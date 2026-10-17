@@ -32,10 +32,10 @@ use std::time::{Duration, Instant};
 use crate::harness::{CLEAR, EXTENT, Headless};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
-    CommandEncoderDesc, CompositeAlpha, Extent3d, ImageAspect, ImageSubresourceLayers,
-    ImageSubresourceRange, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, PresentInfo,
-    PresentMode, Rect2d, RenderPassDesc, ResourceState, SemaphoreDesc, SemaphoreKind,
-    SemaphoreSignal, SemaphoreWait, StoreOp, SubmitInfo, SwapchainDesc,
+    CommandEncoderDesc, CompositeAlpha, Extent3d, HalError, ImageAspect, ImageSubresourceLayers,
+    ImageSubresourceRange, ImageViewDesc, ImageViewType, Instance as _, LoadOp, MemoryLocation,
+    PresentInfo, PresentMode, Rect2d, RenderPassDesc, ResourceState, SemaphoreDesc, SemaphoreKind,
+    SemaphoreSignal, SemaphoreWait, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
 };
 
 /// Coming back round the offscreen ring is ordered against the frame that had
@@ -684,5 +684,84 @@ fn a_caller_cannot_destroy_the_swapchains_own_image_or_view() {
         .expect("submit");
     device.wait_idle().expect("idle");
     device.destroy_command_buffer(commands);
+    headless.finish();
+}
+
+/// A composite-alpha mode the surface does not offer is refused by name,
+/// on creation and on reconfigure, rather than handed to the driver.
+///
+/// `crcbl-vk` used to pass `SwapchainDesc::composite_alpha` straight to
+/// `vkCreateSwapchainKHR`, which is
+/// `VUID-VkSwapchainCreateInfoKHR-compositeAlpha-01280` and silently ignored
+/// by a release driver, while `crcbl-dx12` and `crcbl-mtl` refused it. The
+/// refused modes are taken from the surface's **own** caps, and asserted
+/// non-empty, so the test cannot pass by refusing nothing; the accepting arm
+/// is the fixture's own swapchain, created with a mode from the same list.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_composite_alpha_the_surface_does_not_offer_is_refused() {
+    let headless = Headless::open();
+    let device = &headless.device;
+    let adapter = headless.instance.adapters().remove(0);
+    let caps = headless
+        .instance
+        .surface_caps(headless.surface, adapter.id)
+        .expect("the offscreen ring reports its own caps");
+    assert!(caps.composite_alpha.contains(&CompositeAlpha::Opaque));
+    let refused: Vec<CompositeAlpha> = [
+        CompositeAlpha::PreMultiplied,
+        CompositeAlpha::PostMultiplied,
+        CompositeAlpha::Inherit,
+    ]
+    .into_iter()
+    .filter(|alpha| !caps.composite_alpha.contains(alpha))
+    .collect();
+    assert!(
+        !refused.is_empty(),
+        "this surface offers every mode, so nothing here can be refused: {:?}",
+        caps.composite_alpha
+    );
+
+    for alpha in refused {
+        let desc = SwapchainDesc {
+            label: Some("refused alpha"),
+            surface: headless.surface,
+            format: headless.format,
+            extent: EXTENT,
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: alpha,
+        };
+        let created = device.create_swapchain(&desc);
+        let reconfigured = device.reconfigure_swapchain(headless.swapchain, &desc);
+        for (call, error) in [
+            ("create_swapchain", created.err()),
+            ("reconfigure_swapchain", reconfigured.err()),
+        ] {
+            let error = error.unwrap_or_else(|| panic!("{call} accepted {alpha:?}"));
+            let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
+                panic!("{call} refused {alpha:?} as the wrong kind of error: {error}");
+            };
+            assert!(
+                message.contains(&format!("{alpha:?}")),
+                "{call}'s refusal does not name the mode: {message}"
+            );
+        }
+    }
+
+    // The refused reconfigure changed nothing: the ring still hands out frames.
+    let frame = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("a refused reconfigure leaves the swapchain working");
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: frame.present_semaphore.as_slice(),
+                present_id: None,
+            },
+        )
+        .expect("present");
     headless.finish();
 }

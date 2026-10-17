@@ -43,9 +43,14 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      Wayland from `xkb::available()` whatever `zwp_text_input_manager_v3` is
      offered. Clear or split the cap (compose versus input method), S; an X11
      input-method client is L.
-   - S16 `crcbl-vk`'s `build_swapchain` and its offscreen ring never check
-     `SwapchainDesc::composite_alpha` against what the surface offers, where
-     `crcbl-dx12` and `crcbl-mtl` refuse with `InvalidDescriptor`. S.
+   - S16 the null backend's `build_ring` (`crcbl-hal`'s `null` module) checks
+     `SwapchainDesc::format` but not `composite_alpha` against the `Opaque`-only
+     list its `surface_caps` reports, so it accepts what `crcbl-vk`,
+     `crcbl-dx12` and `crcbl-mtl` refuse. Not a lyr or pikr target, but the
+     engine tests lean on it as the reference; once it refuses, the refusal can
+     move into `crates/crcbl/tests/hal_seam_e2e.rs` beside
+     `a_swapchain_format_the_surface_does_not_offer_is_refused` and out of
+     `crcbl-vk`'s own suite. `crcbl-webgpu` not checked. S.
    - S17 `PanelKeyboard::Exclusive` is documented as holding the keyboard while
      mapped; Win32 and AppKit take it once, and AppKit never raises
      `FocusRefused`. Make the code keep it or the docs say what it does, S.

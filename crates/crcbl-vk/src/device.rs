@@ -3594,6 +3594,10 @@ impl VkDevice {
             desc.format,
             &crate::instance::surface_formats(&offered),
         )?;
+        swapchain::check_swapchain_composite_alpha(
+            desc.composite_alpha,
+            &crate::instance::surface_composite_alpha(capabilities.supported_composite_alpha),
+        )?;
 
         let extent = swapchain::resolve_swapchain_extent(desc.extent, &capabilities)?;
         if extent.clamped {
@@ -3746,6 +3750,7 @@ impl VkDevice {
     ) -> Result<SwapchainEntry, SurfaceError> {
         let caps = swapchain::offscreen_surface_caps();
         swapchain::check_swapchain_format(desc.format, &caps.formats)?;
+        swapchain::check_swapchain_composite_alpha(desc.composite_alpha, &caps.composite_alpha)?;
         let extent = swapchain::resolve_swapchain_extent(
             desc.extent,
             &vk::SurfaceCapabilitiesKHR {
