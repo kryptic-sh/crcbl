@@ -63,12 +63,11 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    Vulkan's own swapchain has no composition mode and Windows drivers offer only
    opaque alpha for an `HWND` surface, so its refusal stays.
 3. **Refused today, to build:** S14 accessibility through AT-SPI on Wayland and
-   X11 (`accesskit_unix`, which brings `zbus`; AccessKit itself was approved
-   2026-10-16, so whether the approval covers `zbus` is the owner's to confirm)
-   and on AppKit (`accesskit_macos`), M each; X11 panels, popups and
-   transparency (`_NET_WM_WINDOW_TYPE_DOCK`, `_NET_WM_STRUT_PARTIAL`,
-   override-redirect popups with a grab, a 32-bit ARGB visual once
-   `_NET_WM_CM_Sn` has an owner), M to L together.
+   X11 (`accesskit_unix`, which brings `zbus`; the owner approved `zbus` on
+   2026-10-17, as AccessKit on 2026-10-16) and on AppKit (`accesskit_macos`), M
+   each; X11 panels, popups and transparency (`_NET_WM_WINDOW_TYPE_DOCK`,
+   `_NET_WM_STRUT_PARTIAL`, override-redirect popups with a grab, a 32-bit ARGB
+   visual once `_NET_WM_CM_Sn` has an owner), M to L together.
 4. **Implemented, untested:** S17 panel focus on Win32 and AppKit, and on
    Hyprland (a CI job of its own, M to L); S7 monitor hot-plug on X11 (Xvfb and
    `xrandr --setmonitor`), Win32 and AppKit; S9 X11 compose through a real
