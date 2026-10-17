@@ -50,6 +50,17 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      or offscreen), S. Not a lyr or pikr target; the seam suite's
      `a_swapchain_composite_alpha_the_surface_does_not_offer_is_refused` does
      not run on it.
+   - S17 Win32 reports `Focus { focused: true }` for a window the system refused
+     the foreground (pikr, 2026-10-18, on 0.3.0: an `Exclusive` panel shown
+     while another process held the foreground got `FocusRefused` and then,
+     within about 40 ms, `Focus { focused: true }`, while `GetForegroundWindow`
+     still named the other window). `ShowWindow` with `SW_SHOWNORMAL` activates
+     the window within its own thread, so it gets `WM_SETFOCUS`, which
+     `win32::proc` turns into `RawEvent::Focus` as it stands; the keys go to the
+     foreground window. Fix: a window is focused when it holds its thread's
+     focus and its thread holds the foreground, tracked through `WM_SETFOCUS`,
+     `WM_KILLFOCUS` and `WM_ACTIVATEAPP`, with `Focus` sent only when that
+     changes. S; verified on a real desktop only, by pikr.
    - S9 an X11 input-method client (XIM, or IBus and Fcitx over D-Bus), L, so
      X11 can set `ShellCaps::TEXT_IME`. Until then it is clear there.
    - S17 a `PopupInput::Grab` popup on AppKit is made key the way an exclusive
@@ -294,6 +305,27 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      are small for a window plus a UI: `crcbl-hal`, `crcbl-shell`, `crcbl-ui`
      and each backend reach only `crcbl-core`, `crcbl-console` and (for the
      shell) `crcbl-wl-scanner` inside the workspace.
+   - **Decided 2026-10-18 (asked by lyr): a leaf crate `crcbl-app`** for what a
+     windowed UI-only program needs and today finds only in the `crcbl`
+     umbrella, which links audio (cpal, ALSA on Linux), physics, networking and
+     the ECS: `GpuContext`, `GpuContextDesc`, `PendingGpuContext` and `GpuError`
+     (in `crates/crcbl/src/engine.rs`), the backend walk with its fall-through
+     (`crcbl::backend`) and the adapter pin (`crcbl::adapter`), `open_window`
+     and `wait_for_configure`, and `text_input::TextPump`. It depends on
+     `crcbl-core`, `crcbl-hal`, `crcbl-shell`, `crcbl-ui` and the GPU backends
+     only; the umbrella re-exports everything at its current path so the games
+     do not change. Declined: putting it in `crcbl-frame`, which is the render
+     graph and the UI pass and stays usable offscreen without a window or a
+     backend. Without it lyr and pikr each re-implement the device, swapchain
+     and composite-alpha choice the engine already gets right. It also takes a
+     seam out of `engine.rs`, which is far past the size anyone can hold. L.
+     Planned for the next release (0.4.0, since the `ShellCaps::TEXT_IME`
+     meaning change on main is breaking); tell lyr and pikr when it lands, with
+     what their code changes to use it.
+   - An example drawing `crcbl-ui` on a shell window through `GpuContext`, with
+     no `PageBundle` (asked by lyr, 2026-10-18): `apps/bare` draws no UI, and
+     the UI frame lives in `PageBundle::frame`. Belongs in `crcbl-app` once it
+     exists, as its `examples/`. S.
 2. **The loop: done.** S6 (`Shell::waker`, `ShellWaker`), S19 and S25 are on
    main. CI on 5e669fc4 ran each backend's wake check: Wayland under sway, X11
    under Xvfb, the Win32 real-desktop job, the AppKit session and the Linux
@@ -1038,6 +1070,17 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       s). Not reproduced here yet. What would cut it: probe adapters in
       preference order and stop at the first that can present to the surface,
       instead of creating a device per adapter to list its caps.
+    - pikr measured again on 0.3.0, 2026-10-18, same machine: first paint at
+      0.79 to 0.99 s. `Dx12Instance::open` spends about 306 ms on the RX 7900
+      XTX, 272 ms on the iGPU and 15 ms on WARP, each a `D3D12CreateDevice`
+      inside `adapter::describe` that is dropped again, and `create_device` then
+      spends about 257 ms creating the same adapter's device a second time.
+      Planned, keeping the seam's promise that caps are known before a device
+      exists: describe the adapters on parallel threads, and keep each probe's
+      `ID3D12Device` in its `AdapterRecord` so `Dx12Device::open`'s
+      `D3D12CreateDevice` finds the device D3D12 already holds for that adapter
+      (a device is a singleton per adapter and feature level while one is
+      alive). Measure before and after on this machine (also an RX 7900 XTX).
     - S26, checked 2026-10-15. With no usable GPU, `crcbl::backend::open`
       returns `GpuError::NoBackend` naming every backend it tried and the last
       error, not a panic, and never falls to the Null backend. Windows now falls
@@ -2126,6 +2169,23 @@ does not establish desktop isolation.
 ### EW engine requests
 
 The current audit and port prerequisites are at the top of this backlog.
+
+Raised by EW on 2026-10-18, from generated maps, none blocking:
+
+- **A query mask that admits only colliders inside it.** Colliders default to
+  every layer, so a query masked to one query-only layer (EW's walker barriers
+  and concealment) also finds every ordinary collider; EW subtracts a second,
+  inverted query in `Physics::overlaps_concealment`. Options: a query mode
+  admitting only colliders whose layers fall within the mask, or a one-bit
+  default collider layer. The default is a behaviour change for every caller, so
+  the query mode is the likelier answer. Not decided.
+- **`PhysicsWorld::add_mesh` feeds queries only, and its docs should say the
+  solver never sees it.** EW added terrain meshes there and loose items fell
+  through; a `ColliderComponent::Mesh` on a static body is what the solver
+  collides with. A docs line, S.
+- **Ground speed modifiers in the character controller**: declined for now. EW's
+  thickets keep 60% of speed through a game-local multiplier, and it stays in
+  the game until a second caller wants one.
 
 EW adopts engine revisions independently. Game acceptance, movement locks, gait
 changes and reachable-arrival scheduling remain in EW. New engine work needs a
