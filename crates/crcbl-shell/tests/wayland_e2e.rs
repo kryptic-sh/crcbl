@@ -1872,6 +1872,15 @@ fn hiding_the_cursor_and_naming_every_shape_are_valid_protocol() {
         |session| session.names().contains(&"PointerMotion"),
     );
 
+    // Back where every other test starts it: the compositor's pointer outlives
+    // this test's virtual device, and the next window maps under it, so a
+    // pointer left here enters that window here instead of where it is put.
+    session.take_names();
+    input.move_to(960, 540, LAYOUT_SIZE);
+    session.pump_until("motion back to the centre", |session| {
+        session.names().contains(&"PointerMotion")
+    });
+
     drop(input);
     session.shell.destroy_window(window).expect("destroy");
 }
