@@ -124,6 +124,12 @@ use crate::{
 /// that drift.
 const SURFACE_FORMATS: &[Format] = &[Format::Bgra8UnormSrgb, Format::Bgra8Unorm];
 
+/// Composite-alpha modes a null surface reports unless a test has given its
+/// adapter others ([`Recorder::offer_composite_alpha_on`]). Nothing composites
+/// a null surface, so it offers what an offscreen ring on every other backend
+/// offers.
+const SURFACE_COMPOSITE_ALPHA: &[CompositeAlpha] = &[CompositeAlpha::Opaque];
+
 /// Fewest images a null swapchain ring holds — [`SurfaceCaps::min_image_count`].
 const RING_MIN_IMAGES: u32 = 2;
 /// Most images a null swapchain ring holds — [`SurfaceCaps::max_image_count`].
@@ -447,7 +453,7 @@ impl Instance for NullInstance {
                     PresentMode::Immediate,
                 ]
             },
-            composite_alpha: vec![CompositeAlpha::Opaque],
+            composite_alpha: self.recorder.composite_alpha_on(adapter),
             min_image_count: RING_MIN_IMAGES,
             max_image_count: RING_MAX_IMAGES,
             current_extent: None,
@@ -482,6 +488,7 @@ impl Instance for NullInstance {
         // simulated latency.
         let device = NullDevice {
             recorder: self.recorder.clone(),
+            adapter: desc.adapter,
             instance_id: self.id,
             device_id: next_owner_id(),
             // The *device's* granted features decide the acquire shape, not the
@@ -548,6 +555,9 @@ impl PendingDevice for NullPendingDevice {
 #[derive(Debug)]
 struct NullDevice {
     recorder: Recorder,
+    /// The adapter this device was opened on, whose surface offer its
+    /// swapchains are held to.
+    adapter: AdapterId,
     /// Id of the instance that created this device. Surfaces are checked
     /// against this, so any device from that instance may use them.
     instance_id: u64,
@@ -2212,6 +2222,18 @@ impl NullDevice {
             return Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
                 "{:?} is not one of this surface's formats {SURFACE_FORMATS:?}",
                 desc.format
+            ))));
+        }
+        // The same rule for `SwapchainDesc::composite_alpha`, against the list
+        // `surface_caps` reports for this device's adapter. This backend used
+        // to accept any mode, while `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl`
+        // refused one their surface did not offer.
+        let offered = self.recorder.composite_alpha_on(self.adapter);
+        if !offered.contains(&desc.composite_alpha) {
+            return Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
+                "SwapchainDesc::composite_alpha is {:?}, which this surface does not offer; \
+                 SurfaceCaps::composite_alpha has {offered:?}",
+                desc.composite_alpha
             ))));
         }
         // Clamped to what `surface_caps` reports, not to a pair of literals

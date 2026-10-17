@@ -41,14 +41,15 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      clear until this lands, so it is no longer silent; set the bit in
      `appkit::caps` (and flip the `appkit_session` and unit-test assertions) in
      the same change.
-   - S16 the null backend's `build_ring` (`crcbl-hal`'s `null` module) checks
-     `SwapchainDesc::format` but not `composite_alpha` against the `Opaque`-only
-     list its `surface_caps` reports, so it accepts what `crcbl-vk`,
-     `crcbl-dx12` and `crcbl-mtl` refuse. Not a lyr or pikr target, but the
-     engine tests lean on it as the reference; once it refuses, the refusal can
-     move into `crates/crcbl/tests/hal_seam_e2e.rs` beside
-     `a_swapchain_format_the_surface_does_not_offer_is_refused` and out of
-     `crcbl-vk`'s own suite. `crcbl-webgpu` not checked. S.
+   - S16 `crcbl-webgpu`'s `create_swapchain` and `reconfigure_swapchain` check
+     only the extent, then encode the descriptor for the replayer, so a `format`
+     or `composite_alpha` outside the surface's `SurfaceCaps` is not refused on
+     the host as every other backend now refuses it (found 2026-10-18 while
+     closing the null backend's gap; what the browser does with it was not
+     checked). Needs the device to know which caps its surface reported (canvas
+     or offscreen), S. Not a lyr or pikr target; the seam suite's
+     `a_swapchain_composite_alpha_the_surface_does_not_offer_is_refused` does
+     not run on it.
    - S9 an X11 input-method client (XIM, or IBus and Fcitx over D-Bus), L, so
      X11 can set `ShellCaps::TEXT_IME`. Until then it is clear there.
    - S17 a `PopupInput::Grab` popup on AppKit is made key the way an exclusive

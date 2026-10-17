@@ -4479,6 +4479,70 @@ fn a_swapchain_format_must_be_one_the_surface_offers() {
     instance.destroy_surface(surface);
 }
 
+/// `SwapchainDesc::composite_alpha` must be one of
+/// `SurfaceCaps::composite_alpha`, on create and on reconfigure alike, since
+/// both build the ring through the same check.
+#[test]
+fn a_swapchain_composite_alpha_must_be_one_the_surface_offers() {
+    let instance = NullInstance::gpu_driven();
+    let device = open(&instance);
+    // SAFETY: `Offscreen` names no platform object.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let caps = instance
+        .surface_caps(surface, AdapterId(0))
+        .expect("surface caps");
+
+    let desc = |composite_alpha| SwapchainDesc {
+        label: None,
+        surface,
+        format: caps.formats[0],
+        extent: (64, 48),
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha,
+    };
+    let refused: Vec<_> = [
+        CompositeAlpha::Opaque,
+        CompositeAlpha::PreMultiplied,
+        CompositeAlpha::PostMultiplied,
+        CompositeAlpha::Inherit,
+    ]
+    .into_iter()
+    .filter(|alpha| !caps.composite_alpha.contains(alpha))
+    .collect();
+    assert!(
+        !refused.is_empty(),
+        "this surface offers every mode, so nothing below is refused: {:?}",
+        caps.composite_alpha
+    );
+
+    for &alpha in &refused {
+        let error = device
+            .create_swapchain(&desc(alpha))
+            .expect_err("a mode the surface does not offer");
+        let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
+            panic!("{alpha:?} was refused as the wrong kind of error: {error:?}");
+        };
+        assert!(message.contains(&format!("{alpha:?}")), "{message}");
+    }
+
+    let swapchain = device
+        .create_swapchain(&desc(caps.composite_alpha[0]))
+        .expect("a reported mode is accepted");
+    for &alpha in &refused {
+        assert!(
+            matches!(
+                device.reconfigure_swapchain(swapchain, &desc(alpha)),
+                Err(SurfaceError::Hal(HalError::InvalidDescriptor(_)))
+            ),
+            "reconfiguring to {alpha:?}"
+        );
+    }
+
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+}
+
 /// The simulated device latency applies to requests made *after* it is set, and
 /// each request counts down on its own — the same contract
 /// `set_readback_latency` carries, and the one a test that opens two devices in

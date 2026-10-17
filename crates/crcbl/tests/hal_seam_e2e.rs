@@ -604,6 +604,94 @@ fn a_swapchain_format_the_surface_does_not_offer_is_refused() {
     drop(device);
 }
 
+/// `SwapchainDesc::composite_alpha` is held to [`SurfaceCaps::composite_alpha`]
+/// the way the format is held to its list, on every backend.
+///
+/// A mode outside `supportedCompositeAlpha` is
+/// `VUID-VkSwapchainCreateInfoKHR-compositeAlpha-01280`, which a release driver
+/// need not report, so `crcbl-vk` used to hand back a swapchain that composited
+/// opaquely whatever it was asked for; the null backend accepted any mode too.
+/// The refused modes are every mode the offscreen surface does not report, so
+/// the test reads the same on a backend whose offer differs, and the list is
+/// asserted non-empty first: a surface offering every mode would make the
+/// refusals vacuous. The accepting arm keeps a backend that refused every mode
+/// from passing.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_swapchain_composite_alpha_the_surface_does_not_offer_is_refused() {
+    let instance = instance();
+    let adapter = select_adapter(instance.as_ref());
+    // SAFETY: `Offscreen` names no platform object.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("offscreen");
+    let caps = instance
+        .surface_caps(surface, adapter.id)
+        .expect("an offscreen surface has caps");
+    let device = instance
+        .create_device(&DeviceDesc {
+            label: Some("crcbl hal seam e2e"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: Some(surface),
+        })
+        .expect("a device opens");
+    let format = caps
+        .preferred_format()
+        .expect("a surface with no formats at all cannot present");
+
+    let swapchain_of = |composite_alpha| {
+        device.create_swapchain(&SwapchainDesc {
+            label: None,
+            surface,
+            format,
+            extent: EXTENT,
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha,
+        })
+    };
+
+    let refused: Vec<_> = [
+        CompositeAlpha::Opaque,
+        CompositeAlpha::PreMultiplied,
+        CompositeAlpha::PostMultiplied,
+        CompositeAlpha::Inherit,
+    ]
+    .into_iter()
+    .filter(|alpha| !caps.composite_alpha.contains(alpha))
+    .collect();
+    assert!(
+        !refused.is_empty(),
+        "this surface offers every mode, so nothing below is refused: {:?}",
+        caps.composite_alpha
+    );
+    for alpha in refused {
+        let error = swapchain_of(alpha)
+            .err()
+            .unwrap_or_else(|| panic!("{alpha:?} is not a mode this surface offers"));
+        let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
+            panic!("{alpha:?} was refused as the wrong kind of error: {error}");
+        };
+        // Every backend's wording names the mode it refused.
+        assert!(
+            message.contains(&format!("{alpha:?}")),
+            "the refusal does not name the mode it refused: {message}"
+        );
+    }
+
+    let offered = *caps
+        .composite_alpha
+        .first()
+        .expect("a surface offering no composite alpha cannot present");
+    let swapchain = swapchain_of(offered)
+        .unwrap_or_else(|error| panic!("{offered:?} is one of this surface's own modes: {error}"));
+    device.destroy_swapchain(swapchain);
+
+    instance.destroy_surface(surface);
+    assert_no_out_of_band_error(device.as_ref());
+    drop(device);
+}
+
 /// A present needs a frame to present, and every backend says so in the same
 /// sentence.
 ///

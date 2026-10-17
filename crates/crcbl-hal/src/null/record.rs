@@ -24,11 +24,11 @@ use crcbl_core::{Handle, Pool};
 
 use crate::{
     AdapterId, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle, BufferBarrier,
-    BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle, ComputePipelineHandle,
-    DepthStencilAttachment, DrawIndirect, DrawIndirectCount, GraphicsPipelineHandle, ImageBarrier,
-    ImageCopy, ImageHandle, IndexFormat, MemoryLocation, PushConstantRange, QuerySetHandle,
-    QueueHandle, Rect2d, SemaphoreSignal, SemaphoreWait, ShaderSources, ShaderStages,
-    SwapchainHandle, Viewport,
+    BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle, CompositeAlpha,
+    ComputePipelineHandle, DepthStencilAttachment, DrawIndirect, DrawIndirectCount,
+    GraphicsPipelineHandle, ImageBarrier, ImageCopy, ImageHandle, IndexFormat, MemoryLocation,
+    PushConstantRange, QuerySetHandle, QueueHandle, Rect2d, SemaphoreSignal, SemaphoreWait,
+    ShaderSources, ShaderStages, SwapchainHandle, Viewport,
 };
 
 /// One pipeline as [`Recorder::pipelines_created`] reports it.
@@ -836,6 +836,9 @@ pub(super) struct State {
     /// Adapters whose `surface_caps` refuses every surface, permanently. See
     /// [`Recorder::refuse_surface_on`].
     pub(super) refused_adapters: std::collections::BTreeSet<AdapterId>,
+    /// Composite-alpha modes a surface offers on each adapter named here. See
+    /// [`Recorder::offer_composite_alpha_on`].
+    pub(super) composite_alpha: std::collections::BTreeMap<AdapterId, Vec<CompositeAlpha>>,
     /// Why the device is lost, once it is — and never cleared, which is what
     /// separates it from `device_errors`. See [`Recorder::lose_device`].
     pub(super) lost_device: Option<String>,
@@ -859,6 +862,7 @@ impl State {
             clamped_extent: None,
             present_wait_timeouts: 0,
             refused_adapters: std::collections::BTreeSet::new(),
+            composite_alpha: std::collections::BTreeMap::new(),
             lost_device: None,
         }
     }
@@ -1491,6 +1495,24 @@ impl Recorder {
     /// [`refuse_surface_on`](Self::refuse_surface_on).
     pub(super) fn refuses_surface(&self, adapter: AdapterId) -> bool {
         self.lock().refused_adapters.contains(&adapter)
+    }
+
+    /// Makes a surface on `adapter` offer `modes` as its composite alpha, in
+    /// place of the opaque-only default, for both `surface_caps` and the
+    /// swapchain check that holds a descriptor to it — so a test can stand in
+    /// for a compositor that blends a transparent window, and the backend
+    /// still refuses what the list leaves out.
+    pub fn offer_composite_alpha_on(&self, adapter: AdapterId, modes: &[CompositeAlpha]) {
+        self.lock().composite_alpha.insert(adapter, modes.to_vec());
+    }
+
+    /// What a surface on `adapter` offers as its composite alpha. The backend's
+    /// half of [`offer_composite_alpha_on`](Self::offer_composite_alpha_on).
+    pub(super) fn composite_alpha_on(&self, adapter: AdapterId) -> Vec<CompositeAlpha> {
+        self.lock()
+            .composite_alpha
+            .get(&adapter)
+            .map_or_else(|| super::SURFACE_COMPOSITE_ALPHA.to_vec(), Clone::clone)
     }
 
     /// Loses the device, permanently: every later call that resolves a handle —

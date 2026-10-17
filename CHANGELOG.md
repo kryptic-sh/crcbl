@@ -51,6 +51,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   unchecked, so asking an opaque-only surface (an `HWND` on Windows drivers, the
   offscreen ring) for `PreMultiplied` succeeded and composited opaquely. Pick
   the mode from `Instance::surface_caps`' `composite_alpha`.
+- **`crcbl-hal`'s null backend refuses a `SwapchainDesc::composite_alpha` its
+  surface does not offer** the same way, on create and reconfigure. Its surface
+  offers `CompositeAlpha::Opaque` alone, and it used to accept any mode, so a
+  test passing on the null backend could ask for what every GPU backend refuses.
+  `Recorder::offer_composite_alpha_on` makes an adapter's surface offer other
+  modes, for a test standing in for a compositor; its swapchains are then held
+  to that list.
 
 ## [0.3.0] - 2026-10-17
 

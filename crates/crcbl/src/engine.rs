@@ -12779,59 +12779,22 @@ mod tests {
         assert_eq!(checked, 1 << MODES.len(), "every subset was checked");
     }
 
-    /// A [`crcbl_hal::null::NullInstance`] whose surface offers, on adapter
-    /// `n`, the composite-alpha modes `offers[n]`.
+    /// `inner`, with its surface offering, on adapter `n`, the composite-alpha
+    /// modes `offers[n]`.
     ///
     /// The null backend offers [`CompositeAlpha::Opaque`] alone, as a surface
     /// with no compositor behind it should; a transparent window needs a
-    /// surface that offers more, so this rewrites that one list and forwards
-    /// everything else untouched.
-    #[derive(Debug)]
-    struct AlphaInstance {
+    /// surface that offers more. The offer goes through the backend's own
+    /// recorder, so its swapchains are held to the same list its caps report.
+    fn alpha_instance(
         inner: crcbl_hal::null::NullInstance,
-        offers: Vec<Vec<CompositeAlpha>>,
-    }
-
-    impl Instance for AlphaInstance {
-        fn backend(&self) -> crcbl_hal::BackendKind {
-            self.inner.backend()
+        offers: &[Vec<CompositeAlpha>],
+    ) -> crcbl_hal::null::NullInstance {
+        let recorder = inner.recorder();
+        for (adapter, modes) in (0..).zip(offers) {
+            recorder.offer_composite_alpha_on(crcbl_hal::AdapterId(adapter), modes);
         }
-
-        fn adapters(&self) -> Vec<crcbl_hal::AdapterInfo> {
-            self.inner.adapters()
-        }
-
-        unsafe fn create_surface(
-            &self,
-            target: &crcbl_hal::SurfaceTarget,
-        ) -> Result<SurfaceHandle, HalError> {
-            // SAFETY: forwarded unchanged, so the caller's obligation for
-            // `target` is the inner instance's.
-            unsafe { self.inner.create_surface(target) }
-        }
-
-        fn destroy_surface(&self, surface: SurfaceHandle) {
-            self.inner.destroy_surface(surface);
-        }
-
-        fn surface_caps(
-            &self,
-            surface: SurfaceHandle,
-            adapter: crcbl_hal::AdapterId,
-        ) -> Result<crcbl_hal::SurfaceCaps, HalError> {
-            let caps = self.inner.surface_caps(surface, adapter)?;
-            Ok(crcbl_hal::SurfaceCaps {
-                composite_alpha: self.offers[adapter.0 as usize].clone(),
-                ..caps
-            })
-        }
-
-        fn request_device(
-            &self,
-            desc: &DeviceDesc<'_>,
-        ) -> Result<Box<dyn crcbl_hal::PendingDevice>, HalError> {
-            self.inner.request_device(desc)
-        }
+        inner
     }
 
     /// A Wayland target for a window that was or was not made transparent.
@@ -12850,7 +12813,7 @@ mod tests {
     /// Starts and finishes an open of `target` against `instance`, as
     /// [`open_null_context`] does for a headless window.
     fn open_alpha_context(
-        instance: AlphaInstance,
+        instance: crcbl_hal::null::NullInstance,
         target: crcbl_hal::SurfaceTarget,
         adapter_pin: Option<&str>,
     ) -> Result<(crcbl_shell::HeadlessShell, GpuContext), GpuError> {
@@ -12878,9 +12841,11 @@ mod tests {
     fn a_transparent_window_presents_premultiplied_across_reconfigures() {
         use crcbl_hal::null::NullInstance;
 
-        let both = || AlphaInstance {
-            inner: NullInstance::gpu_driven(),
-            offers: vec![vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied]],
+        let both = || {
+            alpha_instance(
+                NullInstance::gpu_driven(),
+                &[vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied]],
+            )
         };
         let (_shell, mut gpu) = open_alpha_context(both(), wayland_target(true), None)
             .expect("premultiplied is offered");
@@ -12932,10 +12897,10 @@ mod tests {
         let opaque = vec![CompositeAlpha::Opaque];
         let both = vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied];
         let (_shell, mut gpu) = open_alpha_context(
-            AlphaInstance {
-                inner: NullInstance::gpu_driven().with_adapters(2),
-                offers: vec![opaque.clone(), both],
-            },
+            alpha_instance(
+                NullInstance::gpu_driven().with_adapters(2),
+                &[opaque.clone(), both],
+            ),
             wayland_target(true),
             None,
         )
@@ -12947,12 +12912,12 @@ mod tests {
 
         let recorder = Recorder::new();
         let Err(refused) = open_alpha_context(
-            AlphaInstance {
-                inner: NullInstance::gpu_driven()
+            alpha_instance(
+                NullInstance::gpu_driven()
                     .with_adapters(2)
                     .with_recorder(recorder.clone()),
-                offers: vec![opaque.clone(), opaque.clone()],
-            },
+                &[opaque.clone(), opaque.clone()],
+            ),
             wayland_target(true),
             None,
         ) else {
@@ -12969,10 +12934,7 @@ mod tests {
         );
 
         let Err(pinned) = open_alpha_context(
-            AlphaInstance {
-                inner: NullInstance::gpu_driven(),
-                offers: vec![opaque],
-            },
+            alpha_instance(NullInstance::gpu_driven(), &[opaque]),
             wayland_target(true),
             Some("cpu"),
         ) else {

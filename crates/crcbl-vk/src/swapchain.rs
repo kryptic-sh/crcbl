@@ -486,7 +486,8 @@ mod tests {
     /// [`check_swapchain_composite_alpha`], which the WSI path holds to the
     /// surface's `supportedCompositeAlpha` and the offscreen ring to its own
     /// opaque-only list. The WSI call site needs a window no headless test
-    /// has, so the refusal's wording is held here.
+    /// has, so the refusal's wording is held here; the offscreen ring's
+    /// refusal is `crcbl`'s `hal_seam_e2e`, which holds every backend to it.
     #[test]
     fn a_composite_alpha_the_surface_does_not_offer_is_refused_by_name() {
         let offered = crate::instance::surface_composite_alpha(
@@ -504,22 +505,6 @@ mod tests {
         assert!(message.contains("composite_alpha"), "{message}");
         assert!(message.contains("PreMultiplied"), "{message}");
         assert!(message.contains("Inherit"), "{message}");
-
-        // The offscreen ring offers exactly what its caps say, and nothing
-        // composites a ring.
-        let ring = offscreen_surface_caps().composite_alpha;
-        check_swapchain_composite_alpha(CompositeAlpha::Opaque, &ring)
-            .expect("the ring's own offer");
-        for refused in [
-            CompositeAlpha::PreMultiplied,
-            CompositeAlpha::PostMultiplied,
-            CompositeAlpha::Inherit,
-        ] {
-            assert!(
-                check_swapchain_composite_alpha(refused, &ring).is_err(),
-                "{refused:?} on the offscreen ring"
-            );
-        }
     }
 
     /// A `SwapchainEntry` with nothing in it but the fields the present-id
