@@ -58,17 +58,6 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      or offscreen), S. Not a lyr or pikr target; the seam suite's
      `a_swapchain_composite_alpha_the_surface_does_not_offer_is_refused` does
      not run on it.
-   - S17 Win32 reports `Focus { focused: true }` for a window the system refused
-     the foreground (pikr, 2026-10-18, on 0.3.0: an `Exclusive` panel shown
-     while another process held the foreground got `FocusRefused` and then,
-     within about 40 ms, `Focus { focused: true }`, while `GetForegroundWindow`
-     still named the other window). `ShowWindow` with `SW_SHOWNORMAL` activates
-     the window within its own thread, so it gets `WM_SETFOCUS`, which
-     `win32::proc` turns into `RawEvent::Focus` as it stands; the keys go to the
-     foreground window. Fix: a window is focused when it holds its thread's
-     focus and its thread holds the foreground, tracked through `WM_SETFOCUS`,
-     `WM_KILLFOCUS` and `WM_ACTIVATEAPP`, with `Focus` sent only when that
-     changes. S; verified on a real desktop only, by pikr.
    - S9 an X11 input-method client (XIM, or IBus and Fcitx over D-Bus), L, so
      X11 can set `ShellCaps::TEXT_IME`. Until then it is clear there.
    - S17 a `PopupInput::Grab` popup on AppKit is made key the way an exclusive

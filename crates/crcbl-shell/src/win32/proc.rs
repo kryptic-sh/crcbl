@@ -239,6 +239,16 @@ pub(super) struct Shared {
     /// when focus comes back — so this records what the shell asked for rather
     /// than what the system currently has.
     clipped: Cell<isize>,
+    /// The window holding this thread's keyboard focus, from `WM_SETFOCUS` and
+    /// `WM_KILLFOCUS`, or zero.
+    ///
+    /// Not the same as having the keyboard: a window can hold its thread's
+    /// focus while another process holds the foreground, which is where a
+    /// panel refused the foreground is left. See [`focus_change`].
+    keyboard: Cell<isize>,
+    /// The window last reported focused through
+    /// [`Focus`](RawEvent::Focus), or zero.
+    focused: Cell<isize>,
     /// Each window's UI Automation adapter; see [`access`](super::access).
     #[cfg(all(target_os = "windows", feature = "accesskit"))]
     access: super::access::Adapters,
@@ -312,6 +322,12 @@ impl Shared {
         }
         if self.clipped.get() == hwnd {
             self.clipped.set(0);
+        }
+        if self.keyboard.get() == hwnd {
+            self.keyboard.set(0);
+        }
+        if self.focused.get() == hwnd {
+            self.focused.set(0);
         }
         #[cfg(all(target_os = "windows", feature = "accesskit"))]
         self.access.close(hwnd);
@@ -465,6 +481,66 @@ impl Shared {
     pub(super) fn clipped(&self) -> isize {
         self.clipped.get()
     }
+
+    /// Reports the keyboard moving, if it has, given the window `foreground`
+    /// (as a [`key`]) that holds the foreground now; see [`focus_change`].
+    /// Returns the windows that lost and gained it, for a caller with a clip
+    /// to move.
+    ///
+    /// Asked on every message that can move either half and once per pump,
+    /// so a change the messages did not show is reported a frame late rather
+    /// than never.
+    pub(super) fn sync_focus(&self, foreground: isize) -> (Option<isize>, Option<isize>) {
+        let (now, lost, gained) = focus_change(self.keyboard.get(), foreground, self.focused.get());
+        self.focused.set(now);
+        for (hwnd, focused) in [(lost, false), (gained, true)] {
+            let Some(hwnd) = hwnd else { continue };
+            self.push(RawEvent::Focus { hwnd, focused });
+            // UI Automation's focus follows the window's. The adapter raises
+            // what that changed after it has let go of its table, since the
+            // raising may itself ask for the provider.
+            #[cfg(all(target_os = "windows", feature = "accesskit"))]
+            self.access.focus(hwnd, focused);
+        }
+        (lost, gained)
+    }
+}
+
+/// Which window has the keyboard, and which lost and gained it since
+/// `reported`: `(now, lost, gained)`, each a [`key`] and zero or `None` for no
+/// window.
+///
+/// A window has the keyboard when it holds its thread's keyboard focus
+/// (`keyboard`) **and** is the foreground window (`foreground`). The first half
+/// alone is what `WM_SETFOCUS` says, and it is not enough: `ShowWindow` with
+/// `SW_SHOWNORMAL` activates a window within its own thread, focus included,
+/// even when the system refuses that thread the foreground — and then the
+/// keys go to the foreground window while the shell would have said `Focus`.
+/// Every window this backend makes is top-level, so the foreground window is
+/// the focused one itself whenever it has the keyboard.
+const fn focus_change(
+    keyboard: isize,
+    foreground: isize,
+    reported: isize,
+) -> (isize, Option<isize>, Option<isize>) {
+    let now = if keyboard != 0 && keyboard == foreground {
+        keyboard
+    } else {
+        0
+    };
+    if now == reported {
+        return (now, None, None);
+    }
+    let lost = if reported == 0 { None } else { Some(reported) };
+    let gained = if now == 0 { None } else { Some(now) };
+    (now, lost, gained)
+}
+
+/// The window holding the foreground, as a [`key`]; zero for none.
+#[cfg(target_os = "windows")]
+pub(super) fn foreground() -> isize {
+    // SAFETY: no arguments; the handle is only turned into a key.
+    key(unsafe { ffi::GetForegroundWindow() })
 }
 
 /// `LOWORD`.
@@ -594,29 +670,31 @@ pub(super) unsafe extern "system" fn window_proc(
             0
         }
 
-        msg::SET_FOCUS | msg::KILL_FOCUS => {
-            let focused = message == msg::SET_FOCUS;
+        msg::SET_FOCUS | msg::KILL_FOCUS | msg::ACTIVATE | msg::ACTIVATE_APP => {
+            match message {
+                msg::SET_FOCUS => shared.keyboard.set(window),
+                msg::KILL_FOCUS if shared.keyboard.get() == window => shared.keyboard.set(0),
+                _ => {}
+            }
+            let (lost, gained) = shared.sync_focus(foreground());
             // **Not deferred to the pump.** A window that keeps the cursor
             // clipped after it stops being the foreground window has taken the
             // desktop hostage; see the module docs for why one frame of that is
             // one frame too many. The recorded target survives, so focus coming
-            // back restores the clip the caller asked for.
-            if shared.clipped() == window {
-                if focused {
-                    input::apply_clip(hwnd);
-                } else {
-                    input::release_clip();
-                }
+            // back restores the clip the caller asked for. A clip regained by
+            // another window than this one is the pump's `refresh_clip`.
+            let clipped = shared.clipped();
+            if clipped != 0 && lost == Some(clipped) {
+                input::release_clip();
             }
-            shared.push(RawEvent::Focus {
-                hwnd: window,
-                focused,
-            });
-            // UI Automation's focus follows the window's. The adapter raises
-            // what that changed after it has let go of its table, since the
-            // raising may itself ask for the provider.
-            #[cfg(feature = "accesskit")]
-            shared.access().focus(window, focused);
+            if clipped == window && gained == Some(window) {
+                input::apply_clip(hwnd);
+            }
+            // Activation is the default handler's to finish: it is what moves
+            // the focus into an activated window.
+            if matches!(message, msg::ACTIVATE | msg::ACTIVATE_APP) {
+                return default();
+            }
             0
         }
 
@@ -1129,6 +1207,66 @@ pub(super) unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PANEL: isize = 0x10;
+    const OTHER: isize = 0x20;
+    /// Another process's window holding the foreground.
+    const ELSEWHERE: isize = 0x99;
+
+    /// pikr's report on 0.3.0: an `Exclusive` panel shown while another
+    /// process held the foreground took its thread's focus (`WM_SETFOCUS`)
+    /// and was reported focused right after `FocusRefused`. Red when thread
+    /// focus alone counts as the keyboard again.
+    #[test]
+    fn thread_focus_without_the_foreground_is_not_the_keyboard() {
+        assert_eq!(focus_change(PANEL, ELSEWHERE, 0), (0, None, None));
+        // The user clicks it: the foreground arrives, the focus is unchanged.
+        assert_eq!(focus_change(PANEL, PANEL, 0), (PANEL, None, Some(PANEL)));
+        // Unchanged since the last report: nothing to say.
+        assert_eq!(focus_change(PANEL, PANEL, PANEL), (PANEL, None, None));
+        // The foreground goes elsewhere before the focus does.
+        assert_eq!(
+            focus_change(PANEL, ELSEWHERE, PANEL),
+            (0, Some(PANEL), None)
+        );
+        // The focus moves between this thread's windows.
+        assert_eq!(
+            focus_change(OTHER, OTHER, PANEL),
+            (OTHER, Some(PANEL), Some(OTHER))
+        );
+        // No window of this thread holds the focus, whoever is foreground.
+        assert_eq!(focus_change(0, 0, 0), (0, None, None));
+    }
+
+    /// The events `sync_focus` queues follow the same rule, once each, in
+    /// loss-then-gain order, and `forget` drops a dead window's half of it.
+    #[test]
+    fn sync_focus_reports_each_change_once() {
+        let shared = Shared::default();
+        let focus = |hwnd, focused| RawEvent::Focus { hwnd, focused };
+
+        shared.keyboard.set(PANEL);
+        assert_eq!(shared.sync_focus(ELSEWHERE), (None, None));
+        assert!(shared.take_events().is_empty(), "refused: nothing to say");
+
+        assert_eq!(shared.sync_focus(PANEL), (None, Some(PANEL)));
+        assert_eq!(shared.sync_focus(PANEL), (None, None));
+        assert_eq!(shared.take_events(), [focus(PANEL, true)]);
+
+        shared.keyboard.set(OTHER);
+        assert_eq!(shared.sync_focus(OTHER), (Some(PANEL), Some(OTHER)));
+        assert_eq!(
+            shared.take_events(),
+            [focus(PANEL, false), focus(OTHER, true)]
+        );
+
+        shared.forget(OTHER);
+        assert_eq!(shared.sync_focus(OTHER), (None, None));
+        assert!(
+            shared.take_events().is_empty(),
+            "a dead window loses nothing"
+        );
+    }
 
     #[test]
     fn a_passthrough_popup_is_forgotten_with_its_window() {

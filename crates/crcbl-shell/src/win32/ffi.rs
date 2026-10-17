@@ -1027,12 +1027,16 @@ pub mod msg {
     pub const MOVE: u32 = 0x0003;
     /// `WM_SIZE`.
     pub const SIZE: u32 = 0x0005;
+    /// `WM_ACTIVATE` — a window of this thread was activated or deactivated.
+    pub const ACTIVATE: u32 = 0x0006;
     /// `WM_SETFOCUS`.
     pub const SET_FOCUS: u32 = 0x0007;
     /// `WM_KILLFOCUS`.
     pub const KILL_FOCUS: u32 = 0x0008;
     /// `WM_CLOSE`.
     pub const CLOSE: u32 = 0x0010;
+    /// `WM_ACTIVATEAPP` — the foreground moved to or from another process.
+    pub const ACTIVATE_APP: u32 = 0x001C;
     /// `WM_SETCURSOR` — asked on every pointer movement over the window, and
     /// the **only** place a cursor shape may be set.
     pub const SET_CURSOR: u32 = 0x0020;

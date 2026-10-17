@@ -856,6 +856,11 @@ impl Win32Shell {
     /// into the system — several of these branches do, and the procedure they
     /// re-enter would panic on a `RefCell` that was still borrowed.
     fn translate(&mut self) {
+        // The keyboard can move with no message to this thread saying so
+        // (the foreground taken by another process while this one is busy
+        // arrives as `WM_ACTIVATEAPP`, but nothing guarantees every case
+        // does), so it is checked once per pump as well.
+        let _ = self.shared.sync_focus(proc::foreground());
         for event in self.shared.take_events() {
             let window = event.hwnd().and_then(|key| self.window_by_key(key));
             match event {
@@ -1380,8 +1385,11 @@ impl Shell for Win32Shell {
         {
             let waker = self.waker();
             // SAFETY: takes no arguments and only reads which window of this
-            // thread has the keyboard focus.
-            let focused = unsafe { ffi::GetFocus() } == hwnd.as_ptr();
+            // thread has the keyboard focus. The foreground too, by the rule
+            // `proc::focus_change` states: thread focus alone is not the
+            // keyboard.
+            let focused = unsafe { ffi::GetFocus() } == hwnd.as_ptr()
+                && proc::foreground() == proc::key(hwnd.as_ptr());
             self.shared.access().open(hwnd.as_ptr(), focused, waker);
         }
         let state = self.window(window)?;

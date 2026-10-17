@@ -69,6 +69,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   modes, for a test standing in for a compositor; its swapchains are then held
   to that list.
 
+### Fixed
+
+- **Win32 no longer reports `Focus { focused: true }` for a window that does not
+  have the keyboard.** A window shown while another process held the foreground
+  (an `Exclusive` panel or a grabbing popup refused it, reported as
+  `FocusRefused`) still took its own thread's focus, and that was reported as
+  focus while the keys went to the other process. A window is now focused when
+  it holds its thread's focus and is the foreground window, and `Focus` follows
+  that: a refused panel hears `Focus { focused: true }` when the user activates
+  it. The cursor clip and the accessibility adapter's focus follow the same
+  rule.
+
 ## [0.3.0] - 2026-10-17
 
 ### Breaking

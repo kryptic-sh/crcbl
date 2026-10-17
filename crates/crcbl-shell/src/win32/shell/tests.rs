@@ -2888,7 +2888,12 @@ fn a_grabbing_popup_closes_when_it_loses_the_keyboard_and_a_pointer_one_does_not
         ))
         .expect("a popup");
     shell.pump(&mut |_| {});
-    send_focus(hwnd_of(&shell, grab), false);
+    // A popup loses the keyboard only if it had it: the foreground as well as
+    // its thread's focus, which a desktop shared with other processes need
+    // not have granted when the popup was shown.
+    let grab_hwnd = hwnd_of(&shell, grab);
+    focus_and_confirm(&mut shell, grab, grab_hwnd);
+    send_focus(grab_hwnd, false);
     send_focus(hwnd_of(&shell, pointer), false);
     let mut asked = Vec::new();
     shell.pump(&mut |event| {
