@@ -734,6 +734,10 @@ pub trait Shell: core::fmt::Debug {
     ///
     /// Visibility and capture are separate axes; see [`cursor`].
     ///
+    /// Hiding works on every backend. A shape is seen only where
+    /// [`ShellCaps::CURSOR_SHAPE`] is set; elsewhere it is accepted and
+    /// recorded rather than refused, because a UI calls this on every hover.
+    ///
     /// # Errors
     ///
     /// [`ShellError::InvalidWindow`] if the handle is stale.

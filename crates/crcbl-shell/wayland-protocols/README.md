@@ -19,21 +19,23 @@ which `build.rs` only feeds to the generator under the `wayland-e2e` feature —
 virtual-input protocol compiled into a shipping build is a synthetic-input
 capability nobody asked for.
 
-| File                                  | Upstream                                                                          | Version | SHA-256 (first 16) |
-| ------------------------------------- | --------------------------------------------------------------------------------- | ------- | ------------------ |
-| `wayland.xml`                         | `wayland`, `protocol/wayland.xml`                                                 | 1.25.0  | `08fb558d96742b41` |
-| `xdg-shell.xml`                       | `wayland-protocols`, `stable/xdg-shell/xdg-shell.xml` (`xdg_wm_base` v7)          | 1.49    | `7ba7f9c8473deee6` |
-| `viewporter.xml`                      | `wayland-protocols`, `stable/viewporter/viewporter.xml`                           | 1.49    | `dcb12279a0374630` |
-| `fractional-scale-v1.xml`             | `wayland-protocols`, `staging/fractional-scale/fractional-scale-v1.xml`           | 1.49    | `5941de5d28f427ec` |
-| `xdg-output-unstable-v1.xml`          | `wayland-protocols`, `unstable/xdg-output/`                                       | 1.49    | `363d547c3eefe895` |
-| `xdg-decoration-unstable-v1.xml`      | `wayland-protocols`, `unstable/xdg-decoration/`                                   | 1.49    | `68753c4a85a28659` |
-| `relative-pointer-unstable-v1.xml`    | `wayland-protocols`, `unstable/relative-pointer/`                                 | 1.49    | `ab4930dd3084f732` |
-| `pointer-constraints-unstable-v1.xml` | `wayland-protocols`, `unstable/pointer-constraints/`                              | 1.49    | `f980fac900ba1dcf` |
-| `wlr-layer-shell-unstable-v1.xml`     | `wlr-protocols`, `unstable/wlr-layer-shell-unstable-v1.xml` (commit `2b8d4332`)   | v5      | `87e0b9c837aecd69` |
-| `virtual-keyboard-unstable-v1.xml`    | `wayland-protocols-misc`, `virtual-keyboard-unstable-v1.xml` — **e2e**            | 1.0     | `7ad7870003ecd592` |
-| `wlr-virtual-pointer-unstable-v1.xml` | `wlr-protocols`, `unstable/wlr-virtual-pointer-unstable-v1.xml` — **e2e**         | v2      | `3ff6d540be0bc522` |
-| `text-input-unstable-v3.xml`          | `wayland-protocols`, `unstable/text-input/` (`zwp_text_input_v3` v2; bound at v1) | 1.49    | `160815cda13c285a` |
-| `input-method-unstable-v2.xml`        | `wlroots`, `protocol/input-method-unstable-v2.xml` — **e2e**                      | 0.17.1  | `99414dbad9458e71` |
+| File                                  | Upstream                                                                                                       | Version | SHA-256 (first 16) |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------- | ------------------ |
+| `wayland.xml`                         | `wayland`, `protocol/wayland.xml`                                                                              | 1.25.0  | `08fb558d96742b41` |
+| `xdg-shell.xml`                       | `wayland-protocols`, `stable/xdg-shell/xdg-shell.xml` (`xdg_wm_base` v7)                                       | 1.49    | `7ba7f9c8473deee6` |
+| `viewporter.xml`                      | `wayland-protocols`, `stable/viewporter/viewporter.xml`                                                        | 1.49    | `dcb12279a0374630` |
+| `fractional-scale-v1.xml`             | `wayland-protocols`, `staging/fractional-scale/fractional-scale-v1.xml`                                        | 1.49    | `5941de5d28f427ec` |
+| `xdg-output-unstable-v1.xml`          | `wayland-protocols`, `unstable/xdg-output/`                                                                    | 1.49    | `363d547c3eefe895` |
+| `xdg-decoration-unstable-v1.xml`      | `wayland-protocols`, `unstable/xdg-decoration/`                                                                | 1.49    | `68753c4a85a28659` |
+| `relative-pointer-unstable-v1.xml`    | `wayland-protocols`, `unstable/relative-pointer/`                                                              | 1.49    | `ab4930dd3084f732` |
+| `pointer-constraints-unstable-v1.xml` | `wayland-protocols`, `unstable/pointer-constraints/`                                                           | 1.49    | `f980fac900ba1dcf` |
+| `wlr-layer-shell-unstable-v1.xml`     | `wlr-protocols`, `unstable/wlr-layer-shell-unstable-v1.xml` (commit `2b8d4332`)                                | v5      | `87e0b9c837aecd69` |
+| `virtual-keyboard-unstable-v1.xml`    | `wayland-protocols-misc`, `virtual-keyboard-unstable-v1.xml` — **e2e**                                         | 1.0     | `7ad7870003ecd592` |
+| `wlr-virtual-pointer-unstable-v1.xml` | `wlr-protocols`, `unstable/wlr-virtual-pointer-unstable-v1.xml` — **e2e**                                      | v2      | `3ff6d540be0bc522` |
+| `text-input-unstable-v3.xml`          | `wayland-protocols`, `unstable/text-input/` (`zwp_text_input_v3` v2; bound at v1)                              | 1.49    | `160815cda13c285a` |
+| `input-method-unstable-v2.xml`        | `wlroots`, `protocol/input-method-unstable-v2.xml` — **e2e**                                                   | 0.17.1  | `99414dbad9458e71` |
+| `cursor-shape-v1.xml`                 | `wayland-protocols`, `staging/cursor-shape/cursor-shape-v1.xml` (bound at v1)                                  | 1.49    | `bb57d91e53a79dad` |
+| `tablet-v2.xml`                       | `wayland-protocols`, `stable/tablet/tablet-v2.xml` — only so `cursor-shape-v1`'s `zwp_tablet_tool_v2` resolves | 1.49    | `ac1128b26c779cf9` |
 
 All are MIT-licensed except `wlr-layer-shell-unstable-v1.xml`, which carries a
 Historical Permission Notice and Disclaimer (HPND), as permissive as MIT; the

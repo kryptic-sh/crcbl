@@ -22,9 +22,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   keeps the keyboard while it is mapped. Set on Wayland when the compositor
   offers layer-shell, which enforces it on the `Top` and `Overlay` layers; clear
   on Win32 and AppKit.
+- **`ShellCaps::CURSOR_SHAPE`**: `set_cursor` with a shape changes the cursor
+  the user sees. Set on Win32, AppKit and the web, and on Wayland when the
+  compositor offers `cursor-shape-v1`; clear on X11. `set_cursor` still accepts
+  and records a shape where the bit is clear, so a UI that sets the cursor on
+  every hover needs no error handling; read the bit to know whether the shape is
+  seen.
 
 ### Changed
 
+- **Wayland applies cursor shapes through `cursor-shape-v1`** where the
+  compositor offers it, and the compositor draws the user's own themed cursor.
+  `set_cursor(window, Some(shape))` used to be recorded and never applied there;
+  a shape now also ends a hide at once rather than at the next pointer enter.
 - **`ShellCaps::TEXT_IME` means an input method wired end to end**: its
   composition as `TextPreedit`, its conversions as `TextCommit`, and
   `set_text_input` and `set_text_input_area` passed on to it. It used to mean

@@ -298,6 +298,20 @@ bitflags::bitflags! {
         /// launcher that should close when it loses the keyboard closes on
         /// that event; a lock screen cannot be built without this bit.
         const PANEL_EXCLUSIVE_KEYBOARD = 1 << 22;
+
+        /// [`Shell::set_cursor`](crate::Shell::set_cursor) with a shape
+        /// changes the cursor the user sees, to the platform's own themed
+        /// cursor for that [`CursorIcon`](crate::CursorIcon).
+        ///
+        /// Win32's stock `user32` cursors, AppKit's `NSCursor`, and the
+        /// canvas's CSS `cursor` on the web; on Wayland, `cursor-shape-v1`
+        /// where the compositor offers it, which hands the compositor the
+        /// shape's name and lets it draw the user's theme. Clear on X11, which
+        /// has no cursor theme loader yet. Without it, `set_cursor` still
+        /// accepts and records a shape — a UI calls it on every hover, and an
+        /// error there would be one every caller had to handle — and hiding
+        /// with `None` works everywhere; only the shape goes unseen.
+        const CURSOR_SHAPE = 1 << 23;
     }
 }
 
@@ -367,7 +381,8 @@ mod tests {
             | ShellCaps::MULTI_WINDOW
             | ShellCaps::SERVER_DECORATIONS
             | ShellCaps::FRACTIONAL_SCALE
-            | ShellCaps::EVENT_WAIT;
+            | ShellCaps::EVENT_WAIT
+            | ShellCaps::CURSOR_SHAPE;
         assert!(wayland.has_mouselook());
         assert!(!wayland.contains(ShellCaps::POINTER_WARP));
         assert!(!wayland.contains(ShellCaps::ASPECT_HINT_HONORED));

@@ -658,6 +658,10 @@ fn the_capability_set_is_x11_shaped() {
         !caps.contains(ShellCaps::TEXT_IME),
         "no XIM, IBus or Fcitx client, so no input method reaches this backend"
     );
+    assert!(
+        !caps.contains(ShellCaps::CURSOR_SHAPE),
+        "set_cursor records a shape and applies nothing until a theme loader lands"
+    );
     // And one that depends on nothing at all: XDND is client-to-client client
     // messages plus a selection, with no extension and no window manager under
     // it. The bit is a claim, and the claim is cashed by

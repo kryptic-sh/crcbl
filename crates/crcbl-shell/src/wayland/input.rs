@@ -72,6 +72,7 @@ impl WaylandShell {
             self.conn.watch(relative, ObjectKind::RelativePointer);
             self.seats[index].relative_pointer = relative;
         }
+        self.add_cursor_shape(index);
         // A window that asked to be locked before any pointer existed gets its
         // constraint now. This is the hotplug case that would otherwise leave a
         // first-person camera with a free cursor until the next mode change.
@@ -97,6 +98,8 @@ impl WaylandShell {
         // has to reach the compositor while the object it refers to still
         // exists.
         self.drop_window_constraints_for_seat(index);
+        // An add-on object of the pointer, like the relative pointer below.
+        self.remove_cursor_shape(index);
         let (pointer, relative) = (
             self.seats[index].pointer,
             self.seats[index].relative_pointer,

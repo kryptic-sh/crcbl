@@ -34,6 +34,7 @@
 //! | [`TOUCH`](ShellCaps::TOUCH) | the shim forwards every contact through [`__crcbl_web_touch`](shim::__crcbl_web_touch) |
 //! | [`POINTER_LOCK`](ShellCaps::POINTER_LOCK) | the shim calls `requestPointerLock` from a gesture and answers with [`__crcbl_web_pointer_lock`](shim::__crcbl_web_pointer_lock) |
 //! | [`RAW_POINTER_MOTION`](ShellCaps::RAW_POINTER_MOTION) | under that lock `movementX`/`movementY` are the whole event, asked for with `unadjustedMovement: true` |
+//! | [`CURSOR_SHAPE`](ShellCaps::CURSOR_SHAPE) | the shim sets the canvas's CSS `cursor` from [`__crcbl_web_cursor_ptr`](shim::__crcbl_web_cursor_ptr), and every shape is a CSS keyword |
 //!
 //! Everything else is clear, and each one is a *behaviour* that is missing
 //! rather than a platform that lacks it. [`TEXT_IME`](ShellCaps::TEXT_IME) and
@@ -1171,6 +1172,7 @@ impl Shell for WebShell {
             | ShellCaps::TOUCH
             | ShellCaps::POINTER_LOCK
             | ShellCaps::RAW_POINTER_MOTION
+            | ShellCaps::CURSOR_SHAPE
     }
 
     /// Creates the canvas window.
@@ -2044,7 +2046,8 @@ mod tests {
                 | ShellCaps::FRACTIONAL_SCALE
                 | ShellCaps::TOUCH
                 | ShellCaps::POINTER_LOCK
-                | ShellCaps::RAW_POINTER_MOTION,
+                | ShellCaps::RAW_POINTER_MOTION
+                | ShellCaps::CURSOR_SHAPE,
             "every other bit names something this backend does not do"
         );
         // The three that used to be advertised with nothing behind them.

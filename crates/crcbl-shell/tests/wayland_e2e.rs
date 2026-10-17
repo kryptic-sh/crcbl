@@ -885,6 +885,10 @@ fn capabilities_are_honest_about_what_the_compositor_advertises() {
         caps.contains(ShellCaps::PANEL | ShellCaps::PANEL_EXCLUSIVE_KEYBOARD),
         "sway offers layer-shell, which holds an exclusive panel's keyboard"
     );
+    assert!(
+        caps.contains(ShellCaps::CURSOR_SHAPE),
+        "sway offers wp_cursor_shape_manager_v1"
+    );
     // P0.5c: both come from `wl_data_device_manager`, which sway advertises.
     assert!(caps.contains(ShellCaps::CLIPBOARD));
     assert!(caps.contains(ShellCaps::DRAG_DROP));
@@ -1837,10 +1841,11 @@ fn confining_the_pointer_is_accepted_and_reported_in_window_state() {
     session.shell.destroy_window(window).expect("destroy");
 }
 
-/// Hiding the cursor needs no buffer; naming a shape is recorded and inert.
+/// Hiding the cursor needs no buffer, and a shape goes through
+/// `cursor-shape-v1`, which sway offers.
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
-fn hiding_the_cursor_works_and_naming_a_shape_is_accepted() {
+fn hiding_the_cursor_and_naming_every_shape_are_valid_protocol() {
     let mut session = Session::open();
     let (window, input) = session.with_input("crcbl e2e cursor");
     input.move_to(960, 540, LAYOUT_SIZE);
@@ -1848,17 +1853,23 @@ fn hiding_the_cursor_works_and_naming_a_shape_is_accepted() {
         session.names().contains(&"PointerFocus")
     });
 
-    // Both directions are accepted; only the hide is expressible without a
-    // buffer, which the backend documents rather than hiding.
+    // A shape the compositor's bound version lacks is `invalid_shape`, a
+    // protocol error that disconnects the client, so every shape is sent.
+    assert!(session.shell.caps().contains(ShellCaps::CURSOR_SHAPE));
     session.shell.set_cursor(window, None).expect("hide");
-    session
-        .shell
-        .set_cursor(window, Some(CursorIcon::Crosshair))
-        .expect("a shape is recorded, not refused");
-    session.settle(Duration::from_millis(100));
-    assert!(
-        session.shell.window_state(window).is_ok(),
-        "a null-surface set_cursor is valid protocol, not a disconnect"
+    for &shape in CursorIcon::ALL {
+        session
+            .shell
+            .set_cursor(window, Some(shape))
+            .expect("a shape is applied");
+    }
+    // A protocol error closes the connection, after which nothing arrives:
+    // motion reaching the window is the proof none was raised.
+    session.take_names();
+    input.move_to(980, 560, LAYOUT_SIZE);
+    session.pump_until(
+        "motion after a null-surface set_cursor and every set_shape",
+        |session| session.names().contains(&"PointerMotion"),
     );
 
     drop(input);

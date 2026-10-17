@@ -164,6 +164,7 @@
 //! keyboard, and on a keymap change; and a run that falls more than four
 //! intervals behind resynchronises instead of emitting the backlog.
 
+mod cursor_shape;
 mod data;
 mod data_device;
 mod fd;
@@ -209,6 +210,7 @@ use crate::{
 
 use data::{Delivery, HeldRead, Resolution, Transfer};
 use ffi::{Lib, WlArgument, WlDisplay, WlMessage, WlProxy};
+use protocol::cursor_shape::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1};
 use protocol::fractional_scale::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
 use protocol::layer_shell::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use protocol::pointer_constraints::{zwp_locked_pointer_v1, zwp_pointer_constraints_v1};
@@ -1329,6 +1331,7 @@ struct Conn {
     data_device_manager: *mut WlProxy,
     layer_shell: *mut WlProxy,
     text_input_manager: *mut WlProxy,
+    cursor_shape_manager: *mut WlProxy,
     /// Owned by the connection, reached only as a raw pointer; see [`Sink`].
     sink: *mut Sink,
 }
@@ -1356,6 +1359,7 @@ enum Singleton {
     DataDeviceManager,
     LayerShell,
     TextInputManager,
+    CursorShapeManager,
 }
 
 impl Singleton {
@@ -1373,6 +1377,7 @@ impl Singleton {
             Self::DataDeviceManager => &mut conn.data_device_manager,
             Self::LayerShell => &mut conn.layer_shell,
             Self::TextInputManager => &mut conn.text_input_manager,
+            Self::CursorShapeManager => &mut conn.cursor_shape_manager,
         }
     }
 
@@ -1391,6 +1396,7 @@ impl Singleton {
             Self::DataDeviceManager => wl_data_device_manager::NAME,
             Self::LayerShell => zwlr_layer_shell_v1::NAME,
             Self::TextInputManager => zwp_text_input_manager_v3::NAME,
+            Self::CursorShapeManager => wp_cursor_shape_manager_v1::NAME,
         }
     }
 }
@@ -1677,6 +1683,9 @@ struct Seat {
     pointer: *mut WlProxy,
     keyboard: *mut WlProxy,
     relative_pointer: *mut WlProxy,
+    /// This pointer's `wp_cursor_shape_device_v1`, once the manager global
+    /// exists; see [`cursor_shape`].
+    cursor_shape: *mut WlProxy,
     /// This seat's `wl_data_device`, once the manager global exists.
     ///
     /// One per seat, not one per shell: the clipboard *is* a seat's, and a
@@ -2105,6 +2114,7 @@ impl WaylandShell {
             data_device_manager: ptr::null_mut(),
             layer_shell: ptr::null_mut(),
             text_input_manager: ptr::null_mut(),
+            cursor_shape_manager: ptr::null_mut(),
             sink: Sink::boxed(lib),
         };
 
@@ -2220,6 +2230,12 @@ impl WaylandShell {
         caps.set(ShellCaps::PANEL_RESERVE, layer_shell);
         // `keyboard_interactivity = exclusive`, which the compositor holds.
         caps.set(ShellCaps::PANEL_EXCLUSIVE_KEYBOARD, layer_shell);
+        // Each pointer's shape device hangs off the manager, which the registry
+        // listing has bound by now or will not bind this run.
+        caps.set(
+            ShellCaps::CURSOR_SHAPE,
+            !self.conn.cursor_shape_manager.is_null(),
+        );
         // A compositor blends every surface by its buffer's alpha unless the
         // client declares a region opaque, which this backend never does, so a
         // swapchain with premultiplied alpha is all a transparent window needs.
@@ -2385,6 +2401,14 @@ impl WaylandShell {
                     Singleton::TextInputManager
                 );
             }
+            "wp_cursor_shape_manager_v1" => {
+                bind!(
+                    cursor_shape_manager,
+                    wp_cursor_shape_manager_v1,
+                    cursor_shape::CURSOR_SHAPE_VERSION,
+                    Singleton::CursorShapeManager
+                );
+            }
             "wl_output" => {
                 // SAFETY: `registry` is live; see the macro above.
                 let proxy = unsafe {
@@ -2446,6 +2470,7 @@ impl WaylandShell {
                     pointer: ptr::null_mut(),
                     keyboard: ptr::null_mut(),
                     relative_pointer: ptr::null_mut(),
+                    cursor_shape: ptr::null_mut(),
                     data: None,
                     enter_serial: 0,
                     last_serial: 0,
@@ -2554,6 +2579,10 @@ impl WaylandShell {
             },
             Singleton::TextInputManager => unsafe {
                 self.conn.release(proxy, zwp_text_input_manager_v3::destroy);
+            },
+            Singleton::CursorShapeManager => unsafe {
+                self.conn
+                    .release(proxy, wp_cursor_shape_manager_v1::destroy);
             },
         }
         self.conn.flush();
@@ -2881,6 +2910,7 @@ impl WaylandShell {
         self.ensure_xdg_outputs();
         self.ensure_data_devices();
         self.ensure_text_inputs();
+        self.ensure_cursor_shapes();
         if monitors_dirty {
             self.republish_monitors();
         }
@@ -3173,24 +3203,40 @@ impl WaylandShell {
 
     /// Sends the cursor a window asked for on a seat that has just entered it.
     ///
-    /// Only the hidden case is expressible; see [`Shell::set_cursor`].
+    /// A shape needs the seat's `cursor-shape-v1` device; see
+    /// [`Shell::set_cursor`].
     fn apply_cursor(&mut self, index: usize, window: WindowId) {
         let Ok(state) = self.window(window) else {
             return;
         };
-        // `Some(None)` is "hide"; `None` (never set) and `Some(Some(_))` (a
-        // shape) both leave the compositor's cursor alone.
-        if state.cursor != Some(None) {
+        // Never set: the compositor's own cursor stays.
+        let Some(cursor) = state.cursor else {
             return;
-        }
+        };
         let seat = &self.seats[index];
-        let (pointer, serial) = (seat.pointer, seat.enter_serial);
+        let (pointer, device, serial) = (seat.pointer, seat.cursor_shape, seat.enter_serial);
         if pointer.is_null() {
             return;
         }
-        // SAFETY: the pointer is live and a null surface argument is the
-        // documented way to say "no cursor" in core Wayland.
-        unsafe { wl_pointer::set_cursor(pointer, serial, ptr::null_mut(), 0, 0) };
+        match cursor {
+            // SAFETY: the pointer is live and a null surface argument is the
+            // documented way to say "no cursor" in core Wayland.
+            None => unsafe { wl_pointer::set_cursor(pointer, serial, ptr::null_mut(), 0, 0) },
+            Some(icon) if !device.is_null() => {
+                // SAFETY: the device is live, made from this seat's pointer,
+                // and `shape_of` only names entries the bound version has.
+                unsafe {
+                    wp_cursor_shape_device_v1::set_shape(
+                        device,
+                        serial,
+                        cursor_shape::shape_of(icon),
+                    );
+                }
+            }
+            // No device: `CURSOR_SHAPE` is clear, and the compositor's cursor
+            // stays until the next `wl_pointer.enter` resets it.
+            Some(_) => return,
+        }
         self.conn.flush();
     }
 
@@ -3509,6 +3555,7 @@ impl Drop for WaylandShell {
             }
         }
         let globals = [
+            self.conn.cursor_shape_manager,
             self.conn.layer_shell,
             self.conn.data_device_manager,
             self.conn.pointer_constraints,
@@ -4063,48 +4110,36 @@ impl Shell for WaylandShell {
         Ok(())
     }
 
-    /// Hides the cursor with `None`. **A shape is recorded and not yet
-    /// applied** — the honest half of this call, and why.
+    /// Hides the cursor with `None`, and names a shape through
+    /// `cursor-shape-v1` where the compositor offers it.
     ///
-    /// # Hiding is real
+    /// # Hiding works on every compositor
     ///
     /// `wl_pointer.set_cursor` with a **null** surface *is* "no cursor" in core
-    /// Wayland. It needs no buffer, no theme and no extra protocol, so
-    /// [`set_cursor(window, None)`](Shell::set_cursor) works on every
-    /// compositor — which is the case a first-person game and
-    /// [`PointerMode::Locked`] actually need.
+    /// Wayland. It needs no buffer, no theme and no extra protocol — which is
+    /// the case a first-person game and [`PointerMode::Locked`] actually need.
     ///
-    /// The request is re-sent on every `wl_pointer.enter`, because a compositor
-    /// resets the cursor when it crosses a surface boundary; a client that set
-    /// it once would watch it flicker back on every re-entry.
+    /// # A shape needs `cursor-shape-v1`
     ///
-    /// # A shape is not, and this is a real gap
+    /// `wp_cursor_shape_device_v1.set_shape` hands the compositor a name from
+    /// the CSS vocabulary [`CursorIcon::as_css_name`] already speaks, and the
+    /// compositor draws the user's own themed, correctly scaled cursor; the
+    /// [`cursor_shape`] module says why that beats loading a theme here.
+    /// [`ShellCaps::CURSOR_SHAPE`] is set when the manager was bound by the end
+    /// of [`open`](Self::open). A shape also ends a hide, because the shape
+    /// replaces the null surface.
     ///
-    /// Naming a shape needs one of two things, and this slice has neither:
-    ///
-    /// * **A cursor buffer.** Load the user's XCursor theme, pick the image for
-    ///   the right shape at the right scale, wrap it in a `wl_shm` buffer and
-    ///   attach it to a cursor surface. That is a theme loader plus a second
-    ///   presentation path inside the shell, and it is how the cursor ends up
-    ///   *disagreeing* with the user's theme the moment either side changes.
-    /// * **`cursor-shape-v1`**, which is the right answer — it hands the
-    ///   compositor a name from the same CSS vocabulary
-    ///   [`CursorIcon::as_css_name`] already speaks and lets the compositor
-    ///   draw its own themed, correctly-scaled cursor. It is **not** vendored
-    ///   here for one concrete reason: its `wl_interface` type table references
-    ///   `zwp_tablet_tool_v2`, so generating it requires vendoring the whole
-    ///   50 KB deprecated `tablet-unstable-v2` protocol to satisfy a single
-    ///   pointer for a request this engine will never send. That trade is worth
-    ///   revisiting when the editor needs resize cursors (P10); it is not worth
-    ///   it for a slice with no renderer.
-    ///
-    /// So a shape request is **accepted and recorded** rather than failed: a UI
-    /// calls this on every hover, and erroring there would make every consumer
-    /// handle a case that is going to start working. It also *stops hiding* —
-    /// but because un-hiding likewise needs a buffer, the compositor's arrow
-    /// returns at the next `wl_pointer.enter` rather than immediately.
+    /// On a compositor without the protocol a shape is **accepted and
+    /// recorded** rather than failed, and the cap being clear is the loud part:
+    /// a UI calls this on every hover, and erroring there would make every
+    /// caller handle it. The shape is not seen; a hide it follows lasts until
+    /// the next `wl_pointer.enter`, where the compositor resets the cursor.
     /// [`WindowState`] does not claim otherwise, because the seam has no
     /// effective-cursor field.
+    ///
+    /// Either request is re-sent on every `wl_pointer.enter`, because a
+    /// compositor resets the cursor when it crosses a surface boundary; a
+    /// client that set it once would watch it flicker back on every re-entry.
     ///
     /// # Errors
     ///
@@ -4975,6 +5010,10 @@ mod tests {
         assert_eq!(
             zwp_text_input_manager_v3::NAME,
             c"zwp_text_input_manager_v3"
+        );
+        assert_eq!(
+            wp_cursor_shape_manager_v1::NAME,
+            c"wp_cursor_shape_manager_v1"
         );
         assert_eq!(xdg_toplevel::state::FULLSCREEN, 2);
         assert_eq!(wl_output::mode::CURRENT, 1);

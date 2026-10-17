@@ -589,6 +589,18 @@ fn dead_keys_and_the_input_method_are_set_and_a_held_keyboard_is_not() {
     }
 }
 
+/// `set_cursor` loads a stock `user32` cursor for every shape, so the bit
+/// added 2026-10-18 is a constant too.
+#[test]
+fn a_named_cursor_shape_is_applied() {
+    for raw_motion in [false, true] {
+        assert!(
+            Win32Shell::latch_caps(raw_motion).contains(ShellCaps::CURSOR_SHAPE),
+            "WM_SETCURSOR answers with the shape's stock cursor"
+        );
+    }
+}
+
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_capabilities_are_exactly_what_this_backend_implements() {
@@ -615,6 +627,7 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
         ShellCaps::POPUP,
         ShellCaps::POPUP_REPOSITION,
         ShellCaps::TRANSPARENT,
+        ShellCaps::CURSOR_SHAPE,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
     }

@@ -361,7 +361,8 @@ impl Win32Shell {
             .union(ShellCaps::PANEL_RESERVE)
             .union(ShellCaps::POPUP)
             .union(ShellCaps::POPUP_REPOSITION)
-            .union(ShellCaps::TRANSPARENT);
+            .union(ShellCaps::TRANSPARENT)
+            .union(ShellCaps::CURSOR_SHAPE);
         #[cfg(feature = "accesskit")]
         let caps = caps.union(ShellCaps::ACCESSIBILITY);
         if raw_motion {
@@ -1214,6 +1215,9 @@ impl Shell for Win32Shell {
     ///   parent and kept on its monitor; see [`popup`](super::popup).
     /// * [`POPUP_REPOSITION`](ShellCaps::POPUP_REPOSITION) — the same placement
     ///   worked out again, and the window moved with `SetWindowPos`.
+    /// * [`CURSOR_SHAPE`](ShellCaps::CURSOR_SHAPE) — the stock `user32`
+    ///   cursors, answered from `WM_SETCURSOR`; see
+    ///   [`set_cursor`](Shell::set_cursor).
     /// * [`TRANSPARENT`](ShellCaps::TRANSPARENT) — the window system's half: a
     ///   transparent window of any role is created with
     ///   `WS_EX_NOREDIRECTIONBITMAP`, a frameless one is given square corners

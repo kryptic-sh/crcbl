@@ -29,10 +29,18 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
 38988977910). What it found, in the order of work:
 
 1. **Silent gaps, which break the rule outright.**
-   - S20 cursor shape on Wayland and X11: `set_cursor` stores the shape and
-     applies nothing. Real fix `cursor-shape-v1` on Wayland (its type table
-     needs `tablet-unstable-v2` vendored) and `libxcb-cursor` through `dlopen`
-     on X11, each M.
+   - S20 cursor shape on X11: `set_cursor` stores the shape and applies nothing.
+     Real fix `libxcb-cursor` through `dlopen`, M. X11 keeps
+     `ShellCaps::CURSOR_SHAPE` clear until it lands, so it is no longer silent;
+     set the bit in the X11 backend's `latch_caps` and flip the `x11_e2e`
+     assertion in the same change. Wayland applies shapes through
+     `cursor-shape-v1` where the compositor offers it.
+   - **Decided 2026-10-18: cursor shapes get a cap, `CURSOR_SHAPE`, rather than
+     `set_cursor` erroring**, because a UI sets the cursor on every hover and an
+     error there is one every caller would have to handle. Declined: a theme
+     loader drawing XCursor images into cursor buffers on Wayland, which
+     disagrees with the user's theme when either side changes and is a second
+     presentation path inside the shell.
    - S9 input method on AppKit: `set_text_input` and `set_text_input_area` are
      the trait's no-op defaults, so fields do not switch the input method, no
      secure input (`EnableSecureEventInput`) guards a `Password` or `Pin` field,

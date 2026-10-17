@@ -28,7 +28,7 @@
 //! | Clipboard: `TARGETS`, `INCR` both directions, own and read | complete |
 //! | Drag and drop in: XDND version 5, the `accept_drops` gate | complete — [`DRAG_DROP`](ShellCaps::DRAG_DROP), see [`xdnd`] |
 //! | Key repeat synthesis | not needed — the X server does it |
-//! | Themed cursor shapes | recorded, not applied — same gap the Wayland backend documents |
+//! | Themed cursor shapes | recorded, not applied — [`CURSOR_SHAPE`](ShellCaps::CURSOR_SHAPE) is clear |
 //!
 //! ## What was cut, and why that seam
 //!
@@ -38,8 +38,9 @@
 //! nothing in this engine asks to drag a file *out* — the viewer and the
 //! editor's asset browser both want files coming in.
 //!
-//! **Themed cursor shapes**, as the table says, and for the reason the Wayland
-//! backend gives: a cursor is a theme lookup and a pixmap, and pixels are P1.
+//! **Themed cursor shapes**, as the table says: X11 has no compositor to name a
+//! shape to, as Wayland's `cursor-shape-v1` does, so a cursor is a theme lookup
+//! and a pixmap, which waits on `libxcb-cursor`.
 //!
 //! # What X11 does that neither Wayland nor `HeadlessShell` models
 //!
@@ -956,6 +957,8 @@ impl X11Shell {
             // values here. See the module docs for how little of a *protocol*
             // that is.
             | ShellCaps::FRACTIONAL_SCALE;
+        // `CURSOR_SHAPE` is not here: `set_cursor` records a shape and applies
+        // nothing until a cursor theme loader lands.
 
         // Both of these need a window manager, and a window manager is a
         // separate program that may simply not be running — the finding this

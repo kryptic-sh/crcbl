@@ -751,15 +751,12 @@ impl Shell for X11Shell {
     /// is the case a first-person game and [`PointerMode::Locked`] actually
     /// need.
     ///
-    /// A *shape* is the same gap the Wayland backend documents, arrived at from
-    /// the other side. There, naming a shape needs `cursor-shape-v1`; here it
-    /// needs an XCursor theme loader — find the user's theme, parse its cursor
-    /// files, pick the image for the right shape at the right size, upload it —
-    /// or `libxcb-cursor`, which is that loader as a library and is a
-    /// dependency for a request this engine will not send until the editor
-    /// needs resize cursors at P10. So a shape request is accepted and
-    /// recorded, [`WindowState`] can report it, and the pair closes in the same
-    /// slice on both backends.
+    /// A *shape* needs an XCursor theme loader — find the user's theme, parse
+    /// its cursor files, pick the image for the right shape at the right size,
+    /// upload it — or `libxcb-cursor`, which is that loader as a library and is
+    /// not loaded yet. So [`ShellCaps::CURSOR_SHAPE`] is clear here, and a
+    /// shape request is accepted and recorded rather than refused, because a
+    /// UI calls this on every hover; [`WindowState`] can report it.
     fn set_cursor(
         &mut self,
         window: WindowId,

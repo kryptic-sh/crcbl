@@ -1478,6 +1478,8 @@ fn the_backend_is_reachable_by_name_and_is_win32_shaped() {
         ShellCaps::TEXT_COMPOSE,
         // The input method's path, written and not yet proven here.
         ShellCaps::TEXT_IME,
+        // Stock `user32` cursors, answered from `WM_SETCURSOR`.
+        ShellCaps::CURSOR_SHAPE,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
     }

@@ -587,6 +587,10 @@ mod macos {
         assert!(caps.contains(ShellCaps::POINTER_WARP), "{caps:?}");
         assert!(caps.contains(ShellCaps::TEXT_COMPOSE), "{caps:?}");
         assert!(
+            caps.contains(ShellCaps::CURSOR_SHAPE),
+            "NSCursor applies every shape: {caps:?}"
+        );
+        assert!(
             !caps.contains(ShellCaps::TEXT_IME),
             "the pre-edit is not sent, so the input method is not wired end to end: {caps:?}"
         );

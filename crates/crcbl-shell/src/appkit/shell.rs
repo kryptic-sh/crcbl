@@ -956,6 +956,8 @@ impl Shell for AppKitShell {
     /// * [`TRANSPARENT`](ShellCaps::TRANSPARENT) — a window that is not opaque,
     ///   with a clear background, no shadow and a layer composited by its
     ///   alpha.
+    /// * [`CURSOR_SHAPE`](ShellCaps::CURSOR_SHAPE) — `NSCursor`, set now and
+    ///   again from `cursorUpdate:`; see [`set_cursor`](Shell::set_cursor).
     ///
     /// # What is clear, and why each one is a decision
     ///
@@ -1537,9 +1539,9 @@ impl Shell for AppKitShell {
     /// hidden, which is what makes alt-tabbing out of a game give the desktop
     /// its pointer back.
     ///
-    /// Unlike the X11 and Wayland backends a named shape really is applied here:
-    /// AppKit ships the cursors, so there is no theme to load and no dependency
-    /// to take on. Four of the seam's shapes have no public equivalent and are
+    /// A named shape really is applied here, which
+    /// [`CURSOR_SHAPE`](ShellCaps::CURSOR_SHAPE) reports: AppKit ships the
+    /// cursors, so there is no theme to load and no dependency to take on. Four of the seam's shapes have no public equivalent and are
     /// approximated; [`pointer::cursor_selector`](super::pointer::cursor_selector)
     /// names which and to what.
     ///

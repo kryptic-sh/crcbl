@@ -24,5 +24,12 @@
 // unused in this slice by design, and `wl_shm`/`wl_shell` will stay unused
 // forever — the engine presents through Vulkan, not through shared memory.
 #![allow(dead_code)]
+// Event variants are upstream's names, which the generator does not rename:
+// `zwp_tablet_seat_v2`'s are `tablet_added`, `tool_added` and `pad_added`.
+// `expect` rather than `allow`, so dropping the tablet XML says so here.
+#![expect(
+    clippy::enum_variant_names,
+    reason = "generated from upstream protocol XML"
+)]
 
 include!(concat!(env!("OUT_DIR"), "/wayland_protocol.rs"));
