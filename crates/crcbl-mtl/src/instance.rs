@@ -716,11 +716,13 @@ pub(crate) mod tests {
             SurfaceTarget::Wayland {
                 display: dangling,
                 surface: dangling,
+                transparent: false,
             },
             SurfaceTarget::Xcb {
                 connection: dangling,
                 window: 1,
                 visual_id: 2,
+                transparent: false,
             },
             SurfaceTarget::Win32 {
                 hinstance: dangling,

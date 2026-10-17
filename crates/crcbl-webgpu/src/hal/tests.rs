@@ -445,6 +445,7 @@ fn create_surface_refuses_a_pointer_target() {
     // dereferenced; the refusal is decided from the variant alone.
     let target = SurfaceTarget::AppKit {
         layer: core::ptr::NonNull::<core::ffi::c_void>::dangling(),
+        transparent: false,
     };
     let refused = unsafe { instance.create_surface(&target) };
     assert!(

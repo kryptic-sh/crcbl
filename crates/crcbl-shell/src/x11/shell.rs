@@ -601,6 +601,10 @@ impl Shell for X11Shell {
             connection: self.conn.connection.cast::<c_void>(),
             window: state.id,
             visual_id: self.conn.root_visual,
+            // Every window is on the root visual, which has no alpha, and
+            // `create_window` refuses a transparent one (`TRANSPARENT` is not
+            // in this backend's caps), so no window here is transparent.
+            transparent: false,
         })
     }
 

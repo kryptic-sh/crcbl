@@ -160,7 +160,10 @@ unsafe extern "C" fn ignore(
 ///
 /// Never; every fallible step is reported as an error.
 pub fn map_window(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError> {
-    let SurfaceTarget::Wayland { display, surface } = shell.surface_target(window)? else {
+    let SurfaceTarget::Wayland {
+        display, surface, ..
+    } = shell.surface_target(window)?
+    else {
         return Err(ShellError::Backend(
             "not a Wayland window; this helper is only for the Wayland backend".to_string(),
         ));

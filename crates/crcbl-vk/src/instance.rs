@@ -844,7 +844,14 @@ impl Instance for VkInstance {
             })
         };
         let raw = match *target {
-            SurfaceTarget::Wayland { display, surface } => {
+            // Transparency changes nothing about the surface on Wayland or X11:
+            // the swapchain's composite alpha is the whole of it, chosen from
+            // what `surface_caps` reports.
+            SurfaceTarget::Wayland {
+                display,
+                surface,
+                transparent: _,
+            } => {
                 let Some(ext) = self.inner.wayland_ext.as_ref() else {
                     return unsupported("VK_KHR_wayland_surface is not available");
                 };
@@ -863,6 +870,7 @@ impl Instance for VkInstance {
                 connection,
                 window,
                 visual_id: _,
+                transparent: _,
             } => {
                 let Some(ext) = self.inner.xcb_ext.as_ref() else {
                     return unsupported("VK_KHR_xcb_surface is not available");

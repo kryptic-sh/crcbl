@@ -399,11 +399,17 @@ fn the_surface_target_exists_before_the_window_has_a_size() {
     // and only the extent waits. That is the split P1's `crcbl-vk` depends on:
     // `vkCreateWaylandSurfaceKHR` can run now, the swapchain cannot.
     let target = session.shell.surface_target(window).expect("live window");
-    let SurfaceTarget::Wayland { display, surface } = target else {
+    let SurfaceTarget::Wayland {
+        display,
+        surface,
+        transparent,
+    } = target
+    else {
         panic!("a Wayland backend must produce a Wayland target, got {target:?}");
     };
     assert_eq!(target.platform_name(), "wayland");
     assert!(target.is_windowed());
+    assert!(!transparent, "the window was not asked to be transparent");
     let (display_before, surface_before) = (display, surface);
 
     session.pump_until("the first configure", |session| {
@@ -412,8 +418,9 @@ fn the_surface_target_exists_before_the_window_has_a_size() {
 
     // Stable across the configure: the compositor resizing a surface does not
     // replace it, so a HAL surface built at creation stays valid.
-    let SurfaceTarget::Wayland { display, surface } =
-        session.shell.surface_target(window).expect("live window")
+    let SurfaceTarget::Wayland {
+        display, surface, ..
+    } = session.shell.surface_target(window).expect("live window")
     else {
         panic!("the target changed platform");
     };
@@ -3306,6 +3313,15 @@ fn an_exclusive_panel_takes_the_keyboard_when_it_maps() {
             },
         )
     });
+    assert!(
+        session
+            .shell
+            .surface_target(launcher)
+            .expect("live panel")
+            .transparent(),
+        "the surface target says the panel is transparent, so GpuContext asks for \
+         premultiplied alpha"
+    );
     session.pump_until("the panel's first configure", |session| {
         session.size(launcher).is_some()
     });

@@ -84,6 +84,24 @@ use core::ptr::NonNull;
 /// Xlib is absent on purpose: topic 15 links `libxcb`, not `libX11`, so no
 /// shell backend can produce an `Xlib` target and a variant nobody constructs
 /// is a variant every backend still has to handle.
+///
+/// # Transparency travels here
+///
+/// Every variant that names a desktop window carries `transparent`: the shell
+/// sets it from the window's `WindowDesc::transparent` (`crcbl-shell`, named
+/// rather than linked, see the module docs), and
+/// [`transparent`](Self::transparent) reads it whatever the platform. The
+/// window is what knows it was made transparent, so the renderer learns it
+/// from the window's own handles rather than from a second statement that
+/// could disagree. A presenter that sees it asks for premultiplied alpha, and
+/// one whose surface cannot composite that way refuses rather than drawing the
+/// window opaque.
+///
+/// [`Web`](Self::Web) and [`Offscreen`](Self::Offscreen) carry no flag. The web
+/// shell refuses a transparent window, since what shows through a canvas is the
+/// page's business, so a canvas target is never one; an offscreen ring has no
+/// compositor to blend with, and its readback holds whatever alpha the frame
+/// wrote either way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SurfaceTarget {
     /// Wayland: `wl_display*` + `wl_surface*`, as returned by
@@ -94,6 +112,10 @@ pub enum SurfaceTarget {
         display: NonNull<c_void>,
         /// `struct wl_surface *`.
         surface: NonNull<c_void>,
+        /// The window was created transparent. The compositor blends the
+        /// surface by its buffer's alpha, so a presenter asks for
+        /// premultiplied alpha; the surface itself is made the same way.
+        transparent: bool,
     },
     /// X11 through XCB: `xcb_connection_t*` plus the window's XID.
     Xcb {
@@ -104,6 +126,12 @@ pub enum SurfaceTarget {
         /// `xcb_visualid_t` of the window, needed by some backends to pick a
         /// compatible format.
         visual_id: u32,
+        /// The window was created transparent. The X11 shell makes every
+        /// window on the root visual, which has no alpha, and refuses a
+        /// transparent one, so it always sets this `false`; the field is here
+        /// so that a backend reads transparency the same way on every window
+        /// system.
+        transparent: bool,
     },
     /// Windows: module instance + window handle, and whether the window was
     /// made for per-pixel transparency.
@@ -117,14 +145,10 @@ pub enum SurfaceTarget {
         /// itself is shown, and a backend must present through
         /// DirectComposition with premultiplied alpha.
         ///
-        /// The one target that carries this, because Windows is the one
-        /// window system where transparency changes how a *backend* presents.
-        /// On Wayland, X11 and macOS it is the window's own business (its
-        /// visual, its opaque region, its layer), and a backend makes the
-        /// surface the same way either way. A backend that cannot present this
-        /// way refuses
-        /// the surface by name rather than drawing into a window that shows
-        /// nothing.
+        /// Windows is the one window system where this changes how a backend
+        /// makes the *surface*, not only which alpha its swapchain asks for.
+        /// A backend that cannot present this way refuses the surface by name
+        /// rather than drawing into a window that shows nothing.
         transparent: bool,
     },
     /// macOS/iOS: a `CAMetalLayer*`.
@@ -135,6 +159,11 @@ pub enum SurfaceTarget {
     AppKit {
         /// `CAMetalLayer *`.
         layer: NonNull<c_void>,
+        /// The window was created transparent: the shell made the window and
+        /// this layer non-opaque. A presenter keeps the layer non-opaque and
+        /// asks for premultiplied alpha, which is how Core Animation blends a
+        /// layer's contents.
+        transparent: bool,
     },
     /// Web: an integer key into the shell's JS-side canvas registry.
     ///
@@ -190,6 +219,23 @@ impl SurfaceTarget {
         }
     }
 
+    /// Whether the window behind this target was created transparent, so the
+    /// desktop should show through where the frame's alpha is below one.
+    ///
+    /// Always `false` for [`Web`](Self::Web) and
+    /// [`Offscreen`](Self::Offscreen); see the type's docs for why they carry
+    /// no flag.
+    #[must_use]
+    pub const fn transparent(&self) -> bool {
+        match *self {
+            Self::Wayland { transparent, .. }
+            | Self::Xcb { transparent, .. }
+            | Self::Win32 { transparent, .. }
+            | Self::AppKit { transparent, .. } => transparent,
+            Self::Web { .. } | Self::Offscreen => false,
+        }
+    }
+
     /// Whether this target presents to a real window server.
     ///
     /// `false` only for [`SurfaceTarget::Offscreen`]. Backends use it to skip
@@ -214,18 +260,23 @@ mod tests {
             SurfaceTarget::Wayland {
                 display: dangling(),
                 surface: dangling(),
+                transparent: false,
             },
             SurfaceTarget::Xcb {
                 connection: dangling(),
                 window: 1,
                 visual_id: 2,
+                transparent: false,
             },
             SurfaceTarget::Win32 {
                 hinstance: dangling(),
                 hwnd: dangling(),
                 transparent: false,
             },
-            SurfaceTarget::AppKit { layer: dangling() },
+            SurfaceTarget::AppKit {
+                layer: dangling(),
+                transparent: false,
+            },
             SurfaceTarget::Web { canvas_id: 7 },
             SurfaceTarget::Offscreen,
         ];
@@ -243,6 +294,41 @@ mod tests {
             "a canvas is a real presentation target"
         );
         assert!(!SurfaceTarget::Offscreen.is_windowed());
+    }
+
+    /// Every windowed variant answers its own flag, both ways, and the two
+    /// that carry none answer `false`.
+    #[test]
+    fn transparent_reads_each_windowed_variants_own_flag() {
+        for flag in [false, true] {
+            let targets = [
+                SurfaceTarget::Wayland {
+                    display: dangling(),
+                    surface: dangling(),
+                    transparent: flag,
+                },
+                SurfaceTarget::Xcb {
+                    connection: dangling(),
+                    window: 1,
+                    visual_id: 2,
+                    transparent: flag,
+                },
+                SurfaceTarget::Win32 {
+                    hinstance: dangling(),
+                    hwnd: dangling(),
+                    transparent: flag,
+                },
+                SurfaceTarget::AppKit {
+                    layer: dangling(),
+                    transparent: flag,
+                },
+            ];
+            for target in targets {
+                assert_eq!(target.transparent(), flag, "{target:?}");
+            }
+        }
+        assert!(!SurfaceTarget::Web { canvas_id: 0 }.transparent());
+        assert!(!SurfaceTarget::Offscreen.transparent());
     }
 
     #[test]

@@ -1953,6 +1953,10 @@ struct WlWindow {
     /// records: a window that did not ask for drops answers
     /// `wl_data_offer.accept(null)` and never reads the dropped data.
     accept_drops: bool,
+    /// [`WindowDesc::transparent`], which [`surface_target`](Shell::surface_target)
+    /// hands on. Nothing here changes for it: the compositor blends by the
+    /// buffer's alpha either way, so the swapchain's alpha is the whole of it.
+    transparent: bool,
     /// What a text field in the window asked of the input method; see
     /// [`text_input`].
     text_input: text_input::Field,
@@ -3734,6 +3738,7 @@ impl Shell for WaylandShell {
                 constraints: Vec::new(),
                 cursor: None,
                 accept_drops: desc.accept_drops,
+                transparent: desc.transparent,
                 text_input: text_input::Field::default(),
                 focused: false,
                 visible: desc.visible,
@@ -4028,6 +4033,7 @@ impl Shell for WaylandShell {
         Ok(SurfaceTarget::Wayland {
             display: self.conn.display.cast::<c_void>(),
             surface,
+            transparent: state.transparent,
         })
     }
 
@@ -5030,6 +5036,7 @@ mod tests {
             constraints: Vec::new(),
             cursor: None,
             accept_drops: false,
+            transparent: false,
             text_input: text_input::Field::default(),
             focused: false,
             visible: true,

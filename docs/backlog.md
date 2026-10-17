@@ -108,9 +108,9 @@ each checked against the code here unless it says otherwise:
   Win32 step below says how). pikr's panel is transparent and square on Windows
   when it renders through D3D12 and asks its swapchain for
   `CompositeAlpha::PreMultiplied`; through Vulkan, `create_surface` refuses the
-  window by name. Two things pikr and lyr should know, both open below:
-  `GpuContext` always asks for `CompositeAlpha::Opaque`, and on macOS
-  `crcbl-mtl` makes the layer opaque again when it configures it.
+  window by name. Since the same day `GpuContext` asks for premultiplied itself
+  for a transparent window on every platform, and `crcbl-mtl` no longer makes
+  the layer opaque again (step 3 below says how, and what is unverified).
 
 **pikr drops resvg and the `image` crate, 2026-10-16** (the owner's call,
 relayed by pikr's session), so every `crcbl-image` gap now shows in pikr as a
@@ -203,6 +203,75 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `TRANSPARENT`.
    - The headless shell builds every role. Every other backend refuses roles and
      transparency through `role::check` until its step lands.
+   - Transparency reaches the swapchain on every platform, 2026-10-17. Every
+     windowed `SurfaceTarget` variant (`Wayland`, `Xcb`, `Win32`, `AppKit`)
+     carries `transparent`, set by each shell's `surface_target` from
+     `WindowDesc::transparent`, and `SurfaceTarget::transparent` reads it. X11
+     always sets `false`: it lacks `TRANSPARENT` and makes every window on the
+     root visual. `GpuContext` (`crates/crcbl/src/engine.rs`,
+     `composite_alpha_for`) asks for `CompositeAlpha::PreMultiplied` when the
+     target is transparent, keeps it in `SwapchainConfig` so `resize` and
+     `set_pacing` rebuild with it, and walks past an adapter whose surface does
+     not offer it. When none does, the open fails with `GpuError::Unusable`
+     naming the missing alpha (`GpuError::AdapterPin` with that reason under a
+     pin). `crcbl-mtl` offers premultiplied for a transparent `AppKit` target
+     and sets the layer's `opaque` from the descriptor
+     (`crates/crcbl-mtl/src/alpha.rs`, `layer_composite_alpha` and
+     `layer_opaque`). `WindowDesc::transparent`'s docs give the recipe end to
+     end.
+   - Decided 2026-10-17: the window's transparency travels in `SurfaceTarget` on
+     every platform, as `Win32`'s already did, because the shell made the window
+     and is the one that knows. Declined: a `GpuContextDesc::transparent` field
+     (a second statement of what the window already says, which can disagree
+     with it); preferring premultiplied whenever a surface offers it (Vulkan on
+     Wayland can offer it for an opaque window, which would then composite by
+     whatever alpha the renderer writes).
+   - Decided 2026-10-17: a transparent window whose surface offers no
+     premultiplied alpha is refused, not drawn opaque with a `log::warn!`. The
+     closest precedents are the unmet requests that change what is shown:
+     `crcbl-vk` refusing a transparent Win32 window, and an adapter pin that
+     never falls back. Present modes do fall back to `Fifo`, but a pacing
+     preference still draws the right picture and an opaque transparent window
+     does not.
+   - Decided 2026-10-17: `Web` and `Offscreen` carry no flag, and
+     `SurfaceTarget::transparent` is `false` for both. The web shell lacks
+     `TRANSPARENT` (what shows through a canvas is the page's business), and an
+     offscreen ring has no compositor; its readback holds the frame's alpha
+     either way. A canvas could honour it, since `crcbl-webgpu` already offers
+     `PreMultiplied` on a canvas surface and maps it to `alphaMode`, but that
+     needs the web shell to set the cap and `Web` to gain the field; nobody has
+     asked.
+   - **Verified locally:** `SurfaceTarget::transparent` for every windowed
+     variant both ways; `composite_alpha_for` over every subset of offered
+     modes; through the null backend (`AlphaInstance` in the engine tests), the
+     open, a resize and a pacing rebuild keeping premultiplied (read from
+     `SwapchainConfig` and its descriptor), an opaque window staying opaque on a
+     surface that offers both, the adapter walk passing an adapter without
+     premultiplied, and the refusal unpinned and pinned; `crcbl-mtl`'s
+     `layer_composite_alpha` and `layer_opaque` as host unit tests. Each was
+     mutation-checked.
+   - **Only CI can verify:** the Wayland e2e assertion that a transparent
+     panel's target says so and an opaque window's does not (the sway job), the
+     AppKit session assertions (the transparent bar's target says so, the
+     launcher's does not), and `crcbl-mtl`'s
+     `a_transparent_layer_is_configured_premultiplied_and_left_non_opaque` (a
+     detached layer configured premultiplied and read back with `isOpaque`, in
+     the macOS e2e jobs). None of their mutants was run.
+   - **Verified by nothing:** what a compositor shows. No test reads pixels back
+     through Wayland, DWM or the window server, so the desktop showing through a
+     window opened with `GpuContext` is unobserved on every platform, as is a
+     real Vulkan driver's surface offering premultiplied for a transparent
+     Wayland window inside a test.
+   - Left: `ViewBackground::Transparent` writes straight colour beside coverage
+     alpha, which is premultiplied output only where the alpha is zero or one
+     and an empty pixel holds no fog light; water's edge fade and a material
+     with alpha below one would composite too bright in a transparent window. A
+     premultiplied output on the forward renderer is what a transparent 3D
+     window needs; nobody has asked.
+   - Found, not changed: an opaque window is asked for `CompositeAlpha::Opaque`
+     without checking the surface offers it, as before. `crcbl-vk` adds `Opaque`
+     only to an empty list, so a driver offering only `Inherit` would be handed
+     a mode it did not offer.
    - Shaped with lyr's and pikr's feedback, 2026-10-15:
      - A panel's size along a stretched axis is ignored, and `Resized` is the
        authority.
@@ -227,10 +296,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
    - Transparency (S16) is on: `ShellCaps::TRANSPARENT` is set, because a
      compositor blends a surface by its buffer's alpha unless the client
      declares an opaque region, which this backend never does. The swapchain's
-     premultiplied alpha is the caller's. Not done: declaring an opaque region
-     for the windows that are not transparent, which is an optimisation
-     compositors use, and a test that reads pixels back through the compositor
-     (the e2e test checks the cap and that a transparent panel is built).
+     premultiplied alpha is `GpuContext`'s (step 3) or the caller's. Not done:
+     declaring an opaque region for the windows that are not transparent, which
+     is an optimisation compositors use, and a test that reads pixels back
+     through the compositor (the e2e test checks the cap and that a transparent
+     panel is built).
    - `MonitorInfo::name` was already `wl_output.name` on Wayland, so S7's name
      is Win32's (`MONITORINFOEX::szDevice`) and AppKit's
      (`NSScreen.localizedName`) to check.
@@ -469,13 +539,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      the desktop showing through, the square corners and the missing border are
      unobserved, as is the `DwmSetWindowAttribute` result (logged at debug, not
      asserted, because Windows 10 refuses both attributes).
-   - Not done: `GpuContext` (`crates/crcbl/src/engine.rs`,
-     `SwapchainConfig::desc`) always asks for `CompositeAlpha::Opaque`, so a
-     transparent window opened through it is drawn opaque on every backend (here
-     as `DXGI_ALPHA_MODE_IGNORE`; on Wayland, Mesa picks an opaque format for an
-     opaque swapchain). Needs a decision: a `GpuContextDesc` field, or
-     `GpuContext` asking for `PreMultiplied` when the surface offers it and the
-     window is transparent, which it cannot tell today off Win32.
+   - `GpuContext` presents a transparent window through D3D12 premultiplied
+     since 2026-10-17; step 3 says how, for every platform.
    - Popups (S3) are built (`crates/crcbl-shell/src/win32/popup.rs`, placement
      in `geometry::popup_rect`): an owned `WS_POPUP` tool window, topmost when
      its parent is, placed against the anchor at the parent's scale, flipped to
@@ -505,15 +570,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      the pointer, placed again when the screens change, and closed when its
      screen is detached. `TRANSPARENT` is set for every window: `opaque = NO`, a
      clear background, no shadow and a non-opaque `CAMetalLayer` (pikr item 7).
-   - **Found 2026-10-17, unverified on a Mac:** `crcbl-mtl`'s swapchain
-     configure calls `layer.setOpaque(true)` unconditionally
-     (`crates/crcbl-mtl/src/swapchain.rs`, beside `setFramebufferOnly`), after
-     the AppKit shell made the window's `CAMetalLayer` non-opaque in
-     `appkit/window.rs`. Read from the code only: a transparent window drawn
-     through Metal is likely opaque. Fixing it means offering
-     `CompositeAlpha::PreMultiplied` on Metal surfaces and setting `opaque` from
-     the descriptor, which `layer_surface_caps` declines today for want of a
-     verified non-opaque path.
+   - `crcbl-mtl` keeps a transparent window's layer non-opaque since 2026-10-17:
+     the surface offers `CompositeAlpha::PreMultiplied` for a transparent
+     `SurfaceTarget::AppKit`, and `configure_layer` sets `opaque` from the
+     descriptor instead of `true` always. Step 3 says what verifies it (a
+     detached layer in CI's macOS jobs; nothing on screen).
    - Decided: the level numbers are asked of `CGWindowLevelForKey` at run time
      rather than written down, because they are the window server's to define.
      Hover without the keyboard (lyr item 9) is the never-key panel class plus
@@ -29441,9 +29502,10 @@ quarantined draw tests above). What remains:
   requires** — on Metal every device can drive any layer, so the branch is
   unreachable and **the contract is untested here by construction**, not merely
   untested. `crcbl-vk` is where that path is exercised.
-- **`CompositeAlpha` offers only `Opaque`.** `CAMetalLayer` has `opaque` and can
-  composite with alpha, but nothing verified the non-opaque behaviour, so it is
-  not offered rather than offered untested.
+- **`CompositeAlpha::PreMultiplied` is offered only for a transparent window's
+  layer** (since 2026-10-17, `crates/crcbl-mtl/src/alpha.rs`). What is verified
+  is the layer's `opaque` after a configure, on a detached layer; how the window
+  server blends it is not, since no test reads the screen.
 
 ## What MTL6 settled, and what it leaves for a decision
 

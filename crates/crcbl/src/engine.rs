@@ -105,10 +105,10 @@ use std::time::Duration;
 
 use crcbl_core::time::{ManualTime, MonotonicTime, TimeSource};
 use crcbl_hal::{
-    AcquiredFrame, BindingModel, CommandBufferHandle, DeviceDesc, DisplayTiming, Features, Format,
-    GeometryPath, HalError, LightingPath, PresentInfo, PresentMode, QueueHandle, QueueKind,
-    SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreSignal, SemaphoreWait, SubmitInfo,
-    SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
+    AcquiredFrame, BindingModel, CommandBufferHandle, CompositeAlpha, DeviceDesc, DisplayTiming,
+    Features, Format, GeometryPath, HalError, LightingPath, PresentInfo, PresentMode, QueueHandle,
+    QueueKind, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreSignal, SemaphoreWait,
+    SubmitInfo, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
 };
 use crcbl_hal::{Device, Instance};
 use crcbl_render::{EffectRequest, RenderEffects};
@@ -608,6 +608,10 @@ struct SwapchainConfig {
     extent: (u32, u32),
     image_count: u32,
     present_mode: PresentMode,
+    /// [`composite_alpha_for`]'s answer at open. Kept here, not recomputed,
+    /// so a resize or a pacing change rebuilds the swapchain with the alpha it
+    /// was opened with; D3D12 refuses a reconfigure that changes it.
+    composite_alpha: CompositeAlpha,
 }
 
 impl SwapchainConfig {
@@ -619,9 +623,40 @@ impl SwapchainConfig {
             extent: self.extent,
             image_count: self.image_count,
             present_mode: self.present_mode,
-            composite_alpha: crcbl_hal::CompositeAlpha::Opaque,
+            composite_alpha: self.composite_alpha,
         }
     }
+}
+
+/// Why an adapter whose surface offers no premultiplied alpha cannot present a
+/// transparent window. See [`composite_alpha_for`].
+const NO_PREMULTIPLIED_ALPHA: &str =
+    "the window is transparent, and the surface offers no premultiplied alpha to present it with";
+
+/// The composite alpha a [`GpuContext`] asks for, from whether the window is
+/// transparent
+/// ([`SurfaceTarget::transparent`](crcbl_hal::SurfaceTarget::transparent)) and
+/// what the surface offers; `None` when it cannot present the window as it
+/// was made.
+///
+/// A transparent window gets [`CompositeAlpha::PreMultiplied`], which is the
+/// alpha `WindowDesc::transparent` promises and the one every window system
+/// here composites by. A surface that does not offer it is refused rather than
+/// drawn opaque: a window that silently is not what was asked is the failure
+/// `crcbl-vk`'s refusal of a transparent Win32 window exists to prevent, and
+/// unlike a pacing preference there is no fallback that still looks right.
+///
+/// An opaque window gets [`CompositeAlpha::Opaque`], as a context always has,
+/// even where premultiplied is also offered: Vulkan on Wayland can offer it for
+/// any surface, and an opaque window composited by whatever alpha the renderer
+/// happened to write would show the desktop through it.
+fn composite_alpha_for(transparent: bool, offered: &[CompositeAlpha]) -> Option<CompositeAlpha> {
+    if !transparent {
+        return Some(CompositeAlpha::Opaque);
+    }
+    offered
+        .contains(&CompositeAlpha::PreMultiplied)
+        .then_some(CompositeAlpha::PreMultiplied)
 }
 
 // ---------------------------------------------------------------------------
@@ -1563,12 +1598,30 @@ impl GpuContext {
         // present to an Xvfb window* — while the software rasteriser behind it
         // can. An `Err` here means "not this one", not "give up". A pin narrows
         // the walk to one adapter, so there it does mean "give up".
+        //
+        // A transparent window narrows it again: an adapter whose surface
+        // offers no premultiplied alpha cannot present it as it was made, so
+        // the walk goes on to the next one, and only when none can is the
+        // open refused (see `composite_alpha_for`).
+        let transparent = target.transparent();
         let mut chosen = None;
         let mut last_error = None;
+        let mut alpha_refused = false;
         for adapter in candidates {
             match instance.surface_caps(surface, adapter.id) {
                 Ok(caps) if caps.preferred_format().is_some() => {
-                    chosen = Some((adapter.clone(), caps));
+                    let Some(alpha) = composite_alpha_for(transparent, &caps.composite_alpha)
+                    else {
+                        log::debug!(
+                            "hal: adapter {:?} offers no premultiplied alpha for this transparent \
+                             window (only {:?}); trying the next",
+                            adapter.name,
+                            caps.composite_alpha
+                        );
+                        alpha_refused = true;
+                        continue;
+                    };
+                    chosen = Some((adapter.clone(), caps, alpha));
                     break;
                 }
                 Ok(_) => log::debug!(
@@ -1584,14 +1637,15 @@ impl GpuContext {
                 }
             }
         }
-        let Some((adapter, caps)) = chosen else {
+        let Some((adapter, caps, composite_alpha)) = chosen else {
             instance.destroy_surface(surface);
             return Err(match (pin, candidates, last_error) {
                 (Some(pin), [pinned], error) => {
-                    let reason = error.map_or_else(
-                        || "it offers no usable surface format".to_owned(),
-                        |error| error.to_string(),
-                    );
+                    let reason = match error {
+                        Some(error) => error.to_string(),
+                        None if alpha_refused => NO_PREMULTIPLIED_ALPHA.to_owned(),
+                        None => "it offers no usable surface format".to_owned(),
+                    };
                     GpuError::AdapterPin(crate::adapter::PinMiss::new(format!(
                         "{ADAPTER_ENV_VAR}={pin} chose adapter {id} {name:?} type={kind:?}, and it \
                          cannot present to this window: {reason}. No other adapter is tried, \
@@ -1603,6 +1657,9 @@ impl GpuContext {
                         kind = pinned.device_type,
                     )))
                 }
+                // Before an adapter that could not see the surface at all: one
+                // that could, and lacked only the alpha, is the closer miss.
+                _ if alpha_refused => GpuError::Unusable(NO_PREMULTIPLIED_ALPHA),
                 (_, _, Some(error)) => error.into(),
                 (_, _, None) => GpuError::Unusable("no adapter can present to this window"),
             });
@@ -1647,6 +1704,7 @@ impl GpuContext {
             extent,
             image_count,
             present_mode,
+            composite_alpha,
         };
 
         // The one call that may take more than an instant. On the web it is a
@@ -1688,10 +1746,14 @@ impl GpuContext {
             .ok_or(GpuError::Unusable("no graphics queue"))?;
 
         let swapchain = device.create_swapchain(&config.desc(surface))?;
-        let (format, present_mode, image_count) =
-            (config.format, config.present_mode, config.image_count);
+        let (format, present_mode, image_count, alpha) = (
+            config.format,
+            config.present_mode,
+            config.image_count,
+            config.composite_alpha,
+        );
         log::info!(
-            "hal: swapchain {}x{} {format:?} {present_mode:?} ({image_count} images)",
+            "hal: swapchain {}x{} {format:?} {present_mode:?} {alpha:?} alpha ({image_count} images)",
             extent.0,
             extent.1
         );
@@ -12603,6 +12665,250 @@ mod tests {
             gpu.destroy()
                 .expect("teardown is in the seam's stated order");
         }
+    }
+
+    /// **The composite alpha a context asks for, over every set of modes a
+    /// surface could offer.**
+    ///
+    /// Red when a transparent window falls back to anything (opaque, straight
+    /// alpha, inherit) instead of being refused, when an opaque window starts
+    /// taking premultiplied because it is offered, or when an opaque window
+    /// is refused for a surface that offers no premultiplied alpha.
+    #[test]
+    fn a_transparent_window_asks_for_premultiplied_or_nothing() {
+        const MODES: [CompositeAlpha; 4] = [
+            CompositeAlpha::Opaque,
+            CompositeAlpha::PreMultiplied,
+            CompositeAlpha::PostMultiplied,
+            CompositeAlpha::Inherit,
+        ];
+        let mut checked = 0;
+        for subset in 0..1_u32 << MODES.len() {
+            let offered: Vec<_> = MODES
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| subset & (1 << bit) != 0)
+                .map(|(_, &mode)| mode)
+                .collect();
+            assert_eq!(
+                composite_alpha_for(false, &offered),
+                Some(CompositeAlpha::Opaque),
+                "an opaque window is opaque whatever is offered: {offered:?}"
+            );
+            let premultiplied = offered.contains(&CompositeAlpha::PreMultiplied);
+            assert_eq!(
+                composite_alpha_for(true, &offered),
+                premultiplied.then_some(CompositeAlpha::PreMultiplied),
+                "a transparent window is premultiplied or refused: {offered:?}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 1 << MODES.len(), "every subset was checked");
+    }
+
+    /// A [`crcbl_hal::null::NullInstance`] whose surface offers, on adapter
+    /// `n`, the composite-alpha modes `offers[n]`.
+    ///
+    /// The null backend offers [`CompositeAlpha::Opaque`] alone, as a surface
+    /// with no compositor behind it should; a transparent window needs a
+    /// surface that offers more, so this rewrites that one list and forwards
+    /// everything else untouched.
+    #[derive(Debug)]
+    struct AlphaInstance {
+        inner: crcbl_hal::null::NullInstance,
+        offers: Vec<Vec<CompositeAlpha>>,
+    }
+
+    impl Instance for AlphaInstance {
+        fn backend(&self) -> crcbl_hal::BackendKind {
+            self.inner.backend()
+        }
+
+        fn adapters(&self) -> Vec<crcbl_hal::AdapterInfo> {
+            self.inner.adapters()
+        }
+
+        unsafe fn create_surface(
+            &self,
+            target: &crcbl_hal::SurfaceTarget,
+        ) -> Result<SurfaceHandle, HalError> {
+            // SAFETY: forwarded unchanged, so the caller's obligation for
+            // `target` is the inner instance's.
+            unsafe { self.inner.create_surface(target) }
+        }
+
+        fn destroy_surface(&self, surface: SurfaceHandle) {
+            self.inner.destroy_surface(surface);
+        }
+
+        fn surface_caps(
+            &self,
+            surface: SurfaceHandle,
+            adapter: crcbl_hal::AdapterId,
+        ) -> Result<crcbl_hal::SurfaceCaps, HalError> {
+            let caps = self.inner.surface_caps(surface, adapter)?;
+            Ok(crcbl_hal::SurfaceCaps {
+                composite_alpha: self.offers[adapter.0 as usize].clone(),
+                ..caps
+            })
+        }
+
+        fn request_device(
+            &self,
+            desc: &DeviceDesc<'_>,
+        ) -> Result<Box<dyn crcbl_hal::PendingDevice>, HalError> {
+            self.inner.request_device(desc)
+        }
+    }
+
+    /// A Wayland target for a window that was or was not made transparent.
+    ///
+    /// The null backend's `create_surface` reads nothing but the variant's
+    /// name, so the dangling handles are never dereferenced; a headless
+    /// window's target is `Offscreen`, which carries no transparency at all.
+    fn wayland_target(transparent: bool) -> crcbl_hal::SurfaceTarget {
+        crcbl_hal::SurfaceTarget::Wayland {
+            display: core::ptr::NonNull::dangling(),
+            surface: core::ptr::NonNull::dangling(),
+            transparent,
+        }
+    }
+
+    /// Starts and finishes an open of `target` against `instance`, as
+    /// [`open_null_context`] does for a headless window.
+    fn open_alpha_context(
+        instance: AlphaInstance,
+        target: crcbl_hal::SurfaceTarget,
+        adapter_pin: Option<&str>,
+    ) -> Result<(crcbl_shell::HeadlessShell, GpuContext), GpuError> {
+        let (shell, mut pending) = adapter_walk_request(adapter_pin);
+        pending.target = target;
+        pending.stage = GpuContext::start_device(Box::new(instance), &pending)?;
+        let gpu = loop {
+            if let Some(context) = pending.poll()? {
+                break context;
+            }
+        };
+        Ok((shell, gpu))
+    }
+
+    /// **A transparent window opens premultiplied and keeps it through a
+    /// resize and a pacing change; an opaque one on the same surface stays
+    /// opaque.**
+    ///
+    /// Read from the context's `SwapchainConfig`, which is what every
+    /// rebuild's descriptor is made from, and from that descriptor itself.
+    /// Red when `SwapchainConfig::desc` goes back to a fixed
+    /// `CompositeAlpha::Opaque`, when the open ignores the target's flag, or
+    /// when a reconfigure path rebuilds the config without the alpha.
+    #[test]
+    fn a_transparent_window_presents_premultiplied_across_reconfigures() {
+        use crcbl_hal::null::NullInstance;
+
+        let both = || AlphaInstance {
+            inner: NullInstance::gpu_driven(),
+            offers: vec![vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied]],
+        };
+        let (_shell, mut gpu) = open_alpha_context(both(), wayland_target(true), None)
+            .expect("premultiplied is offered");
+        assert_eq!(gpu.config.composite_alpha, CompositeAlpha::PreMultiplied);
+
+        gpu.resize((640, 480)).expect("a resize");
+        assert_eq!(gpu.config.extent, (640, 480), "the resize took");
+        let before = gpu.config.present_mode;
+        gpu.set_pacing(Pacing::Vsync).expect("a pacing change");
+        assert_ne!(
+            gpu.config.present_mode, before,
+            "the pacing change rebuilt the swapchain with a new mode"
+        );
+        assert_eq!(
+            gpu.config.composite_alpha,
+            CompositeAlpha::PreMultiplied,
+            "a rebuild keeps the alpha the context opened with"
+        );
+        assert_eq!(
+            gpu.config.desc(gpu.surface).composite_alpha,
+            CompositeAlpha::PreMultiplied,
+            "the descriptor every rebuild is made from carries it"
+        );
+        gpu.drain().expect("nothing was submitted");
+        gpu.destroy().expect("teardown");
+
+        let (_shell, mut gpu) =
+            open_alpha_context(both(), wayland_target(false), None).expect("opaque is offered");
+        assert_eq!(
+            gpu.config.desc(gpu.surface).composite_alpha,
+            CompositeAlpha::Opaque,
+            "an opaque window is not made premultiplied because it could be"
+        );
+        gpu.drain().expect("nothing was submitted");
+        gpu.destroy().expect("teardown");
+    }
+
+    /// **A transparent window walks past an adapter whose surface cannot
+    /// composite it, and is refused by name when none can.**
+    ///
+    /// Red when an adapter without premultiplied alpha is taken anyway (the
+    /// window drawn opaque), when the walk stops at it instead of going on,
+    /// and when the refusal stops naming the missing alpha, pinned or not.
+    #[test]
+    fn a_transparent_window_no_adapter_can_composite_is_refused_by_name() {
+        use crcbl_hal::AdapterId;
+        use crcbl_hal::null::{NullInstance, ObjectKind, Recorder};
+
+        let opaque = vec![CompositeAlpha::Opaque];
+        let both = vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied];
+        let (_shell, mut gpu) = open_alpha_context(
+            AlphaInstance {
+                inner: NullInstance::gpu_driven().with_adapters(2),
+                offers: vec![opaque.clone(), both],
+            },
+            wayland_target(true),
+            None,
+        )
+        .expect("the second adapter can composite the window");
+        assert_eq!(gpu.adapter, AdapterId(1));
+        assert_eq!(gpu.config.composite_alpha, CompositeAlpha::PreMultiplied);
+        gpu.drain().expect("nothing was submitted");
+        gpu.destroy().expect("teardown");
+
+        let recorder = Recorder::new();
+        let Err(refused) = open_alpha_context(
+            AlphaInstance {
+                inner: NullInstance::gpu_driven()
+                    .with_adapters(2)
+                    .with_recorder(recorder.clone()),
+                offers: vec![opaque.clone(), opaque.clone()],
+            },
+            wayland_target(true),
+            None,
+        ) else {
+            panic!("no adapter can composite a transparent window, so none may open");
+        };
+        assert!(
+            matches!(refused, GpuError::Unusable(NO_PREMULTIPLIED_ALPHA)),
+            "{refused}"
+        );
+        assert_eq!(
+            recorder.live_objects(ObjectKind::Surface),
+            0,
+            "the surface is destroyed on the way out"
+        );
+
+        let Err(pinned) = open_alpha_context(
+            AlphaInstance {
+                inner: NullInstance::gpu_driven(),
+                offers: vec![opaque],
+            },
+            wayland_target(true),
+            Some("cpu"),
+        ) else {
+            panic!("the pinned adapter cannot composite a transparent window");
+        };
+        let GpuError::AdapterPin(why) = &pinned else {
+            panic!("the pin chose the adapter that could not: {pinned}");
+        };
+        assert!(why.to_string().contains(NO_PREMULTIPLIED_ALPHA), "{why}");
     }
 
     /// The two halves of the present-feedback line [`GpuContext::finish`] logs,

@@ -26,14 +26,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   so `e` with U+0301, an emoji ZWJ sequence or a flag is one stop rather than
   one per `char`.
 
-- **`SurfaceTarget::Win32` has a `transparent` field.** It is `true` for a
-  window the Win32 shell made with `WindowDesc::transparent`, which is created
-  with `WS_EX_NOREDIRECTIONBITMAP` and shows only what DirectComposition gives
-  it. A backend that builds the variant by hand (a test, a foreign window) sets
-  it to `false` for an ordinary window; a match with `..` is unaffected.
+- **Every windowed `SurfaceTarget` variant has a `transparent` field**:
+  `Wayland`, `Xcb`, `Win32` and `AppKit`. It is `true` for a window its shell
+  made with `WindowDesc::transparent` (the X11 shell, which refuses such
+  windows, always sets `false`); on Windows that window is created with
+  `WS_EX_NOREDIRECTIONBITMAP` and shows only what DirectComposition gives it.
+  Code that builds a variant by hand (a test, a foreign window) sets it to
+  `false` for an ordinary window; a match with `..` is unaffected. `Web` and
+  `Offscreen` are unchanged.
 
 ### Added
 
+- **`GpuContext` presents a transparent window with premultiplied alpha**, on
+  every backend whose surface offers it. It reads the window's transparency from
+  its surface target (the new `SurfaceTarget::transparent`), asks for
+  `CompositeAlpha::PreMultiplied`, keeps it across `resize` and `set_pacing`,
+  and passes over an adapter whose surface cannot composite it. When no adapter
+  can, the open fails with `GpuError::Unusable` saying so (or `AdapterPin`, with
+  that reason, under `CRCBL_ADAPTER`) rather than drawing the window opaque.
+  Opaque windows still ask for `CompositeAlpha::Opaque`, even where
+  premultiplied is offered. What shows through is what the frame writes as
+  premultiplied colour; `WindowDesc::transparent`'s docs give the recipe.
 - **Per-pixel transparency on Windows, with the D3D12 backend.** `Win32Shell`
   now sets `ShellCaps::TRANSPARENT`: a transparent toplevel, panel or popup is
   created with `WS_EX_NOREDIRECTIONBITMAP`, and a frameless one is given square
@@ -87,6 +100,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   unkerned. A word broken between clusters by a paragraph's
   `overflow-wrap: break-word` is shaped again on each side.
 - **`text-overflow: ellipsis` cuts between clusters**, never inside one.
+
+### Fixed
+
+- **`crcbl-mtl` no longer makes a transparent window's layer opaque.** Its
+  swapchain set `CAMetalLayer.opaque` to `true` on every configure, undoing the
+  AppKit shell's non-opaque layer, so a transparent window drawn through Metal
+  was opaque. A transparent window's surface now offers
+  `CompositeAlpha::PreMultiplied`, and the layer's `opaque` follows the
+  swapchain's composite alpha.
 
 ## [0.2.1] - 2026-10-17
 

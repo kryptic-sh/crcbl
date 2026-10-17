@@ -371,6 +371,12 @@
 
 #[cfg(target_os = "macos")]
 mod adapter;
+// Not macOS-only, for the reason the modules beside it give: which composite
+// alpha a layer offers and what its `opaque` is set to are decided in plain
+// Rust, and a wrong answer fails nothing — the window just draws opaque — so
+// `cargo test` on any host runs the decision.
+#[cfg(any(target_os = "macos", test))]
+mod alpha;
 // The third module that is not macOS-only, and for the reason the other two
 // give: how big Metal's argument tables are and where a push-constant block
 // lands in the buffer one are decided in plain Rust, and nothing in Metal

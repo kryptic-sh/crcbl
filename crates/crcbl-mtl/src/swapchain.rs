@@ -147,19 +147,26 @@ use objc2_foundation::{NSObjectProtocol, NSString};
 use objc2_metal::{MTLCommandBuffer, MTLDrawable, MTLTexture};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
-use crate::conv;
 use crate::device::{
     DeviceState, MetalDevice, Owned, local_handle, lookup, lookup_mut, owned, to_ns,
 };
 use crate::instance::{InstanceInner, MetalInstance};
 use crate::present::{PresentLedger, PresentWait};
+use crate::{alpha, conv};
 
 /// What a [`SurfaceHandle`] names.
 pub(crate) enum SurfaceKind {
     /// A `CAMetalLayer` the shell created and still owns. Retained, so the
     /// obligation that a swapchain outlive its surface *handle* is discharged
     /// by reference counting — see [`SurfaceEntry`].
-    Layer(Retained<CAMetalLayer>),
+    Layer {
+        /// The layer.
+        layer: Retained<CAMetalLayer>,
+        /// [`SurfaceTarget::AppKit`]'s `transparent`: the shell made this
+        /// layer non-opaque, so the surface offers premultiplied alpha. See
+        /// [`alpha`](crate::alpha).
+        transparent: bool,
+    },
     /// No window system at all.
     Offscreen,
 }
@@ -169,7 +176,12 @@ impl core::fmt::Debug for SurfaceKind {
     /// every log line, so only which kind of surface this is gets printed.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
-            Self::Layer(_) => "Layer",
+            Self::Layer {
+                transparent: false, ..
+            } => "Layer",
+            Self::Layer {
+                transparent: true, ..
+            } => "Layer (transparent)",
             Self::Offscreen => "Offscreen",
         })
     }
@@ -314,16 +326,16 @@ const OFFSCREEN_FORMATS: &[Format] = &[
 /// `displaySyncEnabled = false` tears. [`PresentMode::FifoRelaxed`] has no Metal
 /// spelling at all.
 ///
-/// `composite_alpha` is `[Opaque]` alone. `CALayer::setOpaque:` is the only knob
-/// Core Animation offers here, and what a non-opaque Metal layer does with an
-/// alpha channel is not something this slice has verified end to end — so it is
-/// not claimed.
+/// `composite_alpha` is [`alpha::layer_composite_alpha`]'s: premultiplied beside
+/// opaque for a transparent window's layer, opaque alone otherwise.
+/// `CALayer::setOpaque:` is the knob, set from the descriptor on every
+/// configure.
 #[must_use]
-pub(crate) fn layer_surface_caps(layer: &CAMetalLayer) -> SurfaceCaps {
+pub(crate) fn layer_surface_caps(layer: &CAMetalLayer, transparent: bool) -> SurfaceCaps {
     SurfaceCaps {
         formats: LAYER_FORMATS.to_vec(),
         present_modes: vec![PresentMode::Fifo, PresentMode::Immediate],
-        composite_alpha: vec![CompositeAlpha::Opaque],
+        composite_alpha: alpha::layer_composite_alpha(transparent),
         min_image_count: MIN_LAYER_DRAWABLES,
         max_image_count: MAX_LAYER_DRAWABLES,
         current_extent: layer_extent(layer),
@@ -449,7 +461,7 @@ impl MetalInstance {
         target: &SurfaceTarget,
     ) -> Result<SurfaceHandle, HalError> {
         let kind = match *target {
-            SurfaceTarget::AppKit { layer } => {
+            SurfaceTarget::AppKit { layer, transparent } => {
                 // SAFETY: the trait's contract puts this on the caller — the
                 // pointer names a live `CAMetalLayer *` that outlives both this
                 // surface and every swapchain on it. Nothing in this crate can
@@ -471,7 +483,7 @@ impl MetalInstance {
                             .to_string(),
                     ));
                 }
-                SurfaceKind::Layer(layer)
+                SurfaceKind::Layer { layer, transparent }
             }
             SurfaceTarget::Offscreen => SurfaceKind::Offscreen,
             SurfaceTarget::Wayland { .. } | SurfaceTarget::Xcb { .. } => {
@@ -546,7 +558,7 @@ impl MetalInstance {
         // non-preferred adapter as unsupported would refuse a pairing that
         // works.)
         Ok(match &entry.kind {
-            SurfaceKind::Layer(layer) => layer_surface_caps(layer),
+            SurfaceKind::Layer { layer, transparent } => layer_surface_caps(layer, *transparent),
             SurfaceKind::Offscreen => offscreen_surface_caps(),
         })
     }
@@ -563,7 +575,10 @@ impl InstanceInner {
     pub(crate) fn surface_kind(&self, surface: SurfaceHandle) -> Result<SurfaceKindRef, HalError> {
         let surfaces = self.surfaces();
         Ok(match &lookup(&surfaces, "surface", surface, self)?.kind {
-            SurfaceKind::Layer(layer) => SurfaceKindRef::Layer(layer.clone()),
+            SurfaceKind::Layer { layer, transparent } => SurfaceKindRef::Layer {
+                layer: layer.clone(),
+                transparent: *transparent,
+            },
             SurfaceKind::Offscreen => SurfaceKindRef::Offscreen,
         })
     }
@@ -572,7 +587,10 @@ impl InstanceInner {
 /// A surface resolved out from under the instance lock. See
 /// [`InstanceInner::surface_kind`].
 pub(crate) enum SurfaceKindRef {
-    Layer(Retained<CAMetalLayer>),
+    Layer {
+        layer: Retained<CAMetalLayer>,
+        transparent: bool,
+    },
     Offscreen,
 }
 
@@ -965,7 +983,7 @@ impl MetalDevice {
         kind: &SurfaceKindRef,
     ) -> Result<SwapchainEntry, SurfaceError> {
         let caps = match kind {
-            SurfaceKindRef::Layer(layer) => layer_surface_caps(layer),
+            SurfaceKindRef::Layer { layer, transparent } => layer_surface_caps(layer, *transparent),
             SurfaceKindRef::Offscreen => offscreen_surface_caps(),
         };
         if !caps.formats.contains(&desc.format) {
@@ -995,7 +1013,7 @@ impl MetalDevice {
             .clamp(caps.min_image_count, caps.max_image_count);
 
         let target = match kind {
-            SurfaceKindRef::Layer(layer) => {
+            SurfaceKindRef::Layer { layer, .. } => {
                 self.configure_layer(layer, desc, extent.configured, image_count, present_mode);
                 SwapchainTarget::Layer {
                     layer: layer.clone(),
@@ -1056,10 +1074,12 @@ impl MetalDevice {
         // is that Core Animation cannot pick the most compressed layout for the
         // drawable; the alternative is a swapchain image the engine cannot read.
         layer.setFramebufferOnly(false);
-        // `CompositeAlpha::Opaque` is the only mode `layer_surface_caps` offers
-        // and `build_swapchain` refused anything else, so this is unconditional
-        // rather than a match with one arm.
-        layer.setOpaque(true);
+        // From the descriptor, which `build_swapchain` checked against the
+        // surface's offer: premultiplied only on a transparent window's layer,
+        // which the shell made non-opaque and this keeps that way. Before this
+        // was set from the descriptor it was `true` always, which made every
+        // transparent window drawn through Metal opaque.
+        layer.setOpaque(alpha::layer_opaque(desc.composite_alpha));
         layer.setMaximumDrawableCount(to_ns(u64::from(image_count)));
         layer.setDisplaySyncEnabled(matches!(present_mode, PresentMode::Fifo));
         layer.setDrawableSize(CGSize::new(f64::from(extent.0), f64::from(extent.1)));
@@ -1316,10 +1336,19 @@ mod tests {
         CAMetalLayer::new()
     }
 
-    /// The `SurfaceTarget` naming `layer`.
+    /// The `SurfaceTarget` naming `layer`, for an opaque window.
     fn appkit_target(layer: &CAMetalLayer) -> SurfaceTarget {
         SurfaceTarget::AppKit {
             layer: core::ptr::NonNull::from(&**layer).cast(),
+            transparent: false,
+        }
+    }
+
+    /// The `SurfaceTarget` naming `layer`, for a transparent window.
+    fn transparent_appkit_target(layer: &CAMetalLayer) -> SurfaceTarget {
+        SurfaceTarget::AppKit {
+            layer: core::ptr::NonNull::from(&**layer).cast(),
+            transparent: true,
         }
     }
 
@@ -1428,8 +1457,9 @@ mod tests {
         let offscreen = offscreen_surface_caps();
         // The real thing rather than a hand-assembled stand-in: a stand-in
         // would go on passing after `layer_surface_caps` itself emptied a list.
-        let layer = layer_surface_caps(&detached_layer());
-        for caps in [&offscreen, &layer] {
+        let layer = layer_surface_caps(&detached_layer(), false);
+        let transparent = layer_surface_caps(&detached_layer(), true);
+        for caps in [&offscreen, &layer, &transparent] {
             assert!(!caps.formats.is_empty(), "{caps:?}");
             assert!(!caps.present_modes.is_empty(), "{caps:?}");
             assert!(!caps.composite_alpha.is_empty(), "{caps:?}");
@@ -2101,6 +2131,67 @@ mod tests {
         instance.destroy_surface(surface);
     }
 
+    /// **A transparent window's layer is configured premultiplied and stays
+    /// non-opaque; an opaque window's is configured opaque.**
+    ///
+    /// The shell makes a transparent window's layer non-opaque, and the
+    /// swapchain used to set it opaque again on every configure. Red when
+    /// `configure_layer` goes back to `setOpaque(true)` (the first `isOpaque`
+    /// check), when the transparent target's flag is dropped on the way to
+    /// the surface (premultiplied is then not offered, and the swapchain is
+    /// refused), and when `layer_opaque` is inverted (the opaque layer comes
+    /// out non-opaque).
+    #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn a_transparent_layer_is_configured_premultiplied_and_left_non_opaque() {
+        use crcbl_hal::Device as _;
+        let (instance, device) = open_device();
+        let adapter = instance.adapters()[0].id;
+
+        let layer = detached_layer();
+        layer.setOpaque(false);
+        // SAFETY: a live layer this function owns and holds a `Retained` to,
+        // so it outlives the surface; this thread owns it.
+        let surface = unsafe { instance.create_surface(&transparent_appkit_target(&layer)) }
+            .expect("a CAMetalLayer is a Metal surface");
+        let caps = instance.surface_caps(surface, adapter).expect("caps");
+        assert!(
+            caps.composite_alpha
+                .contains(&CompositeAlpha::PreMultiplied),
+            "a transparent window's layer offers premultiplied: {caps:?}"
+        );
+        let desc = SwapchainDesc {
+            composite_alpha: CompositeAlpha::PreMultiplied,
+            ..swapchain_desc(surface, Format::Bgra8UnormSrgb, 2)
+        };
+        let swapchain = device
+            .create_swapchain(&desc)
+            .expect("a premultiplied layer swapchain");
+        assert!(
+            !layer.isOpaque(),
+            "a premultiplied swapchain leaves the layer blending"
+        );
+        device.destroy_swapchain(swapchain);
+        instance.destroy_surface(surface);
+
+        let opaque = detached_layer();
+        opaque.setOpaque(false);
+        // SAFETY: as above.
+        let surface = unsafe { instance.create_surface(&appkit_target(&opaque)) }
+            .expect("a CAMetalLayer is a Metal surface");
+        let caps = instance.surface_caps(surface, adapter).expect("caps");
+        assert_eq!(caps.composite_alpha, vec![CompositeAlpha::Opaque]);
+        let swapchain = device
+            .create_swapchain(&swapchain_desc(surface, Format::Bgra8UnormSrgb, 2))
+            .expect("an opaque layer swapchain");
+        assert!(
+            opaque.isOpaque(),
+            "an opaque swapchain makes the layer opaque"
+        );
+        device.destroy_swapchain(swapchain);
+        instance.destroy_surface(surface);
+    }
+
     /// **The sRGB check, on the object that would have been wrong.**
     /// Configuring a swapchain writes the format `conv`'s table names, the size
     /// the shell asked for, and the pacing the descriptor named — all read back
@@ -2199,6 +2290,7 @@ mod tests {
         let plain = CALayer::new();
         let target = SurfaceTarget::AppKit {
             layer: core::ptr::NonNull::from(&*plain).cast(),
+            transparent: false,
         };
         // SAFETY: `plain` is a live `CALayer` this function owns — a real
         // Objective-C object, which is what makes the retain sound. It is the

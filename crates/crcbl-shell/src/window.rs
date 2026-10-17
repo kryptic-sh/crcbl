@@ -292,6 +292,25 @@ pub struct WindowDesc<'a> {
     /// cannot do it refuses the window
     /// ([`ShellCaps::TRANSPARENT`](crate::ShellCaps::TRANSPARENT)) rather
     /// than draw it opaque. The frame's alpha is premultiplied.
+    ///
+    /// # End to end
+    ///
+    /// 1. **The window.** This flag, on a shell with `TRANSPARENT`. The shell
+    ///    hands it on in the window's surface target
+    ///    ([`SurfaceTarget::transparent`](crcbl_core::SurfaceTarget::transparent)).
+    /// 2. **The swapchain.** `crcbl::engine::GpuContext` reads the target and
+    ///    asks for `CompositeAlpha::PreMultiplied`, and refuses the open
+    ///    (`GpuError::Unusable`) when no adapter's surface offers it rather
+    ///    than drawing the window opaque. On Windows only the D3D12 backend
+    ///    can present it; Vulkan refuses the surface. A swapchain built by
+    ///    hand asks for premultiplied itself.
+    /// 3. **The frame.** Premultiplied colour, with alpha below one where the
+    ///    desktop should show. A forward renderer view with
+    ///    `ViewBackground::Transparent` clears to transparent black and writes
+    ///    its coverage as alpha beside straight colour. That is premultiplied
+    ///    output wherever the alpha is zero or one and an empty pixel holds no
+    ///    scattered light (a frame without volumetric fog); where the alpha is
+    ///    partial, such as water's edge fade, it is not.
     pub transparent: bool,
 }
 

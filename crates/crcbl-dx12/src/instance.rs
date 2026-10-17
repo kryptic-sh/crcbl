@@ -1522,13 +1522,18 @@ pub(crate) mod tests {
             SurfaceTarget::Wayland {
                 display: dangling,
                 surface: dangling,
+                transparent: false,
             },
             SurfaceTarget::Xcb {
                 connection: dangling,
                 window: 1,
                 visual_id: 1,
+                transparent: false,
             },
-            SurfaceTarget::AppKit { layer: dangling },
+            SurfaceTarget::AppKit {
+                layer: dangling,
+                transparent: false,
+            },
             SurfaceTarget::Web { canvas_id: 0 },
         ];
         assert!(!never.is_empty(), "nothing to check");

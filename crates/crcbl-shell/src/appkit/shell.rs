@@ -116,6 +116,10 @@ pub(super) struct AppWindow {
     /// cover: registration is a property of the *view*, and anything else in
     /// the process could register ours. See [`view`](super::view).
     pub(super) accept_drops: bool,
+    /// Whether [`WindowDesc::transparent`] was set, and so whether the window
+    /// and its layer were made non-opaque. Handed on in
+    /// [`SurfaceTarget::AppKit`], so the presenter keeps the layer that way.
+    transparent: bool,
     pub(super) focused: bool,
     close_pending: bool,
     /// What a panel was created with, so it can be placed again; `None` for
@@ -1106,6 +1110,7 @@ impl Shell for AppKitShell {
             cursor: None,
             pointer_mode: PointerMode::Free,
             accept_drops: desc.accept_drops,
+            transparent: desc.transparent,
             focused: false,
             close_pending: false,
             panel,
@@ -1433,7 +1438,10 @@ impl Shell for AppKitShell {
         let state = self.window(handle)?;
         let layer = NonNull::new(state.layer)
             .ok_or_else(|| ShellError::Backend("this window has no CAMetalLayer".to_string()))?;
-        Ok(SurfaceTarget::AppKit { layer })
+        Ok(SurfaceTarget::AppKit {
+            layer,
+            transparent: state.transparent,
+        })
     }
 
     /// Frees or locks the pointer. **[`Confined`](PointerMode::Confined) is

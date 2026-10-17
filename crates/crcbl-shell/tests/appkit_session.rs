@@ -2163,6 +2163,10 @@ mod macos {
             "a bar that hid whenever its application was not active: {facts:?}"
         );
         assert!(!facts.opaque, "a transparent window: {facts:?}");
+        assert!(
+            shell.surface_target(bar).expect("a live bar").transparent(),
+            "the surface target says the bar is transparent"
+        );
         assert!(!facts.can_become_key, "a bar takes no keyboard: {facts:?}");
         assert_eq!(
             [
@@ -2204,6 +2208,13 @@ mod macos {
             "a launcher takes the keyboard: {facts:?}"
         );
         assert!(facts.opaque, "not asked to be transparent: {facts:?}");
+        assert!(
+            !shell
+                .surface_target(launcher)
+                .expect("a live launcher")
+                .transparent(),
+            "nor does its surface target say so"
+        );
         assert_eq!(facts.content_points, [400.0, 300.0], "{facts:?}");
         shell
             .destroy_window(launcher)

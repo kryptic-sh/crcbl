@@ -233,8 +233,11 @@ bitflags::bitflags! {
         ///
         /// The window system's half. The frame's half is a swapchain that
         /// carries alpha, premultiplied — which the HAL's surface caps say
-        /// whether the driver offers — and a renderer that clears to alpha
-        /// zero.
+        /// whether the driver offers, and which `crcbl::engine::GpuContext`
+        /// asks for when the window's surface target says it is transparent
+        /// — and a renderer that clears to alpha zero. See
+        /// [`WindowDesc::transparent`](crate::WindowDesc::transparent) for the
+        /// whole recipe.
         const TRANSPARENT = 1 << 18;
 
         /// [`Shell::reposition_popup`](crate::Shell::reposition_popup) moves
