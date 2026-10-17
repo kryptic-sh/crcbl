@@ -19,6 +19,70 @@ approved as a dependency of `crcbl-shell` and goes ahead after the release;
 breaking change, so a minor bump); `crcbl-cli` stays unpublished; the `notify`
 watcher and a grapheme crate stay declined until a caller needs them.
 
+**Every backend, the owner's rule from 2026-10-17** (relayed by lyr): every
+feature built for lyr and pikr must work on every backend — Wayland, X11, Win32
+and AppKit, and Vulkan, D3D12 and Metal where it touches the GPU — and where a
+backend genuinely cannot, it must fail loudly (a missing `ShellCaps` flag or a
+named error), never succeed silently. lyr keeps the per-row matrix in its own
+repository's surfaces-and-input plan; it was built 2026-10-17 by reading each
+backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
+38988977910). What it found, in the order of work:
+
+1. **Silent gaps, which break the rule outright.**
+   - S20 cursor shape on Wayland and X11: `set_cursor` stores the shape and
+     applies nothing. Real fix `cursor-shape-v1` on Wayland (its type table
+     needs `tablet-unstable-v2` vendored) and `libxcb-cursor` through `dlopen`
+     on X11, each M.
+   - S9 input method on AppKit: `set_text_input` and `set_text_input_area` are
+     the trait's no-op defaults, so fields do not switch the input method, no
+     secure input (`EnableSecureEventInput`) guards a `Password` or `Pin` field,
+     `setMarkedText:` sends no `TextPreedit`, and `firstRectForCharacterRange:`
+     places no candidate window. S each.
+   - S9 `ShellCaps::TEXT_IME` claims a real input method where none exists: X11
+     sets it from `xkb::x11_available()` with no XIM, IBus or Fcitx client, and
+     Wayland from `xkb::available()` whatever `zwp_text_input_manager_v3` is
+     offered. Clear or split the cap (compose versus input method), S; an X11
+     input-method client is L.
+   - S16 `crcbl-vk`'s `build_swapchain` and its offscreen ring never check
+     `SwapchainDesc::composite_alpha` against what the surface offers, where
+     `crcbl-dx12` and `crcbl-mtl` refuse with `InvalidDescriptor`. S.
+   - S17 `PanelKeyboard::Exclusive` is documented as holding the keyboard while
+     mapped; Win32 and AppKit take it once, and AppKit never raises
+     `FocusRefused`. Make the code keep it or the docs say what it does, S.
+   - Documented degradations no cap reports: Win32 `PanelLayer::Overlay` shares
+     `Top`'s band, Wayland's `work_area` is the output's bounds, X11's wheel
+     arrives in lines only.
+2. **Decided 2026-10-17, transparency on Windows:** a transparent Win32 window
+   opened through `GpuContext` should go to D3D12 rather than fail with Vulkan's
+   refusal, since Windows tries Vulkan first and `start_device` passes the
+   `create_surface` error up instead of trying the next backend (today it needs
+   `CRCBL_GPU=dx12`). S. Declined: presenting Vulkan through DirectComposition
+   by exporting its image (`VK_KHR_external_memory_win32`) into a D3D12
+   composition swapchain with shared fences — L, a second device API to keep
+   right, and nothing gained while D3D12 is there on every Windows machine.
+   Vulkan's own swapchain has no composition mode and Windows drivers offer only
+   opaque alpha for an `HWND` surface, so its refusal stays.
+3. **Refused today, to build:** S14 accessibility through AT-SPI on Wayland and
+   X11 (`accesskit_unix`, which brings `zbus`; AccessKit itself was approved
+   2026-10-16, so whether the approval covers `zbus` is the owner's to confirm)
+   and on AppKit (`accesskit_macos`), M each; X11 panels, popups and
+   transparency (`_NET_WM_WINDOW_TYPE_DOCK`, `_NET_WM_STRUT_PARTIAL`,
+   override-redirect popups with a grab, a 32-bit ARGB visual once
+   `_NET_WM_CM_Sn` has an owner), M to L together.
+4. **Implemented, untested:** S17 panel focus on Win32 and AppKit, and on
+   Hyprland (a CI job of its own, M to L); S7 monitor hot-plug on X11 (Xvfb and
+   `xrandr --setmonitor`), Win32 and AppKit; S9 X11 compose through a real
+   server, Win32 pre-edit (`win32-ime-e2e` is not enabled by
+   `run-win32-e2e.ps1`), AppKit dead keys; S3 popup repositioning on Wayland
+   (CI's sway offers `xdg_wm_base` below 3); S21 a panel at a fractional scale;
+   S16 Vulkan presenting premultiplied on sway; S22 a colour glyph in a GPU
+   golden; S18 FreeBSD beyond `check (freebsd)`'s clippy, in a VM job; S13 any
+   start-up timing at all.
+5. **Genuinely impossible, and refused:** D3D12 off Windows, Metal off Apple, a
+   software Metal adapter, AppKit reserving screen space (only the menu bar and
+   the Dock do). Vulkan on macOS is refused today and could go through MoltenVK
+   and `VK_EXT_metal_surface`, M.
+
 **pikr's port findings, 2026-10-16** (pikr running on crcbl, Win32 + D3D12),
 each checked against the code here unless it says otherwise:
 
@@ -201,8 +265,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `crates/crcbl-shell/src/role.rs`) and `WindowDesc::transparent` are on
      main, along with the caps `PANEL`, `PANEL_RESERVE`, `POPUP` and
      `TRANSPARENT`.
-   - The headless shell builds every role. Every other backend refuses roles and
-     transparency through `role::check` until its step lands.
+   - The headless shell builds every role. The X11 and web shells still refuse
+     roles and transparency through `role::check`; every other backend builds
+     them.
    - Transparency reaches the swapchain on every platform, 2026-10-17. Every
      windowed `SurfaceTarget` variant (`Wayland`, `Xcb`, `Win32`, `AppKit`)
      carries `transparent`, set by each shell's `surface_target` from
@@ -256,7 +321,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      launcher's does not), and `crcbl-mtl`'s
      `a_transparent_layer_is_configured_premultiplied_and_left_non_opaque` (a
      detached layer configured premultiplied and read back with `isOpaque`, in
-     the macOS e2e jobs). None of their mutants was run.
+     `mtl hardware e2e (macos-26)` only; `mtl e2e (macos-15)` does not run
+     `crcbl-mtl`'s own tests). None of their mutants was run.
    - **Verified by nothing:** what a compositor shows. No test reads pixels back
      through Wayland, DWM or the window server, so the desktop showing through a
      window opened with `GpuContext` is unobserved on every platform, as is a
@@ -360,13 +426,13 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      client can claim those, so pikr's "no keys dropped" holds from focus on.
    - Monitor removal (lyr item 6) is built: `ShellEvent::MonitorRemoved` on
      every backend, from `monitor::queue_removed`, and a `CloseRequested` for
-     each panel created for that monitor on Wayland and headless. Win32 and
-     AppKit build no panels yet, so their steps owe the panel half when they do.
-     Close requests, rather than closing every window on that monitor: window
-     managers move toplevels to another monitor, and only a panel has nowhere to
-     go. `swaymsg output HEADLESS-2 disable` does withdraw that `wl_output`,
-     which the mutation run above showed: the test reached the new monitor list
-     and failed only on the missing `MonitorRemoved`.
+     each panel created for that monitor on Wayland and headless, and on Win32
+     and AppKit through `place_panels`, which no test drives there. Close
+     requests, rather than closing every window on that monitor: window managers
+     move toplevels to another monitor, and only a panel has nowhere to go.
+     `swaymsg output HEADLESS-2 disable` does withdraw that `wl_output`, which
+     the mutation run above showed: the test reached the new monitor list and
+     failed only on the missing `MonitorRemoved`.
    - Decided for panels, 2026-10-15: `set_title`, `set_mode` and
      `set_constraints` on a Wayland panel record the request and send nothing,
      as the headless shell accepts them on any role. A panel's effective mode is
@@ -1007,10 +1073,10 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `win32::shell::tests::accessibility::a_reader_finds_the_button_in_the_tree_and_presses_it`,
       a UI Automation client on a second thread that finds a button by name and
       invokes it; it runs only in CI's `win32 e2e (real desktop)` job
-      (`run-win32-e2e.ps1` now enables `accesskit`) and had not run when this
-      landed. Not covered by any test: the focus state passed to the adapter,
-      and an action arriving while the shell sleeps in `wait_events` (the waker
-      path).
+      (`run-win32-e2e.ps1` now enables `accesskit`), where it passed on main
+      run 38988977910. Not covered by any test: the focus state passed to the
+      adapter, and an action arriving while the shell sleeps in `wait_events`
+      (the waker path).
     - Behaviour, not a bug: Windows has no "the last reader went away" signal,
       so `AccessibilityDeactivated` is never raised on Win32 and trees sent
       after the first activation are always kept, for the window's lifetime.
