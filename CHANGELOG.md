@@ -15,6 +15,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **An unpinned `GpuContext` open moves on to the next backend when one refuses
+  the window's surface as `HalError::Unsupported`**, and logs which refused and
+  why. A transparent Win32 window now opens on D3D12 instead of failing with
+  Vulkan's refusal, with no `CRCBL_GPU=dx12` needed. A backend named by
+  `CRCBL_GPU` or `GpuContextDesc::backend` still fails with its refusal.
 - **`crcbl-vk` refuses a `SwapchainDesc::composite_alpha` the surface does not
   offer** with `HalError::InvalidDescriptor` naming the mode and the surface's
   list, on `create_swapchain` and `reconfigure_swapchain`, as `crcbl-dx12` and

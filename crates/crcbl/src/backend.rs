@@ -106,6 +106,15 @@
 //! feature set is the smaller of the two; `CRCBL_GPU=dx12` still selects it
 //! outright.
 //!
+//! **A backend that opens and then cannot present to the window is passed
+//! over too**, when nothing named it. `crcbl::engine::GpuContext` asks
+//! `PendingInstance::fall_through` to move on when the instance's
+//! `create_surface` refuses the window as `HalError::Unsupported` — Vulkan and
+//! a transparent Win32 window, which D3D12 presents through DirectComposition
+//! — and logs which backend refused and why. A backend named by
+//! [`BACKEND_ENV_VAR`] or by `GpuContextDesc::backend` is not passed over:
+//! its refusal ends the open, for the reason above.
+//!
 //! The blocking wrappers `open` and `open_backend` do not exist on `wasm32`
 //! either, for the reason `Instance::create_device` does not: the browser's
 //! main thread may not block, so reaching for one there is a *compile* error
@@ -294,28 +303,31 @@ pub enum GpuError {
 /// of function pointers over three unrelated backends. Not `Send`: an instance
 /// is opened once, on the thread that will drive the frame loop, and on the web
 /// there is only one thread anyway.
-type InstanceFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Instance>, HalError>>>>;
+pub(crate) type InstanceFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Instance>, HalError>>>>;
 
 /// Wraps an already-decided result as a future that completes on its first poll.
 ///
 /// What a backend whose open really is synchronous returns; the seam's
 /// `crcbl-vk` half says the same thing about `vkCreateDevice`.
-fn ready(result: Result<Box<dyn Instance>, HalError>) -> InstanceFuture {
+pub(crate) fn ready(result: Result<Box<dyn Instance>, HalError>) -> InstanceFuture {
     Box::pin(core::future::ready(result))
 }
 
 /// One entry in the backend table.
-struct Registration {
-    backend: GpuBackend,
+///
+/// Crate-visible so the engine's tests can walk a table of their own through
+/// [`request_open_auto`] and [`request_open_named`].
+pub(crate) struct Registration {
+    pub(crate) backend: GpuBackend,
     /// Whether [`request_open`] may select this entry without being asked for
     /// it by name — and so whether `open`, which blocks on it and does not
     /// exist on `wasm32`, may. `false` for [`GpuBackend::Null`] — see the
     /// module docs.
-    auto: bool,
+    pub(crate) auto: bool,
     /// Starts opening this backend. Returning a future rather than an instance
     /// is what makes the web path expressible; two of the three complete on
     /// their first poll.
-    open: fn() -> InstanceFuture,
+    pub(crate) open: fn() -> InstanceFuture,
 }
 
 /// Why [`GpuBackend::WebGpu`] refuses when it is not the active backend, worded
@@ -545,6 +557,26 @@ impl PendingInstance {
         }
     }
 
+    /// Moves past the backend this handed over, because it cannot serve what
+    /// the caller asked of it once open, and starts the next auto-selectable
+    /// one. `true` when there is one to poll; `false` for a by-name open,
+    /// whose refusal is final, or when no candidate is left, and then the
+    /// caller reports `error` itself.
+    ///
+    /// `GpuContext` calls it when `create_surface` refuses the window as
+    /// `HalError::Unsupported`: Vulkan and a transparent Win32 window, which
+    /// D3D12, the next entry there, presents through DirectComposition. Only
+    /// once the instance was handed over: a backend still being opened falls
+    /// through in [`poll`](Self::poll) already.
+    pub(crate) fn fall_through(&mut self, error: &HalError) -> bool {
+        if !self.fallback || self.current.is_some() {
+            return false;
+        }
+        self.last = error.to_string();
+        self.advance();
+        self.current.is_some()
+    }
+
     /// Moves to the next auto-selectable candidate, if there is one.
     fn advance(&mut self) {
         while let Some((entry, rest)) = self.remaining.split_first() {
@@ -607,7 +639,16 @@ pub fn request_open() -> Result<PendingInstance, GpuError> {
 ///
 /// [`GpuError::UnknownBackend`] if this build has no such backend.
 pub fn request_open_backend(backend: GpuBackend) -> Result<PendingInstance, GpuError> {
-    let entry = lookup(REGISTRY, backend)?;
+    request_open_named(REGISTRY, backend)
+}
+
+/// The by-name pending object over an arbitrary registry, so a test can hold
+/// a named backend's refusal to being final.
+pub(crate) fn request_open_named(
+    registry: &'static [Registration],
+    backend: GpuBackend,
+) -> Result<PendingInstance, GpuError> {
+    let entry = lookup(registry, backend)?;
     Ok(PendingInstance {
         current: Some((backend, (entry.open)())),
         remaining: &[],
@@ -619,7 +660,7 @@ pub fn request_open_backend(backend: GpuBackend) -> Result<PendingInstance, GpuE
 
 /// The auto-selection pending object over an arbitrary registry, so the
 /// "nothing auto-selectable worked" arm is reachable from a test.
-fn request_open_auto(registry: &'static [Registration]) -> PendingInstance {
+pub(crate) fn request_open_auto(registry: &'static [Registration]) -> PendingInstance {
     let mut pending = PendingInstance {
         current: None,
         remaining: registry,
