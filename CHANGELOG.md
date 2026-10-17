@@ -13,6 +13,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
 ### Breaking
 
 - **`crcbl_ui::font` shapes parsed text, and the per-char API is gone.**
@@ -20549,7 +20551,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kryptic-sh/crcbl/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/kryptic-sh/crcbl/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/kryptic-sh/crcbl/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kryptic-sh/crcbl/releases/tag/v0.1.0
