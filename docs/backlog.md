@@ -2222,6 +2222,13 @@ Raised by EW on 2026-10-18, from generated maps, none blocking:
   solver never sees it.** EW added terrain meshes there and loose items fell
   through; a `ColliderComponent::Mesh` on a static body is what the solver
   collides with. A docs line, S.
+- **Planning from a start that stands on no kept floor.** `SpanGrid::plan` and
+  `GroundGrid::plan` answer `NoRoute` then, and EW agents end up on blocked
+  cells when pushed into an open door leaf or by squadmates. EW snaps the start
+  itself in `RouteMap::plan`: when `reachable_within(start, 0)` fails it plans
+  from the nearest walkable cell within a few rings and puts that cell first in
+  the route. A crcbl "nearest walkable span" query, or a plan option that snaps,
+  would replace it. Raised 2026-10-18; not started.
 - **Ground speed modifiers in the character controller**: declined for now. EW's
   thickets keep 60% of speed through a game-local multiplier, and it stays in
   the game until a second caller wants one.
