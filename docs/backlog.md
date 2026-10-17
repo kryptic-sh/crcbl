@@ -535,10 +535,13 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      bit on every role and across borderless, the surface target's flag, the
      cap), in `win32 e2e (real desktop)`; the D3D12 device test with the debug
      layer on, in the DX12 jobs. Neither desktop wiring mutant was run.
-   - **Verified by nothing:** what DWM shows. No test reads the desktop back, so
-     the desktop showing through, the square corners and the missing border are
-     unobserved, as is the `DwmSetWindowAttribute` result (logged at debug, not
-     asserted, because Windows 10 refuses both attributes).
+   - **Verified by no test:** what DWM shows. No test reads the desktop back, so
+     the square corners and the missing border are unobserved, as is the
+     `DwmSetWindowAttribute` result (logged at debug, not asserted, because
+     Windows 10 refuses both attributes). Checked by eye once: pikr's panel on
+     4d48eaf4 (Windows 11, D3D12, its own premultiplied swapchain) showed the
+     window behind through the corners its rounded panel leaves, where 3c023b2f
+     drew them black (pikr's screenshots, 2026-10-17).
    - `GpuContext` presents a transparent window through D3D12 premultiplied
      since 2026-10-17; step 3 says how, for every platform.
    - Popups (S3) are built (`crates/crcbl-shell/src/win32/popup.rs`, placement
