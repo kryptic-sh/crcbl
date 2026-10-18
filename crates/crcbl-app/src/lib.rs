@@ -20,6 +20,7 @@
 //! UI — a status bar, a launcher — depends on this crate, `crcbl-ui` and
 //! `crcbl-frame`, opens a [`present::Presenter`] where a game opens the
 //! engine's `GpuContext`, and links no audio, physics, networking or ECS.
+//! `crates/crcbl-app/examples/ui_window.rs` draws one frame that way.
 //!
 //! The `crcbl` umbrella depends on this crate and re-exports every module at
 //! its old path (`crcbl::backend`, `crcbl::adapter`,

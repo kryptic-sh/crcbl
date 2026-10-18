@@ -53,6 +53,12 @@ crcbl-mtl = { workspace = true }
 crcbl-dx12 = { workspace = true }
 
 [dev-dependencies]
+# `examples/ui_window.rs` draws a frame of `crcbl-ui` through the UI pass and
+# its render graph. A dev-dependency only, and by path so publishing this crate
+# does not wait on it: the presenter takes whatever command buffer a caller
+# records, and `crcbl-frame` is one way to record it.
+crcbl-frame = { path = "../crcbl-frame" }
+glam = { workspace = true }
 # `src/present/tests.rs` re-runs its own test binary with the trace on, so the
 # present-wait span is recorded in a process no other test shares.
 crcbl-spawn = { path = "../crcbl-spawn" }

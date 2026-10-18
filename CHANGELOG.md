@@ -42,9 +42,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   against the display), `acquire`, `submit_and_present`, `resize`, `drain` and
   `destroy`. A program that draws only a UI opens one with
   `Presenter::request_open` (or the blocking `Presenter::open` off the web)
-  instead of `GpuContext`, and records its own frames into it. `PresenterDesc`
-  takes resolved values — backend, adapter pin, pacing, features,
-  `frames_in_flight` — and reads no settings file or environment.
+  instead of `GpuContext`, and records its own frames into it —
+  `crates/crcbl-app/examples/ui_window.rs` draws one frame of `crcbl-ui` that
+  way. `PresenterDesc` takes resolved values — backend, adapter pin, pacing,
+  features, `frames_in_flight` — and reads no settings file or environment.
   `submit_and_present_with` submits extra command buffers in the frame's batch
   and runs a hook after the present, which is how `--screenshot` rides it.
   `crcbl::engine::GpuContext` now wraps a `Presenter` and keeps its API;

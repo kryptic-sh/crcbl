@@ -440,6 +440,7 @@ version = "0.3.0"
 dependencies = [
  "crcbl-core",
  "crcbl-dx12",
+ "crcbl-frame",
  "crcbl-hal",
  "crcbl-mtl",
  "crcbl-shell",
@@ -447,6 +448,7 @@ dependencies = [
  "crcbl-ui",
  "crcbl-vk",
  "crcbl-webgpu",
+ "glam",
  "log",
  "thiserror 2.0.21",
 ]

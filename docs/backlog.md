@@ -320,7 +320,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
        `PresenterDesc` (pass `crcbl_app::adapter::pin().as_deref()` as
        `adapter_pin` to honour `CRCBL_ADAPTER`) where they would have opened
        `GpuContext`, and record frames with `crcbl-frame`'s `UiRenderer` into
-       what `acquire` hands out.
+       what `acquire` hands out — `crates/crcbl-app/examples/ui_window.rs` is
+       the whole of it.
      - Gap, not fixed: `crcbl-frame`'s UI pass keeps its per-frame ring at a
        private constant in `ui_pass.rs`, and nothing ties it to
        `crcbl_app::present::FRAMES_IN_FLIGHT` or to a `PresenterDesc` whose
@@ -340,13 +341,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
        need a child process with the trace on. Left as two copies of test-only
        code; a shared helper would belong in `crcbl-spawn` beside `command`.
      - Not verified: `Presenter` on a real display through a window system (the
-       GPU seam suites are offscreen), and on `wasm32` beyond
+       GPU seam suites are offscreen, and the example was run only with
+       `--headless`), and on `wasm32` beyond
        `cargo clippy --target wasm32-unknown-unknown`.
-   - An example drawing `crcbl-ui` on a shell window through `GpuContext`, with
-     no `PageBundle` (asked by lyr, 2026-10-18): `apps/bare` draws no UI, and
-     the UI frame lives in `PageBundle::frame`. Belongs in `crcbl-app`'s
-     `examples/` directory once `GpuContext` is there (not cited as a path: it
-     does not exist yet). S.
 2. **The loop: done.** S6 (`Shell::waker`, `ShellWaker`), S19 and S25 are on
    main. CI on 5e669fc4 ran each backend's wake check: Wayland under sway, X11
    under Xvfb, the Win32 real-desktop job, the AppKit session and the Linux
