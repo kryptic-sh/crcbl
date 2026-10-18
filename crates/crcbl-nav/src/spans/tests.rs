@@ -520,3 +520,142 @@ fn erosion_reaches_every_column_whose_cell_comes_within_the_radius() {
     assert_eq!(at(1, 3), vec![0.0], "two columns from the hole");
     assert_eq!(at(1, 2), vec![0.0], "two over and one along");
 }
+
+/// **A position inside a wall snaps to the nearest kept floor on its own side,
+/// and a plan from there succeeds where one from the position did not.**
+///
+/// The wall's column keeps no ground floor (no headroom) and its top is no
+/// floor within a climb of the feet, so the position stands on nothing; the
+/// floors beside it are eroded by the agent's radius, so the nearest kept one
+/// is a few columns off — which is why the rings are a parameter.
+#[test]
+fn nearest_walkable_snaps_a_position_in_a_wall_to_the_nearest_kept_floor() {
+    let grid = build(config(4.0, 4.0), &[solid([1.9, 0.0, 0.0], [2.6, 3.0, 4.0])]);
+    let goal = DVec3::new(0.5, 0.0, 2.0);
+    let near_minus_x = DVec3::new(2.0, 0.0, 2.0);
+    assert_eq!(
+        grid.plan(near_minus_x, goal),
+        Err(GroundRouteError::NoRoute)
+    );
+    assert_eq!(grid.nearest_walkable(near_minus_x, 0), Ok(None));
+
+    let snapped = grid
+        .nearest_walkable(near_minus_x, 4)
+        .unwrap()
+        .expect("a kept floor lies within four rings");
+    assert!(
+        snapped.y.abs() < 1e-9,
+        "the ground, not the wall top: {snapped}"
+    );
+    assert!(
+        snapped.x < 1.9 - AGENT.radius_m,
+        "the -X side, clear of the wall by the radius: {snapped}"
+    );
+    assert!((snapped.z - near_minus_x.z).abs() <= CELL_M, "{snapped}");
+    assert!(grid.plan(snapped, goal).is_ok());
+
+    let near_plus_x = DVec3::new(2.5, 0.0, 2.0);
+    let other = grid.nearest_walkable(near_plus_x, 4).unwrap().unwrap();
+    assert!(other.x > 2.6 + AGENT.radius_m, "the +X side: {other}");
+
+    let open = DVec3::new(0.6, 0.1, 2.1);
+    assert_eq!(
+        grid.nearest_walkable(open, 4).unwrap(),
+        grid.reachable_within(open, 0)
+            .unwrap()
+            .first()
+            .map(|&(at, _)| at),
+        "a position on a kept floor answers that floor"
+    );
+    assert_eq!(
+        grid.nearest_walkable(DVec3::new(f64::NAN, 0.0, 2.0), 1),
+        Err(GroundRouteError::InvalidWorldPosition)
+    );
+    assert_eq!(
+        grid.nearest_walkable(DVec3::new(9.0, 0.0, 2.0), 1),
+        Err(GroundRouteError::OutsideGrid)
+    );
+}
+
+/// **The nearest floor is nearest in height too**: a position at the foot of a
+/// pillar under the deck snaps to the ground beside the pillar, not to the deck
+/// straight above it, and one at the deck's height answers the deck.
+#[test]
+fn nearest_walkable_prefers_the_floor_on_the_positions_own_storey() {
+    // A pillar under the middle of the deck, from the ground to its underside.
+    let mut solids = deck_and_stairs();
+    solids.push(solid([7.9, 0.0, 2.9], [8.1, 2.2, 3.1]));
+    let grid = build(config(10.0, 6.0), &solids);
+    let low = DVec3::new(8.0, 0.0, 3.0);
+    let high = DVec3::new(8.0, 2.4, 3.0);
+    assert_eq!(
+        grid.plan(low, DVec3::new(9.0, 0.0, 3.0)),
+        Err(GroundRouteError::NoRoute)
+    );
+
+    let ground = grid.nearest_walkable(low, 4).unwrap().unwrap();
+    assert!(
+        ground.y.abs() < 1e-9,
+        "beside the pillar on the ground: {ground}"
+    );
+    let deck = grid.nearest_walkable(high, 4).unwrap().unwrap();
+    assert!((deck.y - 2.4).abs() < 1e-9, "the deck itself: {deck}");
+}
+
+/// **Ties go to the lower span, and a position on a kept floor answers the one
+/// `plan` reads, not merely the nearest.**
+///
+/// A hand-written probe and a body narrower than half a cell, so nothing is
+/// eroded and every floor is exactly where the probe put it: three columns in
+/// a row, the outer two holding a floor at the ground and a ledge a step above
+/// it, the middle one holding none.
+#[test]
+fn nearest_walkable_breaks_ties_by_span_and_reads_the_floor_plan_reads() {
+    let narrow = NavAgent {
+        radius_m: CELL_M * 0.4,
+        ..AGENT
+    };
+    let ledge = AGENT.max_climb_m * 0.75;
+    let config = SpanGridConfig {
+        origin: DVec2::ZERO,
+        cell_size_m: CELL_M,
+        width: 3,
+        height: 1,
+    };
+    let grid = SpanGrid::build(config, narrow, |at: DVec2| {
+        if at.x > CELL_M && at.x < 2.0 * CELL_M {
+            return Vec::new();
+        }
+        [0.0, ledge]
+            .into_iter()
+            .map(|y| ProbedFloor {
+                y,
+                normal_y: 1.0,
+                headroom_clear: true,
+            })
+            .collect()
+    })
+    .unwrap();
+    assert_eq!(grid.span_count(), 4, "nothing eroded");
+
+    // Midway between the outer columns at the ground: the ground floors tie.
+    let middle = DVec3::new(1.5 * CELL_M, 0.0, 0.5 * CELL_M);
+    assert_eq!(
+        grid.nearest_walkable(middle, 0),
+        Ok(None),
+        "the floors are one ring out"
+    );
+    assert_eq!(
+        grid.nearest_walkable(middle, 1),
+        Ok(Some(DVec3::new(0.5 * CELL_M, 0.0, 0.5 * CELL_M))),
+        "the -X column's ground is the lower span"
+    );
+
+    // On the first column, nearer the ground than the ledge but within a climb
+    // of both: `plan` stands it on the ledge, the highest within a climb.
+    let feet = DVec3::new(0.5 * CELL_M, ledge * 0.25, 0.5 * CELL_M);
+    assert_eq!(
+        grid.nearest_walkable(feet, 1),
+        Ok(Some(DVec3::new(0.5 * CELL_M, ledge, 0.5 * CELL_M)))
+    );
+}

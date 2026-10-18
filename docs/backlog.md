@@ -2169,15 +2169,9 @@ does not establish desktop isolation.
 
 The current audit and port prerequisites are at the top of this backlog.
 
-Raised by EW on 2026-10-18, from generated maps, none blocking:
+Raised by EW on 2026-10-18, from generated maps. The query mask and the start
+snap shipped; what is left was declined:
 
-- **Planning from a start that stands on no kept floor.** `SpanGrid::plan` and
-  `GroundGrid::plan` answer `NoRoute` then, and EW agents end up on blocked
-  cells when pushed into an open door leaf or by squadmates. EW snaps the start
-  itself in `RouteMap::plan`: when `reachable_within(start, 0)` fails it plans
-  from the nearest walkable cell within a few rings and puts that cell first in
-  the route. A crcbl "nearest walkable span" query, or a plan option that snaps,
-  would replace it. Raised 2026-10-18; not started.
 - **A one-bit default collider layer**, in place of `ALL_LAYERS`: declined
   2026-10-18 for `QueryFilter::within`, which answers EW's query-only layers
   without changing what every existing query reports.

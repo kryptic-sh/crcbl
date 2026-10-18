@@ -27,6 +27,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   collider too, and a caller after just the colliders put on that layer (a
   walker barrier, a concealment volume) had to subtract a second, inverted
   query. `QueryFilter::with_layer_match` sets the mode on any filter.
+- **`crcbl_nav::SpanGrid::nearest_walkable` and `GroundGrid::nearest_walkable`**
+  answer the kept floor (or walkable cell) nearest a position, within a number
+  of rings of its column. `plan` and `reachable_within` answer `NoRoute` for a
+  start on no kept floor, such as an agent pushed into a door leaf or against a
+  wall; plan from this position instead and walk to it first. A position already
+  on a kept floor answers the floor `plan` reads, and ties break by index, so
+  the answer is deterministic.
 
 ### Fixed
 

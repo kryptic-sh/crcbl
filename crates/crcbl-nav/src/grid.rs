@@ -11,6 +11,10 @@
 //! * [`GroundGrid::reachable_within`]: every walkable cell centre within a step
 //!   budget, with how many steps each one took.
 //!
+//! And one about a position on a blocked cell, where both answer
+//! [`GroundRouteError::NoRoute`]: [`GroundGrid::nearest_walkable`], the
+//! walkable cell centre to plan from instead.
+//!
 //! # The grid is flat
 //!
 //! Only a position's X and Z pick its cell; its Y is read for finiteness and
@@ -299,6 +303,57 @@ impl GroundGrid {
             }
         }
         Ok(reached)
+    }
+
+    /// The centre of the walkable cell nearest `world_position`, among the
+    /// cells within `max_rings` rings of the one holding it, or `None` if every
+    /// one of them is blocked.
+    ///
+    /// For a start on a blocked cell — an agent pushed into a door leaf or by
+    /// a squadmate — where [`plan`](Self::plan) and
+    /// [`reachable_within`](Self::reachable_within) answer
+    /// [`GroundRouteError::NoRoute`]: plan from this centre instead, and walk
+    /// to it first.
+    ///
+    /// A walkable cell answers its own centre. Otherwise the nearest is by the
+    /// distance across X and Z from `world_position` to each centre, ties going
+    /// to the lower row and then the lower column, so the answer is the same
+    /// every time. Ring `r` is the cells `r` steps away with a diagonal step
+    /// counted as one, so `max_rings == 0` searches the position's own cell
+    /// alone. The search visits every cell of the square the rings cover that
+    /// lies on the grid.
+    ///
+    /// # Errors
+    ///
+    /// [`GroundRouteError::InvalidWorldPosition`] or
+    /// [`GroundRouteError::OutsideGrid`] for the position.
+    pub fn nearest_walkable(
+        &self,
+        world_position: DVec3,
+        max_rings: usize,
+    ) -> Result<Option<DVec3>, GroundRouteError> {
+        let cell = self.world_to_cell(world_position)?;
+        if self.cells[cell] == GridCell::Walkable {
+            return Ok(Some(self.cell_center(cell)));
+        }
+        let (width, height) = (self.config.width, self.config.height);
+        let (x, z) = (cell % width, cell / width);
+        let mut nearest: Option<(f64, usize)> = None;
+        for row in z.saturating_sub(max_rings)..=z.saturating_add(max_rings).min(height - 1) {
+            for column in x.saturating_sub(max_rings)..=x.saturating_add(max_rings).min(width - 1) {
+                let index = row * width + column;
+                if self.cells[index] == GridCell::Blocked {
+                    continue;
+                }
+                let center = self.cell_center(index);
+                let distance = (center.x - world_position.x).hypot(center.z - world_position.z);
+                // Strictly nearer, so a tie keeps the earlier cell in row order.
+                if nearest.is_none_or(|(best, _)| distance < best) {
+                    nearest = Some((distance, index));
+                }
+            }
+        }
+        Ok(nearest.map(|(_, index)| self.cell_center(index)))
     }
 
     /// The side of one grid cell, in metres — what one step of
@@ -784,5 +839,78 @@ mod tests {
         .unwrap();
 
         assert_eq!(grid.cell_size_m(), 0.25);
+    }
+
+    /// The nearest walkable cell to a position on a blocked one: the nearer
+    /// centre across X and Z, the lower row then column on a tie, nothing
+    /// outside the rings asked for, and the position's own cell when it is
+    /// walkable — and a plan from the answer succeeds where one from the
+    /// position did not.
+    #[test]
+    fn nearest_walkable_snaps_a_blocked_position_to_the_closest_walkable_centre() {
+        use GridCell::{Blocked as B, Walkable as W};
+        // Row z = 0: walkable, blocked, blocked, walkable. Row z = 1 all
+        // blocked but its last cell.
+        let grid = grid(4, 2, vec![W, B, B, W, B, B, B, W]);
+
+        let near_minus_x = DVec3::new(1.2, 0.0, 0.5);
+        assert_eq!(
+            grid.plan(near_minus_x, DVec3::new(3.5, 0.0, 0.5)),
+            Err(GroundRouteError::NoRoute)
+        );
+        let snapped = grid.nearest_walkable(near_minus_x, 1).unwrap();
+        assert_eq!(snapped, Some(DVec3::new(0.5, 0.0, 0.5)));
+        assert_eq!(
+            grid.nearest_walkable(DVec3::new(2.8, 0.0, 0.5), 1).unwrap(),
+            Some(DVec3::new(3.5, 0.0, 0.5)),
+            "the nearer side wins"
+        );
+        assert!(
+            grid.plan(snapped.unwrap(), DVec3::new(0.5, 0.0, 0.5))
+                .is_ok(),
+            "the answer is a start plan accepts"
+        );
+
+        // Only the last column walkable, so (2.5, 1.0) — in the blocked cell
+        // (2, 1) — is equally far from both rows' walkable centres.
+        let between = DVec3::new(3.5, 0.0, 1.0);
+        let grid_tied = self::grid(4, 2, vec![B, B, B, W, B, B, B, W]);
+        assert_eq!(
+            grid_tied
+                .nearest_walkable(DVec3::new(2.5, 0.0, 1.0), 1)
+                .unwrap(),
+            Some(DVec3::new(3.5, 0.0, 0.5)),
+            "a tie goes to the lower row"
+        );
+        assert_eq!(
+            grid_tied.nearest_walkable(between, 1).unwrap(),
+            Some(DVec3::new(3.5, 0.0, 1.5)),
+            "on the row boundary the position is in the upper row's walkable cell, which wins \
+             over the tie-break"
+        );
+
+        assert_eq!(
+            grid.nearest_walkable(DVec3::new(1.5, 0.0, 1.5), 0).unwrap(),
+            None,
+            "no rings is the position's own cell alone"
+        );
+        assert_eq!(
+            grid.nearest_walkable(DVec3::new(1.5, 0.0, 1.5), 1).unwrap(),
+            Some(DVec3::new(0.5, 0.0, 0.5)),
+            "one ring reaches the diagonal"
+        );
+        assert_eq!(
+            grid.nearest_walkable(DVec3::new(3.2, 0.0, 0.5), 0).unwrap(),
+            Some(DVec3::new(3.5, 0.0, 0.5)),
+            "a walkable cell answers its own centre"
+        );
+        assert_eq!(
+            grid.nearest_walkable(DVec3::new(f64::NAN, 0.0, 0.5), 1),
+            Err(GroundRouteError::InvalidWorldPosition)
+        );
+        assert_eq!(
+            grid.nearest_walkable(DVec3::new(9.0, 0.0, 0.5), 1),
+            Err(GroundRouteError::OutsideGrid)
+        );
     }
 }

@@ -12,6 +12,9 @@
 //! * [`SpanGrid::reachable_within`]: every floor within a step budget, with how
 //!   many steps each one took.
 //!
+//! And, as there, [`SpanGrid::nearest_walkable`] for a position that stands on
+//! no kept floor: the floor to plan from instead.
+//!
 //! # The rung toward the navmesh
 //!
 //! This is the voxel stage of `docs/plan/24-navigation.md` in miniature: a probe
@@ -453,6 +456,56 @@ impl SpanGrid {
         Ok(reached)
     }
 
+    /// The feet position on the kept floor nearest `world_position`, among the
+    /// columns within `max_rings` rings of the one holding it, or `None` if
+    /// none of them keeps a floor.
+    ///
+    /// For a start that stands on no kept floor — an agent pushed into a door
+    /// leaf, or against a wall by a squadmate — where [`plan`](Self::plan) and
+    /// [`reachable_within`](Self::reachable_within) answer
+    /// [`GroundRouteError::NoRoute`]: plan from this position instead, and
+    /// walk to it first.
+    ///
+    /// A position on a kept floor answers that floor, as `plan` would read it.
+    /// Otherwise the nearest is by straight-line distance from
+    /// `world_position` to each floor's feet position, so a floor on another
+    /// storey is as far as its height makes it; ties go to the lower span
+    /// index (the order the module docs name), so the answer is the same every
+    /// time. Ring `r` is the columns `r` steps away with a diagonal step
+    /// counted as one, so `max_rings == 0` searches the position's own column
+    /// alone. The search visits every floor of the square the rings cover that
+    /// lies in the region.
+    ///
+    /// # Errors
+    ///
+    /// [`GroundRouteError::InvalidWorldPosition`] or
+    /// [`GroundRouteError::OutsideGrid`] for the position.
+    pub fn nearest_walkable(
+        &self,
+        world_position: DVec3,
+        max_rings: usize,
+    ) -> Result<Option<DVec3>, GroundRouteError> {
+        let column = self.column_of_position(world_position)?;
+        if let Some(span) = self.floor_in(column, world_position.y) {
+            return Ok(Some(self.feet_of(span)));
+        }
+        let (width, height) = (self.config.width, self.config.height);
+        let (x, z) = (column % width, column / width);
+        let mut nearest: Option<(f64, SpanId)> = None;
+        for row in z.saturating_sub(max_rings)..=z.saturating_add(max_rings).min(height - 1) {
+            for column in x.saturating_sub(max_rings)..=x.saturating_add(max_rings).min(width - 1) {
+                for span in self.spans_of(row * width + column) {
+                    let distance = self.feet_of(span).distance(world_position);
+                    // Strictly nearer, so a tie keeps the lower span.
+                    if nearest.is_none_or(|(best, _)| distance < best) {
+                        nearest = Some((distance, span));
+                    }
+                }
+            }
+        }
+        Ok(nearest.map(|(_, span)| self.feet_of(span)))
+    }
+
     /// The column holding `position`'s X and Z, if the region does.
     fn column_at(&self, position: DVec3) -> Option<usize> {
         let local =
@@ -472,16 +525,25 @@ impl SpanGrid {
     /// The span a body with its feet at `position` stands on, or `None` for a
     /// column with no floor within a climb of it.
     fn span_at(&self, position: DVec3) -> Result<Option<SpanId>, GroundRouteError> {
+        let column = self.column_of_position(position)?;
+        Ok(self.floor_in(column, position.y))
+    }
+
+    /// The column holding a query's `position`, or why it names none.
+    fn column_of_position(&self, position: DVec3) -> Result<usize, GroundRouteError> {
         if !position.is_finite() {
             return Err(GroundRouteError::InvalidWorldPosition);
         }
-        let column = self
-            .column_at(position)
-            .ok_or(GroundRouteError::OutsideGrid)?;
-        Ok(self
-            .spans_of(column)
+        self.column_at(position)
+            .ok_or(GroundRouteError::OutsideGrid)
+    }
+
+    /// The span of `column` a body with its feet at height `y` stands on: the
+    /// highest within a climb of it.
+    fn floor_in(&self, column: usize, y: f64) -> Option<SpanId> {
+        self.spans_of(column)
             .rev()
-            .find(|&span| (position.y - self.floors[span]).abs() <= self.agent.max_climb_m))
+            .find(|&span| (y - self.floors[span]).abs() <= self.agent.max_climb_m)
     }
 
     /// The spans of `column`.
