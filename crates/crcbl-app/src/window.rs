@@ -93,7 +93,7 @@ pub fn log_first_configure(extent: (u32, u32)) {
 ///
 /// A swapchain needs a size and an unconfigured window does not have one, so
 /// this is the gate between [`Shell::create_window`] and opening a device on
-/// the window (`crcbl::engine::GpuContext::open`).
+/// the window ([`Presenter::request_open`](crate::present::Presenter::request_open)).
 /// Events observed while waiting are added to `events`.
 ///
 /// # Errors

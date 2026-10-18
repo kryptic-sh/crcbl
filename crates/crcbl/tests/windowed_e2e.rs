@@ -439,8 +439,8 @@ impl Windowed {
         // advertises no DRI3, so a discrete radv GPU that enumerates first
         // cannot present to this display at all while the software rasteriser
         // behind it can. An `Err` here means "not this one"; only running out
-        // of adapters is fatal. `crcbl::engine`'s `GpuContext::start_device` is
-        // the shipped copy of this loop.
+        // of adapters is fatal. `crcbl_app::present`'s `Presenter::start_device`
+        // is the shipped copy of this loop.
         let adapters = instance.adapters();
         let mut chosen = None;
         for adapter in &adapters {

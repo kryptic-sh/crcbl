@@ -583,7 +583,7 @@ fn common_sample_count(limits: &vk::PhysicalDeviceLimits) -> u32 {
 ///
 /// Openable devices first and discrete ahead of integrated among them (stage 2
 /// §2.1: "prefer discrete"), so the order is already the preference: the
-/// engine's `GpuContext::start_device` walks it and takes the first adapter
+/// presenter's `Presenter::start_device` walks it and takes the first adapter
 /// that can present, and a caller with no surface to ask about gets the
 /// preferred adapter first.
 pub(crate) fn enumerate(

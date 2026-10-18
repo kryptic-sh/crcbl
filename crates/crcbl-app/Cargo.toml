@@ -52,5 +52,10 @@ crcbl-mtl = { workspace = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 crcbl-dx12 = { workspace = true }
 
+[dev-dependencies]
+# `src/present/tests.rs` re-runs its own test binary with the trace on, so the
+# present-wait span is recorded in a process no other test shares.
+crcbl-spawn = { path = "../crcbl-spawn" }
+
 [lints]
 workspace = true

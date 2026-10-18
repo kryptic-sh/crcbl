@@ -303,57 +303,45 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      and each backend reach only `crcbl-core`, `crcbl-console` and (for the
      shell) `crcbl-wl-scanner` inside the workspace.
    - **`crcbl-app` (decided 2026-10-18, asked by lyr): the backend walk, the
-     adapter pin, window bring-up and `TextPump` are in; `GpuContext` is not.**
+     adapter pin, window bring-up, `TextPump` and the presenter are in.**
      `crates/crcbl-app` holds `backend` (with its fall-through), `adapter`,
-     `window::{open_window, wait_for_configure, ConfigureError, CONFIGURE_TIMEOUT}`
-     and `text_input::TextPump`, and depends on `crcbl-core`, `crcbl-hal`,
-     `crcbl-shell`, `crcbl-ui` and the GPU backends only. The umbrella
-     re-exports each at its old path, and
-     `crcbl::engine::open_window(&Clock, ..)` is a wrapper passing the clock's
-     elapsed time. Declined: putting it in `crcbl-frame`, which is the render
-     graph and the UI pass and stays usable offscreen without a window or a
-     backend.
-     - **Left: `GpuContext`, `GpuContextDesc`, `PendingGpuContext` and
-       `GpuError`**, still in `crates/crcbl/src/engine.rs`. Without them lyr and
-       pikr each re-implement the device, swapchain and composite-alpha choice
-       the engine already gets right. Decided 2026-10-18: `GpuContext` splits
-       into a core presenter in `crcbl-app` (backend walk, adapter pin,
-       composite alpha, surface, swapchain, pacing, `acquire`,
-       `submit_and_present`, `resize`, `drain`, `destroy`) and the umbrella's
-       engine `GpuContext` wrapping it with the video settings,
-       `effect_request`, screenshots and the settings stack. Why it could not
-       move as it is, by what each piece reaches outside the allowed crates
-       (read in `engine.rs`):
-       - `GpuError::Graph` holds `crcbl_render::GraphError`.
-       - `FRAMES_IN_FLIGHT` is `crcbl_render::forward::FRAMES_IN_FLIGHT`.
-       - `effect_request`, `video_effects` and `antialiasing` return
-         `crcbl-render` types (`EffectRequest`, `RenderEffects`,
-         `Antialiasing`).
-       - `GpuContextDesc::settings` is a `SettingsSource`: it reads
-         `crcbl_store::settings` (and `crcbl-store` depends on `crcbl-net`),
-         calls `crate::settings`' readers, and its `audio_gains` speak
-         `crcbl-audio`'s mixer.
-       - The context keeps a `VideoSettings` (`crate::settings`), which holds
-         `crcbl-render` types and the engine's `FrameLimit`; `video` and
-         `frame_limit` read it, and `switch_pacing` returns
-         `crate::settings::Landed`.
-       - `--screenshot` rides inside `submit_and_present`, through
-         `crate::screenshot`'s readback helpers and `crcbl-golden`'s PNG
-         encoder.
-       - `crate::perf::PRESENT_WAIT_SPAN`, a string constant: it moves with the
-         presenter, and stays in `perf` until then.
-     - Open questions for that slice: what `GpuError::Graph` becomes (an API
-       change either way, fine in 0.4.0); whether the core desc takes resolved
-       pacing and present values instead of `SettingsSource`; keeping a
-       `FRAMES_IN_FLIGHT` in `crcbl-app` in step with `crcbl-render`'s (a
-       compile-time assertion in the umbrella); how a screenshot attaches to a
-       frame (an extra command buffer plus an after-present hook).
-     - Declined: allowing `crcbl-render` into `crcbl-app`. It would still leave
-       `crcbl-store` (and through it `crcbl-net`), `crcbl-audio`,
-       `crate::settings` and `crcbl-golden`.
-     - Planned for 0.4.0 (the `ShellCaps::TEXT_IME` meaning change on main is
-       breaking). Tell lyr and pikr when `GpuContext` lands, with what their
-       code changes to use it. L.
+     `window`, `text_input::TextPump` and `present::Presenter` — the device,
+     swapchain, composite alpha, frame ring and pacing half of `GpuContext` —
+     and depends on `crcbl-core`, `crcbl-hal`, `crcbl-shell`, `crcbl-ui` and the
+     GPU backends only. `crcbl::engine::GpuContext` wraps a `Presenter` and adds
+     the video settings, `effect_request` and `--screenshot` (which rides
+     `Presenter::submit_and_present_with`). Declined: putting it in
+     `crcbl-frame`, which stays usable offscreen without a window or a backend;
+     and allowing `crcbl-render` into `crcbl-app`, which would still leave
+     `crcbl-store` (and through it `crcbl-net`), `crcbl-audio`,
+     `crate::settings` and `crcbl-golden`.
+     - **Left: tell lyr, pikr and EW** that `Presenter` is on main, with what
+       their code changes to: open `crcbl_app::present::Presenter` with a
+       `PresenterDesc` (pass `crcbl_app::adapter::pin().as_deref()` as
+       `adapter_pin` to honour `CRCBL_ADAPTER`) where they would have opened
+       `GpuContext`, and record frames with `crcbl-frame`'s `UiRenderer` into
+       what `acquire` hands out.
+     - Gap, not fixed: `crcbl-frame`'s UI pass keeps its per-frame ring at a
+       private constant in `ui_pass.rs`, and nothing ties it to
+       `crcbl_app::present::FRAMES_IN_FLIGHT` or to a `PresenterDesc` whose
+       `frames_in_flight` is deeper. A UI-only program that asks for a deeper
+       ring would let the UI pass write a slot the device may still read. The
+       umbrella's renderer is held in step by a compile-time assertion in
+       `engine.rs`; the UI pass is not. A fix is a public constant in
+       `crcbl-frame` asserted against the presenter's, or a ring depth
+       `UiRenderer::new` takes.
+     - Behaviour that is not a bug: `GpuContext::request_open` now reads the
+       `[engine.video] present_mode` key before it opens the backend (the
+       presenter's desc carries the resolved pacing), so an open whose backend
+       fails still reads the settings file once. It used to fail first.
+     - Considered: the `present-wait` span tests in
+       `crates/crcbl-app/src/present/tests.rs` carry a copy of the umbrella
+       engine tests' `in_a_traced_process` helper, because both crates' tests
+       need a child process with the trace on. Left as two copies of test-only
+       code; a shared helper would belong in `crcbl-spawn` beside `command`.
+     - Not verified: `Presenter` on a real display through a window system (the
+       GPU seam suites are offscreen), and on `wasm32` beyond
+       `cargo clippy --target wasm32-unknown-unknown`.
    - An example drawing `crcbl-ui` on a shell window through `GpuContext`, with
      no `PageBundle` (asked by lyr, 2026-10-18): `apps/bare` draws no UI, and
      the UI frame lives in `PageBundle::frame`. Belongs in `crcbl-app`'s
@@ -26546,8 +26534,8 @@ also said five readback exports where there are seven.
 ### Nothing on the WebGPU backend can ever say "try the next adapter"
 
 `surface_caps`'s contract obliges a caller doing selection to read an `Err` as
-"try the next adapter" rather than as fatal. `crcbl::engine`'s
-`GpuContext::start_device` is the loop that does it.
+"try the next adapter" rather than as fatal. `crcbl_app::present`'s
+`Presenter::start_device` is the loop that does it.
 
 **The WebGPU backend can never produce that answer.** Its capability query names
 no adapter — it is an argument-less instance-level question, because the record
@@ -27348,9 +27336,9 @@ never learns when a frame was actually shown.
 **The seam, the engine wiring and the Vulkan backend now exist.**
 `Features::PRESENT_FEEDBACK`, `PresentInfo::present_id` and
 `Device::wait_until_presented` are the capability-named seam the note below
-asked for, and `GpuContext::acquire` calls the wait for the present
+asked for, and `Presenter::acquire` calls the wait for the present
 `FRAMES_IN_FLIGHT` behind the frame it is about to start
-(`GpuContext::present_to_wait_for` is the arithmetic, tested without a GPU). A
+(`Presenter::present_to_wait_for` is the arithmetic, tested without a GPU). A
 device that does not advertise the flag answers `Ok(())` immediately, which is
 what lets the call site have no branch on which backend is underneath.
 `crcbl-vk` answers it with `vkWaitForPresentKHR` where the driver has
@@ -27438,7 +27426,7 @@ What is still owed:
   `Features::PRESENT_TIMING` and `Device::display_timing` are the capability-
   named seam; `crcbl_vk::present_timing` is the hand-written FFI (`ash` still
   has no bindings — rechecked against the pinned 0.38.0+1.3.281);
-  `GpuContext::settle_pacing` in `crates/crcbl/src/engine.rs` is the caller,
+  `Presenter::settle_pacing` in `crates/crcbl-app/src/present.rs` is the caller,
   asking once after the first present and resolving `Pacing::Auto` against the
   answer with `Pacing::resolve`. The extension is **ratified**, not provisional
   as this entry previously said: `supported="vulkan" ratified="vulkan"` in

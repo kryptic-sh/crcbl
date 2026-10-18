@@ -389,8 +389,8 @@ pub trait Instance: core::fmt::Debug + crate::threading::HalThreadSafe {
     ///   is always there.
     /// * **Callers** doing selection must treat an `Err` from this call as "try
     ///   the next adapter", not as fatal. Only running out of adapters is
-    ///   fatal. `crcbl::engine`'s `GpuContext::start_device` is the reference
-    ///   implementation.
+    ///   fatal. `crcbl_app::present`'s `Presenter::start_device` is the
+    ///   reference implementation.
     ///
     /// # Errors
     ///

@@ -966,7 +966,7 @@ impl Instance for VkInstance {
         // would break its promise that `Fifo` is always there. `Unsupported` is
         // the honest answer, and it obliges a caller doing adapter selection to
         // treat an `Err` from this call as "try the next one" rather than as
-        // fatal — which `crcbl::engine`'s `GpuContext::start_device` does, and
+        // fatal — which `crcbl_app::present`'s `Presenter::start_device` does, and
         // which `Instance::surface_caps`'s contract in `crcbl-hal` states.
         let mut presentable = false;
         // SAFETY: `record.physical` came from this instance.

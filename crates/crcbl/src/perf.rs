@@ -86,13 +86,10 @@ pub const DRAW_SPAN: &str = "draw";
 /// Recording, submitting and presenting — [`GameGpu::frame`](crate::engine::GameGpu::frame).
 pub const PRESENT_SPAN: &str = "present";
 
-/// The swapchain wait inside [`GpuContext::acquire`](crate::engine::GpuContext::acquire):
-/// the closed-loop present wait and the acquire itself, plus waits for old
-/// submissions in `GpuContext::retire_to`. Resource destruction stays counted
-/// as CPU work.
-///
-/// Waiting, not working: subtracted by [`frame_cpu_time`].
-pub const PRESENT_WAIT_SPAN: &str = "present-wait";
+/// The swapchain wait inside the presenter every [`GpuContext`](crate::engine::GpuContext)
+/// draws through — `crcbl-app`'s, where the span is opened, re-exported here
+/// beside the others. Waiting, not working: subtracted by [`frame_cpu_time`].
+pub use crcbl_app::present::PRESENT_WAIT_SPAN;
 
 /// The spans in which the loop is blocked on something outside it.
 ///

@@ -1019,7 +1019,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("stage=present id={id}: {error:?}"));
 
             // Two frames back, which is the cadence
-            // `GpuContext::present_to_wait_for` uses and the one the frame
+            // `Presenter::present_to_wait_for` uses and the one the frame
             // latency is set for.
             if let Some(waiting_for) = id.checked_sub(2).filter(|id| *id > 0) {
                 let started = Instant::now();

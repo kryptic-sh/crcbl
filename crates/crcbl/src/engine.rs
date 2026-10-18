@@ -57,14 +57,24 @@
 //!         → present(wait present) → retire the command buffer
 //! ```
 //!
+//! # The device and the swapchain are `crcbl-app`'s
+//!
+//! [`GpuContext`] wraps a [`Presenter`], which holds the backend walk, the
+//! adapter pin, the surface, the device, the swapchain, the frame ring and the
+//! pacing, so a program that draws only a UI opens one without this crate.
+//! What the context adds is the engine's: the player's `[engine.video]`
+//! settings and the renderer's effect request, read while it opens, and
+//! `--screenshot`, which rides in the presenter's submit through
+//! [`Presenter::submit_and_present_with`].
+//!
 //! # Frames in flight, not `wait_idle`
 //!
 //! [`Device::destroy_command_buffer`] may not be called until the submission
 //! that used it has completed, and the seam offers exactly two ways to know
 //! that: a timeline semaphore, or [`Device::wait_idle`] — which the seam itself
 //! documents as "a shutdown and test primitive" that "destroys pipelining". So
-//! [`GpuContext`] keeps a ring keyed on a timeline semaphore value, and falls
-//! back to `wait_idle` only on a device that has no timeline semaphores.
+//! the [`Presenter`] keeps a ring keyed on a timeline semaphore value, and
+//! falls back to `wait_idle` only on a device that has no timeline semaphores.
 //!
 //! # What the join revealed
 //!
@@ -79,38 +89,39 @@
 //!    is the other, and on Vulkan it is a real size on X11 and deliberately
 //!    `0xFFFFFFFF` ("you choose") on Wayland. `crcbl-hal`'s
 //!    [`swapchain`](crcbl_hal::swapchain) module states the rule as four
-//!    numbered backend obligations, and [`GpuContext::open`] is the reference
+//!    numbered backend obligations, and [`Presenter::request_open`] is the reference
 //!    implementation of the caller's half.
 //! 2. **[`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget) embedded a size,
 //!    so a headless target went stale on resize** — *fixed by deleting the
-//!    size.* [`GpuContext::resize`] therefore reconfigures the swapchain and
+//!    size.* [`Presenter::resize`] therefore reconfigures the swapchain and
 //!    nothing else, on every backend.
-//! 3. **`unsafe` at the join is unavoidable.** [`Instance::create_surface`] is
+//! 3. **`unsafe` at the join is unavoidable.**
+//!    [`Instance::create_surface`](crcbl_hal::Instance::create_surface) is
 //!    `unsafe` because it dereferences platform handles, and the safety
 //!    obligation ("these outlive the surface") is one only the code holding
-//!    *both* the shell and the device can discharge. That code is now here,
-//!    once, instead of in each app.
+//!    *both* the shell and the device can discharge. That code is now in
+//!    [`Presenter`], once, instead of in each app.
 //! 4. **Teardown order is stated in three places and enforced in none.** The
 //!    swapchain must die before the surface, the surface before the window, and
-//!    the device may outlive its instance. [`GpuContext::destroy`] does it by
+//!    the device may outlive its instance. [`Presenter::destroy`] does it by
 //!    hand; at P1.1 a real driver with validation on agreed.
 //! 5. **The swapchain's configured extent was unobservable** — *fixed in the
 //!    seam*, [`AcquiredFrame::extent`].
 //! 6. **A render pass needed a view the seam would not give it** — *fixed in
 //!    the seam*, [`AcquiredFrame::view`].
 
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crcbl_app::present::{PendingPresenter, PresentError, Presenter, PresenterDesc};
 use crcbl_core::time::{ManualTime, MonotonicTime, TimeSource};
+use crcbl_hal::Device;
+#[cfg(doc)]
+use crcbl_hal::PresentMode;
 use crcbl_hal::{
-    AcquiredFrame, BindingModel, CommandBufferHandle, CompositeAlpha, DeviceDesc, DisplayTiming,
-    Features, Format, GeometryPath, HalError, LightingPath, PresentInfo, PresentMode, QueueHandle,
-    QueueKind, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreSignal, SemaphoreWait,
-    SubmitInfo, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
+    AcquiredFrame, BindingModel, CommandBufferHandle, Features, Format, GeometryPath, HalError,
+    LightingPath, QueueHandle, SurfaceError, SwapchainHandle,
 };
-use crcbl_hal::{Device, Instance};
 use crcbl_render::{EffectRequest, RenderEffects};
 use crcbl_shell::{
     CloseReply, CursorIcon, DisplayMode, PhysicalSize, PointerMode, Shell, ShellError, ShellEvent,
@@ -121,6 +132,7 @@ use crcbl_store::settings::{LaunchLayers, SETTINGS_FILE, SettingsStack, StorageS
 
 use crate::settings::VideoSettings;
 
+#[cfg(doc)]
 use crate::adapter::ADAPTER_ENV_VAR;
 use crate::backend::GpuBackend;
 
@@ -196,16 +208,13 @@ pub const MAX_CONSECUTIVE_RECONFIGURES: u32 = 240;
 /// camera is a read-after-write hazard across submissions.
 pub const FRAMES_IN_FLIGHT: usize = crcbl_render::forward::FRAMES_IN_FLIGHT;
 
-/// How long a frame will wait for an older present to reach the display.
-///
-/// A bound rather than a pacing choice: the wait it guards normally returns
-/// within a display period, and this only fires when something underneath has
-/// stopped answering — a compositor that stopped drawing, a monitor being
-/// re-plugged. Waiting forever there would hang the loop with no way out,
-/// including its input handling and its close button, so the loop renders the
-/// frame instead and asks again next time. Far longer than any panel's period
-/// and far shorter than a user's patience.
-pub const PRESENT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
+// The presenter's ring is the depth `GpuContext` passes it, and its default
+// is a constant of its own: `crcbl-app` cannot name the renderer's. Held equal
+// here, where both are in scope, so a change to either is a build failure
+// rather than a renderer whose uniform ring and frame ring disagree.
+const _: () = assert!(crcbl_app::present::FRAMES_IN_FLIGHT == FRAMES_IN_FLIGHT);
+
+pub use crcbl_app::present::{FrameOutcome, PRESENT_WAIT_TIMEOUT, Pacing};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -321,55 +330,18 @@ impl From<crcbl_render::GraphError> for GpuError {
     }
 }
 
-/// Why [`GpuContext::start_device`] started no device.
-///
-/// A [`GpuError`] with one refusal told apart: the backend's `create_surface`
-/// answering [`HalError::Unsupported`], which says this backend cannot present
-/// to the window at all (Vulkan and a transparent Win32 window). An unpinned
-/// open answers that one by trying the next backend, through
-/// [`PendingInstance::fall_through`](crate::backend::PendingInstance::fall_through);
-/// everything else ends the open.
-#[derive(Debug)]
-enum StartRefusal {
-    /// `create_surface` refused the target as unsupported.
-    Surface(HalError),
-    /// Anything else.
-    Failed(GpuError),
-}
-
-impl core::fmt::Display for StartRefusal {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Surface(error) => write!(f, "{error}"),
-            Self::Failed(error) => write!(f, "{error}"),
+impl From<PresentError> for GpuError {
+    /// Each of the presenter's refusals onto the variant of the same name, so
+    /// a game matching on a [`GpuError`] sees what it saw before the device
+    /// and swapchain moved into [`Presenter`].
+    fn from(error: PresentError) -> Self {
+        match error {
+            PresentError::NoBackend(error) => Self::NoBackend(error),
+            PresentError::Unusable(what) => Self::Unusable(what),
+            PresentError::AdapterPin(error) => Self::AdapterPin(error),
+            PresentError::Hal(error) => Self::Hal(error),
+            PresentError::Surface(error) => Self::Surface(error),
         }
-    }
-}
-
-impl From<StartRefusal> for GpuError {
-    fn from(refusal: StartRefusal) -> Self {
-        match refusal {
-            StartRefusal::Surface(error) => Self::Hal(error),
-            StartRefusal::Failed(error) => error,
-        }
-    }
-}
-
-impl From<GpuError> for StartRefusal {
-    fn from(error: GpuError) -> Self {
-        Self::Failed(error)
-    }
-}
-
-impl From<HalError> for StartRefusal {
-    fn from(error: HalError) -> Self {
-        Self::Failed(error.into())
-    }
-}
-
-impl From<crate::adapter::PinMiss> for StartRefusal {
-    fn from(error: crate::adapter::PinMiss) -> Self {
-        Self::Failed(error.into())
     }
 }
 
@@ -454,258 +426,6 @@ impl<G> From<GpuError> for LoopError<G> {
     fn from(error: GpuError) -> Self {
         Self::Gpu(error)
     }
-}
-
-// ---------------------------------------------------------------------------
-// Frame outcome
-// ---------------------------------------------------------------------------
-
-/// What one presented frame did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FrameOutcome {
-    /// The frame was recorded, submitted and presented.
-    Presented,
-    /// The swapchain no longer matched the surface, so it was reconfigured and
-    /// this frame was skipped. Expected traffic during a resize, not an error.
-    Reconfigured,
-}
-
-// ---------------------------------------------------------------------------
-// Swapchain config
-// ---------------------------------------------------------------------------
-
-/// How presented frames are paced against the display.
-///
-/// # One value, so the exclusive cases cannot both be asked for
-///
-/// Vsync and adaptive sync are alternatives, not switches: a display is either
-/// following a fixed refresh or following the application's presents, and it
-/// cannot do both. Two booleans would make "vsync on, VRR on" a state a caller
-/// can write down and the engine has to reject at runtime; one value makes it a
-/// state that cannot be spelled.
-///
-/// # What the engine can and cannot do about VRR
-///
-/// **Nothing here turns adaptive sync on.** VRR is negotiated between the
-/// display, the driver and the compositor, and an application never enables it
-/// — what changes is what presenting *means*: on a VRR panel the present does
-/// not wait for a fixed vblank, the panel follows the presents. So the choice
-/// this enum makes is which present mode to ask for, and the job left to the
-/// frame limiter is staying inside the panel's range.
-///
-/// Which mode is actually running is a separate question, and it is one the
-/// engine answers **once**: [`GpuContext`] asks [`Device::display_timing`]
-/// after its first present, settles [`Auto`](Self::Auto) against the answer,
-/// and never asks again. See [`GpuContext::effective_pacing`] for what that
-/// resolution can and cannot see.
-///
-/// A caller that names [`Vsync`](Self::Vsync), [`Adaptive`](Self::Adaptive) or
-/// [`Off`](Self::Off) is never overridden by that observation — it refines
-/// [`Auto`](Self::Auto) and nothing else — and any of the four can be switched
-/// mid-run with [`GpuContext::set_pacing`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Pacing {
-    /// Follow the display: adaptive sync where the display is running it,
-    /// vsync where it is not. The default.
-    ///
-    /// **This is not a synonym for [`Vsync`](Self::Vsync), even though the
-    /// swapchain opens on the same present mode.**
-    /// [`preferences`](Self::preferences) is the vsync list here because the
-    /// present mode is chosen when the swapchain is created, which is before
-    /// any present exists and therefore before the display can be asked
-    /// anything — `VK_EXT_present_timing` is specified to report nothing until
-    /// an image has been presented. The difference is what happens *after* that
-    /// first present: the display is read once, and an answer of
-    /// [`DisplayTiming::Variable`] or [`DisplayTiming::Stepped`] rebuilds the
-    /// swapchain on [`Adaptive`](Self::Adaptive)'s present mode. Asking for
-    /// [`Vsync`](Self::Vsync) outright is never rebuilt.
-    #[default]
-    Auto,
-    /// Wait for the display. [`PresentMode::Fifo`], which is the only mode
-    /// guaranteed to exist — and the only one WebGPU has.
-    Vsync,
-    /// Follow the display when it can follow us: [`PresentMode::FifoRelaxed`]
-    /// where the surface offers it, otherwise [`PresentMode::Mailbox`].
-    ///
-    /// `FifoRelaxed` is the closer fit — it waits for vblank when the frame is
-    /// on time and tears rather than stalling when it is late, which is what
-    /// keeps a VRR panel inside its range instead of dropping to a duplicated
-    /// frame.
-    Adaptive,
-    /// Do not wait: [`PresentMode::Mailbox`] where offered, otherwise
-    /// [`PresentMode::Immediate`]. Tears on `Immediate`. For latency work and
-    /// for benchmarks, where the [`FrameLimit`] is the only thing pacing the
-    /// loop.
-    Off,
-}
-
-impl Pacing {
-    /// Every pacing, in the order a settings row steps through them.
-    pub const ALL: [Self; 4] = [Self::Auto, Self::Vsync, Self::Adaptive, Self::Off];
-
-    /// The word [`from_name`](Self::from_name) reads back as this pacing: the
-    /// one `--pacing` takes and `[engine.video] present_mode` holds.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Vsync => "vsync",
-            Self::Adaptive => "adaptive",
-            Self::Off => "off",
-        }
-    }
-
-    /// The value a command line spells `name`, or `None` for a word this is not
-    /// one of.
-    ///
-    /// Trimmed and case-folded like
-    /// [`GpuBackend::from_name`](crate::backend::GpuBackend::from_name), so a
-    /// wrapper script that quoted a value with a stray space still works.
-    ///
-    /// **`vrr` is deliberately not a spelling of [`Adaptive`](Self::Adaptive).**
-    /// The names here are the variants' own, and a caller who typed the hardware
-    /// word is better served by a rejection that says which word this engine
-    /// uses than by a synonym that quietly works in one of the two places the
-    /// value is written down.
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "auto" => Some(Self::Auto),
-            "vsync" => Some(Self::Vsync),
-            "adaptive" => Some(Self::Adaptive),
-            "off" => Some(Self::Off),
-            _ => None,
-        }
-    }
-
-    /// The present modes to try, best first.
-    ///
-    /// Every list ends in a mode the surface must support, so
-    /// [`SurfaceCaps::choose_present_mode`](crcbl_hal::SurfaceCaps::choose_present_mode)
-    /// cannot fall through to a mode that is not there.
-    #[must_use]
-    pub const fn preferences(self) -> &'static [PresentMode] {
-        match self {
-            // `Auto` shares the vsync list because that is genuinely what the
-            // swapchain opens with: the mode is picked before the first
-            // present, and the observation that could say otherwise does not
-            // exist yet. The adaptive list is reached from here only through
-            // `resolve`, on the rebuild after that present.
-            Self::Auto | Self::Vsync => &[PresentMode::Fifo],
-            Self::Adaptive => &[
-                PresentMode::FifoRelaxed,
-                PresentMode::Mailbox,
-                PresentMode::Fifo,
-            ],
-            Self::Off => &[
-                PresentMode::Mailbox,
-                PresentMode::Immediate,
-                PresentMode::Fifo,
-            ],
-        }
-    }
-
-    /// What is actually in force, given what the display turned out to be
-    /// doing. Never [`Auto`](Self::Auto).
-    ///
-    /// The whole policy, in one place, with no device in the signature — which
-    /// is what makes every pair of it checkable on a machine that has no
-    /// display, and that is the only way three of the four [`DisplayTiming`]
-    /// arms are reachable at all (see [`GpuContext::effective_pacing`]).
-    ///
-    /// A concrete request comes back unchanged. Someone who asked for
-    /// [`Vsync`](Self::Vsync) on a VRR panel meant it, and someone who asked
-    /// for [`Off`](Self::Off) is measuring something the display's opinion must
-    /// not disturb.
-    ///
-    /// [`Stepped`](DisplayTiming::Stepped) resolves the same way as
-    /// [`Variable`](DisplayTiming::Variable), because the question the pacing
-    /// asks is whether the cycle is *fixed*, and a quantised cycle is not one:
-    /// a panel that moves between 120, 60 and 40 Hz breaks a fixed-vblank
-    /// assumption in the same way a free-running one does, and
-    /// [`PresentMode::FifoRelaxed`] — wait when the frame is on time, tear
-    /// rather than stall when it is late — is the answer to both. It is the
-    /// narrower case of the two, so if a stepped panel ever turns out to want
-    /// something else, this is the arm to split, not the enum.
-    /// [`Fixed`](DisplayTiming::Fixed) and [`Unknown`](DisplayTiming::Unknown)
-    /// are both vsync: the first because the display really is on a fixed
-    /// cycle, the second because a display that will not say is the fallback
-    /// case rather than a guess.
-    #[must_use]
-    const fn resolve(self, observed: DisplayTiming) -> Self {
-        match (self, observed) {
-            (Self::Auto, DisplayTiming::Variable { .. } | DisplayTiming::Stepped { .. }) => {
-                Self::Adaptive
-            }
-            (Self::Auto, DisplayTiming::Fixed { .. } | DisplayTiming::Unknown) => Self::Vsync,
-            // Every concrete request, unchanged. Written as a binding rather
-            // than a wildcard over `observed` alone so that a new `Pacing`
-            // variant is a decision made here rather than one that silently
-            // lands on "whatever the caller said".
-            (Self::Vsync, _) => Self::Vsync,
-            (Self::Adaptive, _) => Self::Adaptive,
-            (Self::Off, _) => Self::Off,
-        }
-    }
-}
-
-/// The swapchain parameters, kept so a reconfigure changes exactly one of them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SwapchainConfig {
-    label: &'static str,
-    format: Format,
-    extent: (u32, u32),
-    image_count: u32,
-    present_mode: PresentMode,
-    /// [`composite_alpha_for`]'s answer at open. Kept here, not recomputed,
-    /// so a resize or a pacing change rebuilds the swapchain with the alpha it
-    /// was opened with; D3D12 refuses a reconfigure that changes it.
-    composite_alpha: CompositeAlpha,
-}
-
-impl SwapchainConfig {
-    fn desc(self, surface: SurfaceHandle) -> SwapchainDesc<'static> {
-        SwapchainDesc {
-            label: Some(self.label),
-            surface,
-            format: self.format,
-            extent: self.extent,
-            image_count: self.image_count,
-            present_mode: self.present_mode,
-            composite_alpha: self.composite_alpha,
-        }
-    }
-}
-
-/// Why an adapter whose surface offers no premultiplied alpha cannot present a
-/// transparent window. See [`composite_alpha_for`].
-const NO_PREMULTIPLIED_ALPHA: &str =
-    "the window is transparent, and the surface offers no premultiplied alpha to present it with";
-
-/// The composite alpha a [`GpuContext`] asks for, from whether the window is
-/// transparent
-/// ([`SurfaceTarget::transparent`](crcbl_hal::SurfaceTarget::transparent)) and
-/// what the surface offers; `None` when it cannot present the window as it
-/// was made.
-///
-/// A transparent window gets [`CompositeAlpha::PreMultiplied`], which is the
-/// alpha `WindowDesc::transparent` promises and the one every window system
-/// here composites by. A surface that does not offer it is refused rather than
-/// drawn opaque: a window that silently is not what was asked is the failure
-/// `crcbl-vk`'s refusal of a transparent Win32 window exists to prevent, and
-/// unlike a pacing preference there is no fallback that still looks right.
-///
-/// An opaque window gets [`CompositeAlpha::Opaque`], as a context always has,
-/// even where premultiplied is also offered: Vulkan on Wayland can offer it for
-/// any surface, and an opaque window composited by whatever alpha the renderer
-/// happened to write would show the desktop through it.
-fn composite_alpha_for(transparent: bool, offered: &[CompositeAlpha]) -> Option<CompositeAlpha> {
-    if !transparent {
-        return Some(CompositeAlpha::Opaque);
-    }
-    offered
-        .contains(&CompositeAlpha::PreMultiplied)
-        .then_some(CompositeAlpha::PreMultiplied)
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,7 +949,14 @@ impl DevicePathRows {
     }
 }
 
-/// The engine's GPU side, driven entirely through the `crcbl-hal` seam.
+/// The engine's GPU side: a [`Presenter`] and what a game needs on top of it.
+///
+/// The device, the swapchain, the frame ring, the pacing and the adapter walk
+/// are the presenter's, in `crcbl-app`, where a program that draws only a UI
+/// reaches them without the engine. What this adds is the engine's: the
+/// player's `[engine.video]` settings, read while the context opens and handed
+/// to the renderer as [`effect_request`](Self::effect_request), and
+/// `--screenshot`, which rides the presenter's submit.
 ///
 /// Nothing in this struct names a backend. [`GpuContext::open`] asks
 /// `crcbl::backend::open_backend` for one **by value** and everything after
@@ -1237,65 +964,16 @@ impl DevicePathRows {
 /// the null backend to `crcbl-vk` a change to one argument.
 #[derive(Debug)]
 pub struct GpuContext {
-    instance: Box<dyn Instance>,
-    device: Box<dyn Device>,
-    queue: QueueHandle,
-    surface: SurfaceHandle,
-    /// The adapter the surface was matched against, kept so a pacing change can
-    /// ask *this* surface which present modes it offers rather than choosing
-    /// from a list cached at start-up.
-    adapter: crcbl_hal::AdapterId,
-    swapchain: SwapchainHandle,
-    /// Everything `create_swapchain` was last called with, so a resize
-    /// reconfigures with one field changed rather than a fresh guess.
-    config: SwapchainConfig,
-    /// `None` on a device without timeline semaphores; see the module docs.
-    timeline: Option<SemaphoreHandle>,
-    /// Submissions issued so far, and therefore the value the next one signals.
-    ///
-    /// Doubles as the present id: it is already monotonic and already one per
-    /// frame, so the frame the display is being asked about and the frame the
-    /// timeline is being asked about are the same number.
-    submitted: u64,
-    /// What the caller asked for, [`Pacing::Auto`] included. Kept apart from
-    /// `effective_pacing` because "asked for `Auto` and the display turned out
-    /// fixed" and "asked for `Vsync`" are different facts about a run, and
-    /// because a later [`set_pacing`](Self::set_pacing) back to `Auto` resolves
-    /// from here.
-    pacing: Pacing,
-    /// What is actually in force: `pacing` resolved against the one display
-    /// observation, and therefore never [`Pacing::Auto`].
-    ///
-    /// This is the value the loop reads — the resolved [`PresentMode`] in
-    /// `config` cannot answer whether waiting for the display is wanted at all,
-    /// which [`Pacing::Off`] says it is not.
-    effective_pacing: Pacing,
-    in_flight: VecDeque<(u64, CommandBufferHandle)>,
-    /// The extent the swapchain was last *configured* at, from
-    /// [`AcquiredFrame::extent`]. Distinct from what the shell asked for.
-    configured_extent: (u32, u32),
-    /// The single cadence [`Device::display_timing`] reported, and the latch
-    /// that stops it being asked twice.
-    ///
-    /// `None` is "not asked yet", which is a different thing from
-    /// [`DisplayTiming::Unknown`] — "asked, and the display would not say".
-    /// Collapsing them would make the query run every frame forever on every
-    /// driver that answers `Unknown`, which today is every driver this repo can
-    /// reach.
-    ///
-    /// Kept after the resolution rather than dropped, so that a later
-    /// [`set_pacing`](Self::set_pacing) to [`Pacing::Auto`] can settle against
-    /// the sample already taken instead of taking a second one.
-    observed_timing: Option<DisplayTiming>,
+    presenter: Presenter,
     /// Presents that actually happened, which is what a `--screenshot` frame
     /// number counts against.
     ///
-    /// Not `submitted`: that one counts *submissions*, and a frame whose
-    /// present reported the swapchain out of date was submitted and reached
-    /// nothing. The two differ only on a surface that reconfigures, which is a
-    /// surface `--screenshot` refuses to finish on — but counting the right
-    /// thing is cheaper than the comment explaining why the wrong one happens
-    /// to work.
+    /// Not the presenter's submission count: that one counts *submissions*,
+    /// and a frame whose present reported the swapchain out of date was
+    /// submitted and reached nothing. The two differ only on a surface that
+    /// reconfigures, which is a surface `--screenshot` refuses to finish on —
+    /// but counting the right thing is cheaper than the comment explaining why
+    /// the wrong one happens to work.
     #[cfg(not(target_arch = "wasm32"))]
     presented: u64,
     /// The frame this run was asked to write out, until it has been written.
@@ -1309,31 +987,6 @@ pub struct GpuContext {
     /// its rows through the renderer's own request. See
     /// [`GpuContext::effect_request`] and [`GpuContext::render_scale`].
     video: VideoSettings,
-    /// Scratch, reused every frame so a steady-state frame allocates nothing.
-    waits: Vec<SemaphoreWait>,
-    signals: Vec<SemaphoreSignal>,
-}
-
-/// How far [`PendingGpuContext`] has got.
-///
-/// Exactly the two steps that can take longer than an instant, in order: the
-/// backend instance (adapter enumeration is a promise on the web) and then the
-/// device (`requestDevice` is a promise everywhere). Everything between them —
-/// surface creation, surface-aware adapter selection, format and present-mode
-/// choice — is synchronous on every backend and happens in one step when the
-/// instance lands.
-#[derive(Debug)]
-enum OpenStage {
-    Instance(crate::backend::PendingInstance),
-    Device {
-        instance: Box<dyn Instance>,
-        surface: SurfaceHandle,
-        adapter: crcbl_hal::AdapterId,
-        config: SwapchainConfig,
-        pending: Box<dyn crcbl_hal::PendingDevice>,
-    },
-    /// The context has been handed over, or a step failed.
-    Done,
 }
 
 /// A [`GpuContext`] being opened, one poll at a time.
@@ -1347,23 +1000,11 @@ enum OpenStage {
 /// [`GpuContext::destroy`] discharges, except that no swapchain exists yet.
 #[derive(Debug)]
 pub struct PendingGpuContext {
-    stage: OpenStage,
-    target: crcbl_hal::SurfaceTarget,
-    extent: (u32, u32),
-    label: String,
-    required_features: Features,
-    optional_features: Features,
-    /// Carried from the desc because the swapchain is built at the end of the
-    /// open, several polls after the caller handed it over.
-    pacing: Pacing,
+    presenter: PendingPresenter,
     /// The `[engine.video]` read, done when the open was *started* rather than
     /// when it finishes: it touches storage, and a browser drives the polls
     /// below from a frame callback that has no time for one.
     video: VideoSettings,
-    /// [`crate::adapter::pin`], read when the open was started for the same
-    /// reason as `video`, and so a test can set it without touching the
-    /// process environment.
-    adapter_pin: Option<String>,
 }
 
 impl PendingGpuContext {
@@ -1378,99 +1019,56 @@ impl PendingGpuContext {
     /// after the context was handed over is a caller bug and reports
     /// [`GpuError::Unusable`].
     pub fn poll(&mut self) -> Result<Option<GpuContext>, GpuError> {
+        Ok(self
+            .presenter
+            .poll()?
+            .map(|presenter| GpuContext::wrap(presenter, self.video)))
+    }
+
+    /// Polls until the context arrives — the loop behind [`GpuContext::open`]
+    /// and [`GpuContext::open_offscreen`].
+    fn block(mut self) -> Result<GpuContext, GpuError> {
         loop {
-            match core::mem::replace(&mut self.stage, OpenStage::Done) {
-                OpenStage::Instance(mut pending) => {
-                    let Some(instance) = pending.poll()? else {
-                        self.stage = OpenStage::Instance(pending);
-                        return Ok(None);
-                    };
-                    // The stage is left `Done` if this fails, which is what
-                    // makes a failed open stay failed rather than retrying a
-                    // half-built context on the next frame.
-                    let backend = instance.backend();
-                    match GpuContext::start_device(instance, self) {
-                        Ok(stage) => self.stage = stage,
-                        Err(StartRefusal::Surface(error)) if pending.fall_through(&error) => {
-                            // Never silent: which backend a window ended up
-                            // on, and why not the first, is the question a
-                            // bug report starts with.
-                            log::info!(
-                                "hal: the {backend} backend cannot present to this {} window                                  ({error}); trying the next backend",
-                                self.target.platform_name()
-                            );
-                            self.stage = OpenStage::Instance(pending);
-                        }
-                        Err(refusal) => return Err(refusal.into()),
-                    }
-                }
-                OpenStage::Device {
-                    instance,
-                    surface,
-                    adapter,
-                    config,
-                    mut pending,
-                } => match pending.poll()? {
-                    crcbl_hal::DeviceRequestState::Pending => {
-                        self.stage = OpenStage::Device {
-                            instance,
-                            surface,
-                            adapter,
-                            config,
-                            pending,
-                        };
-                        return Ok(None);
-                    }
-                    crcbl_hal::DeviceRequestState::Ready(device) => {
-                        // Topic 39's one downgrade line, said here rather than
-                        // at adapter selection because this is the first point
-                        // that knows what the device actually *granted* — an
-                        // adapter's report is only what it could have given.
-                        // Nothing is logged when it granted the lot, and that
-                        // silence is the useful half: it tells a reader that
-                        // `IndirectPerBatch` was the device's ceiling rather
-                        // than something the descriptor never asked for.
-                        let absent = crcbl_hal::downgrades(self.optional_features, &device.caps());
-                        if !absent.is_empty() {
-                            log::info!("hal: this device does not have {absent}");
-                        }
-                        return GpuContext::finish(
-                            instance, surface, adapter, config, device, self,
-                        )
-                        .map(Some);
-                    }
-                },
-                OpenStage::Done => {
-                    return Err(GpuError::Unusable("this GPU context was already opened"));
-                }
+            if let Some(context) = self.poll()? {
+                return Ok(context);
             }
+            std::thread::yield_now();
         }
     }
 }
 
-/// The adapters [`GpuContext::start_device`] may walk, in the order it walks
-/// them.
-///
-/// Unpinned, that is every adapter in enumeration order, so the walk can step
-/// past a GPU that cannot present to the window. Pinned, it is the one adapter
-/// [`crate::adapter::select`] names and nothing else: a pin that fell through to
-/// the next adapter would be a run on a device nobody asked for, which is the
-/// outcome [`crate::adapter`] exists to refuse.
-///
-/// # Errors
-///
-/// [`crate::adapter::PinMiss`] when the pin names no adapter here.
-fn adapter_candidates<'a>(
-    pin: Option<&str>,
-    adapters: &'a [crcbl_hal::AdapterInfo],
-) -> Result<&'a [crcbl_hal::AdapterInfo], crate::adapter::PinMiss> {
-    match pin {
-        None => Ok(adapters),
-        Some(_) => crate::adapter::select(pin, adapters).map(core::slice::from_ref),
+impl GpuContextDesc<'_> {
+    /// The presenter's half of this desc, with the settings it names already
+    /// read: the pacing is `[engine.video] present_mode` where the game left
+    /// it on [`Pacing::Auto`] (see [`SettingsSource`]), and the adapter pin is
+    /// `pin`.
+    fn presenter<'a>(&'a self, pin: Option<&'a str>) -> PresenterDesc<'a> {
+        PresenterDesc {
+            label: self.label,
+            backend: self.backend,
+            adapter_pin: pin,
+            required_features: self.required_features,
+            optional_features: self.optional_features,
+            pacing: self.settings.pacing(self.label, self.pacing),
+            frames_in_flight: FRAMES_IN_FLIGHT,
+        }
     }
 }
 
 impl GpuContext {
+    /// A context over `presenter`, with the video settings read at the start
+    /// of its open.
+    const fn wrap(presenter: Presenter, video: VideoSettings) -> Self {
+        Self {
+            presenter,
+            #[cfg(not(target_arch = "wasm32"))]
+            presented: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            screenshot: None,
+            video,
+        }
+    }
+
     /// Creates an instance, a surface for `window`, a device and a swapchain.
     ///
     /// `extent` must come from the window system — call this only after the
@@ -1482,9 +1080,8 @@ impl GpuContext {
     /// It spins on [`request_open`](Self::request_open) until the device
     /// arrives. In a browser the promise behind that device is resolved by the
     /// event loop this call is *inside*, so it would never complete — which is
-    /// why `crcbl::backend::open` and
-    /// `Instance::create_device` do not
-    /// exist on `wasm32` at all.
+    /// why `crcbl::backend::open`, `Instance::create_device` and
+    /// `Presenter::open` do not exist on `wasm32` at all.
     ///
     /// This one still does, deliberately and temporarily: `apps/breakout`'s
     /// start-up is written on it, and the slice that gives the sample a polled
@@ -1517,13 +1114,7 @@ impl GpuContext {
         extent: (u32, u32),
         desc: &GpuContextDesc<'_>,
     ) -> Result<Self, GpuError> {
-        let mut pending = Self::request_open(shell, window, extent, desc)?;
-        loop {
-            if let Some(context) = pending.poll()? {
-                return Ok(context);
-            }
-            std::thread::yield_now();
-        }
+        Self::request_open(shell, window, extent, desc)?.block()
     }
 
     /// The same context with no window behind it, at `extent`.
@@ -1551,27 +1142,13 @@ impl GpuContext {
     /// [`GpuError`] on everything [`open`](Self::open) reports it for, minus the
     /// window: no backend, no adapter, no device, no swapchain.
     pub fn open_offscreen(extent: (u32, u32), desc: &GpuContextDesc<'_>) -> Result<Self, GpuError> {
-        let instance = match desc.backend {
-            Some(backend) => crate::backend::request_open_backend(backend)?,
-            None => crate::backend::request_open()?,
-        };
-        let mut pending = PendingGpuContext {
-            stage: OpenStage::Instance(instance),
-            target: crcbl_hal::SurfaceTarget::Offscreen,
-            extent,
-            label: desc.label.to_string(),
-            required_features: desc.required_features,
-            optional_features: desc.optional_features,
-            pacing: desc.settings.pacing(desc.label, desc.pacing),
+        let pin = crate::adapter::pin();
+        let presenter = Presenter::request_open_offscreen(extent, &desc.presenter(pin.as_deref()))?;
+        PendingGpuContext {
+            presenter,
             video: desc.settings.video(desc.label),
-            adapter_pin: crate::adapter::pin(),
-        };
-        loop {
-            if let Some(context) = pending.poll()? {
-                return Ok(context);
-            }
-            std::thread::yield_now();
         }
+        .block()
     }
 
     /// Starts opening the instance, surface, device and swapchain, without
@@ -1597,292 +1174,21 @@ impl GpuContext {
         extent: (u32, u32),
         desc: &GpuContextDesc<'_>,
     ) -> Result<PendingGpuContext, GpuError> {
-        // The line that used to name `NullInstance`. It now names a *value*
-        // from a registry, which is the whole difference between "the sample
-        // knows about Vulkan" and "the sample knows there are backends".
-        let instance = match desc.backend {
-            Some(backend) => crate::backend::request_open_backend(backend)?,
-            None => crate::backend::request_open()?,
-        };
-
-        // The join. `shell` produced this; only a HAL backend looks inside it.
-        // Taken now rather than at poll time so the shell is not borrowed for
-        // the whole of start-up.
-        let target = shell
-            .surface_target(window)
-            .map_err(|_| GpuError::Unusable("the window went away before its surface was made"))?;
-        log::debug!(
-            "hal: creating a surface for a {} target",
-            target.platform_name()
-        );
-
+        // [`crate::adapter::pin`], read when the open was started for the same
+        // reason as the video settings below.
+        let pin = crate::adapter::pin();
+        let presenter =
+            Presenter::request_open(shell, window, extent, &desc.presenter(pin.as_deref()))?;
         Ok(PendingGpuContext {
-            stage: OpenStage::Instance(instance),
-            target,
-            extent,
-            label: desc.label.to_string(),
-            required_features: desc.required_features,
-            optional_features: desc.optional_features,
-            pacing: desc.settings.pacing(desc.label, desc.pacing),
+            presenter,
             video: desc.settings.video(desc.label),
-            adapter_pin: crate::adapter::pin(),
-        })
-    }
-
-    /// Creates the surface, picks an adapter and starts the device request.
-    ///
-    /// `open` is the request being started, for the same reason
-    /// [`finish`](Self::finish) takes it.
-    fn start_device(
-        instance: Box<dyn Instance>,
-        open: &PendingGpuContext,
-    ) -> Result<OpenStage, StartRefusal> {
-        let (target, extent, label, pacing) = (&open.target, open.extent, &open.label, open.pacing);
-        let adapters = instance.adapters();
-        if adapters.is_empty() {
-            return Err(GpuError::Unusable("no adapter").into());
-        }
-        // Resolved before the surface exists, so a pin that names nothing here
-        // leaves nothing to tear down.
-        let pin = open.adapter_pin.as_deref();
-        let candidates = adapter_candidates(pin, &adapters)?;
-
-        // SAFETY: `target` was produced by the caller's shell for a window that
-        // must still be live — `request_open` documents that obligation and it
-        // is the same one `open` has always carried — so every handle in it
-        // names an object of the stated kind. The caller keeps the shell, and
-        // therefore the window, alive until after `destroy`, which tears the
-        // swapchain and surface down first. This is the whole
-        // `Instance::create_surface` contract.
-        let surface = match unsafe { instance.create_surface(target) } {
-            Ok(surface) => surface,
-            Err(error @ HalError::Unsupported { .. }) => return Err(StartRefusal::Surface(error)),
-            Err(error) => return Err(error.into()),
-        };
-
-        // **Adapter selection is surface-aware, and has to be.** P1.1 found a
-        // discrete radv GPU that enumerates first, is Tier A, and *cannot
-        // present to an Xvfb window* — while the software rasteriser behind it
-        // can. An `Err` here means "not this one", not "give up". A pin narrows
-        // the walk to one adapter, so there it does mean "give up".
-        //
-        // A transparent window narrows it again: an adapter whose surface
-        // offers no premultiplied alpha cannot present it as it was made, so
-        // the walk goes on to the next one, and only when none can is the
-        // open refused (see `composite_alpha_for`).
-        let transparent = target.transparent();
-        let mut chosen = None;
-        let mut last_error = None;
-        let mut alpha_refused = false;
-        for adapter in candidates {
-            match instance.surface_caps(surface, adapter.id) {
-                Ok(caps) if caps.preferred_format().is_some() => {
-                    let Some(alpha) = composite_alpha_for(transparent, &caps.composite_alpha)
-                    else {
-                        log::debug!(
-                            "hal: adapter {:?} offers no premultiplied alpha for this transparent \
-                             window (only {:?}); trying the next",
-                            adapter.name,
-                            caps.composite_alpha
-                        );
-                        alpha_refused = true;
-                        continue;
-                    };
-                    chosen = Some((adapter.clone(), caps, alpha));
-                    break;
-                }
-                Ok(_) => log::debug!(
-                    "hal: adapter {:?} offers no usable surface format; trying the next",
-                    adapter.name
-                ),
-                Err(error) => {
-                    log::debug!(
-                        "hal: adapter {:?} cannot serve this surface ({error}); trying the next",
-                        adapter.name
-                    );
-                    last_error = Some(error);
-                }
-            }
-        }
-        let Some((adapter, caps, composite_alpha)) = chosen else {
-            instance.destroy_surface(surface);
-            return Err(StartRefusal::Failed(match (pin, candidates, last_error) {
-                (Some(pin), [pinned], error) => {
-                    let reason = match error {
-                        Some(error) => error.to_string(),
-                        None if alpha_refused => NO_PREMULTIPLIED_ALPHA.to_owned(),
-                        None => "it offers no usable surface format".to_owned(),
-                    };
-                    GpuError::AdapterPin(crate::adapter::PinMiss::new(format!(
-                        "{ADAPTER_ENV_VAR}={pin} chose adapter {id} {name:?} type={kind:?}, and it \
-                         cannot present to this window: {reason}. No other adapter is tried, \
-                         because that would be a run on a device nobody named; unset \
-                         {ADAPTER_ENV_VAR} to walk every adapter.",
-                        pin = pin.trim(),
-                        id = pinned.id.0,
-                        name = pinned.name,
-                        kind = pinned.device_type,
-                    )))
-                }
-                // Before an adapter that could not see the surface at all: one
-                // that could, and lacked only the alpha, is the closer miss.
-                _ if alpha_refused => GpuError::Unusable(NO_PREMULTIPLIED_ALPHA),
-                (_, _, Some(error)) => error.into(),
-                (_, _, None) => GpuError::Unusable("no adapter can present to this window"),
-            }));
-        };
-        let why = match pin {
-            Some(pin) => format!("pinned by {ADAPTER_ENV_VAR}={}", pin.trim()),
-            None => format!(
-                "the first of {} enumerated that can present, {ADAPTER_ENV_VAR} unset",
-                adapters.len()
-            ),
-        };
-        log::info!(
-            "hal: {} adapter {:?} ({:?}), {why}, geometry {:?}, binding {:?}, lighting {:?}",
-            instance.backend(),
-            adapter.name,
-            adapter.device_type,
-            adapter.caps.geometry_path(),
-            adapter.caps.binding_model(),
-            adapter.caps.lighting_path()
-        );
-
-        if let Some(reported) = caps.current_extent
-            && reported != extent
-        {
-            log::info!(
-                "hal: surface reports {reported:?} but the shell configured {extent:?}; \
-                 using the shell's size"
-            );
-        }
-        let format = caps
-            .preferred_format()
-            .ok_or(GpuError::Unusable("the surface offers no format"))?;
-        let present_mode = caps.choose_present_mode(pacing.preferences());
-        let image_count = caps
-            .min_image_count
-            .saturating_add(1)
-            .min(caps.max_image_count);
-
-        let config = SwapchainConfig {
-            label: "crcbl swapchain",
-            format,
-            extent,
-            image_count,
-            present_mode,
-            composite_alpha,
-        };
-
-        // The one call that may take more than an instant. On the web it is a
-        // promise; here it is a `PendingDevice` the caller polls.
-        let pending = instance.request_device(&DeviceDesc {
-            label: Some(label),
-            adapter: adapter.id,
-            required_features: open.required_features,
-            optional_features: open.optional_features,
-            compatible_surface: Some(surface),
-        })?;
-
-        Ok(OpenStage::Device {
-            instance,
-            surface,
-            adapter: adapter.id,
-            config,
-            pending,
-        })
-    }
-
-    /// Builds the context once the device has arrived.
-    /// `open` is the request being finished — everything decided before the
-    /// device arrived and still needed after it: the extent, the pacing and the
-    /// player's video settings. Carried as the object rather than unpacked into
-    /// three more parameters, because the next thing start-up learns early and
-    /// uses late would be a fourth.
-    fn finish(
-        instance: Box<dyn Instance>,
-        surface: SurfaceHandle,
-        adapter: crcbl_hal::AdapterId,
-        config: SwapchainConfig,
-        device: Box<dyn Device>,
-        open: &PendingGpuContext,
-    ) -> Result<Self, GpuError> {
-        let (extent, pacing) = (open.extent, open.pacing);
-        let queue = device
-            .queue(QueueKind::Graphics)
-            .ok_or(GpuError::Unusable("no graphics queue"))?;
-
-        let swapchain = device.create_swapchain(&config.desc(surface))?;
-        let (format, present_mode, image_count, alpha) = (
-            config.format,
-            config.present_mode,
-            config.image_count,
-            config.composite_alpha,
-        );
-        log::info!(
-            "hal: swapchain {}x{} {format:?} {present_mode:?} {alpha:?} alpha ({image_count} images)",
-            extent.0,
-            extent.1
-        );
-
-        let timeline = if device
-            .caps()
-            .features
-            .contains(Features::TIMELINE_SEMAPHORE)
-        {
-            Some(device.create_semaphore(&SemaphoreDesc {
-                label: Some("crcbl frames in flight"),
-                kind: SemaphoreKind::Timeline { initial_value: 0 },
-            })?)
-        } else {
-            log::debug!("hal: no timeline semaphores; retiring command buffers with wait_idle");
-            None
-        };
-
-        // Which of the two pacing stories this run gets, said once at start-up
-        // rather than branched on per frame: `acquire` calls the wait either
-        // way, and a device without the capability answers it immediately.
-        if device.caps().features.contains(Features::PRESENT_FEEDBACK) {
-            log::info!("hal: pacing on presents, {FRAMES_IN_FLIGHT} frames deep");
-        } else {
-            log::debug!("hal: no present feedback; the frame limiter is the only pacing");
-        }
-
-        Ok(Self {
-            instance,
-            device,
-            queue,
-            surface,
-            adapter,
-            swapchain,
-            config,
-            timeline,
-            submitted: 0,
-            pacing,
-            // Nothing has been presented, so nothing has been observed, and
-            // `Unknown` is exactly what "the display has not said" resolves
-            // through — which for `Auto` is the vsync the swapchain was just
-            // created on. The first present may move it; see `settle_pacing`.
-            effective_pacing: pacing.resolve(DisplayTiming::Unknown),
-            in_flight: VecDeque::with_capacity(FRAMES_IN_FLIGHT + 1),
-            configured_extent: extent,
-            // Not asked yet, and the query is only meaningful after a present —
-            // see `settle_pacing`.
-            observed_timing: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            presented: 0,
-            #[cfg(not(target_arch = "wasm32"))]
-            screenshot: None,
-            video: open.video,
-            waits: Vec::with_capacity(1),
-            signals: Vec::with_capacity(2),
         })
     }
 
     /// The device, for building renderers and recording work.
     #[must_use]
     pub fn device(&self) -> &dyn Device {
-        self.device.as_ref()
+        self.presenter.device()
     }
 
     /// The swapchain everything renders into, for a caller that wants the
@@ -1890,44 +1196,36 @@ impl GpuContext {
     /// is how a frame is held for the display.
     #[must_use]
     pub const fn swapchain(&self) -> SwapchainHandle {
-        self.swapchain
+        self.presenter.swapchain()
     }
 
-    /// The adapter this context opened its device on.
-    ///
-    /// **The only way an application can say which GPU it is running on.** Every
-    /// other place that names one is inside a backend, writing to the log, so a
-    /// caller that wants it on screen or in a test's output has nothing to read
-    /// — and "which device produced this frame" is the first question asked of
-    /// any measurement.
+    /// The adapter this context opened its device on — see
+    /// [`Presenter::adapter`].
     ///
     /// `None` only if the adapter list changed under the context, which no
     /// backend does while a device is open.
     #[must_use]
     pub fn adapter(&self) -> Option<crcbl_hal::AdapterInfo> {
-        self.instance
-            .adapters()
-            .into_iter()
-            .find(|info| info.id == self.adapter)
+        self.presenter.adapter()
     }
 
     /// The graphics queue everything is submitted to.
     #[must_use]
     pub const fn queue(&self) -> QueueHandle {
-        self.queue
+        self.presenter.queue()
     }
 
     /// The format the swapchain was created with — what a pipeline rendering
     /// into it has to name.
     #[must_use]
     pub const fn format(&self) -> Format {
-        self.config.format
+        self.presenter.format()
     }
 
     /// The swapchain's current size — the one it was **configured** at.
     #[must_use]
     pub const fn extent(&self) -> (u32, u32) {
-        self.configured_extent
+        self.presenter.extent()
     }
 
     /// What the player's `[engine.video]` section allowed, read while this
@@ -2051,83 +1349,32 @@ impl GpuContext {
         }
     }
 
-    /// What the caller asked for, [`Pacing::Auto`] included.
-    ///
-    /// Pair with [`effective_pacing`](Self::effective_pacing): this one is the
-    /// request, that one is the answer.
+    /// What the caller asked for, [`Pacing::Auto`] included — see
+    /// [`Presenter::pacing`].
     #[must_use]
     pub const fn pacing(&self) -> Pacing {
-        self.pacing
+        self.presenter.pacing()
     }
 
     /// What is actually pacing the frames. Never [`Pacing::Auto`].
     ///
-    /// Equal to [`pacing`](Self::pacing) unless [`Pacing::Auto`] was asked for,
-    /// in which case it is [`Pacing::Vsync`] or [`Pacing::Adaptive`] depending
-    /// on what the display reported.
-    ///
-    /// # The observation behind it happens once
-    ///
-    /// After the first present — never before it, because
-    /// `VK_EXT_present_timing` is specified to report nothing until an image
-    /// has been presented — the display is asked exactly once, and the answer
-    /// settles this for the life of the context. It is not re-read on a resize,
-    /// a display-mode change, or a window dragged to another monitor, and
-    /// [`set_pacing`](Self::set_pacing) does not re-read it either.
-    ///
-    /// **Once, rather than until it answers**, because a driver that only ever
-    /// reports [`DisplayTiming::Unknown`] would otherwise be re-queried every
-    /// frame for the life of the process — and that is every driver this repo
-    /// has been able to test against. The known cost: a platform that needs
-    /// more than one present before it will answer reads `Unknown` here and
-    /// stays on [`Pacing::Vsync`], which is the documented fallback. A caller
-    /// on such a platform asks for [`Pacing::Adaptive`] by name.
-    ///
-    /// # What has actually been observed
-    ///
-    /// Only [`DisplayTiming::Unknown`] has ever come back from a real driver in
-    /// this repo — see `docs/backlog.md`. The
-    /// [`Variable`](DisplayTiming::Variable), [`Stepped`](DisplayTiming::Stepped)
-    /// and [`Fixed`](DisplayTiming::Fixed) paths through the resolution are
-    /// exercised by unit tests and by nothing else on any machine.
+    /// [`Presenter::effective_pacing`] says when the display is asked and what
+    /// that observation can and cannot see.
     #[must_use]
     pub const fn effective_pacing(&self) -> Pacing {
-        self.effective_pacing
+        self.presenter.effective_pacing()
     }
 
-    /// Changes how presented frames are paced, mid-run.
-    ///
-    /// The present mode is a swapchain property, so this rebuilds the swapchain
-    /// — but **only when the mode it resolves to differs from the one
-    /// presenting**. Setting the pacing already in force costs nothing, which
-    /// is what a settings screen that re-applies every value on every apply
-    /// needs.
-    ///
-    /// # `Auto` here does not re-detect
-    ///
-    /// Detection happens once per context, and this call is not it: `Auto`
-    /// resolves against the sample the first present already took. Before that
-    /// present there is no sample, so `Auto` set here is vsync until the first
-    /// present takes one — the same start-up path a context opened on `Auto`
-    /// follows, and the same single query.
+    /// Changes how presented frames are paced, mid-run — see
+    /// [`Presenter::set_pacing`], which rebuilds the swapchain only when the
+    /// present mode moves.
     ///
     /// # Errors
     ///
-    /// [`GpuError`] if the swapchain could not be rebuilt. The old swapchain is
-    /// still configured when that happens — `reconfigure_swapchain` replaces
-    /// nothing until the new one is built — so the context stays usable, and
-    /// [`pacing`](Self::pacing), [`effective_pacing`](Self::effective_pacing)
-    /// and the swapchain's own mode are rolled back together rather than left
-    /// describing a change that did not take.
+    /// [`GpuError`] if the swapchain could not be rebuilt, with the request,
+    /// the effective pacing and the swapchain's mode rolled back together.
     pub fn set_pacing(&mut self, pacing: Pacing) -> Result<(), GpuError> {
-        let previous = (self.pacing, self.effective_pacing);
-        self.pacing = pacing;
-        self.effective_pacing = pacing.resolve(self.observed_timing.unwrap_or_default());
-        let result = self.apply_present_mode();
-        if result.is_err() {
-            (self.pacing, self.effective_pacing) = previous;
-        }
-        result
+        Ok(self.presenter.set_pacing(pacing)?)
     }
 
     /// [`set_pacing`](Self::set_pacing), answering the pacing asked before
@@ -2139,7 +1386,7 @@ impl GpuContext {
     /// failure is logged here rather than returned because it is already
     /// answered — the rollback is the landed value, and a screen shows it.
     pub fn switch_pacing(&mut self, pacing: Pacing) -> crate::settings::Landed<Pacing> {
-        let previous = self.pacing;
+        let previous = self.pacing();
         if let Err(error) = self.set_pacing(pacing) {
             log::warn!(
                 "gpu: could not present with {} pacing ({error}); still on {}",
@@ -2149,46 +1396,12 @@ impl GpuContext {
         }
         crate::settings::Landed {
             previous,
-            landed: self.pacing,
+            landed: self.pacing(),
         }
     }
 
-    /// Which present the frame about to start should wait for, or `None` if
-    /// there is nothing worth waiting on yet.
-    ///
-    /// `submitted` is the id of the most recent present, so the frame about to
-    /// start will be `submitted + 1` and the one to wait for is
-    /// **`FRAMES_IN_FLIGHT` behind it**. The two ends of that range are both
-    /// wrong: waiting for `submitted + 1` is waiting for something that has not
-    /// been submitted, and waiting for `submitted` — the frame just sent —
-    /// empties the pipeline every frame, so the CPU sits out a whole display
-    /// period doing nothing and the result is worse than not waiting at all.
-    /// `pacing` is the **effective** one — [`Pacing::Auto`] has already been
-    /// resolved by the time a frame is paced, and the `Off` test below would
-    /// otherwise have to guess what `Auto` meant.
-    ///
-    /// One `FRAMES_IN_FLIGHT` back is the id whose display leaves exactly
-    /// `FRAMES_IN_FLIGHT` presents outstanding, which is the depth
-    /// [`retire_to`](Self::retire_to) already holds command buffers to; the
-    /// wait therefore paces the loop without changing that depth.
-    ///
-    /// `None` in two cases. The first `FRAMES_IN_FLIGHT` frames have nothing
-    /// that far behind them — ids start at 1, so the subtraction lands on 0 or
-    /// underflows — and the loop is still filling anyway. And [`Pacing::Off`]
-    /// asked *not* to be paced by the display: blocking until a frame is on
-    /// screen would pin the loop to the refresh rate, which is the one thing
-    /// that mode exists to avoid.
-    fn present_to_wait_for(submitted: u64, pacing: Pacing) -> Option<u64> {
-        if matches!(pacing, Pacing::Off) {
-            return None;
-        }
-        submitted
-            .saturating_add(1)
-            .checked_sub(FRAMES_IN_FLIGHT as u64)
-            .filter(|id| *id > 0)
-    }
-
-    /// Acquires the next swapchain image, or reconfigures and says so.
+    /// Acquires the next swapchain image, or reconfigures and says so — see
+    /// [`Presenter::acquire`].
     ///
     /// `Ok(None)` means the swapchain was out of date and has been
     /// reconfigured: skip this frame and try the next one.
@@ -2198,88 +1411,15 @@ impl GpuContext {
     /// [`GpuError`] for anything except a swapchain that has merely gone out of
     /// date, which is handled here.
     pub fn acquire(&mut self) -> Result<Option<AcquiredFrame>, GpuError> {
-        // Before anything else, because an error the device reported out of
-        // band is a reason not to record another frame. On a backend that
-        // reports every failure through its return values this is `None` every
-        // time; on WebGPU it is the *only* way a failed pipeline is ever heard
-        // from, and until this call existed the answer was a black canvas over
-        // a game that reported itself as playing. Start of the frame rather
-        // than end of the last one so that failures during start-up — where
-        // every pipeline is built — are caught by the first frame.
-        if let Some(message) = self.device.take_error() {
-            return Err(GpuError::Hal(HalError::Backend(message)));
-        }
-
-        // The two blocking calls, and only those, under one span: this is where
-        // a frame waits for the display rather than for the CPU, and
-        // `crate::perf::frame_cpu_time` subtracts it. The reconfigure the match
-        // below can run is deliberately outside — it is work, not waiting.
-        let next = {
-            let _waiting = crcbl_core::trace::span(crate::perf::PRESENT_WAIT_SPAN);
-
-            // Closed-loop pacing, before an image is taken and before any work is
-            // recorded: this is the point in a frame where the CPU can be held back
-            // without holding anything else up. A device without present feedback
-            // answers immediately, which is why there is no branch here on which
-            // backend is underneath.
-            if let Some(present_id) =
-                Self::present_to_wait_for(self.submitted, self.effective_pacing)
-            {
-                match self.device.wait_until_presented(
-                    self.swapchain,
-                    present_id,
-                    PRESENT_WAIT_TIMEOUT,
-                ) {
-                    Ok(()) => {}
-                    // The display did not get to it in time. Render anyway: a
-                    // frame skipped because the *last* one was slow is two frames
-                    // lost instead of one, and the next wait catches up.
-                    Err(SurfaceError::Timeout) => {
-                        log::debug!(
-                            "hal: present {present_id} was still not up after a whole timeout"
-                        );
-                    }
-                    // Not reported here: the acquire below reports it too, through
-                    // the arm that already reconfigures and skips the frame.
-                    Err(SurfaceError::OutOfDate) => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-
-            self.device.acquire_next_frame(self.swapchain)
-        };
-
-        let acquired = match next {
-            Ok(frame) => frame,
-            // Expected traffic after a resize, per the seam's docs: reconfigure
-            // and let the next frame have the image.
-            Err(SurfaceError::OutOfDate) => {
-                self.reconfigure()?;
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
-        };
-
-        // Obligation 3: the answer, not the request.
-        if acquired.extent != self.configured_extent {
-            log::debug!(
-                "hal: swapchain configured at {:?} (the shell asked for {:?})",
-                acquired.extent,
-                self.config.extent
-            );
-            self.configured_extent = acquired.extent;
-            // Track the answer in `config` too. `resize` early-returns when the
-            // requested extent already matches `config.extent`, so leaving
-            // `config` holding the size the shell asked for made a resize back
-            // to the compositor's chosen size look like a change and triggered
-            // a reconfigure that changed nothing.
-            self.config.extent = acquired.extent;
-        }
-        Ok(Some(acquired))
+        Ok(self.presenter.acquire()?)
     }
 
     /// Submits `command_buffer` for `acquired`, presents it, and retires the
     /// oldest command buffer once its submission has completed.
+    ///
+    /// On the `--screenshot` frame the copy out of the presented image rides
+    /// in the same batch and is written to its file after the present — see
+    /// [`set_screenshot`](Self::set_screenshot).
     ///
     /// # Errors
     ///
@@ -2291,124 +1431,48 @@ impl GpuContext {
         acquired: &AcquiredFrame,
         command_buffer: CommandBufferHandle,
     ) -> Result<FrameOutcome, GpuError> {
-        // Before the submit, because the copy has to ride in the *same* batch
-        // as the frame that drew it — see `begin_screenshot`.
-        #[cfg(not(target_arch = "wasm32"))]
-        let capture = self.begin_screenshot(acquired)?;
-
-        self.submitted += 1;
-        let value = self.submitted;
-
-        self.waits.clear();
-        self.waits
-            .extend(acquired.acquire_semaphore.map(|semaphore| SemaphoreWait {
-                semaphore,
-                value: 0,
-            }));
-        self.signals.clear();
-        self.signals
-            .extend(acquired.present_semaphore.map(|semaphore| SemaphoreSignal {
-                semaphore,
-                value: 0,
-            }));
-        // A timeline value is monotonic, so the frame number *is* the value and
-        // no rotation is needed.
-        self.signals.extend(
-            self.timeline
-                .map(|semaphore| SemaphoreSignal { semaphore, value }),
-        );
-
-        // Two command buffers on a `--screenshot` frame and one otherwise, in
-        // one batch: submission order is what puts the copy's barrier after the
-        // frame's last pass, and a second `submit` would be a second batch with
-        // nothing ordering it against the first.
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut batch = [command_buffer; 2];
-        // No second slot is ever written in a browser, so the binding is not
-        // `mut` there — the same split the `recorded` below already makes.
-        #[cfg(target_arch = "wasm32")]
-        let batch = [command_buffer; 2];
-        #[cfg(not(target_arch = "wasm32"))]
-        let recorded = match &capture {
-            Some(capture) => {
-                batch[1] = capture.commands;
-                2
-            }
-            None => 1,
-        };
-        #[cfg(target_arch = "wasm32")]
-        let recorded = 1;
-
-        self.device.submit(
-            self.queue,
-            &SubmitInfo {
-                command_buffers: &batch[..recorded],
-                waits: &self.waits,
-                signals: &self.signals,
-            },
-        )?;
-        self.in_flight.push_back((value, command_buffer));
-        // One frame left executing, not `FRAMES_IN_FLIGHT`: the next frame
-        // records into the per-frame ring slot this wait frees, and the ring
-        // is `FRAMES_IN_FLIGHT` deep. Keeping two in flight let the third
-        // frame write the slot the oldest was still reading — hidden by the
-        // present wait in a window, and a live race offscreen and under
-        // `Pacing::Off`, where nothing else holds the CPU back.
-        self.retire_to(FRAMES_IN_FLIGHT - 1)?;
-
-        match self.device.present(
-            self.queue,
-            &PresentInfo {
-                swapchain: self.swapchain,
-                waits: acquired.present_semaphore.as_slice(),
-                // The submission counter, not a second one: it is monotonic
-                // already, and a frame's present and its timeline value being
-                // the same number is what lets `acquire` ask about a frame by
-                // the only id it has.
-                present_id: Some(value),
-            },
-        ) {
-            Ok(()) => {}
-            // **Present is the usual place a resize is noticed**, not acquire.
-            Err(SurfaceError::OutOfDate) => {
-                // A `--screenshot` frame that never reached anything is a file
-                // the caller asked for and will not get, so it stops the run
-                // rather than being retried on the next frame: the retry would
-                // silently move the picture to a later frame than the one that
-                // was asked for. Unreachable through the flag itself — it
-                // implies `--headless`, and an offscreen ring has no compositor
-                // to go out of date against — which is exactly why it is an
-                // error and not a code path with its own recovery.
-                #[cfg(not(target_arch = "wasm32"))]
-                if capture.is_some() {
-                    return Err(GpuError::Screenshot(
-                        "the swapchain went out of date on the frame that was to be written".into(),
-                    ));
-                }
-                self.reconfigure()?;
-                return Ok(FrameOutcome::Reconfigured);
-            }
-            Err(error) => return Err(error.into()),
-        }
-
-        // After the present, never before it — and after *this* present rather
-        // than at the top of the next frame, because the whole question is what
-        // the display did with a frame it has been given.
-        self.settle_pacing()?;
-
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.presented += 1;
-            if let Some(capture) = capture {
-                self.finish_screenshot(capture)?;
-            }
+            // Before the submit, because the copy has to ride in the *same*
+            // batch as the frame that drew it — see `begin_screenshot`.
+            let capture = self.begin_screenshot(acquired)?;
+            let also = capture.as_ref().map(|capture| capture.commands);
+            let format = self.presenter.format();
+            let (presented, screenshot) = (&mut self.presented, &mut self.screenshot);
+            self.presenter.submit_and_present_with(
+                acquired,
+                command_buffer,
+                also.as_slice(),
+                |device, outcome| match outcome {
+                    // A `--screenshot` frame that never reached anything is a
+                    // file the caller asked for and will not get, so it stops
+                    // the run rather than being retried on the next frame: the
+                    // retry would silently move the picture to a later frame
+                    // than the one that was asked for. Unreachable through the
+                    // flag itself — it implies `--headless`, and an offscreen
+                    // ring has no compositor to go out of date against — which
+                    // is exactly why it is an error and not a code path with
+                    // its own recovery.
+                    FrameOutcome::Reconfigured if capture.is_some() => Err(GpuError::Screenshot(
+                        "the swapchain went out of date on the frame that was to be written".into(),
+                    )),
+                    FrameOutcome::Reconfigured => Ok(()),
+                    FrameOutcome::Presented => {
+                        *presented += 1;
+                        match capture {
+                            Some(capture) => finish_screenshot(device, format, screenshot, capture),
+                            None => Ok(()),
+                        }
+                    }
+                },
+            )
         }
-
-        if acquired.suboptimal {
-            log::debug!("hal: swapchain suboptimal; reconfiguring after present");
-            self.reconfigure()?;
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(self
+                .presenter
+                .submit_and_present(acquired, command_buffer)?)
         }
-        Ok(FrameOutcome::Presented)
     }
 
     /// Asks for the `request.frame`-th presented frame to be written to
@@ -2472,16 +1536,16 @@ impl GpuContext {
             ))
         })?;
 
-        let device = self.device.as_ref();
+        let device = self.presenter.device();
         let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
             label: Some("crcbl screenshot"),
-            queue: self.queue,
+            queue: self.presenter.queue(),
         });
         let staging = crate::screenshot::record_image_readback(
             device,
             encoder.as_mut(),
             acquired.image,
-            self.config.format,
+            self.presenter.format(),
             extent,
             &layout,
             "crcbl screenshot readback",
@@ -2496,261 +1560,15 @@ impl GpuContext {
         }))
     }
 
-    /// Waits for a submitted `--screenshot` copy to land and writes the PNG.
-    ///
-    /// Blocking, and deliberately: this happens once in a run, on a headless
-    /// run with no display to keep up with, and the alternative is a state
-    /// machine spread across the caller's frames for a file nobody reads until
-    /// the process has exited.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError::Screenshot`] if the copy never landed, if the pixels do not
-    /// describe the frame's extent, or if the file could not be written;
-    /// [`GpuError::Hal`] if the readback itself failed.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn finish_screenshot(&mut self, capture: PendingScreenshot) -> Result<(), GpuError> {
-        let request = self
-            .screenshot
-            .take()
-            .ok_or_else(|| GpuError::Screenshot("the request went away mid-frame".into()))?;
-
-        let device = self.device.as_ref();
-        let readback = device.request_readback(&crcbl_hal::ReadbackDesc {
-            label: Some("crcbl screenshot readback"),
-            buffer: capture.staging,
-            offset: 0,
-            size: capture.layout.byte_count,
-            after: None,
-        })?;
-
-        let mut staged = vec![0u8; capture.layout.staged_capacity];
-        let started = MonotonicTime::new();
-        loop {
-            if matches!(
-                device.poll_readback(readback, &mut staged)?,
-                crcbl_hal::ReadbackState::Ready
-            ) {
-                break;
-            }
-            if started.elapsed() > crate::screenshot::READBACK_DEADLINE {
-                // The in-flight resources are left alone deliberately, exactly
-                // as `OffscreenSetup::draw_and_readback` leaves its own: the
-                // GPU may still be reading them, and `destroy` waits the device
-                // idle before it frees anything.
-                return Err(GpuError::Screenshot(format!(
-                    "the copy had not landed after {:?}",
-                    crate::screenshot::READBACK_DEADLINE
-                )));
-            }
-            std::thread::yield_now();
-        }
-
-        device.destroy_command_buffer(capture.commands);
-        device.destroy_buffer(capture.staging);
-        device.destroy_readback(readback);
-
-        let pixels = crate::screenshot::compact_rows(
-            &staged,
-            capture.layout.staged_pitch,
-            capture.layout.packed_pitch,
-            capture.layout.host_capacity,
-        );
-        let (width, height) = capture.extent;
-        // `from_readback`, never `from_rgba8`: an ordinary desktop surface is
-        // BGRA and the swizzle is what stops a red/blue-swapped PNG that no
-        // structural comparison would notice.
-        let image = crcbl_golden::Image::from_readback(
-            width,
-            height,
-            &pixels,
-            crate::screenshot::channel_order(self.config.format),
-        )
-        .map_err(|error| GpuError::Screenshot(format!("{width}x{height}: {error}")))?;
-        image.save_png(&request.path).map_err(|error| {
-            GpuError::Screenshot(format!(
-                "could not write {}: {error}",
-                request.path.display()
-            ))
-        })?;
-
-        log::info!(
-            "screenshot: wrote {} ({width}x{height}) from frame {}",
-            request.path.display(),
-            request.frame
-        );
-        Ok(())
-    }
-
-    /// Reads what the display is doing with the frame just presented, settles
-    /// [`Pacing::Auto`] against it, and never asks again.
-    ///
-    /// A no-op after the first call, which is the point: see
-    /// [`effective_pacing`](Self::effective_pacing) for why the query is
-    /// one-shot and what that gives up.
-    ///
-    /// # Why here, and why after the present
-    ///
-    /// `VK_EXT_present_timing`'s proposal is explicit that
-    /// `vkGetSwapchainTimingPropertiesEXT` may answer `VK_NOT_READY` until at
-    /// least one image has been presented to the swapchain. So a query at
-    /// acquire time — or anywhere before the first present — is expected to
-    /// report [`Unknown`](DisplayTiming::Unknown), and that is the platform
-    /// working as specified rather than a fault to chase. The present mode, on
-    /// the other hand, is chosen when the swapchain is created, which is before
-    /// any present exists: the answer is not available at the moment it is
-    /// needed, and opening on vsync and rebuilding once is the only order that
-    /// can use it at all.
-    ///
-    /// # Why an error is not a failed frame
-    ///
-    /// A failed *query* degrades to [`Unknown`](DisplayTiming::Unknown) and a
-    /// `debug!` line, and the pacing falls back to vsync exactly as it would
-    /// for a display that stayed quiet. The frame has already been presented by
-    /// the time this runs, so there is nothing left to abandon, and turning a
-    /// diagnostic into a `GpuError` would let it kill a loop that is working.
-    /// A failed *rebuild* is another matter and is reported: the caller asked
-    /// for a pacing the engine then could not deliver, and
-    /// [`apply_present_mode`](Self::apply_present_mode) leaves the old
-    /// swapchain in place for it.
-    ///
-    /// # The log line
-    ///
-    /// One line, once, saying all three of what was asked, what the display
-    /// reported and what is in force — "asked for `Auto`, display said
-    /// `Variable`, running adaptive" and "asked for `Adaptive`" are different
-    /// runs and a line naming only the result cannot tell them apart. It leads
-    /// with `hal: display timing `, which is what
-    /// `crates/crcbl-shell/tests/run-wayland-e2e.sh` greps for to prove the
-    /// engine really asked the driver; keep that prefix first if the line is
-    /// ever reworded.
-    fn settle_pacing(&mut self) -> Result<(), GpuError> {
-        if self.observed_timing.is_some() {
-            return Ok(());
-        }
-        let observed = match self.device.display_timing(self.swapchain) {
-            Ok(timing) => timing,
-            Err(error) => {
-                log::debug!("hal: could not read the display timing: {error}");
-                DisplayTiming::Unknown
-            }
-        };
-        self.observed_timing = Some(observed);
-        let previous = self.effective_pacing;
-        self.effective_pacing = self.pacing.resolve(observed);
-        log::info!(
-            "hal: display timing {observed:?}; asked for {:?}, pacing {:?}",
-            self.pacing,
-            self.effective_pacing
-        );
-        let result = self.apply_present_mode();
-        if result.is_err() {
-            // The same rollback [`set_pacing`](Self::set_pacing) does, and for
-            // the same reason: the swapchain is still the one that was already
-            // configured, so leaving `effective_pacing` on the mode that did
-            // not take would make the accessor describe a swapchain that does
-            // not exist. `observed_timing` is deliberately *not* rolled back —
-            // the display was asked and it answered, and the query is one-shot
-            // whether or not acting on the answer worked.
-            self.effective_pacing = previous;
-        }
-        result
-    }
-
-    /// Puts [`effective_pacing`](Self::effective_pacing)'s present mode on the
-    /// swapchain, rebuilding only if the mode actually changes.
-    ///
-    /// The mode comes from the surface's own list rather than from the pacing
-    /// alone, because a preference the surface does not offer falls back — a
-    /// surface with no `FifoRelaxed` and no `Mailbox` runs
-    /// [`Pacing::Adaptive`] on `Fifo`, and rebuilding a swapchain to the mode
-    /// it already has is the no-op this comparison exists to prevent.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError`] if the surface could not be queried or the swapchain could
-    /// not be rebuilt. On a failed rebuild the old swapchain is still the
-    /// configured one, so `config` is rolled back to describe it rather than
-    /// the mode that did not take.
-    fn apply_present_mode(&mut self) -> Result<(), GpuError> {
-        let caps = self.instance.surface_caps(self.surface, self.adapter)?;
-        let mode = caps.choose_present_mode(self.effective_pacing.preferences());
-        if mode == self.config.present_mode {
-            return Ok(());
-        }
-        log::info!(
-            "hal: pacing {:?} wants {mode:?}, not {:?}; rebuilding the swapchain",
-            self.effective_pacing,
-            self.config.present_mode
-        );
-        let previous = self.config.present_mode;
-        self.config.present_mode = mode;
-        let result = self.reconfigure();
-        if result.is_err() {
-            self.config.present_mode = previous;
-        }
-        result
-    }
-
     /// Waits for and destroys command buffers until at most `keep` are in
-    /// flight.
-    ///
-    /// # An unsatisfied wait stops the retirement
-    ///
-    /// [`Device::wait_semaphores`] returns `Ok(false)` for a wait that was not
-    /// satisfied, and the seam is explicit that this is an outcome rather than
-    /// an error. Destroying the command buffer anyway would free memory the
-    /// device may still be reading — the exact use-after-free the wait exists
-    /// to prevent — so an unsatisfied wait is reported and the buffer is put
-    /// back at the front of the queue, unretired, for a later call to wait on
-    /// again.
-    ///
-    /// `u64::MAX` does not make this unreachable. It means "no timeout" on the
-    /// APIs that have one, but the seam takes `timeout_ns` as a number and
-    /// `crcbl-hal`'s null device answers from the recorded timeline without
-    /// consulting it at all — so a value nothing has signalled comes back
-    /// `Ok(false)` there however long the caller asked to wait.
-    /// `crcbl_render::MeshPool::flush` treats the same answer the same way.
+    /// flight — see [`Presenter::retire_to`].
     ///
     /// # Errors
     ///
     /// [`GpuError`] if waiting failed, and [`GpuError::Unusable`] if a wait
     /// completed without being satisfied.
     pub fn retire_to(&mut self, keep: usize) -> Result<(), GpuError> {
-        while self.in_flight.len() > keep {
-            let (value, command_buffer) = self
-                .in_flight
-                .pop_front()
-                .unwrap_or_else(|| unreachable!("the queue is non-empty above"));
-            match self.timeline {
-                Some(semaphore) => {
-                    let satisfied = {
-                        let _waiting = crcbl_core::trace::span(crate::perf::PRESENT_WAIT_SPAN);
-                        self.device
-                            .wait_semaphores(&[SemaphoreWait { semaphore, value }], u64::MAX)?
-                    };
-                    if !satisfied {
-                        // Back where it came from, still owned and still
-                        // undestroyed: the caller may retry, and a buffer
-                        // dropped here would leak instead of being freed once
-                        // the timeline catches up.
-                        self.in_flight.push_front((value, command_buffer));
-                        return Err(GpuError::Unusable(
-                            "a command buffer's timeline wait finished unsatisfied, so the \
-                             device may still be reading it",
-                        ));
-                    }
-                }
-                // The Tier B fallback. Correct, and coarse enough that the log
-                // line in `open` exists to explain the frame rate.
-                None => {
-                    let _waiting = crcbl_core::trace::span(crate::perf::PRESENT_WAIT_SPAN);
-                    self.device.wait_idle()?;
-                }
-            }
-            self.device.destroy_command_buffer(command_buffer);
-        }
-        Ok(())
+        Ok(self.presenter.retire_to(keep)?)
     }
 
     /// Resizes the swapchain to `extent`.
@@ -2760,35 +1578,7 @@ impl GpuContext {
     /// [`GpuError`] if the reconfigure failed. A zero extent is *not* an error
     /// — a minimized window reports one, and the swapchain is left alone.
     pub fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
-        if extent == self.config.extent {
-            return Ok(());
-        }
-        if extent.0 == 0 || extent.1 == 0 {
-            log::debug!("hal: window has an empty extent {extent:?}; keeping the swapchain");
-            return Ok(());
-        }
-        self.config.extent = extent;
-        self.reconfigure()
-    }
-
-    fn reconfigure(&mut self) -> Result<(), GpuError> {
-        log::debug!(
-            "hal: reconfiguring the swapchain to {}x{}",
-            self.config.extent.0,
-            self.config.extent.1
-        );
-        // Reconfigure, never destroy-and-recreate: the handle stays valid
-        // across a resize storm, which is what the seam promises callers.
-        self.device
-            .reconfigure_swapchain(self.swapchain, &self.config.desc(self.surface))?;
-        // `observed_timing` is deliberately *not* cleared. A rebuilt swapchain
-        // has had nothing presented to it and would answer `Unknown` again, so
-        // clearing the latch would re-run the whole resolution on every resize
-        // — and on a driver that never says anything but `Unknown`, that is the
-        // per-frame query this design exists to avoid. Detection happens once
-        // per context; a window dragged to a VRR monitor keeps the pacing it
-        // started with until the game asks for another with `set_pacing`.
-        Ok(())
+        Ok(self.presenter.resize(extent)?)
     }
 
     /// Waits for the device to go idle and retires everything still in flight.
@@ -2800,8 +1590,7 @@ impl GpuContext {
     ///
     /// [`GpuError`] if waiting failed.
     pub fn drain(&mut self) -> Result<(), GpuError> {
-        self.device.wait_idle()?;
-        self.retire_to(0)
+        Ok(self.presenter.drain()?)
     }
 
     /// Tears the swapchain and the surface down, in the order the seam
@@ -2812,29 +1601,102 @@ impl GpuContext {
     ///
     /// [`GpuError`] if a final wait failed, or if the device had an
     /// out-of-band error left to report.
-    pub fn destroy(mut self) -> Result<(), GpuError> {
-        self.drain()?;
-        if let Some(semaphore) = self.timeline.take() {
-            self.device.destroy_semaphore(semaphore);
-        }
-        // Swapchain before surface, surface before the window the caller owns;
-        // the device is allowed to outlive its instance, so their drop order is
-        // the one the struct declares.
-        self.device.destroy_swapchain(self.swapchain);
-        self.instance.destroy_surface(self.surface);
-
-        // **The last chance anything has to read the out-of-band channel.**
-        // `acquire` drains it at the top of every frame, which leaves the whole
-        // of teardown uncovered: the final submit's errors do not arrive until
-        // it has completed, and there is no frame after that to hear them. A
-        // run that violated the specification on its way out used to exit 0.
-        // After the destroys above rather than before, so the teardown calls
-        // themselves are inside what this reports.
-        if let Some(message) = self.device.take_error() {
-            return Err(GpuError::Hal(HalError::Backend(message)));
-        }
-        Ok(())
+    pub fn destroy(self) -> Result<(), GpuError> {
+        Ok(self.presenter.destroy()?)
     }
+}
+
+/// Waits for a submitted `--screenshot` copy to land and writes the PNG.
+///
+/// [`GpuContext::submit_and_present`] runs it after the present, on the device
+/// the presenter hands back; `request` is the context's armed request, which
+/// this spends.
+///
+/// Blocking, and deliberately: this happens once in a run, on a headless
+/// run with no display to keep up with, and the alternative is a state
+/// machine spread across the caller's frames for a file nobody reads until
+/// the process has exited.
+///
+/// # Errors
+///
+/// [`GpuError::Screenshot`] if the copy never landed, if the pixels do not
+/// describe the frame's extent, or if the file could not be written;
+/// [`GpuError::Hal`] if the readback itself failed.
+#[cfg(not(target_arch = "wasm32"))]
+fn finish_screenshot(
+    device: &dyn Device,
+    format: Format,
+    request: &mut Option<ScreenshotRequest>,
+    capture: PendingScreenshot,
+) -> Result<(), GpuError> {
+    let request = request
+        .take()
+        .ok_or_else(|| GpuError::Screenshot("the request went away mid-frame".into()))?;
+
+    let readback = device.request_readback(&crcbl_hal::ReadbackDesc {
+        label: Some("crcbl screenshot readback"),
+        buffer: capture.staging,
+        offset: 0,
+        size: capture.layout.byte_count,
+        after: None,
+    })?;
+
+    let mut staged = vec![0u8; capture.layout.staged_capacity];
+    let started = MonotonicTime::new();
+    loop {
+        if matches!(
+            device.poll_readback(readback, &mut staged)?,
+            crcbl_hal::ReadbackState::Ready
+        ) {
+            break;
+        }
+        if started.elapsed() > crate::screenshot::READBACK_DEADLINE {
+            // The in-flight resources are left alone deliberately, exactly
+            // as `OffscreenSetup::draw_and_readback` leaves its own: the
+            // GPU may still be reading them, and `destroy` waits the device
+            // idle before it frees anything.
+            return Err(GpuError::Screenshot(format!(
+                "the copy had not landed after {:?}",
+                crate::screenshot::READBACK_DEADLINE
+            )));
+        }
+        std::thread::yield_now();
+    }
+
+    device.destroy_command_buffer(capture.commands);
+    device.destroy_buffer(capture.staging);
+    device.destroy_readback(readback);
+
+    let pixels = crate::screenshot::compact_rows(
+        &staged,
+        capture.layout.staged_pitch,
+        capture.layout.packed_pitch,
+        capture.layout.host_capacity,
+    );
+    let (width, height) = capture.extent;
+    // `from_readback`, never `from_rgba8`: an ordinary desktop surface is
+    // BGRA and the swizzle is what stops a red/blue-swapped PNG that no
+    // structural comparison would notice.
+    let image = crcbl_golden::Image::from_readback(
+        width,
+        height,
+        &pixels,
+        crate::screenshot::channel_order(format),
+    )
+    .map_err(|error| GpuError::Screenshot(format!("{width}x{height}: {error}")))?;
+    image.save_png(&request.path).map_err(|error| {
+        GpuError::Screenshot(format!(
+            "could not write {}: {error}",
+            request.path.display()
+        ))
+    })?;
+
+    log::info!(
+        "screenshot: wrote {} ({width}x{height}) from frame {}",
+        request.path.display(),
+        request.frame
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -8873,6 +7735,7 @@ impl<S: Shell + ?Sized, G: HostedGame> GameLoop for Loop<S, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl_hal::PresentMode;
 
     // The confirm flow's checks, on the same fixture.
     mod confirm_flow;
@@ -8881,9 +7744,6 @@ mod tests {
     mod input_trace;
 
     mod ui_scale;
-
-    // The backend walk past a backend that refuses the window.
-    mod backend_walk;
 
     // The Steam limb's checks, which run on this module's fixture.
 
@@ -11765,149 +10625,6 @@ mod tests {
         }
     }
 
-    /// One 60 Hz cycle, for the observations below. The figures are arbitrary —
-    /// the resolution reads the arm, never the duration — but a plausible one
-    /// keeps the failure messages readable.
-    const OBSERVED_CYCLE: Duration = Duration::from_nanos(16_666_666);
-
-    /// The quantum a [`DisplayTiming::Stepped`] panel moves in — half the cycle
-    /// above, so the pair is the shape the seam's mapping actually produces: a
-    /// cycle that is a whole multiple of its step, and not equal to it, which
-    /// would have been reported as [`DisplayTiming::Fixed`] instead.
-    const OBSERVED_STEP: Duration = Duration::from_nanos(8_333_333);
-
-    /// Every [`DisplayTiming`] arm, for the exhaustive sweeps below.
-    ///
-    /// Written out rather than derived, so that a fifth arm on the enum is a
-    /// compile-time decision here and not a case these tests quietly stop
-    /// covering.
-    const OBSERVATIONS: [DisplayTiming; 4] = [
-        DisplayTiming::Unknown,
-        DisplayTiming::Fixed {
-            cycle: OBSERVED_CYCLE,
-        },
-        DisplayTiming::Variable {
-            shortest: OBSERVED_CYCLE,
-        },
-        DisplayTiming::Stepped {
-            cycle: OBSERVED_CYCLE,
-            step: OBSERVED_STEP,
-        },
-    ];
-
-    /// Every (requested, observed) pair the resolution can be handed.
-    ///
-    /// **This test is the only place three of the four `DisplayTiming` arms
-    /// execute anywhere in this repo.** Every driver reachable from here
-    /// reports `Unknown`, so `Fixed`, `Variable` and `Stepped` reach the
-    /// resolution here and nowhere else, on any machine — which is why the
-    /// policy is a method with no device in its signature.
-    #[test]
-    fn auto_is_the_only_pacing_the_display_can_change() {
-        for observed in OBSERVATIONS {
-            for requested in [Pacing::Vsync, Pacing::Adaptive, Pacing::Off] {
-                assert_eq!(
-                    requested.resolve(observed),
-                    requested,
-                    "{requested:?} was asked for by name; {observed:?} must not overrule it"
-                );
-            }
-            assert_ne!(
-                Pacing::Auto.resolve(observed),
-                Pacing::Auto,
-                "{observed:?} left Auto unresolved, so the loop would be pacing on a request"
-            );
-        }
-
-        // The policy itself, arm by arm, so a change to it has to be written
-        // down here as well as in `resolve`.
-        assert_eq!(
-            Pacing::Auto.resolve(DisplayTiming::Unknown),
-            Pacing::Vsync,
-            "a display that would not say is the fallback case"
-        );
-        assert_eq!(
-            Pacing::Auto.resolve(DisplayTiming::Fixed {
-                cycle: OBSERVED_CYCLE
-            }),
-            Pacing::Vsync,
-            "a fixed cycle is exactly what vsync is for"
-        );
-        assert_eq!(
-            Pacing::Auto.resolve(DisplayTiming::Variable {
-                shortest: OBSERVED_CYCLE
-            }),
-            Pacing::Adaptive,
-            "a free-running display is the case adaptive sync exists for"
-        );
-        assert_eq!(
-            Pacing::Auto.resolve(DisplayTiming::Stepped {
-                cycle: OBSERVED_CYCLE,
-                step: OBSERVED_STEP
-            }),
-            Pacing::Adaptive,
-            "a quantised cycle is not a fixed one, so a fixed-vblank wait is wrong there too"
-        );
-    }
-
-    /// Which of those resolutions costs a swapchain rebuild, decided from the
-    /// surface's own mode list — no device, no display, just the data a
-    /// `SurfaceCaps` carries.
-    ///
-    /// The pairing is the whole point: `Auto` resolving to `Vsync` must leave
-    /// the swapchain alone, because that is the case every machine in CI takes
-    /// and a rebuild there would be a start-up cost paid by every run for
-    /// nothing.
-    #[test]
-    fn only_a_display_that_is_not_fixed_costs_a_rebuild() {
-        use crcbl_hal::{CompositeAlpha, SurfaceCaps};
-
-        let caps = |present_modes: Vec<PresentMode>| SurfaceCaps {
-            formats: vec![Format::Bgra8UnormSrgb],
-            present_modes,
-            composite_alpha: vec![CompositeAlpha::Opaque],
-            min_image_count: 2,
-            max_image_count: 3,
-            current_extent: None,
-        };
-        let vrr_capable = caps(vec![PresentMode::Fifo, PresentMode::FifoRelaxed]);
-        let fifo_only = caps(vec![PresentMode::Fifo]);
-
-        // What a context opened on `Auto` is presenting with when the
-        // resolution runs: `Auto`'s preference list, resolved once by the
-        // surface. Read from the same call the engine uses rather than written
-        // down, so the two cannot drift.
-        let opened = vrr_capable.choose_present_mode(Pacing::Auto.preferences());
-        assert_eq!(opened, PresentMode::Fifo);
-
-        for observed in OBSERVATIONS {
-            let effective = Pacing::Auto.resolve(observed);
-            let wanted = vrr_capable.choose_present_mode(effective.preferences());
-            let rebuilds = wanted != opened;
-            assert_eq!(
-                rebuilds,
-                matches!(
-                    observed,
-                    DisplayTiming::Variable { .. } | DisplayTiming::Stepped { .. }
-                ),
-                "{observed:?} resolved to {effective:?} and wanted {wanted:?}, \
-                 which is the wrong side of a swapchain rebuild"
-            );
-        }
-
-        // The same resolution on a surface that has nothing to rebuild *to*.
-        // `choose_present_mode` falls back to Fifo, so the mode does not change
-        // and no swapchain is spent finding that out.
-        for observed in OBSERVATIONS {
-            let effective = Pacing::Auto.resolve(observed);
-            assert_eq!(
-                fifo_only.choose_present_mode(effective.preferences()),
-                fifo_only.choose_present_mode(Pacing::Auto.preferences()),
-                "{observed:?} rebuilt a Fifo-only surface to the mode it already had"
-            );
-        }
-    }
-
     #[test]
     fn a_headless_clock_advances_by_exactly_one_frame_step() {
         let mut clock = Clock::new(true);
@@ -12074,946 +10791,6 @@ mod tests {
             .expect("teardown is in the seam's stated order");
     }
 
-    /// The start of topic 39's downgrade line, exactly as
-    /// [`PendingGpuContext::poll`] writes it.
-    const DOWNGRADE_LINE: &str = "hal: this device does not have";
-
-    /// Opens a context on a null instance the caller picked, which the registry
-    /// cannot do: `crcbl::backend`'s null entry is always the `gpu_driven`
-    /// preset, and a downgrade needs a device that grants less than that.
-    ///
-    /// The shell comes back with the context because it owns the window the
-    /// surface was made for, and `create_surface`'s contract has that window
-    /// outliving the surface.
-    fn open_null_context(
-        instance: crcbl_hal::null::NullInstance,
-        optional_features: Features,
-        pacing: Pacing,
-    ) -> (crcbl_shell::HeadlessShell, GpuContext) {
-        let (shell, window) = shell();
-        let extent = (320, 240);
-        let target = shell
-            .surface_target(window)
-            .expect("the headless window is still alive");
-        let mut pending = PendingGpuContext {
-            stage: OpenStage::Done,
-            target,
-            extent,
-            label: "downgrade test".to_string(),
-            required_features: Features::empty(),
-            optional_features,
-            pacing,
-            video: VideoSettings::unrestricted(),
-            adapter_pin: None,
-        };
-        pending.stage = GpuContext::start_device(Box::new(instance), &pending)
-            .expect("the null backend opens everywhere");
-        let gpu = loop {
-            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
-                break context;
-            }
-        };
-        (shell, gpu)
-    }
-
-    /// **The downgrade line is an assertion target, not decoration.**
-    ///
-    /// Topic 39 makes it the engine's only evidence that a
-    /// device refused an optional feature. Nothing but this test reads it, so
-    /// without it a refactor could delete the `log::info!` in
-    /// [`PendingGpuContext::poll`] and leave the suite green.
-    #[test]
-    fn a_device_that_grants_less_says_so() {
-        use crcbl_hal::null::NullInstance;
-
-        let logs = crcbl_core::log::capture();
-        let (_shell, mut gpu) = open_null_context(
-            // The WebGPU-shaped floor, asked for the set every game gets by
-            // default: it has neither bindless nor a GPU-side draw count.
-            NullInstance::portable(),
-            GpuContextDesc::default().optional_features,
-            Pacing::Off,
-        );
-
-        let records = logs.records();
-        let said: Vec<_> = records
-            .iter()
-            .filter(|record| record.message.starts_with(DOWNGRADE_LINE))
-            .collect();
-        assert_eq!(said.len(), 1, "once, at device creation: {records:?}");
-        assert_eq!(said[0].level, log::Level::Info);
-        assert!(
-            said[0].message.contains("DESCRIPTOR_INDEXING -> binding"),
-            "the line names the feature and the selector its absence moved: {}",
-            said[0].message
-        );
-
-        gpu.drain().expect("nothing was submitted");
-        gpu.destroy()
-            .expect("teardown is in the seam's stated order");
-    }
-
-    /// The silence is the other half of the claim and the easier half to lose: a
-    /// line logged unconditionally reads as "downgraded to nothing" on every
-    /// device that granted the lot, which is most of them.
-    #[test]
-    fn a_device_that_grants_everything_says_nothing() {
-        use crcbl_hal::null::NullInstance;
-
-        let logs = crcbl_core::log::capture();
-        let (_shell, mut gpu) = open_null_context(
-            NullInstance::gpu_driven(),
-            // Every flag here is in that preset's caps. The engine's own default
-            // set is deliberately not used: it also asks for `PRESENT_FEEDBACK`
-            // and `PRESENT_TIMING`, which this preset does not have, and their
-            // absence is a real downgrade.
-            Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
-            Pacing::Off,
-        );
-
-        let records = logs.records();
-        assert!(
-            records
-                .iter()
-                .any(|record| record.message.contains("null adapter")),
-            "the capture is live — this is the adapter line every open logs, and \
-             without it the assertion below would pass on an empty buffer: {records:?}"
-        );
-        assert!(
-            !records
-                .iter()
-                .any(|record| record.message.starts_with(DOWNGRADE_LINE)),
-            "nothing was lost, so nothing is said: {records:?}"
-        );
-
-        gpu.drain().expect("nothing was submitted");
-        gpu.destroy()
-            .expect("teardown is in the seam's stated order");
-    }
-
-    /// The debug line `start_device` writes for each adapter it passes over.
-    const REFUSED_LINE: &str = "hal: adapter ";
-
-    /// A start-up request for a headless window, with `adapter_pin` standing
-    /// in for [`crate::adapter::pin`] so no test touches the process
-    /// environment.
-    ///
-    /// The shell comes back with it because the request's surface target names
-    /// that shell's window.
-    fn adapter_walk_request(
-        adapter_pin: Option<&str>,
-    ) -> (crcbl_shell::HeadlessShell, PendingGpuContext) {
-        let (shell, window) = shell();
-        let target = shell
-            .surface_target(window)
-            .expect("the headless window is still alive");
-        let pending = PendingGpuContext {
-            stage: OpenStage::Done,
-            target,
-            extent: (320, 240),
-            label: "adapter walk test".to_string(),
-            required_features: Features::empty(),
-            optional_features: Features::empty(),
-            pacing: Pacing::Off,
-            video: VideoSettings::unrestricted(),
-            adapter_pin: adapter_pin.map(str::to_owned),
-        };
-        (shell, pending)
-    }
-
-    /// Runs [`GpuContext::start_device`] against `instance` with `adapter_pin`
-    /// set, and hands back whatever it refused with.
-    ///
-    /// The shell is dropped on the way out, which is only safe because nothing
-    /// survived the call: a failed start-up destroys the surface it made before
-    /// returning, so no object outlives the window it was made for.
-    fn start_device_error(
-        instance: crcbl_hal::null::NullInstance,
-        adapter_pin: Option<&str>,
-    ) -> GpuError {
-        let (_shell, pending) = adapter_walk_request(adapter_pin);
-        match GpuContext::start_device(Box::new(instance), &pending) {
-            Ok(_) => panic!("nothing could serve this surface, so start-up must not have"),
-            Err(error) => error.into(),
-        }
-    }
-
-    /// **The adapter walk passes over one that cannot present and opens the
-    /// device on a later one.**
-    ///
-    /// The case `crates/crcbl/tests/windowed_e2e.rs` says the loop exists for: a
-    /// discrete RADV GPU enumerates first under Xvfb and cannot present to the
-    /// window at all, while the software rasteriser behind it can. Until
-    /// [`Recorder::refuse_surface_on`] and
-    /// [`NullInstance::with_adapters`](crcbl_hal::null::NullInstance::with_adapters)
-    /// existed, the null backend reported one adapter that never refused, so
-    /// `break`ing out of this loop on the first `Err` would have left the whole
-    /// suite green.
-    ///
-    /// **The observable is `GpuContext::adapter`** — the id `request_device` was
-    /// actually called with — not that start-up succeeded. A `break` on the
-    /// first refusal fails start-up outright, but a walk that took the *first*
-    /// adapter's caps and the *second* adapter's id, or the reverse, would
-    /// succeed here and be wrong on the machine this is modelling. The adapter
-    /// line the engine logs is asserted beside it, because it is the only
-    /// record a run leaves of which adapter it took.
-    #[test]
-    fn the_adapter_walk_passes_over_one_that_cannot_present() {
-        use crcbl_hal::AdapterId;
-        use crcbl_hal::null::{NullInstance, Recorder};
-
-        let logs = crcbl_core::log::capture();
-        let recorder = Recorder::new();
-        recorder.refuse_surface_on(AdapterId(0));
-        let (_shell, mut gpu) = open_null_context(
-            NullInstance::gpu_driven()
-                .with_adapters(2)
-                .with_recorder(recorder),
-            Features::empty(),
-            Pacing::Off,
-        );
-        assert_eq!(
-            gpu.adapter,
-            AdapterId(1),
-            "the device was requested from the adapter that served the surface"
-        );
-
-        let records = logs.records();
-        let chosen: Vec<_> = records
-            .iter()
-            .filter(|record| record.message.contains(", geometry "))
-            .collect();
-        assert_eq!(
-            chosen.len(),
-            1,
-            "one adapter is taken, and named once: {records:?}"
-        );
-        assert!(
-            chosen[0].message.contains("null adapter #1"),
-            "the line names the adapter that served, not the one that refused: {}",
-            chosen[0].message
-        );
-        let passed_over: Vec<_> = records
-            .iter()
-            .filter(|record| record.message.starts_with(REFUSED_LINE))
-            .collect();
-        assert_eq!(
-            passed_over.len(),
-            1,
-            "the refusal is not silent — it is the only record of why the first \
-             adapter was not used: {records:?}"
-        );
-        assert!(
-            passed_over[0].message.contains("null adapter #0"),
-            "{}",
-            passed_over[0].message
-        );
-
-        gpu.drain().expect("nothing was submitted");
-        gpu.destroy()
-            .expect("teardown is in the seam's stated order");
-    }
-
-    /// **An exhausted walk and an empty adapter list fail differently**, and
-    /// each says which happened.
-    ///
-    /// Two failures, two errors, and the distinction is the whole point:
-    /// "every adapter here refused this window" is a pairing problem a user can
-    /// act on — a second GPU, a display not wired to the card — while "no
-    /// adapter" is a machine with no GPU at all. An assertion that only checked
-    /// `is_err` would pass with the two collapsed into one message, and the
-    /// run's only diagnostic would then name the wrong cause half the time.
-    ///
-    /// The refusal arm also carries the *adapter's own* error out rather than
-    /// replacing it with a sentence of the engine's, which is what makes a real
-    /// backend's reason — `crcbl-vk`'s "no queue family on this adapter can
-    /// present to this surface" — reach the log at all.
-    #[test]
-    fn an_exhausted_adapter_walk_and_an_empty_one_fail_differently() {
-        use crcbl_hal::null::{NullInstance, ObjectKind, Recorder};
-        use crcbl_hal::{AdapterId, BackendKind};
-
-        let logs = crcbl_core::log::capture();
-        let recorder = Recorder::new();
-        recorder.refuse_surface_on(AdapterId(0));
-        recorder.refuse_surface_on(AdapterId(1));
-        let exhausted = start_device_error(
-            NullInstance::gpu_driven()
-                .with_adapters(2)
-                .with_recorder(recorder.clone()),
-            None,
-        );
-        assert!(
-            matches!(
-                exhausted,
-                GpuError::Hal(HalError::Unsupported {
-                    backend: BackendKind::Null,
-                    ..
-                })
-            ),
-            "the adapter's own refusal is what comes out: {exhausted}"
-        );
-        assert_eq!(
-            logs.records()
-                .iter()
-                .filter(|record| record.message.starts_with(REFUSED_LINE))
-                .count(),
-            2,
-            "both adapters were asked; the walk ran out rather than stopping at the first"
-        );
-        assert_eq!(
-            recorder.live_objects(ObjectKind::Surface),
-            0,
-            "the surface start-up made is destroyed on the way out, or every failed \
-             open leaks one"
-        );
-
-        let empty = start_device_error(NullInstance::gpu_driven().with_adapters(0), None);
-        assert!(
-            matches!(empty, GpuError::Unusable("no adapter")),
-            "a machine with no GPU is not a window nothing can present to: {empty}"
-        );
-        assert_ne!(
-            exhausted.to_string(),
-            empty.to_string(),
-            "the two causes must be readable apart in a log, not only in a `match`"
-        );
-    }
-
-    /// One enumerated adapter of class `device_type` at position `index`.
-    ///
-    /// Built by hand because every null adapter is [`DeviceType::Cpu`]
-    /// (see [`NullInstance::with_adapters`](crcbl_hal::null::NullInstance::with_adapters)),
-    /// and a pin is only a choice on an enumeration with more than one class
-    /// in it.
-    fn fake_adapter(index: u32, device_type: crcbl_hal::DeviceType) -> crcbl_hal::AdapterInfo {
-        crcbl_hal::AdapterInfo {
-            id: crcbl_hal::AdapterId(index),
-            name: format!("{device_type:?} #{index}"),
-            vendor_id: 0x1002,
-            device_id: 0x744c,
-            device_type,
-            driver: "test".to_owned(),
-            backend: crcbl_hal::BackendKind::Null,
-            caps: crcbl_hal::DeviceCaps {
-                features: Features::empty(),
-                limits: crcbl_hal::Limits::minimum(),
-            },
-        }
-    }
-
-    /// **A pin narrows the walk to the adapter it names; no pin keeps the
-    /// enumeration's order.**
-    ///
-    /// The shape is the one `CRCBL_ADAPTER=cpu` met on the D3D12 desktop: the
-    /// GPU enumerates first and WARP is appended last, so a walk that ignored
-    /// the pin opened the GPU and said nothing about it. The unpinned half is
-    /// the other promise — every adapter, in the order the backend gave, because
-    /// that is what lets the surface-aware walk step past a GPU that cannot
-    /// present.
-    #[test]
-    fn a_pin_narrows_the_adapter_walk_to_the_class_it_names() {
-        use crcbl_hal::{AdapterId, DeviceType};
-
-        let adapters = [
-            fake_adapter(0, DeviceType::Discrete),
-            fake_adapter(1, DeviceType::Integrated),
-            fake_adapter(2, DeviceType::Cpu),
-        ];
-        let ids = |pin| {
-            adapter_candidates(pin, &adapters)
-                .map(|walk| walk.iter().map(|info| info.id).collect::<Vec<_>>())
-        };
-
-        assert_eq!(ids(Some("cpu")), Ok(vec![AdapterId(2)]));
-        assert_eq!(ids(Some("integrated")), Ok(vec![AdapterId(1)]));
-        assert_eq!(ids(Some("discrete")), Ok(vec![AdapterId(0)]));
-        assert_eq!(
-            ids(None),
-            Ok(vec![AdapterId(0), AdapterId(1), AdapterId(2)]),
-            "unpinned, the walk is today's: every adapter, first enumerated first"
-        );
-        let miss = ids(Some("virtual")).expect_err("there is no virtual adapter to name");
-        assert!(miss.to_string().contains("no Virtual adapter"), "{miss}");
-    }
-
-    /// **A pinned open takes the adapter and says it was pinned; an unpinned
-    /// one says it walked.**
-    ///
-    /// The adapter line is the only record a windowed run leaves of which
-    /// device drew it, and "which adapter" without "why that one" cannot tell a
-    /// pin that worked from a pin that was never read — the defect this line
-    /// exists to show.
-    #[test]
-    fn the_adapter_line_says_whether_the_adapter_was_pinned() {
-        use crcbl_hal::null::NullInstance;
-
-        for (pin, why) in [
-            (Some("cpu"), "pinned by CRCBL_ADAPTER=cpu"),
-            (None, "CRCBL_ADAPTER unset"),
-        ] {
-            let logs = crcbl_core::log::capture();
-            let (_shell, mut pending) = adapter_walk_request(pin);
-            pending.stage =
-                GpuContext::start_device(Box::new(NullInstance::gpu_driven()), &pending)
-                    .unwrap_or_else(|error| panic!("{pin:?}: the null adapter is a Cpu: {error}"));
-            let mut gpu = loop {
-                if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
-                    break context;
-                }
-            };
-
-            let records = logs.records();
-            let chosen: Vec<_> = records
-                .iter()
-                .filter(|record| record.message.contains(", geometry "))
-                .collect();
-            assert_eq!(chosen.len(), 1, "{pin:?}: {records:?}");
-            assert!(
-                chosen[0].message.contains(why),
-                "{pin:?}: the line says why this adapter: {}",
-                chosen[0].message
-            );
-
-            gpu.drain().expect("nothing was submitted");
-            gpu.destroy()
-                .expect("teardown is in the seam's stated order");
-        }
-    }
-
-    /// **A pinned adapter that cannot present is refused, naming the pin,
-    /// rather than walked past.**
-    ///
-    /// Unpinned, the same refusal is the adapter's own `HalError` and the walk
-    /// would have gone on to the next adapter (see
-    /// `the_adapter_walk_passes_over_one_that_cannot_present`). Pinned, going
-    /// on would open an adapter nobody named, so the error has to say which
-    /// pin chose the adapter that could not present — otherwise a run with
-    /// `CRCBL_ADAPTER` set reads as a broken window rather than a wrong pin.
-    #[test]
-    fn a_pinned_adapter_that_cannot_present_is_refused_naming_the_pin() {
-        use crcbl_hal::AdapterId;
-        use crcbl_hal::null::{NullInstance, ObjectKind, Recorder};
-
-        let recorder = Recorder::new();
-        recorder.refuse_surface_on(AdapterId(0));
-        let unpinned = start_device_error(
-            NullInstance::gpu_driven().with_recorder(recorder.clone()),
-            None,
-        );
-        let refused = start_device_error(
-            NullInstance::gpu_driven().with_recorder(recorder.clone()),
-            Some("cpu"),
-        );
-        let GpuError::AdapterPin(why) = &refused else {
-            panic!("the pin is what failed, not the backend: {refused}");
-        };
-        let why = why.to_string();
-        assert!(why.contains("CRCBL_ADAPTER=cpu"), "{why}");
-        assert!(why.contains("cannot present"), "{why}");
-        // The adapter's own reason rides along: it is the only thing that says
-        // *why* this adapter and this window do not pair.
-        assert!(
-            matches!(unpinned, GpuError::Hal(_)),
-            "unpinned, the adapter's refusal is the error: {unpinned}"
-        );
-        assert!(why.contains(&unpinned.to_string()), "{why}\n{unpinned}");
-        assert_eq!(
-            recorder.live_objects(ObjectKind::Surface),
-            0,
-            "the surface is destroyed on the way out"
-        );
-    }
-
-    /// **A pin that names no adapter here refuses before a surface exists.**
-    ///
-    /// The null backend enumerates only [`crcbl_hal::DeviceType::Cpu`]
-    /// adapters, so `discrete` names nothing — the `CRCBL_ADAPTER=cpu` on a
-    /// runner with no WARP case, turned around. Refusing is
-    /// [`crate::adapter::select`]'s decision; this is that the engine asks it.
-    #[test]
-    fn a_pin_that_names_no_adapter_here_refuses_the_open() {
-        use crcbl_hal::null::NullInstance;
-
-        let refused = start_device_error(NullInstance::gpu_driven(), Some("discrete"));
-        let GpuError::AdapterPin(why) = &refused else {
-            panic!("a pin that names nothing must not open anything: {refused}");
-        };
-        assert!(why.to_string().contains("no Discrete adapter"), "{refused}");
-    }
-
-    /// A [`crcbl_hal::null::NullInstance`] whose adapters report `classes`,
-    /// one each, in enumeration order.
-    ///
-    /// The null backend calls every adapter a [`crcbl_hal::DeviceType::Cpu`],
-    /// and it is right to: it has one set of capabilities. A pin is only a
-    /// choice on an enumeration that mixes classes, so this relabels the
-    /// enumeration and forwards everything else untouched.
-    #[derive(Debug)]
-    struct ClassedInstance {
-        inner: crcbl_hal::null::NullInstance,
-        classes: Vec<crcbl_hal::DeviceType>,
-    }
-
-    impl Instance for ClassedInstance {
-        fn backend(&self) -> crcbl_hal::BackendKind {
-            self.inner.backend()
-        }
-
-        fn adapters(&self) -> Vec<crcbl_hal::AdapterInfo> {
-            self.inner
-                .adapters()
-                .into_iter()
-                .zip(&self.classes)
-                .map(|(info, &device_type)| crcbl_hal::AdapterInfo {
-                    device_type,
-                    ..info
-                })
-                .collect()
-        }
-
-        unsafe fn create_surface(
-            &self,
-            target: &crcbl_hal::SurfaceTarget,
-        ) -> Result<SurfaceHandle, HalError> {
-            // SAFETY: forwarded unchanged, so the caller's obligation for
-            // `target` is the inner instance's.
-            unsafe { self.inner.create_surface(target) }
-        }
-
-        fn destroy_surface(&self, surface: SurfaceHandle) {
-            self.inner.destroy_surface(surface);
-        }
-
-        fn surface_caps(
-            &self,
-            surface: SurfaceHandle,
-            adapter: crcbl_hal::AdapterId,
-        ) -> Result<crcbl_hal::SurfaceCaps, HalError> {
-            self.inner.surface_caps(surface, adapter)
-        }
-
-        fn request_device(
-            &self,
-            desc: &DeviceDesc<'_>,
-        ) -> Result<Box<dyn crcbl_hal::PendingDevice>, HalError> {
-            self.inner.request_device(desc)
-        }
-    }
-
-    /// **The context opens on the adapter the pin names, and on the first one
-    /// without a pin.**
-    ///
-    /// The enumeration is D3D12's on this desktop: a GPU first, the software
-    /// rasteriser after it. Before the engine asked [`crate::adapter::select`],
-    /// `CRCBL_ADAPTER=cpu` opened the GPU here and the harness printed the
-    /// mismatch. The adapter is read back from the finished context rather
-    /// than from the walk, because the device is what the pin is about.
-    #[test]
-    fn the_context_opens_on_the_adapter_the_pin_names() {
-        use crcbl_hal::null::NullInstance;
-        use crcbl_hal::{AdapterId, DeviceType};
-
-        for (pin, want) in [
-            (Some("cpu"), (AdapterId(1), DeviceType::Cpu)),
-            (None, (AdapterId(0), DeviceType::Discrete)),
-        ] {
-            let (_shell, mut pending) = adapter_walk_request(pin);
-            let instance = ClassedInstance {
-                inner: NullInstance::gpu_driven().with_adapters(2),
-                classes: vec![DeviceType::Discrete, DeviceType::Cpu],
-            };
-            pending.stage = GpuContext::start_device(Box::new(instance), &pending)
-                .unwrap_or_else(|error| panic!("{pin:?}: both adapters can present: {error}"));
-            let mut gpu = loop {
-                if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
-                    break context;
-                }
-            };
-
-            let opened = gpu
-                .adapter()
-                .expect("the context's own adapter is enumerable");
-            assert_eq!(
-                (opened.id, opened.device_type),
-                want,
-                "{pin:?}: the context opened {:?}",
-                opened.name
-            );
-
-            gpu.drain().expect("nothing was submitted");
-            gpu.destroy()
-                .expect("teardown is in the seam's stated order");
-        }
-    }
-
-    /// **The composite alpha a context asks for, over every set of modes a
-    /// surface could offer.**
-    ///
-    /// Red when a transparent window falls back to anything (opaque, straight
-    /// alpha, inherit) instead of being refused, when an opaque window starts
-    /// taking premultiplied because it is offered, or when an opaque window
-    /// is refused for a surface that offers no premultiplied alpha.
-    #[test]
-    fn a_transparent_window_asks_for_premultiplied_or_nothing() {
-        const MODES: [CompositeAlpha; 4] = [
-            CompositeAlpha::Opaque,
-            CompositeAlpha::PreMultiplied,
-            CompositeAlpha::PostMultiplied,
-            CompositeAlpha::Inherit,
-        ];
-        let mut checked = 0;
-        for subset in 0..1_u32 << MODES.len() {
-            let offered: Vec<_> = MODES
-                .iter()
-                .enumerate()
-                .filter(|(bit, _)| subset & (1 << bit) != 0)
-                .map(|(_, &mode)| mode)
-                .collect();
-            assert_eq!(
-                composite_alpha_for(false, &offered),
-                Some(CompositeAlpha::Opaque),
-                "an opaque window is opaque whatever is offered: {offered:?}"
-            );
-            let premultiplied = offered.contains(&CompositeAlpha::PreMultiplied);
-            assert_eq!(
-                composite_alpha_for(true, &offered),
-                premultiplied.then_some(CompositeAlpha::PreMultiplied),
-                "a transparent window is premultiplied or refused: {offered:?}"
-            );
-            checked += 1;
-        }
-        assert_eq!(checked, 1 << MODES.len(), "every subset was checked");
-    }
-
-    /// `inner`, with its surface offering, on adapter `n`, the composite-alpha
-    /// modes `offers[n]`.
-    ///
-    /// The null backend offers [`CompositeAlpha::Opaque`] alone, as a surface
-    /// with no compositor behind it should; a transparent window needs a
-    /// surface that offers more. The offer goes through the backend's own
-    /// recorder, so its swapchains are held to the same list its caps report.
-    fn alpha_instance(
-        inner: crcbl_hal::null::NullInstance,
-        offers: &[Vec<CompositeAlpha>],
-    ) -> crcbl_hal::null::NullInstance {
-        let recorder = inner.recorder();
-        for (adapter, modes) in (0..).zip(offers) {
-            recorder.offer_composite_alpha_on(crcbl_hal::AdapterId(adapter), modes);
-        }
-        inner
-    }
-
-    /// A Wayland target for a window that was or was not made transparent.
-    ///
-    /// The null backend's `create_surface` reads nothing but the variant's
-    /// name, so the dangling handles are never dereferenced; a headless
-    /// window's target is `Offscreen`, which carries no transparency at all.
-    fn wayland_target(transparent: bool) -> crcbl_hal::SurfaceTarget {
-        crcbl_hal::SurfaceTarget::Wayland {
-            display: core::ptr::NonNull::dangling(),
-            surface: core::ptr::NonNull::dangling(),
-            transparent,
-        }
-    }
-
-    /// Starts and finishes an open of `target` against `instance`, as
-    /// [`open_null_context`] does for a headless window.
-    fn open_alpha_context(
-        instance: crcbl_hal::null::NullInstance,
-        target: crcbl_hal::SurfaceTarget,
-        adapter_pin: Option<&str>,
-    ) -> Result<(crcbl_shell::HeadlessShell, GpuContext), GpuError> {
-        let (shell, mut pending) = adapter_walk_request(adapter_pin);
-        pending.target = target;
-        pending.stage = GpuContext::start_device(Box::new(instance), &pending)?;
-        let gpu = loop {
-            if let Some(context) = pending.poll()? {
-                break context;
-            }
-        };
-        Ok((shell, gpu))
-    }
-
-    /// **A transparent window opens premultiplied and keeps it through a
-    /// resize and a pacing change; an opaque one on the same surface stays
-    /// opaque.**
-    ///
-    /// Read from the context's `SwapchainConfig`, which is what every
-    /// rebuild's descriptor is made from, and from that descriptor itself.
-    /// Red when `SwapchainConfig::desc` goes back to a fixed
-    /// `CompositeAlpha::Opaque`, when the open ignores the target's flag, or
-    /// when a reconfigure path rebuilds the config without the alpha.
-    #[test]
-    fn a_transparent_window_presents_premultiplied_across_reconfigures() {
-        use crcbl_hal::null::NullInstance;
-
-        let both = || {
-            alpha_instance(
-                NullInstance::gpu_driven(),
-                &[vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied]],
-            )
-        };
-        let (_shell, mut gpu) = open_alpha_context(both(), wayland_target(true), None)
-            .expect("premultiplied is offered");
-        assert_eq!(gpu.config.composite_alpha, CompositeAlpha::PreMultiplied);
-
-        gpu.resize((640, 480)).expect("a resize");
-        assert_eq!(gpu.config.extent, (640, 480), "the resize took");
-        let before = gpu.config.present_mode;
-        gpu.set_pacing(Pacing::Vsync).expect("a pacing change");
-        assert_ne!(
-            gpu.config.present_mode, before,
-            "the pacing change rebuilt the swapchain with a new mode"
-        );
-        assert_eq!(
-            gpu.config.composite_alpha,
-            CompositeAlpha::PreMultiplied,
-            "a rebuild keeps the alpha the context opened with"
-        );
-        assert_eq!(
-            gpu.config.desc(gpu.surface).composite_alpha,
-            CompositeAlpha::PreMultiplied,
-            "the descriptor every rebuild is made from carries it"
-        );
-        gpu.drain().expect("nothing was submitted");
-        gpu.destroy().expect("teardown");
-
-        let (_shell, mut gpu) =
-            open_alpha_context(both(), wayland_target(false), None).expect("opaque is offered");
-        assert_eq!(
-            gpu.config.desc(gpu.surface).composite_alpha,
-            CompositeAlpha::Opaque,
-            "an opaque window is not made premultiplied because it could be"
-        );
-        gpu.drain().expect("nothing was submitted");
-        gpu.destroy().expect("teardown");
-    }
-
-    /// **A transparent window walks past an adapter whose surface cannot
-    /// composite it, and is refused by name when none can.**
-    ///
-    /// Red when an adapter without premultiplied alpha is taken anyway (the
-    /// window drawn opaque), when the walk stops at it instead of going on,
-    /// and when the refusal stops naming the missing alpha, pinned or not.
-    #[test]
-    fn a_transparent_window_no_adapter_can_composite_is_refused_by_name() {
-        use crcbl_hal::AdapterId;
-        use crcbl_hal::null::{NullInstance, ObjectKind, Recorder};
-
-        let opaque = vec![CompositeAlpha::Opaque];
-        let both = vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied];
-        let (_shell, mut gpu) = open_alpha_context(
-            alpha_instance(
-                NullInstance::gpu_driven().with_adapters(2),
-                &[opaque.clone(), both],
-            ),
-            wayland_target(true),
-            None,
-        )
-        .expect("the second adapter can composite the window");
-        assert_eq!(gpu.adapter, AdapterId(1));
-        assert_eq!(gpu.config.composite_alpha, CompositeAlpha::PreMultiplied);
-        gpu.drain().expect("nothing was submitted");
-        gpu.destroy().expect("teardown");
-
-        let recorder = Recorder::new();
-        let Err(refused) = open_alpha_context(
-            alpha_instance(
-                NullInstance::gpu_driven()
-                    .with_adapters(2)
-                    .with_recorder(recorder.clone()),
-                &[opaque.clone(), opaque.clone()],
-            ),
-            wayland_target(true),
-            None,
-        ) else {
-            panic!("no adapter can composite a transparent window, so none may open");
-        };
-        assert!(
-            matches!(refused, GpuError::Unusable(NO_PREMULTIPLIED_ALPHA)),
-            "{refused}"
-        );
-        assert_eq!(
-            recorder.live_objects(ObjectKind::Surface),
-            0,
-            "the surface is destroyed on the way out"
-        );
-
-        let Err(pinned) = open_alpha_context(
-            alpha_instance(NullInstance::gpu_driven(), &[opaque]),
-            wayland_target(true),
-            Some("cpu"),
-        ) else {
-            panic!("the pinned adapter cannot composite a transparent window");
-        };
-        let GpuError::AdapterPin(why) = &pinned else {
-            panic!("the pin chose the adapter that could not: {pinned}");
-        };
-        assert!(why.to_string().contains(NO_PREMULTIPLIED_ALPHA), "{why}");
-    }
-
-    /// The two halves of the present-feedback line [`GpuContext::finish`] logs,
-    /// exactly as it writes them.
-    const FEEDBACK_LINE: &str = "hal: pacing on presents";
-    const NO_FEEDBACK_LINE: &str = "hal: no present feedback";
-
-    /// **Start-up says which of the two pacing stories this run gets.**
-    ///
-    /// `docs/backlog.md` records that a richer `wait_until_presented` return —
-    /// one distinguishing "waited" from "this device cannot observe presents" —
-    /// was declined *because* `caps().features` answers it once here, which is
-    /// what lets `acquire` call the wait with no branch on which backend is
-    /// underneath. Delete this line and the argument for that decision has no
-    /// evidence left.
-    ///
-    /// No `NullInstance` preset advertises [`Features::PRESENT_FEEDBACK`] —
-    /// there is no display under that backend, so `wait_until_presented` returns
-    /// at once and the preset is honest about it — so the adapter is built by
-    /// hand. Nothing here waits on a present: the line reads the device's caps
-    /// and that is the whole of what this exercises.
-    #[test]
-    fn a_device_that_can_observe_presents_says_so() {
-        use crcbl_hal::null::NullInstance;
-        use crcbl_hal::{DeviceCaps, Limits};
-
-        let logs = crcbl_core::log::capture();
-        let (_shell, mut gpu) = open_null_context(
-            NullInstance::new(DeviceCaps {
-                features: Features::PRESENT_FEEDBACK,
-                limits: Limits::minimum(),
-            }),
-            Features::PRESENT_FEEDBACK,
-            Pacing::Off,
-        );
-
-        let records = logs.records();
-        let said: Vec<_> = records
-            .iter()
-            .filter(|record| record.message.starts_with(FEEDBACK_LINE))
-            .collect();
-        assert_eq!(said.len(), 1, "once, at start-up: {records:?}");
-        assert_eq!(said[0].level, log::Level::Info);
-        assert_eq!(
-            said[0].message,
-            format!("hal: pacing on presents, {FRAMES_IN_FLIGHT} frames deep"),
-            "the line names the depth the loop actually runs at",
-        );
-        assert!(
-            !records
-                .iter()
-                .any(|record| record.message.starts_with(NO_FEEDBACK_LINE)),
-            "the other story is not this run's: {records:?}"
-        );
-
-        gpu.drain().expect("nothing was submitted");
-        gpu.destroy()
-            .expect("teardown is in the seam's stated order");
-    }
-
-    /// The other state, and the one every device in this repo is actually in:
-    /// the engine asked for present feedback and the device did not have it, so
-    /// the frame limiter is all that paces the loop.
-    #[test]
-    fn a_device_that_cannot_observe_presents_says_that_instead() {
-        use crcbl_hal::null::NullInstance;
-
-        let logs = crcbl_core::log::capture();
-        let (_shell, mut gpu) = open_null_context(
-            NullInstance::gpu_driven(),
-            // The set every game gets by default, which asks for
-            // `PRESENT_FEEDBACK`; this preset does not have it.
-            GpuContextDesc::default().optional_features,
-            Pacing::Off,
-        );
-
-        let records = logs.records();
-        let said: Vec<_> = records
-            .iter()
-            .filter(|record| record.message.starts_with(NO_FEEDBACK_LINE))
-            .collect();
-        assert_eq!(said.len(), 1, "once, at start-up: {records:?}");
-        assert_eq!(said[0].level, log::Level::Debug);
-        assert_eq!(
-            said[0].message,
-            "hal: no present feedback; the frame limiter is the only pacing",
-        );
-        assert!(
-            !records
-                .iter()
-                .any(|record| record.message.starts_with(FEEDBACK_LINE)),
-            "a line logged on both paths would report every device as pacing on \
-             presents: {records:?}"
-        );
-
-        gpu.drain().expect("nothing was submitted");
-        gpu.destroy()
-            .expect("teardown is in the seam's stated order");
-    }
-
-    /// The prefix `crates/crcbl-shell/tests/run-wayland-e2e.sh` greps for, and
-    /// the start of the line `GpuContext::settle_pacing` writes.
-    const PACING_LINE: &str = "hal: display timing ";
-
-    /// **The engine says which pair it resolved, not just what it landed on.**
-    ///
-    /// `Pacing::resolve`'s own test walks all sixteen (request, observation)
-    /// pairs; what nothing read until now is that a *run* reports the pair it
-    /// took. "Asked for `Auto`, display said nothing, running vsync" and "asked
-    /// for `Off`" are different runs, and a line naming only the result cannot
-    /// tell them apart — so two requests are driven through here and the whole
-    /// line asserted for each.
-    ///
-    /// The observation half is `Unknown` in both, because the null device has no
-    /// display to have a cadence and says so; the other three
-    /// [`DisplayTiming`] arms need a driver that has never answered anything
-    /// else on any machine this repo has run on (see
-    /// [`GpuContext::effective_pacing`]).
-    #[test]
-    fn the_pacing_resolution_says_which_pair_it_took() {
-        use crcbl_hal::CommandEncoderDesc;
-        use crcbl_hal::null::NullInstance;
-
-        let logs = crcbl_core::log::capture();
-        // A present, because the display is only asked after one — see
-        // `settle_pacing` for why that order is the only one that can work.
-        for pacing in [Pacing::Auto, Pacing::Off] {
-            let (_shell, mut gpu) =
-                open_null_context(NullInstance::gpu_driven(), Features::empty(), pacing);
-            let acquired = gpu.acquire().expect("acquire").expect("no resize happened");
-            let encoder = gpu.device().create_command_encoder(&CommandEncoderDesc {
-                label: Some("pacing test"),
-                queue: gpu.queue(),
-            });
-            let command_buffer = encoder.finish().expect("an empty command buffer");
-            assert_eq!(
-                gpu.submit_and_present(&acquired, command_buffer)
-                    .expect("present"),
-                FrameOutcome::Presented,
-            );
-            gpu.drain().expect("the frame was submitted and presented");
-            gpu.destroy()
-                .expect("teardown is in the seam's stated order");
-        }
-
-        let records = logs.records();
-        let said: Vec<_> = records
-            .iter()
-            .filter(|record| record.message.starts_with(PACING_LINE))
-            .collect();
-        assert_eq!(said.len(), 2, "once per context: {records:?}");
-        assert!(said.iter().all(|record| record.level == log::Level::Info));
-        assert_eq!(
-            said[0].message, "hal: display timing Unknown; asked for Auto, pacing Vsync",
-            "a display that will not say is the vsync fallback, and `Auto` is \
-             not the answer it resolved to",
-        );
-        assert_eq!(
-            said[1].message, "hal: display timing Unknown; asked for Off, pacing Off",
-            "a concrete request comes back unchanged, and the line still says so",
-        );
-    }
-
     /// **Quitting is idempotent at the engine boundary**: a close answered
     /// twice, one already refused, and one nobody asked for all close the
     /// window without an error — while the seam itself still refuses a reply to
@@ -13153,697 +10930,6 @@ mod tests {
         shell.destroy_window(window).expect("the window goes away");
     }
 
-    /// **When the compositor picks a different size, the engine adopts it — and
-    /// stops asking once it has.**
-    ///
-    /// "Obligation 3: the answer, not the request". A window system may hand
-    /// back a swapchain smaller than the one asked for, and a caller that keeps
-    /// rendering at its requested extent draws off the end of the image. The
-    /// branch that writes the answer back into `configured_extent` and `config`
-    /// existed and was reachable from no test in this workspace and no device
-    /// it can run headlessly: the null backend had no window system to disagree
-    /// with, so the acquired extent was the configured one by construction.
-    /// `Recorder::clamp_acquired_extent_to` is what makes it disagree.
-    ///
-    /// Both halves matter. `config.extent` has to move too, because `resize`
-    /// early-returns when the requested extent already matches it — leaving it
-    /// holding the size the shell asked for made a resize back to the
-    /// compositor's own choice look like a change and reconfigure for nothing.
-    #[test]
-    fn a_compositors_own_extent_is_adopted_and_then_agreed_with() {
-        use crcbl_hal::null::{NullInstance, Recorder};
-
-        let clamped = (256, 200);
-        let recorder = Recorder::new();
-        recorder.clamp_acquired_extent_to(clamped);
-        let (_shell, mut gpu) = open_null_context(
-            NullInstance::gpu_driven().with_recorder(recorder),
-            Features::empty(),
-            Pacing::Off,
-        );
-        assert_ne!(
-            gpu.configured_extent, clamped,
-            "the fixture must start at a different size, or this checks nothing"
-        );
-
-        let acquired = gpu
-            .acquire()
-            .expect("the null swapchain acquires")
-            .expect("a frame, not a skipped one");
-        assert_eq!(
-            acquired.extent, clamped,
-            "the injector is what makes the two disagree"
-        );
-        // The images the frame will draw into are that size too: the injector
-        // clamps where a platform does, when the ring is built, and
-        // `build_ring` creates the images and records the swapchain's extent
-        // from one variable. Not asserted here because the null backend keeps
-        // no image detail to read it back from — it is structural, and stated
-        // where it is made rather than checked where it is used.
-        assert_eq!(
-            gpu.configured_extent, clamped,
-            "the engine renders at the answer, not the request"
-        );
-        assert_eq!(
-            gpu.config.extent, clamped,
-            "and the config holds it too, or a resize back to this size looks like a change"
-        );
-
-        // Having adopted it, the sizes agree and the branch stops firing. A
-        // standing clamp is what lets this be observed: the second acquire
-        // reports the same extent and must change nothing.
-        let logs = crcbl_core::log::capture();
-        gpu.acquire()
-            .expect("the second acquire succeeds")
-            .expect("a frame");
-        assert_eq!(
-            (gpu.configured_extent, gpu.config.extent),
-            (clamped, clamped)
-        );
-        assert!(
-            !logs
-                .records()
-                .iter()
-                .any(|record| record.message.contains("swapchain configured at")),
-            "the sizes already agree, so nothing is re-adopted: {:?}",
-            logs.records()
-        );
-    }
-
-    /// **A wait that finishes unsatisfied does not retire the buffer it was
-    /// waiting on.**
-    ///
-    /// `wait_semaphores` answers `Ok(false)` for a wait it did not satisfy, and
-    /// `retire_to` used to discard that `bool` and destroy the command buffer on
-    /// the next line — freeing memory the device may still be reading. `u64::MAX`
-    /// did not make it unreachable: the null device answers from its recorded
-    /// timeline and never looks at `timeout_ns`, which is exactly what this
-    /// fixture leans on.
-    ///
-    /// The queue is loaded directly rather than by rendering, because a frame
-    /// this engine submits signals the value it then waits for — there is no
-    /// sequence of public calls that leaves a value outstanding, which is why
-    /// the arm went unexercised.
-    #[test]
-    fn an_unsatisfied_wait_leaves_the_command_buffer_in_flight() {
-        use crcbl_hal::null::NullInstance;
-
-        let (_shell, mut gpu) = open_null_context(
-            NullInstance::gpu_driven(),
-            Features::TIMELINE_SEMAPHORE,
-            Pacing::Off,
-        );
-        let semaphore = gpu.timeline.expect("the preset carries a timeline");
-
-        // A value nothing has signalled. The device's timeline sits below it,
-        // so the wait completes and reports that it was not satisfied.
-        let command_buffer = gpu
-            .device
-            .create_command_encoder(&crcbl_hal::CommandEncoderDesc {
-                label: Some("never submitted"),
-                queue: gpu.queue,
-            })
-            .finish()
-            .expect("an empty encoder finishes");
-        let outstanding = u64::MAX / 2;
-        gpu.in_flight.push_back((outstanding, command_buffer));
-
-        let error = gpu
-            .retire_to(0)
-            .expect_err("the wait cannot be satisfied, so the buffer must not be retired");
-        assert!(
-            matches!(error, GpuError::Unusable(_)),
-            "an unsatisfied wait is not a HAL failure — the call succeeded and said no: {error:?}"
-        );
-        assert_eq!(
-            gpu.in_flight.front().map(|(value, _)| *value),
-            Some(outstanding),
-            "the buffer stays queued, still owned: dropping it here would leak it instead of \
-             freeing it once the timeline catches up"
-        );
-
-        // And the same call retires it once the timeline has reached the value,
-        // so the refusal is about *this* wait and not about the queue being
-        // non-empty.
-        gpu.device
-            .signal_semaphore(semaphore, outstanding)
-            .expect("the host can advance a timeline");
-        gpu.retire_to(0)
-            .expect("a satisfied wait retires the buffer");
-        assert!(gpu.in_flight.is_empty(), "nothing is left in flight");
-    }
-
-    /// Which present a frame waits for, without a GPU and without spending the
-    /// time — the same split as [`FramePacer::wait`].
-    #[test]
-    fn a_frame_waits_for_the_present_frames_in_flight_behind_it() {
-        let depth = FRAMES_IN_FLIGHT as u64;
-
-        // Still filling: the first `FRAMES_IN_FLIGHT` frames have nothing that
-        // far back, and present ids start at 1 rather than 0.
-        for submitted in 0..depth {
-            assert_eq!(
-                GpuContext::present_to_wait_for(submitted, Pacing::Vsync),
-                None,
-                "frame {} has only {submitted} presents behind it",
-                submitted + 1
-            );
-        }
-
-        for submitted in depth..depth + 8 {
-            let waited = GpuContext::present_to_wait_for(submitted, Pacing::Vsync)
-                .expect("the loop has filled");
-            assert_eq!(
-                waited,
-                submitted + 1 - depth,
-                "the frame about to start is {}, so it waits {depth} back",
-                submitted + 1
-            );
-            assert!(
-                waited < submitted,
-                "waiting on present {submitted}, the one just submitted, would drain the \
-                 pipeline to a single frame"
-            );
-        }
-    }
-
-    /// `Pacing::Off` asked not to be paced by the display, and a wait for a
-    /// frame to be on screen is exactly that.
-    #[test]
-    fn pacing_off_waits_for_nothing() {
-        for submitted in 0..8 {
-            assert_eq!(
-                GpuContext::present_to_wait_for(submitted, Pacing::Off),
-                None,
-                "submitted {submitted}"
-            );
-            assert!(
-                GpuContext::present_to_wait_for(submitted, Pacing::Adaptive).is_some()
-                    == GpuContext::present_to_wait_for(submitted, Pacing::Vsync).is_some(),
-                "adaptive still follows the display when it can, so it waits when vsync does"
-            );
-        }
-    }
-
-    /// The wiring, read off the device rather than off the engine: every
-    /// present is numbered, and every frame past the first `FRAMES_IN_FLIGHT`
-    /// waits for one that has already been presented.
-    #[test]
-    fn the_loop_numbers_its_presents_and_waits_for_the_older_ones() {
-        use crcbl_hal::CommandEncoderDesc;
-        use crcbl_hal::null::{Event, NullInstance, Recorder};
-        use crcbl_shell::{HeadlessShell, WindowDesc};
-
-        let mut shell = HeadlessShell::new();
-        let window = shell
-            .create_window(&WindowDesc::default())
-            .expect("headless always creates a window");
-        let mut shell_events = 0;
-        let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
-
-        // By hand rather than through the registry, because the point of the
-        // test is to hold the recorder the device writes to.
-        let recorder = Recorder::new();
-        let instance: Box<dyn Instance> =
-            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
-        let target = shell
-            .surface_target(window)
-            .expect("the window is still alive");
-        let mut pending = PendingGpuContext {
-            stage: OpenStage::Done,
-            target,
-            extent,
-            label: "present pacing test".to_string(),
-            required_features: Features::empty(),
-            optional_features: Features::empty(),
-            pacing: Pacing::Vsync,
-            // A unit test is a run with no player: reading whoever's real
-            // settings file would make this suite's answer depend on the
-            // machine it ran on.
-            video: VideoSettings::unrestricted(),
-            adapter_pin: None,
-        };
-        pending.stage = GpuContext::start_device(instance, &pending)
-            .expect("the null backend opens everywhere");
-        let mut gpu = loop {
-            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
-                break context;
-            }
-        };
-
-        const FRAMES: u64 = 5;
-        for _ in 0..FRAMES {
-            let acquired = gpu.acquire().expect("acquire").expect("no resize happened");
-            let encoder = gpu.device().create_command_encoder(&CommandEncoderDesc {
-                label: Some("present pacing test"),
-                queue: gpu.queue(),
-            });
-            let command_buffer = encoder.finish().expect("an empty command buffer");
-            assert_eq!(
-                gpu.submit_and_present(&acquired, command_buffer)
-                    .expect("present"),
-                FrameOutcome::Presented,
-            );
-        }
-
-        let events = recorder.events();
-        let presented: Vec<Option<u64>> = events
-            .iter()
-            .filter_map(|event| match event {
-                Event::Presented { present_id, .. } => Some(*present_id),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            presented,
-            (1..=FRAMES).map(Some).collect::<Vec<_>>(),
-            "every present is numbered, from one, with no gaps"
-        );
-
-        let waited: Vec<u64> = events
-            .iter()
-            .filter_map(|event| match event {
-                Event::PresentWaited { present_id, .. } => Some(*present_id),
-                _ => None,
-            })
-            .collect();
-        let depth = FRAMES_IN_FLIGHT as u64;
-        assert_eq!(
-            waited,
-            (1..=FRAMES - depth).collect::<Vec<_>>(),
-            "the first {depth} frames wait for nothing and the rest wait {depth} back"
-        );
-
-        // The same claim again, from the order of the stream rather than from
-        // the counts: a wait never names a present that has not happened.
-        let mut presented_so_far = 0;
-        for event in &events {
-            match event {
-                Event::Presented { .. } => presented_so_far += 1,
-                Event::PresentWaited { present_id, .. } => assert!(
-                    *present_id <= presented_so_far,
-                    "waited for present {present_id} with only {presented_so_far} presented"
-                ),
-                _ => {}
-            }
-        }
-
-        gpu.destroy().expect("teardown");
-        shell.destroy_window(window).expect("the window goes away");
-    }
-
-    /// **A frame is recorded while only the one before it may still run**:
-    /// after every submit, the frame just submitted is the only one left in
-    /// flight, so the next frame's writes into the `FRAMES_IN_FLIGHT`-deep
-    /// ring land in a slot the GPU has finished with. Under `Pacing::Off`,
-    /// where no present wait holds the CPU back and this retirement is the
-    /// only thing that does.
-    #[test]
-    fn the_loop_keeps_one_frame_executing_while_it_records_the_next() {
-        use crcbl_hal::CommandEncoderDesc;
-        use crcbl_hal::null::NullInstance;
-        use crcbl_shell::{HeadlessShell, WindowDesc};
-
-        let mut shell = HeadlessShell::new();
-        let window = shell
-            .create_window(&WindowDesc::default())
-            .expect("headless always creates a window");
-        let mut shell_events = 0;
-        let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
-        let instance: Box<dyn Instance> = Box::new(NullInstance::gpu_driven());
-        let target = shell
-            .surface_target(window)
-            .expect("the window is still alive");
-        let mut pending = PendingGpuContext {
-            stage: OpenStage::Done,
-            target,
-            extent,
-            label: "frames in flight test".to_string(),
-            required_features: Features::empty(),
-            optional_features: Features::empty(),
-            pacing: Pacing::Off,
-            video: VideoSettings::unrestricted(),
-            adapter_pin: None,
-        };
-        pending.stage = GpuContext::start_device(instance, &pending)
-            .expect("the null backend opens everywhere");
-        let mut gpu = loop {
-            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
-                break context;
-            }
-        };
-
-        for frame in 1..=5u64 {
-            let acquired = gpu.acquire().expect("acquire").expect("no resize happened");
-            let encoder = gpu.device().create_command_encoder(&CommandEncoderDesc {
-                label: Some("frames in flight test"),
-                queue: gpu.queue(),
-            });
-            let command_buffer = encoder.finish().expect("an empty command buffer");
-            gpu.submit_and_present(&acquired, command_buffer)
-                .expect("present");
-            let in_flight: Vec<u64> = gpu.in_flight.iter().map(|(value, _)| *value).collect();
-            assert_eq!(
-                in_flight,
-                vec![frame],
-                "after frame {frame}'s submit only it may still run"
-            );
-            assert!(
-                in_flight.len() < FRAMES_IN_FLIGHT,
-                "the ring would be overrun"
-            );
-        }
-
-        gpu.destroy().expect("teardown");
-        shell.destroy_window(window).expect("the window goes away");
-    }
-
-    /// The runtime switch, against a backend that records what the swapchain
-    /// did: a pacing change rebuilds when — and only when — the present mode
-    /// moves.
-    ///
-    /// # What this cannot see
-    ///
-    /// That the display is asked **once** is structural (one
-    /// `observed_timing.is_some()` guard) and is not observable here: the null
-    /// backend answers `DisplayTiming::Unknown` however often it is asked, so a
-    /// run that queried every frame would record exactly the same events. What
-    /// is observable is the consequence — an `Auto` that resolves to vsync
-    /// costs no swapchain, and a later `Auto` settles against the sample
-    /// already taken rather than starting again from a request.
-    #[test]
-    fn a_pacing_switch_rebuilds_the_swapchain_only_when_the_mode_moves() {
-        use crcbl_hal::CommandEncoderDesc;
-        use crcbl_hal::null::{Event, NullInstance, Recorder};
-        use crcbl_shell::{HeadlessShell, WindowDesc};
-
-        let mut shell = HeadlessShell::new();
-        let window = shell
-            .create_window(&WindowDesc::default())
-            .expect("headless always creates a window");
-        let mut shell_events = 0;
-        let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
-
-        let recorder = Recorder::new();
-        let instance: Box<dyn Instance> =
-            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
-        let target = shell
-            .surface_target(window)
-            .expect("the window is still alive");
-        let mut pending = PendingGpuContext {
-            stage: OpenStage::Done,
-            target,
-            extent,
-            label: "pacing switch test".to_string(),
-            required_features: Features::empty(),
-            optional_features: Features::empty(),
-            pacing: Pacing::default(),
-            video: VideoSettings::unrestricted(),
-            adapter_pin: None,
-        };
-        pending.stage = GpuContext::start_device(instance, &pending)
-            .expect("the null backend opens everywhere");
-        let mut gpu = loop {
-            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
-                break context;
-            }
-        };
-
-        let rebuilds = || {
-            recorder
-                .events()
-                .iter()
-                .filter(|event| matches!(event, Event::Reconfigured { .. }))
-                .count()
-        };
-
-        // Before any present there is no observation, so the request is `Auto`
-        // and the answer is the vsync the swapchain was opened on.
-        assert_eq!(gpu.pacing(), Pacing::Auto, "the default is Auto");
-        assert_eq!(gpu.effective_pacing(), Pacing::Vsync);
-        assert_eq!(gpu.config.present_mode, PresentMode::Fifo);
-
-        let present = |gpu: &mut GpuContext| {
-            let acquired = gpu.acquire().expect("acquire").expect("no resize happened");
-            let encoder = gpu.device().create_command_encoder(&CommandEncoderDesc {
-                label: Some("pacing switch test"),
-                queue: gpu.queue(),
-            });
-            let command_buffer = encoder.finish().expect("an empty command buffer");
-            assert_eq!(
-                gpu.submit_and_present(&acquired, command_buffer)
-                    .expect("present"),
-                FrameOutcome::Presented,
-            );
-        };
-        for _ in 0..3 {
-            present(&mut gpu);
-        }
-
-        // The null display says `Unknown`, which is the fallback arm, so the
-        // resolution changed nothing and spent nothing.
-        assert_eq!(gpu.pacing(), Pacing::Auto, "the request is not rewritten");
-        assert_eq!(gpu.effective_pacing(), Pacing::Vsync);
-        assert_eq!(
-            rebuilds(),
-            0,
-            "an Auto that resolved to vsync rebuilt the swapchain it was already using"
-        );
-
-        // Vsync by name is the mode already presenting: same answer, and a
-        // settings screen re-applying it must not cost a swapchain.
-        gpu.set_pacing(Pacing::Vsync).expect("switching to vsync");
-        assert_eq!(gpu.pacing(), Pacing::Vsync);
-        assert_eq!(gpu.effective_pacing(), Pacing::Vsync);
-        assert_eq!(rebuilds(), 0, "vsync over vsync rebuilt the swapchain");
-
-        // Off is a different mode on this surface — no `FifoRelaxed`, so
-        // `Mailbox` — and that is what a rebuild is for.
-        gpu.set_pacing(Pacing::Off).expect("switching to no sync");
-        assert_eq!(gpu.effective_pacing(), Pacing::Off);
-        assert_eq!(gpu.config.present_mode, PresentMode::Mailbox);
-        assert_eq!(rebuilds(), 1, "the mode moved and the swapchain did not");
-
-        gpu.set_pacing(Pacing::Off)
-            .expect("switching to no sync again");
-        assert_eq!(
-            rebuilds(),
-            1,
-            "re-applying the mode in force rebuilt it again"
-        );
-
-        // Back to Auto: it settles against the observation already taken —
-        // `Unknown`, so vsync — rather than asking the display a second time.
-        gpu.set_pacing(Pacing::Auto)
-            .expect("switching back to auto");
-        assert_eq!(gpu.pacing(), Pacing::Auto);
-        assert_eq!(gpu.effective_pacing(), Pacing::Vsync);
-        assert_eq!(gpu.config.present_mode, PresentMode::Fifo);
-        assert_eq!(rebuilds(), 2);
-
-        // And the loop still runs on the swapchain all of that rebuilt.
-        present(&mut gpu);
-
-        gpu.destroy().expect("teardown");
-        shell.destroy_window(window).expect("the window goes away");
-    }
-
-    /// The rollback when the swapchain cannot be rebuilt: a settings screen
-    /// whose apply fails must be left describing the swapchain that is still
-    /// configured, not the pacing that did not take.
-    ///
-    /// The null backend never fails on its own, so the fault is injected
-    /// through the recorder — the same knob a reviewer would use to make the
-    /// rollback observable at all.
-    #[test]
-    fn a_failed_pacing_switch_rolls_back_the_request_the_effective_and_the_mode() {
-        use crcbl_hal::null::{Event, NullInstance, Recorder};
-        use crcbl_shell::{HeadlessShell, WindowDesc};
-
-        let mut shell = HeadlessShell::new();
-        let window = shell
-            .create_window(&WindowDesc::default())
-            .expect("headless always creates a window");
-        let mut shell_events = 0;
-        let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
-
-        let recorder = Recorder::new();
-        let instance: Box<dyn Instance> =
-            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
-        let target = shell
-            .surface_target(window)
-            .expect("the window is still alive");
-        let mut pending = PendingGpuContext {
-            stage: OpenStage::Done,
-            target,
-            extent,
-            label: "pacing rollback test".to_string(),
-            required_features: Features::empty(),
-            optional_features: Features::empty(),
-            pacing: Pacing::default(),
-            video: VideoSettings::unrestricted(),
-            adapter_pin: None,
-        };
-        pending.stage = GpuContext::start_device(instance, &pending)
-            .expect("the null backend opens everywhere");
-        let mut gpu = loop {
-            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
-                break context;
-            }
-        };
-
-        // The context is on Auto -> vsync -> Fifo, and Off is a different mode
-        // on this surface (no `FifoRelaxed`, so Mailbox), so the switch is the
-        // one that has to rebuild — and therefore the one that can fail.
-        assert_eq!(gpu.pacing(), Pacing::Auto);
-        assert_eq!(gpu.effective_pacing(), Pacing::Vsync);
-        assert_eq!(gpu.config.present_mode, PresentMode::Fifo);
-
-        recorder.fail_next_reconfigures(1);
-        let error = gpu
-            .set_pacing(Pacing::Off)
-            .expect_err("the injected fault must surface as an error");
-
-        assert!(
-            matches!(
-                error,
-                GpuError::Surface(SurfaceError::Hal(HalError::OutOfDeviceMemory))
-            ),
-            "{error}"
-        );
-
-        // The request, the effective pacing and the swapchain mode rolled back
-        // together, rather than any of them describing the change that failed.
-        assert_eq!(gpu.pacing(), Pacing::Auto, "the request is not rewritten");
-        assert_eq!(
-            gpu.effective_pacing(),
-            Pacing::Vsync,
-            "the effective pacing does not describe a swapchain that does not exist"
-        );
-        assert_eq!(
-            gpu.config.present_mode,
-            PresentMode::Fifo,
-            "the swapchain is still the one that was configured"
-        );
-        assert_eq!(
-            recorder
-                .events()
-                .iter()
-                .filter(|event| matches!(event, Event::Reconfigured { .. }))
-                .count(),
-            0,
-            "a failed reconfigure must not record itself as a success"
-        );
-
-        // The fault was consumed, not latched: the same switch succeeds now,
-        // and the context stayed usable throughout.
-        gpu.set_pacing(Pacing::Off)
-            .expect("the fault was injected once, not forever");
-        assert_eq!(gpu.effective_pacing(), Pacing::Off);
-        assert_eq!(gpu.config.present_mode, PresentMode::Mailbox);
-
-        gpu.destroy().expect("teardown");
-        shell.destroy_window(window).expect("the window goes away");
-    }
-
-    /// An error the device reported **outside any call** stops the frame.
-    ///
-    /// This is the failure mode P5.13 found in a browser and could not see from
-    /// the code: WebGPU hands back a pipeline object whose shader did not
-    /// compile and delivers the reason to the device's error channel later, so
-    /// every subsequent submit is silently discarded and the page draws nothing
-    /// while reporting itself healthy. `acquire` asks the device before it
-    /// records anything, which is the only point in a frame where that answer
-    /// can still change what happens.
-    #[test]
-    fn a_device_error_raised_between_calls_fails_the_next_frame() {
-        use crcbl_hal::null::{NullInstance, Recorder};
-        use crcbl_shell::{HeadlessShell, WindowDesc};
-
-        let mut shell = HeadlessShell::new();
-        let window = shell
-            .create_window(&WindowDesc::default())
-            .expect("headless always creates a window");
-        let mut events = 0;
-        let extent = wait_for_configure(&mut shell, window, &mut events).expect("configured");
-
-        // Built by hand rather than through the registry, because the point of
-        // the test is to hold the recorder that decides when the device fails.
-        let recorder = Recorder::new();
-        let instance: Box<dyn Instance> =
-            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
-        let target = shell
-            .surface_target(window)
-            .expect("the window is still alive");
-        let mut pending = PendingGpuContext {
-            stage: OpenStage::Done,
-            target,
-            extent,
-            label: "device error test".to_string(),
-            required_features: Features::empty(),
-            optional_features: Features::empty(),
-            pacing: Pacing::default(),
-            video: VideoSettings::unrestricted(),
-            adapter_pin: None,
-        };
-        pending.stage = GpuContext::start_device(instance, &pending)
-            .expect("the null backend opens everywhere");
-        let mut gpu = loop {
-            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
-                break context;
-            }
-        };
-
-        // The control: a device with nothing to report does not fail a frame.
-        assert!(
-            gpu.acquire().expect("a healthy device acquires").is_some(),
-            "an unprovoked drain must not break every frame"
-        );
-
-        recorder.report_device_error("shader module 3 failed to compile");
-        let error = gpu
-            .acquire()
-            .expect_err("the device reported an error before this frame");
-        assert!(
-            error.to_string().contains("shader module 3"),
-            "the reason must survive to the caller, not just the fact: {error}"
-        );
-
-        // Reported once. A latched error would turn one bad pipeline into a
-        // frame loop that can never run again.
-        assert!(
-            gpu.acquire()
-                .expect("the error was already reported")
-                .is_some(),
-            "taking an error must clear it"
-        );
-
-        gpu.destroy().expect("teardown");
-        shell.destroy_window(window).expect("the window goes away");
-    }
-
-    /// An error raised on the way out still reaches the caller.
-    ///
-    /// `acquire` drains the out-of-band channel at the top of a frame, so
-    /// everything after the last one — the final submit completing, the
-    /// teardown calls themselves — had no reader at all, and a run that
-    /// violated the specification while shutting down exited 0.
-    #[test]
-    fn a_device_error_raised_during_teardown_fails_the_run() {
-        let (mut shell, window, recorder, gpu) = null_context("teardown error", Pacing::default());
-
-        recorder.report_device_error("the swapchain was destroyed while still in use");
-        let error = gpu
-            .destroy()
-            .expect_err("the device had an error left to report");
-        assert!(
-            error.to_string().contains("destroyed while still in use"),
-            "the reason must survive teardown, not just the fact: {error}"
-        );
-
-        shell.destroy_window(window).expect("the window goes away");
-    }
-
     // ---- resize and device loss, injected -----------------------------------
 
     /// A real [`GpuContext`] on the null backend, and the recorder that decides
@@ -13895,28 +10981,29 @@ mod tests {
         let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
 
         let recorder = Recorder::new();
-        let instance: Box<dyn Instance> = Box::new(instance.with_recorder(recorder.clone()));
-        let target = shell
-            .surface_target(window)
-            .expect("the window is still alive");
-        let mut pending = PendingGpuContext {
-            stage: OpenStage::Done,
-            target,
+        let presenter = Presenter::request_open_on(
+            Box::new(instance.with_recorder(recorder.clone())),
+            &shell,
+            window,
             extent,
-            label: label.to_string(),
-            required_features: Features::empty(),
-            optional_features: optional,
-            pacing,
+            &PresenterDesc {
+                label,
+                optional_features: optional,
+                pacing,
+                frames_in_flight: FRAMES_IN_FLIGHT,
+                ..PresenterDesc::default()
+            },
+        )
+        .expect("the null backend opens everywhere");
+        let gpu = PendingGpuContext {
+            presenter,
+            // A unit test is a run with no player: reading whoever's real
+            // settings file would make this suite's answer depend on the
+            // machine it ran on.
             video: VideoSettings::unrestricted(),
-            adapter_pin: None,
-        };
-        pending.stage = GpuContext::start_device(instance, &pending)
-            .expect("the null backend opens everywhere");
-        let gpu = loop {
-            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
-                break context;
-            }
-        };
+        }
+        .block()
+        .expect("the null backend cannot fail here");
         (shell, window, recorder, gpu)
     }
 
@@ -13938,14 +11025,6 @@ mod tests {
         gpu.submit_and_present(&acquired, command_buffer)
     }
 
-    /// The start of the line [`GpuContext::reconfigure`] writes.
-    ///
-    /// A rebuild that *failed* records no event, so the recorder alone cannot
-    /// tell an engine that never tried to rebuild from one that tried and was
-    /// refused — and on a lost device those are the two candidate policies.
-    /// This line is what tells them apart.
-    const RECONFIGURE_LINE: &str = "hal: reconfiguring the swapchain to ";
-
     /// How many swapchain rebuilds the recorder saw.
     fn reconfigures(recorder: &crcbl_hal::null::Recorder) -> usize {
         recorder
@@ -13964,299 +11043,21 @@ mod tests {
             .count()
     }
 
-    /// The presents and the rebuilds the recorder saw, in the order it saw
-    /// them.
-    ///
-    /// What [`presents`] and [`reconfigures`] cannot answer: whether the rebuild
-    /// happened *after* the frame reached the display or instead of it. Both
-    /// orders leave the same two counts behind.
-    fn presentation_sequence(recorder: &crcbl_hal::null::Recorder) -> Vec<&'static str> {
+    /// How many of the pacing waits the recorder saw had lapsed.
+    fn timed_out_waits(recorder: &crcbl_hal::null::Recorder) -> usize {
         recorder
             .events()
             .iter()
-            .filter_map(|event| match event {
-                crcbl_hal::null::Event::Presented { .. } => Some("present"),
-                crcbl_hal::null::Event::Reconfigured { .. } => Some("reconfigure"),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The whole of a paced frame as the recorder saw it: the pacing wait — with
-    /// one that lapsed named apart from one that was answered — then the
-    /// acquire, the present and any rebuild.
-    ///
-    /// [`presentation_sequence`] cannot be used for a timed-out wait, because
-    /// the acquire is exactly what the candidate policies disagree about and it
-    /// does not appear there: an engine that skipped the frame and an engine
-    /// that rendered it both leave a present-and-rebuild stream that is empty
-    /// of rebuilds.
-    fn paced_frame_sequence(recorder: &crcbl_hal::null::Recorder) -> Vec<&'static str> {
-        recorder
-            .events()
-            .iter()
-            .filter_map(|event| match event {
-                crcbl_hal::null::Event::PresentWaited {
-                    timed_out: true, ..
-                } => Some("wait timed out"),
-                crcbl_hal::null::Event::PresentWaited { .. } => Some("wait"),
-                crcbl_hal::null::Event::Acquired { .. } => Some("acquire"),
-                crcbl_hal::null::Event::Presented { .. } => Some("present"),
-                crcbl_hal::null::Event::Reconfigured { .. } => Some("reconfigure"),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// **An acquire that reports the swapchain out of date is expected traffic,
-    /// not a failed frame**: it rebuilds and hands the frame back as skipped.
-    ///
-    /// Reachable on a real driver only while someone drags a window edge, which
-    /// is why `crcbl-vk` had to carry the only test of it. The recorder's
-    /// out-of-date latch is what brings it to a machine with no GPU.
-    #[test]
-    fn an_out_of_date_acquire_reconfigures_the_swapchain_and_skips_the_frame() {
-        let (mut shell, window, recorder, mut gpu) =
-            null_context("out-of-date acquire test", Pacing::Vsync);
-
-        // Nothing has been submitted, so no pacing wait is due and `acquire`
-        // is the *only* call that can report this. The frame after it is the
-        // one that would wait, and that case is its own test below.
-        assert_eq!(
-            GpuContext::present_to_wait_for(gpu.submitted, gpu.effective_pacing()),
-            None,
-            "this test is about the acquire, so nothing else must be able to answer first"
-        );
-
-        recorder.report_swapchain_out_of_date();
-        assert!(
-            gpu.acquire()
-                .expect("out of date is expected traffic, not an error")
-                .is_none(),
-            "an out-of-date acquire skips the frame; it does not hand out an image"
-        );
-        assert_eq!(
-            reconfigures(&recorder),
-            1,
-            "the swapchain is rebuilt once, by the arm that caught it"
-        );
-        assert_eq!(presents(&recorder), 0, "a skipped frame presents nothing");
-
-        // Handling it is what cleared it, so the next frame is an ordinary one.
-        assert_eq!(
-            null_frame(&mut gpu).expect("the rebuilt swapchain works"),
-            FrameOutcome::Presented
-        );
-        assert_eq!(
-            reconfigures(&recorder),
-            1,
-            "nothing rebuilt it a second time"
-        );
-        assert_eq!(presents(&recorder), 1);
-
-        gpu.destroy().expect("teardown");
-        shell.destroy_window(window).expect("the window goes away");
-    }
-
-    /// **Present is the usual place a resize is noticed**, and the engine says
-    /// so in a comment; this is the assertion behind the comment.
-    ///
-    /// The frame is recorded and submitted before the present refuses it, so
-    /// the outcome a loop records is [`FrameOutcome::Reconfigured`] — which is
-    /// what [`FrameBudget`] counts against its never-presents cap.
-    #[test]
-    fn an_out_of_date_present_rebuilds_and_reports_the_frame_as_reconfigured() {
-        let (mut shell, window, recorder, mut gpu) =
-            null_context("out-of-date present test", Pacing::Vsync);
-
-        let acquired = gpu
-            .acquire()
-            .expect("acquire")
-            .expect("the swapchain is healthy when the frame starts");
-        // The resize lands after the image was handed out, which is the case
-        // acquire cannot catch.
-        recorder.report_swapchain_out_of_date();
-
-        let encoder = gpu
-            .device()
-            .create_command_encoder(&crcbl_hal::CommandEncoderDesc {
-                label: Some("out-of-date present test"),
-                queue: gpu.queue(),
-            });
-        let command_buffer = encoder.finish().expect("an empty command buffer");
-        assert_eq!(
-            gpu.submit_and_present(&acquired, command_buffer)
-                .expect("a resize noticed at present is not a failed frame"),
-            FrameOutcome::Reconfigured
-        );
-        assert_eq!(reconfigures(&recorder), 1);
-        assert_eq!(
-            presents(&recorder),
-            0,
-            "the present that reported the swapchain out of date did not present"
-        );
-
-        assert_eq!(
-            null_frame(&mut gpu).expect("the rebuilt swapchain works"),
-            FrameOutcome::Presented
-        );
-        assert_eq!(reconfigures(&recorder), 1);
-        assert_eq!(presents(&recorder), 1);
-
-        gpu.destroy().expect("teardown");
-        shell.destroy_window(window).expect("the window goes away");
-    }
-
-    /// **The pacing wait's own out-of-date arm**, which is the third and least
-    /// obvious of the three: it does nothing, deliberately, and leaves the
-    /// acquire behind it to reconfigure.
-    ///
-    /// Without that arm the wait's error would propagate and a resize would
-    /// fail the frame — on a code path that only runs once the pipeline is
-    /// `FRAMES_IN_FLIGHT` deep and only on a display that is pacing, which is
-    /// why it needed a swapchain that can be made out of date on demand.
-    #[test]
-    fn an_out_of_date_pacing_wait_leaves_the_acquire_behind_it_to_reconfigure() {
-        let (mut shell, window, recorder, mut gpu) =
-            null_context("out-of-date wait test", Pacing::Vsync);
-
-        // Fill the pipeline, so the next frame really does wait for an older
-        // present rather than skipping the wait the way the first ones do.
-        for _ in 0..=FRAMES_IN_FLIGHT {
-            assert_eq!(
-                null_frame(&mut gpu).expect("a healthy frame"),
-                FrameOutcome::Presented
-            );
-        }
-        assert!(
-            GpuContext::present_to_wait_for(gpu.submitted, gpu.effective_pacing()).is_some(),
-            "the rest of this test asserts nothing unless the next frame is one that waits"
-        );
-        let waits = recorder
-            .events()
-            .iter()
-            .filter(|event| matches!(event, crcbl_hal::null::Event::PresentWaited { .. }))
-            .count();
-        assert!(
-            waits > 0,
-            "and nothing unless the waits are actually reaching the device"
-        );
-
-        recorder.report_swapchain_out_of_date();
-        assert!(
-            gpu.acquire()
-                .expect("a wait that reports a resize is not a failed frame")
-                .is_none(),
-            "the acquire behind it is what reconfigures and skips"
-        );
-        assert_eq!(reconfigures(&recorder), 1);
-        assert_eq!(
-            recorder
-                .events()
-                .iter()
-                .filter(|event| matches!(event, crcbl_hal::null::Event::PresentWaited { .. }))
-                .count(),
-            waits,
-            "the refused wait recorded nothing, so the arm ran on a real refusal"
-        );
-
-        gpu.destroy().expect("teardown");
-        shell.destroy_window(window).expect("the window goes away");
-    }
-
-    /// **A lost device surfaces and stays surfaced.** The decision in
-    /// `docs/backlog.md` is that the engine does not rebuild its way out of one:
-    /// `HalError::DeviceLost` propagates, wearing the presentation vocabulary
-    /// the seam gives it, and every later frame says the same thing.
-    ///
-    /// The contrast with `report_device_error` is the point. That one is
-    /// one-shot by contract — the test above asserts that taking it clears it —
-    /// so until the recorder could express a *permanent* loss, "this device is
-    /// gone and stays gone" had no test on any backend.
-    #[test]
-    fn a_lost_device_fails_every_frame_after_it_and_rebuilds_nothing() {
-        let (mut shell, window, recorder, mut gpu) =
-            null_context("device loss test", Pacing::Vsync);
-
-        // The control: the same context, one healthy frame.
-        assert_eq!(
-            null_frame(&mut gpu).expect("a healthy frame"),
-            FrameOutcome::Presented
-        );
-        let presented = presents(&recorder);
-        assert_eq!(presented, 1);
-
-        // A rebuild that *fails* records no event, so the recorder alone cannot
-        // tell an engine that never tried to rebuild from one that tried and
-        // was refused — and those are the two policies. The log line can, and a
-        // real resize first is what proves this capture would have seen one.
-        let logs = crcbl_core::log::capture();
-        let rebuilds_logged = || {
-            logs.records()
-                .iter()
-                .filter(|record| record.message.starts_with(RECONFIGURE_LINE))
-                .count()
-        };
-        gpu.resize((320, 240))
-            .expect("a resize the device can still do");
-        assert_eq!(rebuilds_logged(), 1, "{:?}", logs.records());
-        let rebuilt = reconfigures(&recorder);
-        assert_eq!(rebuilt, 1, "and the rebuild really happened");
-
-        recorder.lose_device("gpu hang: the driver reset the adapter");
-
-        let mut errors: Vec<GpuError> = Vec::new();
-        for attempt in 0..3u32 {
-            match null_frame(&mut gpu) {
-                Ok(outcome) => panic!("frame {attempt} ran on a device that is gone: {outcome:?}"),
-                Err(error) => errors.push(error),
-            }
-        }
-        assert_eq!(
-            errors.len(),
-            3,
-            "every frame after the loss failed, not just the first"
-        );
-        for error in &errors {
-            assert!(
+            .filter(|event| {
                 matches!(
-                    error,
-                    GpuError::Surface(SurfaceError::Hal(HalError::DeviceLost(_)))
-                ),
-                "{error}"
-            );
-            assert!(
-                error.to_string().contains("gpu hang"),
-                "the driver's own words are what a player's log has to carry: {error}"
-            );
-        }
-
-        assert_eq!(
-            reconfigures(&recorder),
-            rebuilt,
-            "the engine must not rebuild the swapchain out from under a lost device"
-        );
-        assert_eq!(
-            rebuilds_logged(),
-            1,
-            "and must not so much as attempt one: {:?}",
-            logs.records()
-        );
-        assert_eq!(
-            presents(&recorder),
-            presented,
-            "and nothing reached the screen after the loss"
-        );
-
-        // Teardown reports it too rather than pretending the wait succeeded.
-        let teardown = gpu
-            .destroy()
-            .expect_err("waiting for a dead device to go idle cannot succeed");
-        assert!(
-            matches!(teardown, GpuError::Hal(HalError::DeviceLost(_))),
-            "{teardown}"
-        );
-        shell.destroy_window(window).expect("the window goes away");
+                    event,
+                    crcbl_hal::null::Event::PresentWaited {
+                        timed_out: true,
+                        ..
+                    }
+                )
+            })
+            .count()
     }
 
     /// A loop with nothing in it but the device, so [`drive`] stops for one
@@ -14349,76 +11150,76 @@ mod tests {
         shell.destroy_window(window).expect("the window goes away");
     }
 
-    /// **A suboptimal frame is presented and *then* the swapchain is rebuilt**,
-    /// and that order is the whole of what separates this arm from every other
-    /// reconfigure the engine does.
+    /// **Every refusal the presenter makes reaches a game as the [`GpuError`]
+    /// it was before the presenter existed**, carrying the same value.
     ///
-    /// The observable is the recorder's event *sequence*, not its counts,
-    /// because the counts cannot tell the candidate engines apart. One that
-    /// ignores [`AcquiredFrame::suboptimal`] records the present and no rebuild.
-    /// One that treated it the way it treats
-    /// [`SurfaceError::OutOfDate`] would rebuild *instead* of presenting — a
-    /// rebuild with nothing on the display ahead of it, and a
-    /// [`FrameOutcome::Reconfigured`] for a frame that in fact went out. Only a
-    /// `present` followed by a `reconfigure`, on the one frame, is
-    /// [`GpuContext::submit_and_present`] doing what it says.
-    ///
-    /// The driven half is the other obligation. `report_suboptimal_acquires` is
-    /// *counted* rather than latched, so a loop handed a few suboptimal frames
-    /// rebuilds exactly that many times and then runs out its budget. A latch
-    /// would make this run reconfigure on every frame until
-    /// [`MAX_CONSECUTIVE_RECONFIGURES`] — a test that hangs where it meant to
-    /// fail — which is why the recorder counts.
+    /// A game's `match` on `GpuError::Surface` or `GpuError::Unusable` is
+    /// written against variants the presenter now produces under other names;
+    /// a mapping that put one onto the wrong variant would compile and send a
+    /// lost device or a refused window down the wrong arm. Every variant is
+    /// listed by hand, so a variant added to `PresentError` without a mapping
+    /// fails to compile in the `From` impl and a mapping that is wrong fails
+    /// here.
     #[test]
-    fn a_suboptimal_frame_is_presented_and_then_the_swapchain_is_rebuilt() {
-        let (mut shell, window, recorder, mut gpu) =
-            null_context("suboptimal frame test", Pacing::Vsync);
+    fn every_present_error_lands_on_the_gpu_error_of_its_name() {
+        let pin_miss = crate::adapter::select(Some("virtual"), &[])
+            .expect_err("nothing is enumerated, so no pin can name an adapter");
+        let backend = crate::backend::GpuError::NoBackend {
+            tried: "vulkan".into(),
+            last: "no driver".into(),
+        };
+        let cases = [
+            (PresentError::NoBackend(backend), "NoBackend"),
+            (PresentError::Unusable("no graphics queue"), "Unusable"),
+            (PresentError::AdapterPin(pin_miss.clone()), "AdapterPin"),
+            (PresentError::Hal(HalError::OutOfHostMemory), "Hal"),
+            (
+                PresentError::Surface(SurfaceError::Hal(HalError::DeviceLost("reset".into()))),
+                "Surface",
+            ),
+        ];
+        for (present, name) in cases {
+            let said = present.to_string();
+            let error = GpuError::from(present);
+            let landed = match &error {
+                GpuError::NoBackend(crate::backend::GpuError::NoBackend { tried, last }) => {
+                    assert_eq!((tried.as_str(), last.as_str()), ("vulkan", "no driver"));
+                    "NoBackend"
+                }
+                GpuError::Unusable(what) => {
+                    assert_eq!(*what, "no graphics queue");
+                    "Unusable"
+                }
+                GpuError::AdapterPin(miss) => {
+                    assert_eq!(*miss, pin_miss);
+                    "AdapterPin"
+                }
+                GpuError::Hal(HalError::OutOfHostMemory) => "Hal",
+                GpuError::Surface(SurfaceError::Hal(HalError::DeviceLost(why))) => {
+                    assert_eq!(why, "reset");
+                    "Surface"
+                }
+                other => panic!("{name} landed on {other:?}"),
+            };
+            assert_eq!(landed, name, "{said}");
+            assert_eq!(error.to_string(), said, "the message is the presenter's");
+        }
+    }
 
-        // The control: an undisturbed frame presents and rebuilds nothing, so
-        // the sequence below is this one plus what the flag added.
-        recorder.clear();
-        assert_eq!(
-            null_frame(&mut gpu).expect("a healthy frame"),
-            FrameOutcome::Presented
-        );
-        assert_eq!(
-            presentation_sequence(&recorder),
-            ["present"],
-            "nothing rebuilds a swapchain the surface still fits"
-        );
-
-        recorder.report_suboptimal_acquires(1);
-        recorder.clear();
-        assert_eq!(
-            null_frame(&mut gpu).expect("a suboptimal frame is not a failed one"),
-            FrameOutcome::Presented,
-            "the frame reached the display, so the loop counts it as presented"
-        );
-        assert_eq!(
-            presentation_sequence(&recorder),
-            ["present", "reconfigure"],
-            "the rebuild has to come after the present, not instead of it: {:?}",
-            recorder.events()
-        );
-
-        // And it stops, because the report was spent by the acquire that read
-        // it.
-        recorder.clear();
-        assert_eq!(
-            null_frame(&mut gpu).expect("a healthy frame"),
-            FrameOutcome::Presented
-        );
-        assert_eq!(
-            presentation_sequence(&recorder),
-            ["present"],
-            "the rebuilt swapchain is not suboptimal again"
-        );
-
-        gpu.destroy().expect("teardown");
-        shell.destroy_window(window).expect("the window goes away");
-
-        // Driven, so the arm runs where it actually lives: inside a loop that
-        // has a budget to spend and can therefore be seen failing to spend it.
+    /// **A loop handed suboptimal frames spends its whole budget**, rebuilding
+    /// once per suboptimal frame and presenting every one.
+    ///
+    /// The driven half of `crcbl-app`'s
+    /// `a_suboptimal_frame_is_presented_and_then_the_swapchain_is_rebuilt`, so
+    /// the arm runs where it actually lives: inside a loop that has a budget
+    /// to spend and can therefore be seen failing to spend it.
+    /// `report_suboptimal_acquires` is *counted* rather than latched, so a loop
+    /// handed a few suboptimal frames rebuilds exactly that many times and then
+    /// runs out its budget. A latch would make this run reconfigure on every
+    /// frame until [`MAX_CONSECUTIVE_RECONFIGURES`] — a test that hangs where
+    /// it meant to fail — which is why the recorder counts.
+    #[test]
+    fn a_driven_loop_spends_its_budget_through_suboptimal_frames() {
         const BUDGET: u64 = 4;
         const SUBOPTIMAL: u32 = 2;
 
@@ -14448,119 +11249,19 @@ mod tests {
         shell.destroy_window(window).expect("the window goes away");
     }
 
-    /// **A frame whose pacing wait timed out is still rendered and still
-    /// presented**, which is the whole of the policy that arm exists to carry
-    /// out: a frame skipped because the *last* one was late is two frames lost
-    /// instead of one.
+    /// **A loop whose display falls behind spends its whole budget**: every
+    /// frame whose pacing wait lapsed is still rendered and presented.
     ///
-    /// The observable is the recorder's event sequence for the one frame, and
-    /// it has to separate three candidate engines rather than two. One that
-    /// renders anyway leaves `wait timed out`, an `acquire` and a `present`.
-    /// One that treated the timeout the way it treats
-    /// [`SurfaceError::OutOfDate`] would leave the lapsed wait and **nothing
-    /// else** — no image was ever taken — and hand its caller
-    /// [`FrameOutcome::Reconfigured`] for a frame that never reached the
-    /// display. One that let the error propagate leaves that same truncated
-    /// sequence but fails the frame outright, so the outcome assertion is what
-    /// separates those two from each other and the sequence is what separates
-    /// both from the right answer.
-    ///
-    /// Naming the lapsed wait apart from an answered one is the other half.
-    /// Every candidate above presents on a frame whose wait *succeeded*, so an
-    /// assertion that could not see the refusal would pass on an injection that
-    /// silently reached nothing — which is exactly what an injection on a device
-    /// without [`Features::PRESENT_FEEDBACK`] does, and why this context asks
-    /// for the capability on an adapter built to have it.
-    ///
-    /// The frame after it is the seam's other claim — "let the next wait catch
-    /// up" — and it is testable only because
-    /// [`Recorder::report_present_wait_timeouts`] is counted rather than
-    /// latched.
+    /// The driven half of `crcbl-app`'s
+    /// `a_timed_out_pacing_wait_still_renders_and_presents_the_frame`, so the
+    /// arm runs where it lives: inside a loop with a budget it can be seen
+    /// spending in full. The device is asked for
+    /// [`Features::PRESENT_FEEDBACK`] on an adapter built to have it, because
+    /// an injection on a device without it reaches nothing.
     #[test]
-    fn a_timed_out_pacing_wait_still_renders_and_presents_the_frame() {
+    fn a_driven_loop_spends_its_budget_through_late_presents() {
         use crcbl_hal::null::NullInstance;
 
-        let (mut shell, window, recorder, mut gpu) = null_context_with(
-            NullInstance::gpu_driven().with_present_feedback(),
-            "timed-out wait test",
-            Pacing::Vsync,
-            Features::PRESENT_FEEDBACK,
-        );
-        assert!(
-            gpu.device()
-                .caps()
-                .features
-                .contains(Features::PRESENT_FEEDBACK),
-            "a device that cannot observe presents cannot be told one was late, \
-             and every assertion below would pass without the injection landing"
-        );
-
-        // Fill the pipeline: the first `FRAMES_IN_FLIGHT` frames have nothing
-        // far enough behind them to wait for, so none of them would consume the
-        // injection or exercise the arm.
-        for _ in 0..=FRAMES_IN_FLIGHT {
-            assert_eq!(
-                null_frame(&mut gpu).expect("a healthy frame"),
-                FrameOutcome::Presented
-            );
-        }
-        assert!(
-            GpuContext::present_to_wait_for(gpu.submitted, gpu.effective_pacing()).is_some(),
-            "the rest of this test asserts nothing unless the next frame is one that waits"
-        );
-
-        // The control: the same frame with its wait answered, so the sequence
-        // below is this one with the wait's answer changed and nothing else.
-        recorder.clear();
-        assert_eq!(
-            null_frame(&mut gpu).expect("a healthy frame"),
-            FrameOutcome::Presented
-        );
-        assert_eq!(
-            paced_frame_sequence(&recorder),
-            ["wait", "acquire", "present"],
-            "a paced frame waits, then takes an image, then presents it: {:?}",
-            recorder.events()
-        );
-
-        recorder.report_present_wait_timeouts(1);
-        recorder.clear();
-        assert_eq!(
-            null_frame(&mut gpu).expect("a display that is behind does not fail the frame"),
-            FrameOutcome::Presented,
-            "the frame reached the display, so the loop counts it as presented"
-        );
-        assert_eq!(
-            paced_frame_sequence(&recorder),
-            ["wait timed out", "acquire", "present"],
-            "the frame is rendered anyway: an engine that skipped or failed it \
-             stops after the wait: {:?}",
-            recorder.events()
-        );
-        assert_eq!(
-            reconfigures(&recorder),
-            0,
-            "and a late display is not a resize, so nothing is rebuilt"
-        );
-
-        // The next wait catches up, which the arm's comment promises and only a
-        // counted injection can show.
-        recorder.clear();
-        assert_eq!(
-            null_frame(&mut gpu).expect("a healthy frame"),
-            FrameOutcome::Presented
-        );
-        assert_eq!(
-            paced_frame_sequence(&recorder),
-            ["wait", "acquire", "present"],
-            "the stall was one frame's, not this device's forever"
-        );
-
-        gpu.destroy().expect("teardown");
-        shell.destroy_window(window).expect("the window goes away");
-
-        // Driven, so the arm runs where it lives: inside a loop with a budget it
-        // can be seen spending in full.
         const BUDGET: u64 = 8;
         const TIMEOUTS: u32 = 2;
 
@@ -14583,10 +11284,7 @@ mod tests {
             "the loop spent its whole budget rather than stopping on a late display"
         );
         assert_eq!(
-            paced_frame_sequence(&recorder)
-                .iter()
-                .filter(|step| **step == "wait timed out")
-                .count(),
+            timed_out_waits(&recorder),
             usize::try_from(TIMEOUTS).expect("the injected count fits a usize"),
             "both injected timeouts were spent by real waits, and no more were invented"
         );
@@ -15339,85 +12037,6 @@ mod tests {
                     leftover.report(),
                     span_shapes(&leftover),
                 );
-            },
-        );
-    }
-
-    /// **The swapchain wait is a span of its own**, so the CPU frame time can
-    /// have it taken back out. It is what a vsynced frame spends most of itself
-    /// in, and counting it as CPU work is how a row answers "CPU-bound" to every
-    /// frame on every machine.
-    #[test]
-    fn the_swapchain_wait_is_recorded_as_a_span_of_its_own() {
-        in_a_traced_process(
-            "engine::tests::the_swapchain_wait_is_recorded_as_a_span_of_its_own",
-            || {
-                use crcbl_core::trace::RecordKind::{SpanBegin, SpanEnd};
-
-                let (_shell, _window, _recorder, mut gpu) =
-                    null_context("present-wait span test", Pacing::Vsync);
-                // Two frames: the first has nothing submitted to wait on, the
-                // second does, and both go through the acquire. The second's
-                // submit also retires the first — the loop keeps one frame in
-                // flight — and that wait is a span too: three in all.
-                null_frame(&mut gpu).expect("the null backend presents");
-                null_frame(&mut gpu).expect("the null backend presents");
-
-                let snapshot = crcbl_core::trace::drain();
-                assert_eq!(
-                    span_shapes(&snapshot),
-                    vec![
-                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
-                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
-                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
-                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
-                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
-                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
-                    ],
-                    "a hand-written loop opens no frame span, so these sit at depth zero",
-                );
-                gpu.destroy().expect("the null backend releases everything");
-            },
-        );
-    }
-
-    #[test]
-    fn command_retirement_waits_are_excluded_from_cpu_work() {
-        in_a_traced_process(
-            "engine::tests::command_retirement_waits_are_excluded_from_cpu_work",
-            || {
-                use crcbl_core::trace::RecordKind::{SpanBegin, SpanEnd};
-                let (_shell, _window, _recorder, mut gpu) =
-                    null_context("retirement wait spans", Pacing::Vsync);
-                null_frame(&mut gpu).expect("first frame");
-                null_frame(&mut gpu).expect("second frame");
-                // The loop keeps one submission in flight, so a second
-                // outstanding one is queued by hand: two waits are what this
-                // test needs to tell one span per wait from one per call.
-                let extra = gpu
-                    .device()
-                    .create_command_encoder(&crcbl_hal::CommandEncoderDesc {
-                        label: Some("retirement wait spans"),
-                        queue: gpu.queue(),
-                    })
-                    .finish()
-                    .expect("an empty command buffer");
-                let submitted = gpu.submitted;
-                gpu.in_flight.push_back((submitted, extra));
-                assert_eq!(gpu.in_flight.len(), 2, "two submissions to retire");
-                drop(crcbl_core::trace::drain());
-                gpu.retire_to(0).expect("retire both submissions");
-                assert_eq!(
-                    span_shapes(&crcbl_core::trace::drain()),
-                    vec![
-                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
-                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
-                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
-                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
-                    ],
-                    "each blocking wait needs its own CPU-idle exclusion"
-                );
-                gpu.destroy().expect("release resources");
             },
         );
     }

@@ -3,7 +3,7 @@
 
 use super::*;
 
-use crate::backend::{GpuBackend, Registration, ready, request_open_auto, request_open_named};
+use crate::backend::{Registration, ready, request_open_auto, request_open_named};
 use crcbl_hal::null::NullInstance;
 
 /// What [`RefusingSurface`]'s `create_surface` answers: Vulkan's refusal of a
@@ -124,15 +124,15 @@ static REFUSED_ALONE: &[Registration] = &[
 ];
 
 /// Polls an open of the headless window whose instance comes from `instance`
-/// until it yields a context or fails.
+/// until it yields a presenter or fails.
 fn open_through(
     instance: crate::backend::PendingInstance,
-) -> (crcbl_shell::HeadlessShell, Result<GpuContext, GpuError>) {
+) -> (HeadlessShell, Result<Presenter, PresentError>) {
     let (shell, mut pending) = adapter_walk_request(None);
     pending.stage = OpenStage::Instance(instance);
     let result = loop {
         match pending.poll() {
-            Ok(Some(context)) => break Ok(context),
+            Ok(Some(presenter)) => break Ok(presenter),
             Ok(None) => {}
             Err(error) => break Err(error),
         }
@@ -141,7 +141,7 @@ fn open_through(
 }
 
 /// **Unpinned, a backend that cannot present to the window is passed over
-/// and the next one opens it.** Read from the finished context's own
+/// and the next one opens it.** Read from the finished presenter's own
 /// instance, because which backend drew the window is the claim.
 #[test]
 fn an_unpinned_open_moves_past_a_backend_that_refuses_the_window() {
@@ -153,7 +153,7 @@ fn an_unpinned_open_moves_past_a_backend_that_refuses_the_window() {
         .expect("teardown is in the seam's stated order");
 }
 
-/// **A backend named by `GpuContextDesc::backend` or `CRCBL_GPU` that refuses
+/// **A backend named by `PresenterDesc::backend` or `CRCBL_GPU` that refuses
 /// the window ends the open with its refusal**, rather than quietly drawing
 /// on another one.
 #[test]
@@ -162,7 +162,7 @@ fn a_named_backend_that_refuses_the_window_ends_the_open() {
         request_open_named(REFUSED_THEN_NULL, GpuBackend::Vulkan).expect("the table has the entry");
     let (_shell, opened) = open_through(named);
     let refusal = opened.err();
-    let Some(GpuError::Hal(HalError::Unsupported { what, .. })) = &refusal else {
+    let Some(PresentError::Hal(HalError::Unsupported { what, .. })) = &refusal else {
         panic!("a named backend's refusal is final: {refusal:?}");
     };
     assert_eq!(*what, "this backend cannot present to a transparent window");
@@ -176,7 +176,7 @@ fn a_surface_failure_that_is_not_unsupported_ends_the_open() {
     let (_shell, opened) = open_through(request_open_auto(FAILED_THEN_NULL));
     let refusal = opened.err();
     assert!(
-        matches!(refusal, Some(GpuError::Hal(HalError::OutOfHostMemory))),
+        matches!(refusal, Some(PresentError::Hal(HalError::OutOfHostMemory))),
         "{refusal:?}"
     );
 }
@@ -188,7 +188,10 @@ fn the_last_backend_refusing_the_window_reports_its_refusal() {
     let (_shell, opened) = open_through(request_open_auto(REFUSED_ALONE));
     let refusal = opened.err();
     assert!(
-        matches!(refusal, Some(GpuError::Hal(HalError::Unsupported { .. }))),
+        matches!(
+            refusal,
+            Some(PresentError::Hal(HalError::Unsupported { .. }))
+        ),
         "{refusal:?}"
     );
 }

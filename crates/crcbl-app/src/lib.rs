@@ -5,7 +5,8 @@
 //! crcbl_shell::open() ──▶ window::open_window ──▶ window::wait_for_configure
 //!                                                         │ extent
 //!                                                         ▼
-//!        backend::request_open ──▶ adapter::select ──▶ device + swapchain
+//!   present::Presenter: backend::request_open ──▶ adapter::select
+//!                       ──▶ device + swapchain ──▶ acquire / submit_and_present
 //!
 //! ShellEvent ──▶ text_input::TextPump ──▶ crcbl_ui's TextInput
 //! ```
@@ -13,23 +14,24 @@
 //! [`backend`] walks the GPU backends this target has and falls through past
 //! one that cannot open, [`adapter`] reads the `CRCBL_ADAPTER` pin that says
 //! which device inside it, [`window`] opens a window and waits for its first
-//! size, and [`text_input`] joins the shell's key, commit and clipboard events
-//! to `crcbl-ui`'s text input. A program that draws only a UI — a status bar, a
-//! launcher — depends on this crate, `crcbl-ui` and `crcbl-frame`, and links
-//! no audio, physics, networking or ECS.
+//! size, [`present`] opens a device and a swapchain on that window and paces
+//! frames into it, and [`text_input`] joins the shell's key, commit and
+//! clipboard events to `crcbl-ui`'s text input. A program that draws only a
+//! UI — a status bar, a launcher — depends on this crate, `crcbl-ui` and
+//! `crcbl-frame`, opens a [`present::Presenter`] where a game opens the
+//! engine's `GpuContext`, and links no audio, physics, networking or ECS.
 //!
 //! The `crcbl` umbrella depends on this crate and re-exports every module at
 //! its old path (`crcbl::backend`, `crcbl::adapter`,
-//! `crcbl::text_input::TextPump`, `crcbl::engine::wait_for_configure`), so a
-//! game names nothing here.
+//! `crcbl::text_input::TextPump`, `crcbl::engine::wait_for_configure`,
+//! `crcbl::engine::Pacing`), so a game names nothing here.
 //!
 //! # What is not here
 //!
-//! - **`GpuContext`**, the device and swapchain the engine draws through. It
-//!   still lives in `crcbl::engine`: it reads the player's `[engine.video]`
-//!   settings, hands the renderer its effect request and writes `--screenshot`
-//!   frames, and each of those reaches a crate this one must not link. It
-//!   moves here once the core presenter is split from those.
+//! - **`GpuContext`'s engine half.** `crcbl::engine::GpuContext` wraps a
+//!   [`present::Presenter`] and adds the player's `[engine.video]` settings,
+//!   the renderer's effect request and `--screenshot` frames, and each of
+//!   those reaches a crate this one must not link.
 //! - **The frame loop, the clock and the menus**, which are the engine's.
 //!   [`window::open_window`] takes the clock's elapsed time rather than the
 //!   engine's `Clock`, and `crcbl::engine::open_window` is the wrapper that
@@ -56,6 +58,8 @@
 pub mod adapter;
 
 pub mod backend;
+
+pub mod present;
 
 pub mod text_input;
 

@@ -443,6 +443,7 @@ dependencies = [
  "crcbl-hal",
  "crcbl-mtl",
  "crcbl-shell",
+ "crcbl-spawn",
  "crcbl-ui",
  "crcbl-vk",
  "crcbl-webgpu",

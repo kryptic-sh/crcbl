@@ -36,7 +36,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   re-exports each item at its old path (`crcbl::backend`, `crcbl::adapter`,
   `crcbl::engine::wait_for_configure`, `crcbl::text_input::TextPump`), and
   `crcbl::engine::open_window` keeps its signature, so games change nothing.
-  `GpuContext` is still in `crcbl` for now.
+- **`crcbl_app::present::Presenter`**, the device and swapchain half of
+  `GpuContext`: the backend walk, the adapter pin, the premultiplied alpha a
+  transparent window needs, the frame ring, pacing (`Pacing`, settled once
+  against the display), `acquire`, `submit_and_present`, `resize`, `drain` and
+  `destroy`. A program that draws only a UI opens one with
+  `Presenter::request_open` (or the blocking `Presenter::open` off the web)
+  instead of `GpuContext`, and records its own frames into it. `PresenterDesc`
+  takes resolved values — backend, adapter pin, pacing, features,
+  `frames_in_flight` — and reads no settings file or environment.
+  `submit_and_present_with` submits extra command buffers in the frame's batch
+  and runs a hook after the present, which is how `--screenshot` rides it.
+  `crcbl::engine::GpuContext` now wraps a `Presenter` and keeps its API;
+  `Pacing`, `FrameOutcome`, `PRESENT_WAIT_TIMEOUT` and
+  `crcbl::perf::PRESENT_WAIT_SPAN` are re-exported at their old paths, and
+  `GpuError` gains `From<PresentError>`, mapping each refusal onto the variant
+  of the same name.
 
 ### Changed
 
