@@ -236,6 +236,11 @@ pub const SCENE_CLEAR: [f32; 4] = [0.012, 0.016, 0.030, 1.0];
 /// frames-in-flight.
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
+// The UI pass this renderer draws its HUD through keeps a ring of its own,
+// built at `crcbl_frame`'s default depth; held equal here, where both are in
+// scope, so the HUD cannot fall a frame behind the ring it shares a submit with.
+const _: () = assert!(crcbl_frame::ui_pass::FRAMES_IN_FLIGHT == FRAMES_IN_FLIGHT);
+
 /// The darkest exposure [`ForwardRenderer::set_exposure`] will accept: **five
 /// stops below** [`crcbl_shaders::tonemap::DEFAULT_EXPOSURE`].
 ///

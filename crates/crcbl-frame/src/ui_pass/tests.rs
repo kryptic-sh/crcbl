@@ -1441,3 +1441,55 @@ fn image_uploads_leak_nothing() {
     assert_eq!(recorder.total_live_objects(), before);
     recorder.assert_valid();
 }
+
+/// A pass built for a deeper presenter ring keeps that many slots and comes
+/// back to the first only after all of them. Red when `with_ring` builds the
+/// default depth anyway, or when the rotation wraps at the default rather than
+/// at the depth asked for — either rewrites a slot the device may still read.
+#[test]
+fn a_ring_built_deeper_than_the_default_rotates_through_every_slot() {
+    let (device, queue) = open();
+    let depth = FRAMES_IN_FLIGHT + 1;
+    let mut renderer = UiRenderer::with_ring(
+        device.as_ref(),
+        queue,
+        Format::Bgra8UnormSrgb,
+        ImageAtlas::new(),
+        depth,
+    )
+    .expect("built");
+    assert_eq!(renderer.vertex_buffers.len(), depth);
+    assert_eq!(renderer.index_buffers.len(), depth);
+    assert_eq!(renderer.constant_buffers.len(), depth);
+
+    let atlas = FontAtlas::built_in();
+    let list = DrawList::new();
+    let mut slots = Vec::new();
+    for _ in 0..=depth {
+        renderer
+            .begin_frame(device.as_ref(), &list, &atlas, 1.0)
+            .expect("upload");
+        slots.push(renderer.frame);
+    }
+    let distinct: std::collections::BTreeSet<_> = slots[..depth].iter().collect();
+    assert_eq!(distinct.len(), depth, "every slot is used once: {slots:?}");
+    assert_eq!(slots[depth], slots[0], "and the ring wraps at its depth");
+    renderer.destroy(device.as_ref());
+}
+
+/// A ring of no frames is refused by name rather than dividing by zero at the
+/// first frame.
+#[test]
+fn a_ring_of_no_frames_is_refused() {
+    let (device, queue) = open();
+    let Err(error) = UiRenderer::with_ring(
+        device.as_ref(),
+        queue,
+        Format::Bgra8UnormSrgb,
+        ImageAtlas::new(),
+        0,
+    ) else {
+        panic!("a ring of no frames was built");
+    };
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+}

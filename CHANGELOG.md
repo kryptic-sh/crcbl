@@ -53,6 +53,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `crcbl::perf::PRESENT_WAIT_SPAN` are re-exported at their old paths, and
   `GpuError` gains `From<PresentError>`, mapping each refusal onto the variant
   of the same name.
+- **`crcbl_frame::UiRenderer::with_ring`** builds the UI pass with as many
+  frames of buffers in flight as the presenter it draws through, and
+  `crcbl_frame::ui_pass::FRAMES_IN_FLIGHT` is now public as the depth `new` and
+  `with_images` use. A program that opens a `Presenter` with a deeper
+  `frames_in_flight` builds its UI pass with `with_ring` at that depth; a
+  shallower pass would rewrite a slot the device may still be reading.
 
 ### Changed
 

@@ -20,6 +20,7 @@ use crcbl_frame::{ImportedImage, InitialClaim, RenderGraph, TransientPool, UiRen
 use crcbl_hal::{CommandEncoderDesc, ResourceState};
 use crcbl_shell::{HeadlessShell, Shell, WindowDesc};
 use crcbl_ui::draw_list::DrawList;
+use crcbl_ui::image::ImageAtlas;
 use crcbl_ui::text::FontAtlas;
 use glam::Vec2;
 
@@ -51,7 +52,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut presenter = Presenter::open(shell.as_ref(), window, extent, &desc)?;
 
-    let mut ui = UiRenderer::new(presenter.device(), presenter.queue(), presenter.format())?;
+    // As deep as the presenter's ring, so no slot is rewritten while the
+    // device may still read it.
+    let mut ui = UiRenderer::with_ring(
+        presenter.device(),
+        presenter.queue(),
+        presenter.format(),
+        ImageAtlas::new(),
+        presenter.frames_in_flight(),
+    )?;
     let mut pool = TransientPool::new();
     let atlas = FontAtlas::built_in();
     let mut list = DrawList::new();

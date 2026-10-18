@@ -315,22 +315,6 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      and allowing `crcbl-render` into `crcbl-app`, which would still leave
      `crcbl-store` (and through it `crcbl-net`), `crcbl-audio`,
      `crate::settings` and `crcbl-golden`.
-     - **Left: tell lyr, pikr and EW** that `Presenter` is on main, with what
-       their code changes to: open `crcbl_app::present::Presenter` with a
-       `PresenterDesc` (pass `crcbl_app::adapter::pin().as_deref()` as
-       `adapter_pin` to honour `CRCBL_ADAPTER`) where they would have opened
-       `GpuContext`, and record frames with `crcbl-frame`'s `UiRenderer` into
-       what `acquire` hands out — `crates/crcbl-app/examples/ui_window.rs` is
-       the whole of it.
-     - Gap, not fixed: `crcbl-frame`'s UI pass keeps its per-frame ring at a
-       private constant in `ui_pass.rs`, and nothing ties it to
-       `crcbl_app::present::FRAMES_IN_FLIGHT` or to a `PresenterDesc` whose
-       `frames_in_flight` is deeper. A UI-only program that asks for a deeper
-       ring would let the UI pass write a slot the device may still read. The
-       umbrella's renderer is held in step by a compile-time assertion in
-       `engine.rs`; the UI pass is not. A fix is a public constant in
-       `crcbl-frame` asserted against the presenter's, or a ring depth
-       `UiRenderer::new` takes.
      - Behaviour that is not a bug: `GpuContext::request_open` now reads the
        `[engine.video] present_mode` key before it opens the backend (the
        presenter's desc carries the resolved pacing), so an open whose backend

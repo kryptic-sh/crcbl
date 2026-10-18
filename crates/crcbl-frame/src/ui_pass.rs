@@ -222,8 +222,15 @@ const IMAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 /// bytes are never written and never read.
 const CONSTANTS_UNIFORM_SIZE: u64 = 16;
 
-/// How many frames of vertex/index buffers to keep in flight.
-const FRAMES_IN_FLIGHT: usize = 2;
+/// How many frames of vertex, index and constants buffers
+/// [`UiRenderer::new`] and [`UiRenderer::with_images`] keep in flight.
+///
+/// The pass writes one slot per frame and comes back to it this many frames
+/// later, so it must be at least as deep as the presenter's frame ring: a
+/// shallower one rewrites a slot the device may still be reading. A program
+/// presenting through a deeper ring builds the pass with
+/// [`UiRenderer::with_ring`] at that depth.
+pub const FRAMES_IN_FLIGHT: usize = 2;
 
 /// Starting size of each ring buffer, in bytes.
 const INITIAL_RING_BYTES: u64 = 1024;
@@ -301,6 +308,9 @@ pub struct UiRenderer {
     vertex_buffers: Vec<BufferHandle>,
     index_buffers: Vec<BufferHandle>,
     frame: usize,
+    /// How many slots each per-frame ring holds; see
+    /// [`with_ring`](Self::with_ring).
+    frames_in_flight: usize,
 
     /// One constants buffer per frame in flight, rotating with the geometry
     /// rings so a frame still in flight cannot have its viewport overwritten.
@@ -381,8 +391,42 @@ impl UiRenderer {
         target_format: Format,
         images: ImageAtlas,
     ) -> Result<Self, HalError> {
+        Self::with_ring(device, queue, target_format, images, FRAMES_IN_FLIGHT)
+    }
+
+    /// [`with_images`](Self::with_images), keeping `frames_in_flight` frames
+    /// of buffers in flight instead of [`FRAMES_IN_FLIGHT`].
+    ///
+    /// For a program presenting through a frame ring of its own depth, such as
+    /// a `crcbl_app` presenter opened with a deeper `frames_in_flight`: this
+    /// pass must be at least that deep, or it rewrites a slot the device may
+    /// still be reading.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`] for a ring of no frames, and otherwise
+    /// as [`new`](Self::new).
+    pub fn with_ring(
+        device: &dyn Device,
+        queue: QueueHandle,
+        target_format: Format,
+        images: ImageAtlas,
+        frames_in_flight: usize,
+    ) -> Result<Self, HalError> {
+        if frames_in_flight == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "a UI pass needs at least one frame of buffers in flight".to_string(),
+            ));
+        }
         let mut rollback = Rollback::default();
-        match Self::build(device, queue, target_format, images, &mut rollback) {
+        match Self::build(
+            device,
+            queue,
+            target_format,
+            images,
+            frames_in_flight,
+            &mut rollback,
+        ) {
             Ok(renderer) => Ok(renderer),
             Err(error) => {
                 rollback.run(device);
@@ -398,6 +442,7 @@ impl UiRenderer {
         queue: QueueHandle,
         target_format: Format,
         mut images: ImageAtlas,
+        frames_in_flight: usize,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
         let atlas = FontAtlas::built_in();
@@ -608,16 +653,16 @@ impl UiRenderer {
         rollback.bind_groups.push(blank_group);
 
         // Per-frame bind groups (atlas/sampler are static, the rest rotate)
-        let mut frame_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        let mut vertex_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        let mut index_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        let mut constant_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        let mut last_vertex_count = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        let mut last_index_count = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        let mut last_overlay_index = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        let mut vertex_capacity = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        let mut index_capacity = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        for _ in 0..FRAMES_IN_FLIGHT {
+        let mut frame_groups = Vec::with_capacity(frames_in_flight);
+        let mut vertex_buffers = Vec::with_capacity(frames_in_flight);
+        let mut index_buffers = Vec::with_capacity(frames_in_flight);
+        let mut constant_buffers = Vec::with_capacity(frames_in_flight);
+        let mut last_vertex_count = Vec::with_capacity(frames_in_flight);
+        let mut last_index_count = Vec::with_capacity(frames_in_flight);
+        let mut last_overlay_index = Vec::with_capacity(frames_in_flight);
+        let mut vertex_capacity = Vec::with_capacity(frames_in_flight);
+        let mut index_capacity = Vec::with_capacity(frames_in_flight);
+        for _ in 0..frames_in_flight {
             let vb = device.create_buffer(&BufferDesc {
                 label: Some("ui vertices"),
                 size: INITIAL_RING_BYTES,
@@ -725,24 +770,25 @@ impl UiRenderer {
             images,
             image_page,
             image_sampler,
-            image_staging: vec![None; FRAMES_IN_FLIGHT],
+            image_staging: vec![None; frames_in_flight],
             image_upload: None,
             image_recorded: Arc::new(AtomicBool::new(false)),
             glyphs,
             glyph_pages,
-            glyph_staging: vec![Vec::new(); FRAMES_IN_FLIGHT],
+            glyph_staging: vec![Vec::new(); frames_in_flight],
             glyph_uploads: Vec::new(),
             glyph_recorded: Arc::new(AtomicBool::new(false)),
             colors: ColorGlyphCache::new(),
             texture_layout,
             blank,
             blank_group,
-            texture_groups: TextureGroups::new(FRAMES_IN_FLIGHT),
-            last_texture_runs: vec![Vec::new(); FRAMES_IN_FLIGHT],
+            texture_groups: TextureGroups::new(frames_in_flight),
+            last_texture_runs: vec![Vec::new(); frames_in_flight],
             frame_groups,
             vertex_buffers,
             index_buffers,
             frame: 0,
+            frames_in_flight,
             constant_buffers,
             vertex_capacity,
             index_capacity,
@@ -815,7 +861,7 @@ impl UiRenderer {
         atlas: &FontAtlas,
         scale: f32,
     ) -> Result<(), HalError> {
-        self.frame = (self.frame + 1) % FRAMES_IN_FLIGHT;
+        self.frame = (self.frame + 1) % self.frames_in_flight;
         let idx = self.frame;
         self.texture_groups.retire(device, idx);
 
@@ -1339,7 +1385,7 @@ impl UiRenderer {
             let bytes: &[u8] = bytemuck::bytes_of(&block);
             // A host-visible write, not a command: it lands before this
             // frame is submitted, and the buffer is one of
-            // `FRAMES_IN_FLIGHT` — the same rotation that makes the vertex
+            // `frames_in_flight` — the same rotation that makes the vertex
             // ring safe makes this safe.
             if let Err(error) = ctx.device().write_buffer(constants, 0, bytes) {
                 // Recording a pass that draws nothing beats aborting the
