@@ -109,7 +109,7 @@ pub fn pin() -> Option<String> {
 /// instead — because there is nothing a caller can do about it but report it:
 /// the variable is wrong, or the machine is not the one it describes.
 ///
-/// The second half is `crcbl::engine`'s: a windowed open that pinned an adapter
+/// The second half is [`crate::present`]'s: a windowed open that pinned an adapter
 /// which then cannot present to the window refuses with one of these rather
 /// than walking on to an adapter nobody named.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -117,14 +117,11 @@ pub fn pin() -> Option<String> {
 pub struct PinMiss(String);
 
 impl PinMiss {
-    /// A refusal whose message is `message`, for a caller that found the
-    /// pinned adapter unusable after [`select`] had chosen it.
-    ///
-    /// Public, and hidden, only because that caller — `GpuContext` — is still
-    /// in the `crcbl` umbrella; not part of this crate's API.
-    #[doc(hidden)]
+    /// A refusal whose message is `message`, for a caller in this crate that
+    /// found the pinned adapter unusable after [`select`] had chosen it —
+    /// [`Presenter`](crate::present::Presenter)'s adapter walk.
     #[must_use]
-    pub const fn new(message: String) -> Self {
+    pub(crate) const fn new(message: String) -> Self {
         Self(message)
     }
 }
