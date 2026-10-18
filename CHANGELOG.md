@@ -13,6 +13,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-18
+
+### Breaking
+
+- **`ShellCaps::TEXT_IME` means an input method wired end to end**: its
+  composition as `TextPreedit`, its conversions as `TextCommit`, and
+  `set_text_input` and `set_text_input_area` passed on to it. It used to mean
+  only that composed text reached the engine. X11 no longer sets it (it has no
+  XIM, IBus or Fcitx client), Wayland sets it only when the compositor offers
+  `zwp_text_input_manager_v3`, and AppKit no longer sets it until it sends the
+  pre-edit. Code that read `TEXT_IME` to learn whether dead keys work reads
+  `TEXT_COMPOSE`.
+
 ### Added
 
 - **`ShellCaps::TEXT_COMPOSE`**: dead keys and Compose sequences arrive as one
@@ -73,14 +86,6 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   compositor offers it, and the compositor draws the user's own themed cursor.
   `set_cursor(window, Some(shape))` used to be recorded and never applied there;
   a shape now also ends a hide at once rather than at the next pointer enter.
-- **`ShellCaps::TEXT_IME` means an input method wired end to end**: its
-  composition as `TextPreedit`, its conversions as `TextCommit`, and
-  `set_text_input` and `set_text_input_area` passed on to it. It used to mean
-  only that composed text reached the engine. X11 no longer sets it (it has no
-  XIM, IBus or Fcitx client), Wayland sets it only when the compositor offers
-  `zwp_text_input_manager_v3`, and AppKit no longer sets it until it sends the
-  pre-edit. Code that read `TEXT_IME` to learn whether dead keys work reads
-  `TEXT_COMPOSE`.
 - **`PanelKeyboard::Exclusive` holds the keyboard only where
   `ShellCaps::PANEL_EXCLUSIVE_KEYBOARD` is set.** On Win32 and AppKit the panel
   takes the keyboard when it is shown and the user can click it away, which
@@ -20657,7 +20662,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/kryptic-sh/crcbl/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kryptic-sh/crcbl/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/kryptic-sh/crcbl/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/kryptic-sh/crcbl/compare/v0.1.0...v0.2.0
