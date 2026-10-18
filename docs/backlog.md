@@ -157,9 +157,12 @@ each checked against the code here unless it says otherwise:
   one.** `show_panel` now counts the foreground as granted only when
   `SetForegroundWindow` answered success and `GetForegroundWindow` then names
   the panel (`panel::foreground_granted`, unit-tested and mutation-checked
-  headlessly). That `show_panel` calls it, and that pikr's background launch now
-  gets `FocusRefused`, is verified by review only: pikr should confirm. No
-  deterministic refusal was found to provoke from one test process:
+  headlessly). pikr confirmed on 0.4.0 and 0.5.0 that a launch from a background
+  shell, with another window holding the foreground, gets `FocusRefused` and no
+  `Focus { focused: true }`. The granted path, a launch from a foreground
+  terminal or a hotkey tool, has not been checked by anyone: pikr's shell cannot
+  produce one. No deterministic refusal was found to provoke from one test
+  process:
   - Making another window of the same process the foreground first refuses
     nothing: the foreground process may always move its own foreground.
   - `LockSetForegroundWindow(LSFW_LOCK)` is documented to disable
