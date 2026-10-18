@@ -4,7 +4,7 @@ use crate::broadphase::{Ray, Segment};
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 
 use super::tests::ids_of;
-use super::{ALL_LAYERS, ColliderId, PhysicsWorld, QueryFilter, QueryScratch};
+use super::{ALL_LAYERS, ColliderId, LayerMatch, PhysicsWorld, QueryFilter, QueryScratch};
 
 /// The layer the fixtures put their item on.
 const ITEMS: u32 = 1 << 2;
@@ -391,4 +391,100 @@ fn layers_survive_a_move_and_reset_when_the_slot_is_reused() {
         Some(ALL_LAYERS),
         "a recycled slot starts on every layer again"
     );
+}
+
+/// **A `Within` filter reports only the colliders put on its layers**, where
+/// `Shares` also reports every collider still on the default of every layer.
+///
+/// The scene is EW's: an ordinary wall on the default layers, a barrier on one
+/// query-only layer, and a collider on that layer and another, all across the
+/// +X axis. `Shares` is run first and must see all three, so a `Within` that
+/// admitted nothing could not pass; then every query family is asked, since
+/// each reaches the one shared test.
+#[test]
+fn a_within_filter_reports_only_colliders_wholly_on_its_layers() {
+    const BARRIER: u32 = 1 << 5;
+    let mut world = PhysicsWorld::new();
+    let barrier = world.add_box(BoxCollider::new(
+        DVec3::new(2.0, 0.0, 0.0),
+        DVec3::new(0.5, 2.0, 2.0),
+    ));
+    assert!(world.set_layers(barrier, BARRIER));
+    let both = world.add_box(BoxCollider::new(
+        DVec3::new(4.0, 0.0, 0.0),
+        DVec3::new(0.5, 2.0, 2.0),
+    ));
+    assert!(world.set_layers(both, BARRIER | ITEMS));
+    let wall = world.add_box(BoxCollider::new(
+        DVec3::new(6.0, 0.0, 0.0),
+        DVec3::new(0.5, 5.0, 5.0),
+    ));
+    // On no layer at all: hidden from every query, `Within` included, though
+    // none of its bits lies outside any mask.
+    let hidden = world.add_box(BoxCollider::new(
+        DVec3::new(8.0, 0.0, 0.0),
+        DVec3::new(0.5, 2.0, 2.0),
+    ));
+    assert!(world.set_layers(hidden, 0));
+    let bounds = Aabb::new(DVec3::new(0.0, -1.0, -1.0), DVec3::new(10.0, 1.0, 1.0));
+    let sorted = |mut ids: Vec<ColliderId>| {
+        ids.sort_by_key(|id| id.index());
+        ids
+    };
+
+    assert_eq!(
+        sorted(world.overlap_aabb_filtered(&bounds, QueryFilter::masked(BARRIER))),
+        vec![barrier, both, wall],
+        "sharing a bit reports the default-layer wall too"
+    );
+    assert_eq!(
+        world.overlap_aabb_filtered(&bounds, QueryFilter::within(BARRIER)),
+        vec![barrier],
+        "within the barrier layer is the barrier alone"
+    );
+    assert_eq!(
+        sorted(world.overlap_aabb_filtered(&bounds, QueryFilter::within(BARRIER | ITEMS))),
+        vec![barrier, both],
+        "a collider on two layers is within a mask holding both"
+    );
+    assert_eq!(
+        sorted(world.overlap_aabb_filtered(&bounds, QueryFilter::within(ALL_LAYERS))),
+        vec![barrier, both, wall],
+        "every collider is within every layer"
+    );
+    assert_eq!(
+        QueryFilter::masked(BARRIER).with_layer_match(LayerMatch::Within),
+        QueryFilter::within(BARRIER)
+    );
+
+    // The solid family, past the barrier with the barrier excluded.
+    let id = |hit: Option<(ColliderId, _)>| hit.map(|(id, _)| id);
+    let ray = Ray::new(DVec3::new(10.0, 0.0, 0.0), DVec3::NEG_X);
+    assert_eq!(
+        id(world.cast_ray_filtered(&ray, QueryFilter::masked(BARRIER))),
+        Some(wall),
+        "from +X the wall is first when it shares the mask"
+    );
+    assert_eq!(
+        id(world.cast_ray_filtered(&ray, QueryFilter::within(BARRIER | ITEMS))),
+        Some(both)
+    );
+    assert_eq!(
+        id(world.cast_ray_filtered(
+            &ray,
+            QueryFilter::within(BARRIER).with_exclude(Some(barrier))
+        )),
+        None,
+        "nothing else lies within the barrier layer"
+    );
+    let mut scratch = QueryScratch::new();
+    let mut out = Vec::new();
+    let view = world.overlap_queries();
+    view.overlap_aabb_filtered_into(
+        &bounds,
+        QueryFilter::within(BARRIER),
+        &mut scratch,
+        &mut out,
+    );
+    assert_eq!(out, vec![barrier], "the shared view is the same query");
 }

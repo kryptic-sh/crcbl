@@ -105,8 +105,10 @@ struct ColliderSlot {
 /// the layers it looks at.
 ///
 /// A collider passes when it is not [`exclude`](Self::exclude) and its
-/// [layers](PhysicsWorld::set_layers) share at least one bit with
-/// [`mask`](Self::mask). The solid queries — rays, sweeps and capsule
+/// [layers](PhysicsWorld::set_layers) match [`mask`](Self::mask) the way
+/// [`layer_match`](Self::layer_match) says: by sharing at least one bit with
+/// it (the default), or by lying wholly [`within`](Self::within) it. The solid
+/// queries — rays, sweeps and capsule
 /// penetrations — also skip triggers, exactly as their unfiltered forms do;
 /// the overlap queries report triggers, as theirs do. A filter never makes a
 /// query see something its unfiltered form would not.
@@ -141,6 +143,38 @@ pub struct QueryFilter {
     /// The layers the query looks at. A collider on none of them is skipped,
     /// so a mask of `0` sees nothing.
     pub mask: u32,
+    /// How a collider's layers must match [`mask`](Self::mask) to be looked
+    /// at.
+    pub layer_match: LayerMatch,
+}
+
+/// How a [`QueryFilter`] holds a collider's layers to its mask.
+///
+/// Every collider starts on [`ALL_LAYERS`], so under
+/// [`Shares`](Self::Shares) a mask of one query-only layer still reports every
+/// ordinary collider beside the ones put on it. [`Within`](Self::Within) is the
+/// query for those alone — a walker barrier, a concealment volume — without a
+/// second, inverted query to subtract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayerMatch {
+    /// A collider sharing at least one layer with the mask: `layers & mask !=
+    /// 0`.
+    #[default]
+    Shares,
+    /// A collider on at least one layer, every one of them in the mask:
+    /// `layers & mask != 0 && layers & !mask == 0`. A collider still on
+    /// [`ALL_LAYERS`] is within no mask short of every layer.
+    Within,
+}
+
+impl LayerMatch {
+    /// Whether a collider on `layers` matches `mask` this way.
+    const fn admits(self, layers: u32, mask: u32) -> bool {
+        match self {
+            Self::Shares => layers & mask != 0,
+            Self::Within => layers & mask != 0 && layers & !mask == 0,
+        }
+    }
 }
 
 impl QueryFilter {
@@ -148,6 +182,7 @@ impl QueryFilter {
     pub const ALL: Self = Self {
         exclude: None,
         mask: ALL_LAYERS,
+        layer_match: LayerMatch::Shares,
     };
 
     /// Every layer, with `exclude` left out — what the `_excluding` queries
@@ -157,6 +192,7 @@ impl QueryFilter {
         Self {
             exclude,
             mask: ALL_LAYERS,
+            layer_match: LayerMatch::Shares,
         }
     }
 
@@ -166,6 +202,18 @@ impl QueryFilter {
         Self {
             exclude: None,
             mask,
+            layer_match: LayerMatch::Shares,
+        }
+    }
+
+    /// Only the colliders whose layers all lie in `mask`, excluding nothing:
+    /// [`LayerMatch::Within`].
+    #[must_use]
+    pub const fn within(mask: u32) -> Self {
+        Self {
+            exclude: None,
+            mask,
+            layer_match: LayerMatch::Within,
         }
     }
 
@@ -179,6 +227,15 @@ impl QueryFilter {
     #[must_use]
     pub const fn with_exclude(self, exclude: Option<ColliderId>) -> Self {
         Self { exclude, ..self }
+    }
+
+    /// This filter with its layer test replaced by `layer_match`.
+    #[must_use]
+    pub const fn with_layer_match(self, layer_match: LayerMatch) -> Self {
+        Self {
+            layer_match,
+            ..self
+        }
     }
 }
 
@@ -199,6 +256,7 @@ struct ResolvedFilter {
     /// The storage slot of the excluded collider, if it is live.
     skip: Option<usize>,
     mask: u32,
+    layer_match: LayerMatch,
     /// Whether triggers are skipped — true for the solid queries.
     solid: bool,
 }
@@ -229,13 +287,16 @@ impl ResolvedFilter {
                 .exclude
                 .and_then(|id| slot_of_in(colliders, generations, id)),
             mask: filter.mask,
+            layer_match: filter.layer_match,
             solid,
         }
     }
 
     /// Whether the collider at storage slot `idx` may be reported.
     fn admits(&self, idx: usize, slot: &ColliderSlot) -> bool {
-        Some(idx) != self.skip && slot.layers & self.mask != 0 && !(self.solid && slot.is_trigger)
+        Some(idx) != self.skip
+            && self.layer_match.admits(slot.layers, self.mask)
+            && !(self.solid && slot.is_trigger)
     }
 }
 
@@ -1533,7 +1594,8 @@ impl PhysicsWorld {
     /// on. Returns `false` if the id is invalid.
     ///
     /// A layer is a bit, and a [`QueryFilter`]'s mask is the set of layers a
-    /// query looks at: a collider is reported only when `bits & mask != 0`.
+    /// query looks at: a collider is reported only when `bits & mask != 0`,
+    /// or under [`LayerMatch::Within`] only when every bit is in the mask too.
     /// Every collider starts on [`ALL_LAYERS`], so a world that never calls
     /// this answers every query exactly as before. Layers survive
     /// [`set_sphere`](Self::set_sphere) and its siblings, as the trigger flag

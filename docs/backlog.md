@@ -2171,13 +2171,6 @@ The current audit and port prerequisites are at the top of this backlog.
 
 Raised by EW on 2026-10-18, from generated maps, none blocking:
 
-- **A query mask that admits only colliders inside it.** Colliders default to
-  every layer, so a query masked to one query-only layer (EW's walker barriers
-  and concealment) also finds every ordinary collider; EW subtracts a second,
-  inverted query in `Physics::overlaps_concealment`. Options: a query mode
-  admitting only colliders whose layers fall within the mask, or a one-bit
-  default collider layer. The default is a behaviour change for every caller, so
-  the query mode is the likelier answer. Not decided.
 - **Planning from a start that stands on no kept floor.** `SpanGrid::plan` and
   `GroundGrid::plan` answer `NoRoute` then, and EW agents end up on blocked
   cells when pushed into an open door leaf or by squadmates. EW snaps the start
@@ -2185,6 +2178,9 @@ Raised by EW on 2026-10-18, from generated maps, none blocking:
   from the nearest walkable cell within a few rings and puts that cell first in
   the route. A crcbl "nearest walkable span" query, or a plan option that snaps,
   would replace it. Raised 2026-10-18; not started.
+- **A one-bit default collider layer**, in place of `ALL_LAYERS`: declined
+  2026-10-18 for `QueryFilter::within`, which answers EW's query-only layers
+  without changing what every existing query reports.
 - **Ground speed modifiers in the character controller**: declined for now. EW's
   thickets keep 60% of speed through a game-local multiplier, and it stays in
   the game until a second caller wants one.

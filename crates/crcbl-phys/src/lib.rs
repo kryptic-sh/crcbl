@@ -139,6 +139,6 @@ pub use system::{
 };
 pub use wind::WindQuery;
 pub use world::{
-    ALL_LAYERS, BroadphaseStats, ColliderId, OverlapQueries, PhysicsWorld, QueryFilter,
+    ALL_LAYERS, BroadphaseStats, ColliderId, LayerMatch, OverlapQueries, PhysicsWorld, QueryFilter,
     QueryScratch,
 };

@@ -13,6 +13,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`crcbl_phys::QueryFilter` gains a `layer_match` field**, so a filter built
+  as a struct literal must name it; `LayerMatch::Shares` keeps the old answer.
+  The constructors (`ALL`, `masked`, `excluding`, `Default`) are unchanged.
+
+### Added
+
+- **`crcbl_phys::LayerMatch::Within` and `QueryFilter::within(mask)`** report
+  only the colliders whose layers all lie in the mask. Every collider starts on
+  `ALL_LAYERS`, so a mask of one query-only layer used to report every ordinary
+  collider too, and a caller after just the colliders put on that layer (a
+  walker barrier, a concealment volume) had to subtract a second, inverted
+  query. `QueryFilter::with_layer_match` sets the mode on any filter.
+
 ### Fixed
 
 - **`crcbl-webgpu` refuses a swapchain its surface does not offer.**
