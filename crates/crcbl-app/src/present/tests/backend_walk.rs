@@ -153,6 +153,36 @@ fn an_unpinned_open_moves_past_a_backend_that_refuses_the_window() {
         .expect("teardown is in the seam's stated order");
 }
 
+/// **The fall-through is said in one line**, naming the backend that refused
+/// and why — the line a bug report about which backend drew a window starts
+/// from.
+#[test]
+fn the_fall_through_says_which_backend_refused_and_why() {
+    let logs = crcbl_core::log::capture();
+    let (_shell, opened) = open_through(request_open_auto(REFUSED_THEN_NULL));
+    let mut gpu = opened.expect("the second backend presents to the window");
+
+    let records = logs.records();
+    let said: Vec<_> = records
+        .iter()
+        .filter(|record| record.message.contains("trying the next backend"))
+        .collect();
+    assert_eq!(said.len(), 1, "once, for the one refusal: {records:?}");
+    let line = &said[0].message;
+    assert!(
+        line.contains("this backend cannot present to a transparent window"),
+        "the backend's own reason rides along: {line}"
+    );
+    assert!(
+        !line.contains("  "),
+        "one sentence, with no wrapped literal's indentation inside it: {line:?}"
+    );
+
+    gpu.drain().expect("nothing was submitted");
+    gpu.destroy()
+        .expect("teardown is in the seam's stated order");
+}
+
 /// **A backend named by `PresenterDesc::backend` or `CRCBL_GPU` that refuses
 /// the window ends the open with its refusal**, rather than quietly drawing
 /// on another one.

@@ -16313,11 +16313,19 @@ literals now (`HINT` in that file), which the formatter lays out normally and
 cannot collapse, so the tree is clean — but the hole is not: the pattern's
 character class after the space run is still `[a-z{]`.
 
+**A second miss, found 2026-10-18:** the backend fall-through's `log::info!`
+(now in `crates/crcbl-app/src/present.rs`) read `… this {} window` followed by a
+run of spaces and `({error}); trying the next backend` — a joined literal whose
+continuation resumed with `(`, which the same character class does not accept
+either. The literal is fixed and
+`the_fall_through_says_which_backend_refused_and_why` holds the line to one
+sentence; the guard still misses the shape.
+
 **What it would take:** widen the character class after the space run to accept
-a capital and re-run the guard over every tracked Rust file to see what else it
-then finds, which is why this is its own change rather than a line in the slice
-that found it: a widened guard needs its own red-then-green and whatever it
-turns up needs fixing in the same commit.
+a capital and an opening bracket, and re-run the guard over every tracked Rust
+file to see what else it then finds, which is why this is its own change rather
+than a line in the slice that found it: a widened guard needs its own
+red-then-green and whatever it turns up needs fixing in the same commit.
 
 ### Asset hot reload: the watch, per-chunk scene reload and texture reload are built; shaders are not (2026-08-27, updated 2026-10-06)
 

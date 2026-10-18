@@ -741,7 +741,8 @@ impl PendingPresenter {
                             // on, and why not the first, is the question a
                             // bug report starts with.
                             log::info!(
-                                "hal: the {backend} backend cannot present to this {} window                                  ({error}); trying the next backend",
+                                "hal: the {backend} backend cannot present to this {} window \
+                                 ({error}); trying the next backend",
                                 self.target.platform_name()
                             );
                             self.stage = OpenStage::Instance(pending);
