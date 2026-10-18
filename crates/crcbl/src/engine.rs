@@ -1419,7 +1419,8 @@ impl GpuContext {
     ///
     /// On the `--screenshot` frame the copy out of the presented image rides
     /// in the same batch and is written to its file after the present — see
-    /// [`set_screenshot`](Self::set_screenshot).
+    /// `set_screenshot`, named rather than linked because it does not exist in
+    /// a browser build.
     ///
     /// # Errors
     ///
