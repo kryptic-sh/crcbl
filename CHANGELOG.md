@@ -13,6 +13,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-18
+
 ### Breaking
 
 - **`crcbl_phys::QueryFilter` gains a `layer_match` field**, so a filter built
@@ -20696,7 +20698,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/kryptic-sh/crcbl/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kryptic-sh/crcbl/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kryptic-sh/crcbl/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/kryptic-sh/crcbl/compare/v0.2.0...v0.2.1
