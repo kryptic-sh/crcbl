@@ -202,6 +202,20 @@ pub struct Setup {
     pub pad1: [u8; 4],
 }
 
+/// `xcb_rectangle_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Rectangle {
+    /// Left edge.
+    pub x: i16,
+    /// Top edge.
+    pub y: i16,
+    /// Width in pixels.
+    pub width: u16,
+    /// Height in pixels.
+    pub height: u16,
+}
+
 /// `xcb_screen_t`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -1134,6 +1148,12 @@ pub mod event_mask {
     pub const PROPERTY_CHANGE: u32 = 1 << 22;
 }
 
+/// `xcb_gc_t` — which fields a `CreateGC` value list carries.
+pub mod gc {
+    /// `XCB_GC_FOREGROUND`.
+    pub const FOREGROUND: u32 = 1 << 2;
+}
+
 /// `xcb_cw_t` — which attributes a `CreateWindow` value list carries.
 ///
 /// The list must be written in **mask-bit order**, which is why these are used
@@ -1288,8 +1308,8 @@ mod prototype {
         Connection, Cookie, CursorContext, Extension, GenericError, GenericEvent, GetGeometryReply,
         GetPropertyReply, GetSelectionOwnerReply, GrabPointerReply, InternAtomReply,
         QueryExtensionReply, QueryPointerReply, RandrCrtcInfoReply, RandrOutputInfoReply,
-        RandrOutputPrimaryReply, RandrQueryVersionReply, RandrScreenResourcesReply, Screen,
-        ScreenIterator, Setup, TranslateCoordinatesReply, XiEventMask, XiQueryVersionReply,
+        RandrOutputPrimaryReply, RandrQueryVersionReply, RandrScreenResourcesReply, Rectangle,
+        Screen, ScreenIterator, Setup, TranslateCoordinatesReply, XiEventMask, XiQueryVersionReply,
         XkbPerClientFlagsReply, XkbUseExtensionReply, c_char, c_int, c_void,
     };
 
@@ -1490,8 +1510,17 @@ mod prototype {
         u16,
         u16,
     ) -> Cookie;
+    /// `xcb_void_cookie_t xcb_create_gc(xcb_connection_t *, xcb_gcontext_t cid,
+    /// xcb_drawable_t drawable, uint32_t value_mask, const void *value_list)`
+    pub type CreateGc =
+        unsafe extern "C" fn(*mut Connection, u32, u32, u32, *const c_void) -> Cookie;
+    /// `xcb_void_cookie_t xcb_poly_fill_rectangle(xcb_connection_t *,
+    /// xcb_drawable_t drawable, xcb_gcontext_t gc, uint32_t rectangles_len,
+    /// const xcb_rectangle_t *rectangles)`
+    pub type PolyFillRectangle =
+        unsafe extern "C" fn(*mut Connection, u32, u32, u32, *const Rectangle) -> Cookie;
     /// `xcb_void_cookie_t xcb_free_pixmap(xcb_connection_t *, xcb_pixmap_t)`,
-    /// and `xcb_free_cursor`, which is the same shape.
+    /// and `xcb_free_cursor` and `xcb_free_gc`, which are the same shape.
     pub type FreeResource = unsafe extern "C" fn(*mut Connection, u32) -> Cookie;
 
     /// `xcb_xkb_use_extension_cookie_t xcb_xkb_use_extension(
@@ -1678,6 +1707,9 @@ pub struct Lib {
     pub create_cursor: prototype::CreateCursor,
     pub free_pixmap: prototype::FreeResource,
     pub free_cursor: prototype::FreeResource,
+    pub create_gc: prototype::CreateGc,
+    pub poly_fill_rectangle: prototype::PolyFillRectangle,
+    pub free_gc: prototype::FreeResource,
 }
 
 impl core::fmt::Debug for Lib {
@@ -1974,6 +2006,9 @@ fn load_uncached() -> Result<Lib, String> {
         create_cursor: symbol!("xcb_create_cursor", prototype::CreateCursor),
         free_pixmap: symbol!("xcb_free_pixmap", prototype::FreeResource),
         free_cursor: symbol!("xcb_free_cursor", prototype::FreeResource),
+        create_gc: symbol!("xcb_create_gc", prototype::CreateGc),
+        poly_fill_rectangle: symbol!("xcb_poly_fill_rectangle", prototype::PolyFillRectangle),
+        free_gc: symbol!("xcb_free_gc", prototype::FreeResource),
     })
 }
 

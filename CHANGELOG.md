@@ -22,6 +22,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and records the shape as before. Each shape is loaded once per shell, so a UI
   setting the cursor on every hover costs no reload.
 
+### Fixed
+
+- **A hidden cursor on X11 can no longer show a black pixel.** The blank cursor
+  was built from a pixmap whose contents the protocol leaves undefined, and a
+  set bit in it showed the pixel; the pixmap is now cleared first.
+
 ## [0.5.0] - 2026-10-18
 
 ### Breaking

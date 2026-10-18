@@ -1833,13 +1833,16 @@ fn a_cursor_shape_is_shown_over_the_window_and_loaded_once() {
         "the second Text is the cursor loaded for the first, not a reload"
     );
 
-    // The blank cursor is the backend's 1×1 one. Its pixel is not asserted:
-    // it comes from a pixmap whose contents the protocol leaves undefined.
     let hidden = set(&mut session, window, None, again.serial);
     assert_eq!(
         (hidden.width, hidden.height),
         (1, 1),
         "hiding shows the blank cursor"
+    );
+    assert!(
+        hidden.is_invisible(),
+        "the blank cursor draws nothing: {:?}",
+        hidden.pixels
     );
 }
 

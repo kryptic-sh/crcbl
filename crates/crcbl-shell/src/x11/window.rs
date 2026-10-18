@@ -319,8 +319,7 @@ impl X11Shell {
     /// A 1×1 fully-transparent cursor, created once and shared.
     ///
     /// Core X11's way of hiding the pointer, and it needs no extension: a
-    /// cursor built from an empty 1-bit pixmap with an empty mask draws
-    /// nothing. `XFixesHideCursor` would be one call instead of four and would
+    /// cursor whose 1-bit mask is all zero draws nothing. `XFixesHideCursor` would be one call instead of four and would
     /// cost a whole extra library for it — see [`ffi`]'s table of what is
     /// deliberately not loaded.
     pub(super) fn blank_cursor(&mut self) -> u32 {
@@ -328,16 +327,33 @@ impl X11Shell {
             return self.blank_cursor;
         }
         let pixmap = self.conn.generate_id();
+        let gc = self.conn.generate_id();
         let cursor = self.conn.generate_id();
-        // SAFETY: the connection and root are live, both ids are fresh from
+        let clear = [0_u32];
+        let whole = ffi::Rectangle {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        // SAFETY: the connection and root are live, every id is fresh from
         // `xcb_generate_id`, and depth 1 is what a cursor source and mask must
-        // be. A newly created pixmap's contents are undefined by protocol, but
-        // using the *same* pixmap as source and mask makes that irrelevant: the
-        // mask is what decides which pixels are drawn, and a pixel is drawn
-        // only where source and mask agree, so an all-zero or all-one pixmap
-        // both yield an invisible cursor.
+        // be. `clear` is the one value `gc::FOREGROUND` declares and `whole`
+        // the one rectangle the count says; libxcb copies both before
+        // returning. A new pixmap's contents are undefined by protocol and a
+        // mask bit of 1 shows its pixel, so the pixmap is filled with zero
+        // before it becomes the mask.
         unsafe {
             (self.conn.lib.create_pixmap)(self.conn.raw(), 1, pixmap, self.conn.root, 1, 1);
+            (self.conn.lib.create_gc)(
+                self.conn.raw(),
+                gc,
+                pixmap,
+                ffi::gc::FOREGROUND,
+                clear.as_ptr().cast(),
+            );
+            (self.conn.lib.poly_fill_rectangle)(self.conn.raw(), pixmap, gc, 1, &whole);
+            (self.conn.lib.free_gc)(self.conn.raw(), gc);
             (self.conn.lib.create_cursor)(
                 self.conn.raw(),
                 cursor,

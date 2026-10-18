@@ -29,17 +29,6 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
 38988977910). What it found, in the order of work:
 
 1. **Silent gaps, which break the rule outright.**
-   - X11 hidden cursor may draw a pixel: `X11Shell::blank_cursor` builds its
-     cursor from one fresh 1×1 pixmap used as both source and mask, never drawn
-     into, and its comment says either content is invisible. Under the core
-     protocol a mask bit of 1 shows the pixel (the source picks foreground or
-     background), so a pixmap that happens to hold 1 shows one black pixel. Not
-     observed on a server; found 2026-10-18 while adding X11 cursor shapes,
-     which is why
-     `x11_e2e::a_cursor_shape_is_shown_over_the_window_and_loaded_once` asserts
-     only the hidden cursor's 1×1 size. Fix: clear the pixmap with a zeroed
-     `PolyFillRectangle` before `CreateCursor`, then assert the pixel through
-     `Peer::cursor_image` and `CursorImage::is_invisible`.
    - **Decided 2026-10-18: cursor shapes get a cap, `CURSOR_SHAPE`, rather than
      `set_cursor` erroring**, because a UI sets the cursor on every hover and an
      error there is one every caller would have to handle. Declined: a theme
