@@ -535,6 +535,7 @@
 use core::fmt::Write as _;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crcbl_hal::{
     AdapterId, Barriers, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
@@ -556,6 +557,7 @@ use crcbl_hal::{
 };
 
 use crate::device::DeviceProbe;
+use crate::hal::instance::SurfaceTable;
 use crate::hal::{HandlePool, SharedChannel, WebGpuDevice};
 use crate::instance::AdapterProbe;
 use crate::reply::{Reply, SurfaceCapsFailure};
@@ -12615,7 +12617,12 @@ impl Probe {
             self.parity.state = PARITY_NO_DEVICE;
             return PARITY_NO_DEVICE;
         };
-        let device = WebGpuDevice::new(SharedChannel::new(), caps, HandlePool::new());
+        // No surface reaches this device: the parity run asks capabilities and
+        // configures no swapchain, so a canvas query has nothing to answer.
+        let surfaces = Arc::new(SurfaceTable::new(Err(
+            "the parity device presents to no surface".to_string(),
+        )));
+        let device = WebGpuDevice::new(SharedChannel::new(), caps, HandlePool::new(), surfaces);
         // Read off the device rather than written here: a report that named the
         // backend itself would go on agreeing with the list after the device
         // started answering as something else.

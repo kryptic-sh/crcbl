@@ -1,6 +1,6 @@
 //! `impl Instance for WebGpuInstance` — adapters, surfaces, the device request.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
@@ -27,6 +27,24 @@ pub struct WebGpuInstance {
     pool: HandlePool,
     /// The surfaces created from [`SurfaceTarget::Offscreen`], so
     /// [`surface_caps`](Instance::surface_caps) can tell a ring of textures from
+    /// a canvas, and what each kind accepts — shared with every device this
+    /// instance opens. See [`SurfaceTable`].
+    surfaces: Arc<SurfaceTable>,
+}
+
+/// The surfaces an instance made, and what each of them accepts.
+///
+/// **Shared between the instance and every device it opens**, because
+/// [`SwapchainDesc::format`](crcbl_hal::SwapchainDesc::format) and
+/// [`SwapchainDesc::composite_alpha`](crcbl_hal::SwapchainDesc::composite_alpha)
+/// must be ones the surface's [`SurfaceCaps`] offer, and the swapchain is
+/// created on the device while only the instance's `create_surface` knew which
+/// surfaces are canvases. Without it the device encoded any descriptor with a
+/// real extent, and a mode the surface does not offer reached the replayer
+/// where every other backend refuses it on the host.
+#[derive(Debug)]
+pub(crate) struct SurfaceTable {
+    /// The surfaces made from [`SurfaceTarget::Offscreen`] — every other one is
     /// a canvas.
     ///
     /// A [`SurfaceHandle`] carries no kind and the stream answers no query about
@@ -51,6 +69,56 @@ pub struct WebGpuInstance {
     canvas: Result<SurfaceCaps, String>,
 }
 
+impl SurfaceTable {
+    /// A table holding no offscreen surface yet, answering `canvas` for every
+    /// canvas.
+    pub(crate) fn new(canvas: Result<SurfaceCaps, String>) -> Self {
+        Self {
+            offscreen: Mutex::new(Vec::new()),
+            canvas,
+        }
+    }
+
+    /// The offscreen-surface list, locked.
+    fn offscreen_surfaces(&self) -> std::sync::MutexGuard<'_, Vec<SurfaceHandle>> {
+        self.offscreen
+            .lock()
+            .expect("the WebGPU offscreen-surface list mutex was poisoned")
+    }
+
+    /// Whether `surface` came from [`SurfaceTarget::Offscreen`].
+    ///
+    /// `false` for a handle this instance never made, which is the same answer a
+    /// canvas gets: the seam has no "no such surface" error on this call, and a
+    /// stray handle is a caller bug that the swapchain command will surface
+    /// against the replayer's own surface table.
+    fn is_offscreen(&self, surface: SurfaceHandle) -> bool {
+        self.offscreen_surfaces().contains(&surface)
+    }
+
+    /// What `surface` accepts, or the reason the browser gave for not saying —
+    /// the one answer both [`Instance::surface_caps`] and the device's
+    /// swapchain checks read.
+    ///
+    /// WHICH OF THE TWO ANSWERS DEPENDS ON WHAT THE SURFACE IS, and that is the
+    /// whole reason [`offscreen`](Self::offscreen) exists. A canvas is bound by
+    /// `GPUCanvasContext.configure`, which takes only the linear 8-bit formats;
+    /// an offscreen ring is a set of `GPUTexture`s the replayer creates and no
+    /// canvas constrains: the ring is allocated in the format it names, while a
+    /// canvas's sRGB entry is a view over a linear base that only
+    /// `create_swapchain` on the page knows how to reach. Both therefore have
+    /// to lead with sRGB — every pass above the seam writes display-referred
+    /// values and leaves the encode to the hardware, so a linear target is a
+    /// frame a whole transfer function away from what was asked for — and
+    /// neither may be answered with the other's list.
+    pub(crate) fn caps(&self, surface: SurfaceHandle) -> Result<SurfaceCaps, String> {
+        if self.is_offscreen(surface) {
+            return Ok(offscreen_surface_caps());
+        }
+        self.canvas.clone()
+    }
+}
+
 impl WebGpuInstance {
     /// Assemble an instance from a settled enumeration and a settled canvas
     /// capability query. Called by the open future; not a public entry point,
@@ -65,8 +133,7 @@ impl WebGpuInstance {
             channel,
             adapters,
             pool,
-            offscreen: Mutex::new(Vec::new()),
-            canvas,
+            surfaces: Arc::new(SurfaceTable::new(canvas)),
         }
     }
 
@@ -112,24 +179,8 @@ impl WebGpuInstance {
             self.channel.clone(),
             probe,
             self.pool.clone(),
+            self.surfaces.clone(),
         ))
-    }
-
-    /// The offscreen-surface list, locked.
-    fn offscreen_surfaces(&self) -> std::sync::MutexGuard<'_, Vec<SurfaceHandle>> {
-        self.offscreen
-            .lock()
-            .expect("the WebGPU offscreen-surface list mutex was poisoned")
-    }
-
-    /// Whether `surface` came from [`SurfaceTarget::Offscreen`].
-    ///
-    /// `false` for a handle this instance never made, which is the same answer a
-    /// canvas gets: the seam has no "no such surface" error on this call, and a
-    /// stray handle is a caller bug that the swapchain command will surface
-    /// against the replayer's own surface table.
-    fn is_offscreen(&self, surface: SurfaceHandle) -> bool {
-        self.offscreen_surfaces().contains(&surface)
     }
 }
 
@@ -213,7 +264,7 @@ impl Instance for WebGpuInstance {
                 // Recorded before the encode, so `surface_caps` on the very next
                 // line — which is where `crcbl::engine`'s open calls it — can
                 // already tell this handle from a canvas one.
-                self.offscreen_surfaces().push(surface);
+                self.surfaces.offscreen_surfaces().push(surface);
                 self.channel.with(|channel| {
                     channel.encode(|stream| stream.create_offscreen_surface(surface))
                 });
@@ -231,7 +282,9 @@ impl Instance for WebGpuInstance {
     }
 
     fn destroy_surface(&self, surface: SurfaceHandle) {
-        self.offscreen_surfaces().retain(|held| *held != surface);
+        self.surfaces
+            .offscreen_surfaces()
+            .retain(|held| *held != surface);
         self.channel
             .with(|channel| channel.encode(|stream| stream.destroy_surface(surface)));
     }
@@ -247,23 +300,10 @@ impl Instance for WebGpuInstance {
         // answer in time, and an `Err` meaning "not yet" would send a caller
         // doing adapter selection to an adapter a browser does not have. The
         // canvas answer is the browser's all the same: it was fetched during the
-        // instance open, alongside the enumeration, and is held in `canvas`.
+        // instance open, alongside the enumeration, and is held in the
+        // surface table, which also says which list a surface gets.
         //
-        // WHICH OF THE TWO ANSWERS DEPENDS ON WHAT THE SURFACE IS, and that is
-        // the whole reason `offscreen` exists. A canvas is bound by
-        // `GPUCanvasContext.configure`, which takes only the linear 8-bit
-        // formats; an offscreen ring is a set of `GPUTexture`s the replayer
-        // creates and no canvas constrains: the ring is allocated in the format
-        // it names, while a canvas's sRGB entry is a view over a linear base
-        // that only `create_swapchain` on the page knows how to reach. Both
-        // therefore have to lead with sRGB — every pass above the seam writes
-        // display-referred values and leaves the encode to the hardware, so a
-        // linear target is a frame a whole transfer function away from what was
-        // asked for — and neither may be answered with the other's list.
-        if self.is_offscreen(surface) {
-            return Ok(offscreen_surface_caps());
-        }
-        // THE BROWSER'S OWN ANSWER, LED BY THE sRGB VIEW OF
+        // THE CANVAS ANSWER IS THE BROWSER'S OWN, LED BY THE sRGB VIEW OF
         // `getPreferredCanvasFormat()`. Two orderings matter and they are
         // different claims. `SurfaceCaps::preferred_format` takes the first sRGB
         // entry, so the sRGB counterparts lead the list or the engine is handed
@@ -280,7 +320,7 @@ impl Instance for WebGpuInstance {
         // caller to treat an `Err` as "try the next adapter", so a query the
         // browser refused is reported here rather than having failed the open
         // that the offscreen surfaces do not need it for.
-        self.canvas.clone().map_err(HalError::Backend)
+        self.surfaces.caps(surface).map_err(HalError::Backend)
     }
 
     fn request_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn PendingDevice>, HalError> {

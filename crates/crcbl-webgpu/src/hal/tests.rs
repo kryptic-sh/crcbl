@@ -28,7 +28,7 @@ use crate::decode_stream;
 
 use super::channel::{HandlePool, SharedChannel};
 use super::device::WebGpuDevice;
-use super::instance::WebGpuInstance;
+use super::instance::{SurfaceTable, WebGpuInstance};
 use super::open::WebGpuInstanceOpen;
 
 // ── fixtures ───────────────────────────────────────────────────────────────
@@ -66,6 +66,13 @@ fn browser_canvas_caps() -> SurfaceCaps {
         max_image_count: 2,
         current_extent: None,
     }
+}
+
+/// The surfaces a device built without an instance answers for: every one a
+/// canvas offering [`browser_canvas_caps`], which is what a stray handle gets
+/// on an opened instance too.
+fn canvas_surfaces() -> std::sync::Arc<SurfaceTable> {
+    std::sync::Arc::new(SurfaceTable::new(Ok(browser_canvas_caps())))
 }
 
 fn device_caps() -> DeviceCaps {
@@ -117,7 +124,12 @@ fn opened_instance() -> WebGpuInstance {
 /// only care what the device encodes.
 fn device_on_fresh_channel() -> (SharedChannel, WebGpuDevice) {
     let channel = SharedChannel::new();
-    let device = WebGpuDevice::new(channel.clone(), device_caps(), HandlePool::new());
+    let device = WebGpuDevice::new(
+        channel.clone(),
+        device_caps(),
+        HandlePool::new(),
+        canvas_surfaces(),
+    );
     (channel, device)
 }
 
@@ -136,6 +148,7 @@ fn timestamp_device_on_fresh_channel() -> (SharedChannel, WebGpuDevice) {
             limits: Limits::minimum(),
         },
         HandlePool::new(),
+        canvas_surfaces(),
     );
     (channel, device)
 }
@@ -1474,6 +1487,7 @@ fn a_binding_offset_is_held_to_its_slots_alignment() {
             limits: Limits::desktop(),
         },
         HandlePool::new(),
+        canvas_surfaces(),
     );
     let names = |channel: &SharedChannel| -> Vec<&'static str> {
         channel
@@ -2455,6 +2469,7 @@ fn a_timestamp_set_follows_the_feature_the_device_opened_with() {
                 limits: crcbl_hal::Limits::minimum(),
             },
             HandlePool::new(),
+            canvas_surfaces(),
         );
 
         let created = device.create_query_set(&QuerySetDesc {
@@ -3271,4 +3286,168 @@ fn the_acquired_extent_is_the_one_last_configured() {
         "a canvas is sized by its own width and height, so a configure can never fall behind \
          it and there is nothing to report as suboptimal"
     );
+}
+
+// ── a swapchain held to its surface's caps ─────────────────────────────────
+
+/// A device opened through `instance`, so it shares the instance's surfaces.
+fn device_from(instance: &WebGpuInstance) -> Box<dyn Device> {
+    let mut pending = instance
+        .open_device(&DeviceDesc::for_adapter(AdapterId(0)))
+        .expect("the request encodes");
+    let sequence = pending.sequence().expect("a fresh request waits");
+    feed(&instance.channel(), |w| w.device(sequence, &device_caps()));
+    pending
+        .poll()
+        .expect("the poll succeeds")
+        .into_device()
+        .expect("the device opens on the device reply")
+}
+
+/// How many swapchain commands `channel` holds — the create and reconfigure
+/// that a refusal must keep off the wire.
+fn swapchain_commands(channel: &SharedChannel) -> usize {
+    channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode")
+        .iter()
+        .filter(|command| matches!(command.name(), "CreateSwapchain" | "ReconfigureSwapchain"))
+        .count()
+}
+
+/// **A swapchain format or composite-alpha mode its surface does not offer is
+/// refused on the host, against that surface's own list.**
+///
+/// The device used to check the extent alone and encode the rest, so a mode
+/// `surface_caps` never reported reached `context.configure`, where every
+/// other backend refuses it before any work. The two surfaces answer different
+/// lists — the canvas the browser's, which composites premultiplied, the
+/// offscreen ring only opaque — so the same descriptor is accepted on one and
+/// refused on the other, which a check against either fixed list would get
+/// wrong for one of them.
+///
+/// **The accepting arms run first**, so a check refusing everything cannot
+/// pass, and the wire is counted after each refusal.
+#[test]
+fn a_swapchain_its_surface_does_not_offer_is_refused_on_the_host() {
+    let instance = opened_instance();
+    let channel = instance.channel();
+    let canvas = unsafe { instance.create_surface(&SurfaceTarget::Web { canvas_id: 7 }) }
+        .expect("a Web canvas surface is reachable");
+    let offscreen = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+        .expect("an offscreen surface is reachable");
+    let device = device_from(&instance);
+    let desc = |surface, format, composite_alpha| SwapchainDesc {
+        label: Some("swapchain"),
+        surface,
+        format,
+        extent: (64, 48),
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha,
+    };
+
+    let on_canvas = device
+        .create_swapchain(&desc(
+            canvas,
+            Format::Rgba8UnormSrgb,
+            CompositeAlpha::PreMultiplied,
+        ))
+        .expect("the browser's canvas answer offers premultiplied alpha");
+    device
+        .create_swapchain(&desc(
+            offscreen,
+            Format::Rgba8UnormSrgb,
+            CompositeAlpha::Opaque,
+        ))
+        .expect("an opaque sRGB ring is the offscreen surface's first answer");
+    assert_eq!(swapchain_commands(&channel), 2);
+
+    for (case, surface, format, alpha, field) in [
+        (
+            "a half-float format no canvas offers",
+            canvas,
+            Format::Rgba16Float,
+            CompositeAlpha::Opaque,
+            "format",
+        ),
+        (
+            "a mode the browser's canvas answer leaves out",
+            canvas,
+            Format::Rgba8UnormSrgb,
+            CompositeAlpha::PostMultiplied,
+            "composite_alpha",
+        ),
+        (
+            "the canvas's premultiplied mode, on a ring that is only opaque",
+            offscreen,
+            Format::Rgba8UnormSrgb,
+            CompositeAlpha::PreMultiplied,
+            "composite_alpha",
+        ),
+    ] {
+        let error = device
+            .create_swapchain(&desc(surface, format, alpha))
+            .expect_err(case);
+        let message = format!("{error}");
+        assert!(
+            message.contains(&format!("SwapchainDesc::{field} is"))
+                && message.contains("which this surface does not offer"),
+            "{case}: {message}"
+        );
+        // The reconfigure path, which a resize takes with the same descriptor.
+        let error = device
+            .reconfigure_swapchain(on_canvas, &desc(surface, format, alpha))
+            .expect_err(case);
+        assert!(
+            format!("{error}").contains("which this surface does not offer"),
+            "{case} on reconfigure: {error}"
+        );
+        assert_eq!(swapchain_commands(&channel), 2, "{case} reached the wire");
+    }
+}
+
+/// A canvas whose capabilities the browser refused to report refuses its
+/// swapchain with that reason, as `surface_caps` answered it — and an
+/// offscreen ring on the same device, which the canvas answer does not
+/// describe, is still created.
+#[test]
+fn a_canvas_with_no_reported_caps_refuses_its_swapchain_with_the_reason() {
+    let mut open = WebGpuInstanceOpen::start();
+    let channel = open.channel();
+    feed(&channel, |w| {
+        w.adapter(0, &granted_adapter());
+        w.surface_caps_failed(
+            1,
+            "getPreferredCanvasFormat() answered \"rgba16float\"",
+            crate::SurfaceCapsFailure::Backend,
+        );
+    });
+    let Poll::Ready(Ok(instance)) = Pin::new(&mut open).poll(&mut noop_context()) else {
+        panic!("a refused canvas query must still open the instance");
+    };
+    let canvas = unsafe { instance.create_surface(&SurfaceTarget::Web { canvas_id: 7 }) }
+        .expect("a Web canvas surface is reachable");
+    let offscreen = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+        .expect("an offscreen surface is reachable");
+    let device = device_from(&instance);
+    let desc = |surface| SwapchainDesc {
+        label: Some("swapchain"),
+        surface,
+        format: Format::Rgba8UnormSrgb,
+        extent: (64, 48),
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+
+    device
+        .create_swapchain(&desc(offscreen))
+        .expect("the offscreen ring does not depend on the canvas answer");
+    let error = device
+        .create_swapchain(&desc(canvas))
+        .expect_err("a canvas the browser described nothing about");
+    assert!(format!("{error}").contains("rgba16float"), "{error}");
+    assert_eq!(swapchain_commands(&channel), 1);
 }

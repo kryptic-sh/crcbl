@@ -49,15 +49,6 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      clear until this lands, so it is no longer silent; set the bit in
      `appkit::caps` (and flip the `appkit_session` and unit-test assertions) in
      the same change.
-   - S16 `crcbl-webgpu`'s `create_swapchain` and `reconfigure_swapchain` check
-     only the extent, then encode the descriptor for the replayer, so a `format`
-     or `composite_alpha` outside the surface's `SurfaceCaps` is not refused on
-     the host as every other backend now refuses it (found 2026-10-18 while
-     closing the null backend's gap; what the browser does with it was not
-     checked). Needs the device to know which caps its surface reported (canvas
-     or offscreen), S. Not a lyr or pikr target; the seam suite's
-     `a_swapchain_composite_alpha_the_surface_does_not_offer_is_refused` does
-     not run on it.
    - S9 an X11 input-method client (XIM, or IBus and Fcitx over D-Bus), L, so
      X11 can set `ShellCaps::TEXT_IME`. Until then it is clear there.
    - S17 a `PopupInput::Grab` popup on AppKit is made key the way an exclusive
@@ -26762,17 +26753,6 @@ left, and neither is a bug in what shipped:
   `build_surface_caps` uses — which is why it was extracted rather than
   re-derived. Covering it properly means a windowed harness that asks for a
   format it knows the surface lacks, which is a new mode on those scripts.
-- **`crcbl-webgpu::create_swapchain` does not check its format** against
-  `SurfaceCaps::formats`. The extent half is now fixed
-  (`check_swapchain_extent`, answering the same sentence every other backend
-  does); the format half needs state the device has not got. It looks cheap:
-  `Instance::surface_caps` already answers a real `SurfaceCaps` over the
-  channel, so the device caching the caps for the surface it was opened against
-  would be enough. Note the replayer already refuses a format WebGPU cannot
-  _express_ — `webgpuTextureFormatFor` answers a reason — so what is missing is
-  narrower than it sounds: a mappable format this particular surface does not
-  offer. Neither half is caught by the seam suite, which is a native binary and
-  cannot reach this backend.
 
 ## What the three `crcbl-shell` fixes left uncovered (2026-08-23)
 

@@ -34,7 +34,7 @@
 //! is a [`HalError`] rather than the writer's assert.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
@@ -55,6 +55,7 @@ use crate::reply::Reply;
 
 use super::channel::{HandlePool, SharedChannel, refused_replies};
 use super::encoder::{NO_COUNT_BUFFER_DRAW, NO_MESH_STAGE, WebGpuCommandEncoder};
+use super::instance::SurfaceTable;
 
 // ── WebGpuPendingDevice ────────────────────────────────────────────────────
 
@@ -70,17 +71,25 @@ pub struct WebGpuPendingDevice {
     channel: SharedChannel,
     pool: HandlePool,
     probe: DeviceProbe,
+    /// The instance's surfaces, handed to the device it opens.
+    surfaces: Arc<SurfaceTable>,
     /// `true` once the device has been handed over, so a second poll is the
     /// caller bug it is rather than a second device.
     done: bool,
 }
 
 impl WebGpuPendingDevice {
-    pub(crate) fn new(channel: SharedChannel, probe: DeviceProbe, pool: HandlePool) -> Self {
+    pub(crate) fn new(
+        channel: SharedChannel,
+        probe: DeviceProbe,
+        pool: HandlePool,
+        surfaces: Arc<SurfaceTable>,
+    ) -> Self {
         Self {
             channel,
             pool,
             probe,
+            surfaces,
             done: false,
         }
     }
@@ -115,7 +124,12 @@ impl PendingDevice for WebGpuPendingDevice {
         }
         match &self.probe {
             DeviceProbe::Opened { caps } => {
-                let device = WebGpuDevice::new(self.channel.clone(), *caps, self.pool.clone());
+                let device = WebGpuDevice::new(
+                    self.channel.clone(),
+                    *caps,
+                    self.pool.clone(),
+                    self.surfaces.clone(),
+                );
                 self.done = true;
                 Ok(DeviceRequestState::Ready(Box::new(device)))
             }
@@ -328,6 +342,9 @@ pub struct WebGpuDevice {
     /// What this device remembers about each live swapchain, keyed by handle
     /// bits. See [`SwapchainState`].
     swapchains: Mutex<HashMap<u64, SwapchainState>>,
+    /// What each surface of the instance that opened this device accepts, so
+    /// a swapchain descriptor is held to it — see [`SurfaceTable`].
+    surfaces: Arc<SurfaceTable>,
     /// The size and memory location of each live buffer, keyed by handle bits.
     ///
     /// Exactly [`query_sets`](Self::query_sets)' reason, for exactly its class
@@ -434,7 +451,12 @@ struct SwapchainState {
 impl WebGpuDevice {
     /// Assemble an open device. Called by [`WebGpuPendingDevice::poll`] with the
     /// caps the browser reported for *that device*, and by tests.
-    pub(crate) fn new(channel: SharedChannel, caps: DeviceCaps, pool: HandlePool) -> Self {
+    pub(crate) fn new(
+        channel: SharedChannel,
+        caps: DeviceCaps,
+        pool: HandlePool,
+        surfaces: Arc<SurfaceTable>,
+    ) -> Self {
         let graphics_queue: QueueHandle = pool.alloc();
         Self {
             channel,
@@ -446,10 +468,40 @@ impl WebGpuDevice {
             query_reads: Mutex::new(HashMap::new()),
             errors: Mutex::new(ErrorQueue::default()),
             swapchains: Mutex::new(HashMap::new()),
+            surfaces,
             buffers: Mutex::new(HashMap::new()),
             images: Mutex::new(HashMap::new()),
             layouts: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Holds a swapchain descriptor's format and composite-alpha mode to what
+    /// its surface offers — the list [`Instance::surface_caps`] reports for
+    /// it, so a caller picking from that list is never refused.
+    ///
+    /// The seam says [`SwapchainDesc::format`] "must be one of
+    /// [`SurfaceCaps::formats`]", and `crcbl-vk`, `crcbl-dx12`, `crcbl-mtl` and
+    /// the null backend refuse a descriptor outside either list on the host.
+    /// This backend encoded it, and the replayer refuses only a format WebGPU
+    /// cannot express, so a mappable format or mode this surface does not offer
+    /// reached `context.configure`. A canvas whose capabilities the browser
+    /// refused to report answers that refusal here too, as `surface_caps` did.
+    ///
+    /// Both the create and the reconfigure path call this.
+    ///
+    /// [`Instance::surface_caps`]: crcbl_hal::Instance::surface_caps
+    /// [`SurfaceCaps::formats`]: crcbl_hal::SurfaceCaps::formats
+    fn check_swapchain_caps(&self, desc: &SwapchainDesc<'_>) -> Result<(), SurfaceError> {
+        let caps = self
+            .surfaces
+            .caps(desc.surface)
+            .map_err(|reason| SurfaceError::Hal(HalError::Backend(reason)))?;
+        check_offered("format", desc.format, &caps.formats)?;
+        check_offered(
+            "composite_alpha",
+            desc.composite_alpha,
+            &caps.composite_alpha,
+        )
     }
 
     /// Holds every buffer binding in a bind group to the three rules its slot
@@ -1678,6 +1730,7 @@ impl Device for WebGpuDevice {
 
     fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
         check_swapchain_extent(desc)?;
+        self.check_swapchain_caps(desc)?;
         let handle: SwapchainHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_swapchain(handle, desc)));
@@ -1702,6 +1755,7 @@ impl Device for WebGpuDevice {
         desc: &SwapchainDesc<'_>,
     ) -> Result<(), SurfaceError> {
         check_swapchain_extent(desc)?;
+        self.check_swapchain_caps(desc)?;
         self.channel
             .with(|channel| channel.encode(|stream| stream.reconfigure_swapchain(swapchain, desc)));
         let mut swapchains = self
@@ -1982,4 +2036,22 @@ fn check_swapchain_extent(desc: &SwapchainDesc<'_>) -> Result<(), SurfaceError> 
         ))));
     }
     Ok(())
+}
+
+/// The refusal [`WebGpuDevice::check_swapchain_caps`] answers for each field:
+/// `field` of [`SwapchainDesc`] named a value its
+/// [`SurfaceCaps`](crcbl_hal::SurfaceCaps) list does not hold. The sentence
+/// `crcbl-vk` answers, so the two backends read alike.
+fn check_offered<T: PartialEq + core::fmt::Debug>(
+    field: &str,
+    value: T,
+    offered: &[T],
+) -> Result<(), SurfaceError> {
+    if offered.contains(&value) {
+        return Ok(());
+    }
+    Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
+        "SwapchainDesc::{field} is {value:?}, which this surface does not offer; \
+         SurfaceCaps::{field} has {offered:?}"
+    ))))
 }

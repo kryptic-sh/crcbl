@@ -13,6 +13,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **`crcbl-webgpu` refuses a swapchain its surface does not offer.**
+  `create_swapchain` and `reconfigure_swapchain` hold `SwapchainDesc::format`
+  and `composite_alpha` to the `SurfaceCaps` that `surface_caps` reports for
+  that surface (the browser's answer for a canvas, the ring's own list for an
+  offscreen surface) and answer `InvalidDescriptor` naming the field, as every
+  other backend does. Before, the extent was the only field checked here, and a
+  mode the canvas never offered reached `context.configure` in the browser. A
+  canvas whose capabilities the browser refused to report now refuses its
+  swapchain with that reason.
+
 ## [0.4.0] - 2026-10-18
 
 ### Breaking
