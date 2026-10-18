@@ -2178,10 +2178,6 @@ Raised by EW on 2026-10-18, from generated maps, none blocking:
   admitting only colliders whose layers fall within the mask, or a one-bit
   default collider layer. The default is a behaviour change for every caller, so
   the query mode is the likelier answer. Not decided.
-- **`PhysicsWorld::add_mesh` feeds queries only, and its docs should say the
-  solver never sees it.** EW added terrain meshes there and loose items fell
-  through; a `ColliderComponent::Mesh` on a static body is what the solver
-  collides with. A docs line, S.
 - **Planning from a start that stands on no kept floor.** `SpanGrid::plan` and
   `GroundGrid::plan` answer `NoRoute` then, and EW agents end up on blocked
   cells when pushed into an open door leaf or by squadmates. EW snaps the start

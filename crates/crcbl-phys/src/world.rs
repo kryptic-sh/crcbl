@@ -320,6 +320,19 @@ struct BroadphaseCounters {
 /// `add_mesh` and removed with `remove`. The internal BVH is rebuilt lazily — call
 /// [`PhysicsWorld::rebuild`] after batch mutations, or it auto-rebuilds on
 /// the next query.
+///
+/// # Queries only: the contact solver never reads this world
+///
+/// A collider added here directly answers rays, sweeps and overlaps and
+/// nothing else. The contact solver in a
+/// [`PhysicsSystem`](crate::PhysicsSystem) built
+/// [`with_contacts`](crate::PhysicsSystem::with_contacts) pairs bodies through
+/// its own broadphase, which holds only the colliders bodies own as a
+/// [`ColliderComponent`](crate::ColliderComponent): a body falls straight
+/// through a floor registered with `add_box` or `add_mesh` through
+/// [`PhysicsSystem::world_mut`](crate::PhysicsSystem::world_mut). Ground that
+/// bodies must stand on is a static body carrying the collider, such as a
+/// [`ColliderComponent::Mesh`](crate::ColliderComponent::Mesh) for terrain.
 pub struct PhysicsWorld {
     /// Dense storage of collider entries.
     colliders: Vec<Option<ColliderSlot>>,
@@ -1395,6 +1408,11 @@ impl PhysicsWorld {
     /// bounds descends the mesh's own tree and tests the triangles exactly:
     /// see [`TriangleMesh`]'s module docs. To a query a triangle has two
     /// sides, and a hit's normal faces the side the query came from.
+    ///
+    /// Queries see the mesh and the contact solver does not, so bodies fall
+    /// through it: a mesh they must collide with is a static body's
+    /// [`ColliderComponent::Mesh`](crate::ColliderComponent::Mesh). See
+    /// [queries only](Self#queries-only-the-contact-solver-never-reads-this-world).
     pub fn add_mesh(&mut self, mesh: TriangleMesh, transform: Transform) -> ColliderId {
         self.add(ColliderEntry::Mesh(PlacedMesh::new(mesh, transform)))
     }
