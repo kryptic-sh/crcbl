@@ -667,8 +667,8 @@ impl Shell for X11Shell {
                 };
             }
             self.window_mut(window)?.pointer_mode = mode;
-            let restore = self.window(window)?.cursor == Some(None);
-            self.apply_cursor(xid, restore);
+            let recorded = self.window(window)?.cursor;
+            self.apply_cursor(xid, recorded, false);
             self.conn.flush();
             return Ok(());
         }
@@ -743,20 +743,18 @@ impl Shell for X11Shell {
         Ok(())
     }
 
-    /// Hides the cursor with `None`. **A shape is recorded and not yet
-    /// applied.**
+    /// Hides the cursor with `None`, or sets a themed shape.
     ///
-    /// Hiding is real and complete: a cursor built from an empty 1×1 pixmap
-    /// draws nothing, which is core protocol and works on every server — and it
-    /// is the case a first-person game and [`PointerMode::Locked`] actually
-    /// need.
+    /// Hiding is core protocol and works on every server: a cursor built from
+    /// an empty 1×1 pixmap draws nothing — the case a first-person game and
+    /// [`PointerMode::Locked`] need.
     ///
-    /// A *shape* needs an XCursor theme loader — find the user's theme, parse
-    /// its cursor files, pick the image for the right shape at the right size,
-    /// upload it — or `libxcb-cursor`, which is that loader as a library and is
-    /// not loaded yet. So [`ShellCaps::CURSOR_SHAPE`] is clear here, and a
-    /// shape request is accepted and recorded rather than refused, because a
-    /// UI calls this on every hover; [`WindowState`] can report it.
+    /// A *shape* is the user's XCursor theme's cursor for it, loaded through
+    /// libxcb-cursor once per shape and cached — see [`cursor`](super::cursor),
+    /// which also says which names are tried. Without libxcb-cursor,
+    /// [`ShellCaps::CURSOR_SHAPE`] is clear and a shape request is accepted and
+    /// recorded rather than refused, because a UI calls this on every hover;
+    /// [`WindowState`] can report it.
     fn set_cursor(
         &mut self,
         window: WindowId,
@@ -765,7 +763,7 @@ impl Shell for X11Shell {
         let xid = self.window(window)?.id;
         self.window_mut(window)?.cursor = Some(cursor);
         let locked = self.window(window)?.pointer_mode == PointerMode::Locked;
-        self.apply_cursor(xid, cursor.is_none() || locked);
+        self.apply_cursor(xid, Some(cursor), locked);
         self.conn.flush();
         Ok(())
     }
@@ -945,6 +943,15 @@ impl Drop for X11Shell {
                 // `blank_cursor`, which caches it, so this frees it once.
                 unsafe { (self.conn.lib.free_cursor)(self.conn.raw(), self.blank_cursor) };
             }
+        }
+        // Outside the check above: the context is client memory as well as a
+        // font on the server, and libxcb drops requests on a lost connection
+        // rather than failing them, so it is freed either way.
+        //
+        // SAFETY: the connection is the one the cursors were opened on and is
+        // still open; it closes below.
+        unsafe { self.cursors.release(self.conn.lib, self.conn.raw()) };
+        if self.lost.is_none() {
             self.conn.flush();
         }
         // SAFETY: the connection was returned live by `xcb_connect` and is

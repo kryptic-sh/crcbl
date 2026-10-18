@@ -306,8 +306,9 @@ bitflags::bitflags! {
         /// Win32's stock `user32` cursors, AppKit's `NSCursor`, and the
         /// canvas's CSS `cursor` on the web; on Wayland, `cursor-shape-v1`
         /// where the compositor offers it, which hands the compositor the
-        /// shape's name and lets it draw the user's theme. Clear on X11, which
-        /// has no cursor theme loader yet. Without it, `set_cursor` still
+        /// shape's name and lets it draw the user's theme; on X11, the user's
+        /// XCursor theme loaded through libxcb-cursor, where that library is
+        /// installed. Without it, `set_cursor` still
         /// accepts and records a shape — a UI calls it on every hover, and an
         /// error there would be one every caller had to handle — and hiding
         /// with `None` works everywhere; only the shape goes unseen.

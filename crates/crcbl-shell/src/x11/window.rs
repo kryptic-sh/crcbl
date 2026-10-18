@@ -8,8 +8,8 @@
 //! subtlest bug in the protocol; see [`X11Shell::apply_fullscreen`].
 
 use super::{
-    Conn, DisplayMode, MonitorId, PhysicalSize, ShellError, SizeHints, WindowConfiguration,
-    WmStateAction, X11Shell, XWindow, ffi, keys,
+    Conn, CursorIcon, DisplayMode, MonitorId, PhysicalSize, ShellError, SizeHints,
+    WindowConfiguration, WmStateAction, X11Shell, XWindow, ffi, keys,
 };
 
 impl X11Shell {
@@ -360,18 +360,26 @@ impl X11Shell {
 
     /// Applies a window's recorded cursor to its attributes.
     ///
-    /// Only the hidden case is real; a *shape* is recorded and not applied, for
-    /// the same reason the Wayland backend gives — naming a shape needs an
-    /// XCursor theme loader, which is a second asset pipeline inside the shell
-    /// and is how a cursor ends up disagreeing with the user's theme. See
+    /// `recorded` is [`XWindow::cursor`]: hidden is the blank cursor, a shape
+    /// is the themed cursor [`cursor`](super::cursor) loads for it, and never
+    /// set is `XCB_NONE`. `locked` hides the cursor whatever was recorded, as
+    /// [`PointerMode::Locked`](crate::PointerMode::Locked) promises. See
     /// [`set_cursor`](crate::Shell::set_cursor) on this backend.
-    pub(super) fn apply_cursor(&mut self, xid: u32, hidden: bool) {
-        let cursor = if hidden {
-            self.blank_cursor()
-        } else {
+    pub(super) fn apply_cursor(
+        &mut self,
+        xid: u32,
+        recorded: Option<Option<CursorIcon>>,
+        locked: bool,
+    ) {
+        let cursor = match recorded {
+            _ if locked => self.blank_cursor(),
+            Some(None) => self.blank_cursor(),
+            // `XCB_NONE` when there is no theme or the theme lacks the shape,
+            // as for a cursor never set.
+            Some(Some(icon)) => self.cursors.cursor(icon),
             // `XCB_NONE` on `CWCursor` means "inherit the parent's", which for
             // a top-level window is the root's — the user's themed default.
-            ffi::value::NONE
+            None => ffi::value::NONE,
         };
         /// `XCB_CW_CURSOR`.
         const CW_CURSOR: u32 = 1 << 14;

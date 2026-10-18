@@ -17,6 +17,7 @@
 //! | Something on the clipboard | any other application | `Peer::own_clipboard` |
 //! | Reading *our* clipboard, including `INCR` | any other application | `Peer::read_clipboard` |
 //! | Dragging a file onto a window | a file manager | `Peer::xdnd_enter` and the rest of the XDND source half |
+//! | Seeing which cursor is shown | the user's eyes | `Peer::cursor_image`, through XFixes |
 //!
 //! Every one of those is a real X client doing a real thing over a real socket.
 //! Nothing here reaches inside the shell; the peer only ever sees XIDs and
@@ -118,6 +119,151 @@ fn load_test_lib() -> Option<TestLib> {
                 ) -> ffi::Cookie,
             >(input),
         })
+    }
+}
+
+/// `xcb_xfixes_query_version_reply_t`.
+#[repr(C)]
+struct XfixesQueryVersionReply {
+    response_type: u8,
+    pad0: u8,
+    sequence: u16,
+    length: u32,
+    major_version: u32,
+    minor_version: u32,
+    pad1: [u8; 16],
+}
+
+/// `xcb_xfixes_get_cursor_image_reply_t`. The ARGB pixels follow it and are
+/// reached through `xcb_xfixes_get_cursor_image_cursor_image`.
+#[repr(C)]
+struct CursorImageReply {
+    response_type: u8,
+    pad0: u8,
+    sequence: u16,
+    length: u32,
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+    xhot: u16,
+    yhot: u16,
+    cursor_serial: u32,
+    pad1: [u8; 8],
+}
+
+// A reply's fixed part is the 32 bytes every reply starts with.
+const _: () = assert!(size_of::<XfixesQueryVersionReply>() == 32);
+const _: () = assert!(size_of::<CursorImageReply>() == 32);
+
+/// The XFixes version asked for. `GetCursorImage` arrived in version 2, and a
+/// server refuses every XFixes request from a client that has not said which
+/// version it speaks.
+const XFIXES_MAJOR: u32 = 2;
+
+/// The C prototypes [`XfixesLib`] asserts, named once for the field and the
+/// `transmute` that fills it, as [`ffi`]'s own prototypes are.
+mod xfixes {
+    use super::{Connection, CursorImageReply, XfixesQueryVersionReply, c_int, ffi};
+
+    /// `xcb_xfixes_query_version_cookie_t xcb_xfixes_query_version(
+    /// xcb_connection_t *, uint32_t client_major_version,
+    /// uint32_t client_minor_version)`
+    pub type QueryVersion = unsafe extern "C" fn(*mut Connection, u32, u32) -> ffi::Cookie;
+    /// `xcb_xfixes_query_version_reply_t *xcb_xfixes_query_version_reply(…)`
+    pub type QueryVersionReply = unsafe extern "C" fn(
+        *mut Connection,
+        ffi::Cookie,
+        *mut *mut ffi::GenericError,
+    ) -> *mut XfixesQueryVersionReply;
+    /// `xcb_xfixes_get_cursor_image_cookie_t xcb_xfixes_get_cursor_image(
+    /// xcb_connection_t *)`
+    pub type GetCursorImage = unsafe extern "C" fn(*mut Connection) -> ffi::Cookie;
+    /// `xcb_xfixes_get_cursor_image_reply_t *xcb_xfixes_get_cursor_image_reply(…)`
+    pub type GetCursorImageReply = unsafe extern "C" fn(
+        *mut Connection,
+        ffi::Cookie,
+        *mut *mut ffi::GenericError,
+    ) -> *mut CursorImageReply;
+    /// `uint32_t *xcb_xfixes_get_cursor_image_cursor_image(
+    /// const xcb_xfixes_get_cursor_image_reply_t *)`
+    pub type CursorImagePixels = unsafe extern "C" fn(*const CursorImageReply) -> *mut u32;
+    /// `int xcb_xfixes_get_cursor_image_cursor_image_length(
+    /// const xcb_xfixes_get_cursor_image_reply_t *)`
+    pub type CursorImageLength = unsafe extern "C" fn(*const CursorImageReply) -> c_int;
+}
+
+/// The libxcb-xfixes entry points [`Peer::cursor_image`] needs.
+///
+/// Harness-only, for the reason [`TestLib`] is: the backend hides the cursor
+/// with a core-protocol empty pixmap and never asks which cursor is showing.
+struct XfixesLib {
+    query_version: xfixes::QueryVersion,
+    query_version_reply: xfixes::QueryVersionReply,
+    get_cursor_image: xfixes::GetCursorImage,
+    get_cursor_image_reply: xfixes::GetCursorImageReply,
+    cursor_image: xfixes::CursorImagePixels,
+    cursor_image_length: xfixes::CursorImageLength,
+}
+
+fn load_xfixes() -> Option<XfixesLib> {
+    // SAFETY: a NUL-terminated literal, and `RTLD_NOW` is valid.
+    let handle = unsafe { dlopen(c"libxcb-xfixes.so.0".as_ptr(), RTLD_NOW) };
+    if handle.is_null() {
+        return None;
+    }
+    /// Resolves one symbol, or gives up.
+    macro_rules! symbol {
+        ($name:literal, $ty:ty) => {{
+            // SAFETY: `handle` is live and the name is a NUL-terminated
+            // literal.
+            let raw = unsafe { dlsym(handle, $name.as_ptr()) };
+            if raw.is_null() {
+                return None;
+            }
+            // SAFETY: `$ty` is the prototype `xcb/xfixes.h` declares for this
+            // symbol.
+            unsafe { core::mem::transmute::<*mut c_void, $ty>(raw) }
+        }};
+    }
+    Some(XfixesLib {
+        query_version: symbol!(c"xcb_xfixes_query_version", xfixes::QueryVersion),
+        query_version_reply: symbol!(c"xcb_xfixes_query_version_reply", xfixes::QueryVersionReply),
+        get_cursor_image: symbol!(c"xcb_xfixes_get_cursor_image", xfixes::GetCursorImage),
+        get_cursor_image_reply: symbol!(
+            c"xcb_xfixes_get_cursor_image_reply",
+            xfixes::GetCursorImageReply
+        ),
+        cursor_image: symbol!(
+            c"xcb_xfixes_get_cursor_image_cursor_image",
+            xfixes::CursorImagePixels
+        ),
+        cursor_image_length: symbol!(
+            c"xcb_xfixes_get_cursor_image_cursor_image_length",
+            xfixes::CursorImageLength
+        ),
+    })
+}
+
+/// The cursor the server is showing, as XFixes reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CursorImage {
+    /// The server's serial number for the cursor: distinct for every cursor
+    /// created, so the same serial twice is the same cursor resource.
+    pub serial: u32,
+    /// Width in pixels.
+    pub width: u16,
+    /// Height in pixels.
+    pub height: u16,
+    /// Premultiplied ARGB, one word per pixel, row by row.
+    pub pixels: Vec<u32>,
+}
+
+impl CursorImage {
+    /// Whether every pixel is fully transparent, so the cursor draws nothing.
+    #[must_use]
+    pub fn is_invisible(&self) -> bool {
+        self.pixels.iter().all(|pixel| pixel >> 24 == 0)
     }
 }
 
@@ -258,6 +404,9 @@ pub struct Peer {
     /// timestamp is to keep the last one the server sent. See
     /// [`server_time`](Self::server_time).
     last_time: u32,
+    /// libxcb-xfixes, once [`cursor_image`](Self::cursor_image) has loaded it
+    /// and told the server which XFixes version this connection speaks.
+    xfixes: Option<XfixesLib>,
     /// Bytes per `INCR` chunk when the peer owns the clipboard.
     ///
     /// Deliberately settable and deliberately tiny by default when
@@ -358,6 +507,7 @@ impl Peer {
             pulls: Vec::new(),
             property_notifies: 0,
             last_time: 0,
+            xfixes: None,
             chunk: None,
         })
     }
@@ -684,6 +834,66 @@ impl Peer {
             );
         }
         self.flush();
+    }
+
+    /// The cursor the server is showing right now, wherever the pointer is.
+    ///
+    /// What the user sees, read back: a window's `CWCursor` cannot be read
+    /// from another client, but the cursor it makes the server display can.
+    ///
+    /// `None` when libxcb-xfixes is missing, the server lacks XFixes 2, or
+    /// the request failed.
+    pub fn cursor_image(&mut self) -> Option<CursorImage> {
+        if self.xfixes.is_none() {
+            let xfixes = load_xfixes()?;
+            // SAFETY: the connection is live; a null error pointer discards
+            // the error and a null reply is handled below.
+            let reply = unsafe {
+                let cookie = (xfixes.query_version)(self.connection, XFIXES_MAJOR, 0);
+                (xfixes.query_version_reply)(self.connection, cookie, ptr::null_mut())
+            };
+            if reply.is_null() {
+                return None;
+            }
+            // SAFETY: `reply` is a live reply this call owns.
+            let major = unsafe { (*reply).major_version };
+            // SAFETY: freed exactly once.
+            unsafe { ffi::free_reply(reply) };
+            if major < XFIXES_MAJOR {
+                return None;
+            }
+            self.xfixes = Some(xfixes);
+        }
+        let xfixes = self.xfixes.as_ref()?;
+        // SAFETY: the connection is live and has negotiated XFixes 2; a null
+        // error pointer discards the error and a null reply is handled below.
+        let reply = unsafe {
+            let cookie = (xfixes.get_cursor_image)(self.connection);
+            (xfixes.get_cursor_image_reply)(self.connection, cookie, ptr::null_mut())
+        };
+        if reply.is_null() {
+            return None;
+        }
+        // SAFETY: `reply` is a live reply this call owns, and the accessors
+        // return its trailing pixel array and that array's length in words,
+        // which lie inside the same allocation.
+        let image = unsafe {
+            let words = usize::try_from((xfixes.cursor_image_length)(reply)).unwrap_or(0);
+            let pixels = (xfixes.cursor_image)(reply);
+            CursorImage {
+                serial: (*reply).cursor_serial,
+                width: (*reply).width,
+                height: (*reply).height,
+                pixels: if pixels.is_null() {
+                    Vec::new()
+                } else {
+                    core::slice::from_raw_parts(pixels, words).to_vec()
+                },
+            }
+        };
+        // SAFETY: freed exactly once, after the pixels were copied out.
+        unsafe { ffi::free_reply(reply) };
+        Some(image)
     }
 
     /// Synthesizes a key press or release through `XTEST`.

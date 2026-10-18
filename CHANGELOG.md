@@ -13,6 +13,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`ShellCaps::CURSOR_SHAPE` is set on X11 when libxcb-cursor is installed**,
+  and `set_cursor` with a shape then shows the user's XCursor theme's cursor for
+  it, or a glyph of the core cursor font when no theme has the shape. The
+  library is loaded with `dlopen`, so a system without it keeps the bit clear
+  and records the shape as before. Each shape is loaded once per shell, so a UI
+  setting the cursor on every hover costs no reload.
+
 ## [0.5.0] - 2026-10-18
 
 ### Breaking

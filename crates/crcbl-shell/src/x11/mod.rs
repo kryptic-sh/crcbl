@@ -28,7 +28,7 @@
 //! | Clipboard: `TARGETS`, `INCR` both directions, own and read | complete |
 //! | Drag and drop in: XDND version 5, the `accept_drops` gate | complete — [`DRAG_DROP`](ShellCaps::DRAG_DROP), see [`xdnd`] |
 //! | Key repeat synthesis | not needed — the X server does it |
-//! | Themed cursor shapes | recorded, not applied — [`CURSOR_SHAPE`](ShellCaps::CURSOR_SHAPE) is clear |
+//! | Themed cursor shapes | complete where libxcb-cursor is installed — [`CURSOR_SHAPE`](ShellCaps::CURSOR_SHAPE), see [`cursor`]; recorded and not applied without it |
 //!
 //! ## What was cut, and why that seam
 //!
@@ -37,10 +37,6 @@
 //! drag icon, an action menu and an offer the seam has no vocabulary for, and
 //! nothing in this engine asks to drag a file *out* — the viewer and the
 //! editor's asset browser both want files coming in.
-//!
-//! **Themed cursor shapes**, as the table says: X11 has no compositor to name a
-//! shape to, as Wayland's `cursor-shape-v1` does, so a cursor is a theme lookup
-//! and a pixmap, which waits on `libxcb-cursor`.
 //!
 //! # What X11 does that neither Wayland nor `HeadlessShell` models
 //!
@@ -745,6 +741,8 @@ pub struct X11Shell {
     drag: Option<Drag>,
     /// A hidden cursor, created once and shared. `0` until something asks.
     blank_cursor: u32,
+    /// The themed cursors loaded so far; see [`cursor`].
+    cursors: cursor::Cursors,
     queue: VecDeque<ShellEvent>,
     time: TimeBase,
     caps: ShellCaps,
@@ -830,7 +828,7 @@ impl X11Shell {
 
         // SAFETY: the connection is live and error-free, so the setup reply is
         // present and owned by libxcb for the connection's lifetime.
-        let (root, root_visual, screen_size, max_request_length) = unsafe {
+        let (screen, root, root_visual, screen_size, max_request_length) = unsafe {
             let setup = (lib.get_setup)(connection.as_ptr());
             if setup.is_null() {
                 (lib.disconnect)(connection.as_ptr());
@@ -855,6 +853,7 @@ impl X11Shell {
             }
             let screen = *iterator.data;
             (
+                iterator.data,
                 screen.root,
                 screen.root_visual,
                 PhysicalSize::new(
@@ -894,6 +893,10 @@ impl X11Shell {
 
         let has_window_manager = conn.detect_window_manager();
         let scale_factor = conn.read_xft_scale();
+        // SAFETY: the connection is live and error-free, and `screen` is the
+        // screen from its setup reply, which libxcb keeps for as long as the
+        // connection is open.
+        let cursors = unsafe { cursor::Cursors::open(conn.ext.cursor, conn.raw(), screen) };
 
         let mut shell = Self {
             conn,
@@ -914,6 +917,7 @@ impl X11Shell {
             owner_time: ffi::value::CURRENT_TIME,
             drag: None,
             blank_cursor: 0,
+            cursors,
             queue: VecDeque::new(),
             time: TimeBase::now(),
             caps: ShellCaps::empty(),
@@ -957,8 +961,10 @@ impl X11Shell {
             // values here. See the module docs for how little of a *protocol*
             // that is.
             | ShellCaps::FRACTIONAL_SCALE;
-        // `CURSOR_SHAPE` is not here: `set_cursor` records a shape and applies
-        // nothing until a cursor theme loader lands.
+        // A shape is applied through libxcb-cursor, so the bit needs the
+        // library and a context on this connection; without them `set_cursor`
+        // records a shape and applies nothing, and the clear bit says so.
+        caps.set(ShellCaps::CURSOR_SHAPE, self.cursors.applies_shapes());
 
         // Both of these need a window manager, and a window manager is a
         // separate program that may simply not be running — the finding this
@@ -1100,6 +1106,7 @@ impl X11Shell {
 }
 
 mod connect;
+mod cursor;
 mod input;
 mod monitors;
 mod shell;

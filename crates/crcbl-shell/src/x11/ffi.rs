@@ -12,9 +12,9 @@
 //!   normal and expected on an X11 desktop; the X11 entry failing is normal and
 //!   expected on a Wayland-only one. If either can pre-empt the loader, the
 //!   list is decorative.
-//! * **There are four libraries, not one.** libxcb is always present where
-//!   there is an X server; `libxcb-randr` and `libxcb-xinput` are separately
-//!   packaged and a minimal container may have neither. With `dlopen` a missing
+//! * **There are several libraries, not one.** libxcb is always present where
+//!   there is an X server; `libxcb-randr`, `libxcb-xinput` and `libxcb-cursor`
+//!   are separately packaged and a minimal container may have none of them. With `dlopen` a missing
 //!   extension library is a cleared [`ShellCaps`](crate::ShellCaps) bit and a
 //!   log line — see [`Ext`] — where with `DT_NEEDED` it would be a process that
 //!   does not start.
@@ -54,13 +54,17 @@
 //! | `libxcb-randr.so.0` | monitor geometry, refresh, primary | one monitor covering the whole screen, refresh `0` |
 //! | `libxcb-xinput.so.0` | XI2 raw motion — unaccelerated aim | [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION) cleared, no mouselook |
 //! | `libxcb-xkb.so.1` | detectable auto-repeat — a repeat with no fake release | the release/press lookahead in [`input`](super::input), which cannot see a pair the socket split |
+//! | `libxcb-cursor.so.0` | themed cursor shapes — the user's XCursor theme, or the core cursor font when there is none | [`CURSOR_SHAPE`](crate::ShellCaps::CURSOR_SHAPE) cleared; a shape is recorded and the root's cursor shows |
 //!
 //! Deliberately absent: `libxcb-xfixes` (pointer barriers are not needed —
 //! `GrabPointer`'s `confine_to` *is* [`PointerMode::Confined`](crate::PointerMode)
-//! and hiding the cursor is a core-protocol empty pixmap), `libxcb-cursor`
-//! (a themed cursor needs an XCursor theme loader, which is the same gap the
-//! Wayland backend documents and defers), and `libxcb-icccm`/`libxcb-ewmh`
-//! (policy, see above).
+//! and hiding the cursor is a core-protocol empty pixmap), and
+//! `libxcb-icccm`/`libxcb-ewmh` (policy, see above).
+//!
+//! libxcb-cursor is the XCursor theme loader as a library — what Xlib programs
+//! get from libXcursor. X11 has no compositor to hand a shape's *name* to, as
+//! Wayland's `cursor-shape-v1` does, so a client that wants the user's themed
+//! cursor loads it itself. See [`super::cursor`].
 //!
 //! libxcb-xkb is used for **one request**. The keymap itself still comes from
 //! libxkbcommon-x11, which links libxcb-xkb itself and is where that
@@ -82,6 +86,13 @@ use std::sync::OnceLock;
 /// `xcb_connection_t` — the connection. Opaque; libxcb owns the layout.
 #[repr(C)]
 pub struct Connection {
+    _opaque: [u8; 0],
+}
+
+/// `xcb_cursor_context_t` — libxcb-cursor's theme state for one connection.
+/// Opaque; libxcb-cursor owns the layout.
+#[repr(C)]
+pub struct CursorContext {
     _opaque: [u8; 0],
 }
 
@@ -1274,12 +1285,12 @@ mod prototype {
     #[cfg(feature = "x11-e2e")]
     use super::QueryTreeReply;
     use super::{
-        Connection, Cookie, Extension, GenericError, GenericEvent, GetGeometryReply,
+        Connection, Cookie, CursorContext, Extension, GenericError, GenericEvent, GetGeometryReply,
         GetPropertyReply, GetSelectionOwnerReply, GrabPointerReply, InternAtomReply,
         QueryExtensionReply, QueryPointerReply, RandrCrtcInfoReply, RandrOutputInfoReply,
-        RandrOutputPrimaryReply, RandrQueryVersionReply, RandrScreenResourcesReply, ScreenIterator,
-        Setup, TranslateCoordinatesReply, XiEventMask, XiQueryVersionReply, XkbPerClientFlagsReply,
-        XkbUseExtensionReply, c_char, c_int, c_void,
+        RandrOutputPrimaryReply, RandrQueryVersionReply, RandrScreenResourcesReply, Screen,
+        ScreenIterator, Setup, TranslateCoordinatesReply, XiEventMask, XiQueryVersionReply,
+        XkbPerClientFlagsReply, XkbUseExtensionReply, c_char, c_int, c_void,
     };
 
     /// `xcb_connection_t *xcb_connect(const char *displayname, int *screenp)`
@@ -1580,6 +1591,18 @@ mod prototype {
     /// xcb_window_t, uint16_t num_mask, const xcb_input_event_mask_t *masks)`
     pub type XiSelectEvents =
         unsafe extern "C" fn(*mut Connection, u32, u16, *const XiEventMask) -> Cookie;
+
+    /// `int xcb_cursor_context_new(xcb_connection_t *conn,
+    /// xcb_screen_t *screen, xcb_cursor_context_t **ctx)` — `0` on success, a
+    /// negative `errno` otherwise.
+    pub type CursorContextNew =
+        unsafe extern "C" fn(*mut Connection, *mut Screen, *mut *mut CursorContext) -> c_int;
+    /// `xcb_cursor_t xcb_cursor_load_cursor(xcb_cursor_context_t *ctx,
+    /// const char *name)` — `XCB_NONE` when neither the theme nor the core
+    /// cursor font has `name`.
+    pub type CursorLoadCursor = unsafe extern "C" fn(*mut CursorContext, *const c_char) -> u32;
+    /// `void xcb_cursor_context_free(xcb_cursor_context_t *ctx)`
+    pub type CursorContextFree = unsafe extern "C" fn(*mut CursorContext);
 }
 
 /// Every libxcb entry point this backend uses.
@@ -1731,6 +1754,23 @@ impl core::fmt::Debug for XkbLib {
     }
 }
 
+/// libxcb-cursor, when it is there. See [`RandrLib`].
+///
+/// Not an extension: libxcb-cursor is a client-side library that reads the
+/// user's cursor theme and uploads its images with requests libxcb already
+/// has, so there is no extension descriptor to hold.
+pub struct CursorLib {
+    pub context_new: prototype::CursorContextNew,
+    pub load_cursor: prototype::CursorLoadCursor,
+    pub context_free: prototype::CursorContextFree,
+}
+
+impl core::fmt::Debug for CursorLib {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CursorLib(libxcb-cursor)")
+    }
+}
+
 /// Which optional extension libraries loaded.
 #[derive(Debug)]
 pub struct Ext {
@@ -1741,6 +1781,9 @@ pub struct Ext {
     /// XKB, or `None` — then auto-repeat is recognized by the lookahead in
     /// [`input`](super::input), which a split socket read can defeat.
     pub xkb: Option<&'static XkbLib>,
+    /// libxcb-cursor, or `None` — then a cursor shape is recorded and not
+    /// applied, and [`CURSOR_SHAPE`](crate::ShellCaps::CURSOR_SHAPE) is clear.
+    pub cursor: Option<&'static CursorLib>,
 }
 
 /// The sonames tried, in order.
@@ -1755,11 +1798,14 @@ const RANDR_SONAMES: [&CStr; 2] = [c"libxcb-randr.so.0", c"libxcb-randr.so"];
 const XI_SONAMES: [&CStr; 2] = [c"libxcb-xinput.so.0", c"libxcb-xinput.so"];
 /// As [`SONAMES`], for libxcb-xkb.
 const XKB_SONAMES: [&CStr; 2] = [c"libxcb-xkb.so.1", c"libxcb-xkb.so"];
+/// As [`SONAMES`], for libxcb-cursor.
+const CURSOR_SONAMES: [&CStr; 2] = [c"libxcb-cursor.so.0", c"libxcb-cursor.so"];
 
 static LIB: OnceLock<Result<Lib, String>> = OnceLock::new();
 static RANDR: OnceLock<Option<RandrLib>> = OnceLock::new();
 static XI: OnceLock<Option<XiLib>> = OnceLock::new();
 static XKB: OnceLock<Option<XkbLib>> = OnceLock::new();
+static CURSOR: OnceLock<Option<CursorLib>> = OnceLock::new();
 
 /// The `xcb_extension_t*` an [`Ext`] entry holds, as libxcb wants it.
 ///
@@ -1798,6 +1844,7 @@ pub fn load_ext() -> Ext {
         randr: RANDR.get_or_init(load_randr).as_ref(),
         xi: XI.get_or_init(load_xi).as_ref(),
         xkb: XKB.get_or_init(load_xkb).as_ref(),
+        cursor: CURSOR.get_or_init(load_cursor).as_ref(),
     }
 }
 
@@ -2087,6 +2134,37 @@ fn load_xkb() -> Option<XkbLib> {
             "xcb_xkb_per_client_flags_reply",
             prototype::XkbPerClientFlagsReplyFn
         ),
+    })
+}
+
+fn load_cursor() -> Option<CursorLib> {
+    let handle = open_library(&CURSOR_SONAMES);
+    if handle.is_null() {
+        crcbl_core::log::warn!(
+            "libxcb-cursor is not available: cursor shapes are recorded and not applied, so \
+             ShellCaps::CURSOR_SHAPE stays clear"
+        );
+        return None;
+    }
+    /// Resolves one symbol or gives up on the whole library.
+    macro_rules! symbol {
+        ($name:literal, $ty:ty) => {{
+            // SAFETY: `handle` is a live `dlopen` handle and the name is a
+            // NUL-terminated literal.
+            let raw = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
+            if raw.is_null() {
+                crcbl_core::log::warn!("libxcb-cursor has no symbol {}; degrading", $name);
+                return None;
+            }
+            // SAFETY: `$ty` is the prototype `xcb/xcb_cursor.h` declares for
+            // this symbol.
+            unsafe { core::mem::transmute::<*mut c_void, $ty>(raw) }
+        }};
+    }
+    Some(CursorLib {
+        context_new: symbol!("xcb_cursor_context_new", prototype::CursorContextNew),
+        load_cursor: symbol!("xcb_cursor_load_cursor", prototype::CursorLoadCursor),
+        context_free: symbol!("xcb_cursor_context_free", prototype::CursorContextFree),
     })
 }
 

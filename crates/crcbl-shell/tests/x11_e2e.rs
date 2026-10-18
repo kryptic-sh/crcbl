@@ -36,7 +36,9 @@
 
 use std::time::{Duration, Instant};
 
-use crcbl_shell::x11_test_support::{MAX_EVENTS_PER_PUMP, MAX_PENDING_CLIPBOARD_WRITES, Peer};
+use crcbl_shell::x11_test_support::{
+    CursorImage, MAX_EVENTS_PER_PUMP, MAX_PENDING_CLIPBOARD_WRITES, Peer,
+};
 use crcbl_shell::{
     ButtonState, ClipboardContent, ClipboardOffer, CloseReply, CursorIcon, DisplayMode, KeyCode,
     LogicalSize, MimeType, Modifiers, PhysicalPoint, PhysicalSize, PointerButton, PointerMode,
@@ -648,6 +650,10 @@ fn the_capability_set_is_x11_shaped() {
         caps.contains(ShellCaps::FRACTIONAL_SCALE),
         "Xft.dpi is a DPI"
     );
+    assert!(
+        caps.contains(ShellCaps::CURSOR_SHAPE),
+        "libxcb-cursor is installed, so a shape is the theme's cursor for it"
+    );
 
     // Absent for reasons rather than for want of work.
     assert!(
@@ -657,10 +663,6 @@ fn the_capability_set_is_x11_shaped() {
     assert!(
         !caps.contains(ShellCaps::TEXT_IME),
         "no XIM, IBus or Fcitx client, so no input method reaches this backend"
-    );
-    assert!(
-        !caps.contains(ShellCaps::CURSOR_SHAPE),
-        "set_cursor records a shape and applies nothing until a theme loader lands"
     );
     // And one that depends on nothing at all: XDND is client-to-client client
     // messages plus a selection, with no extension and no window manager under
@@ -1742,14 +1744,103 @@ fn warping_the_pointer_moves_it() {
         (landed.x - 40.0).abs() < 2.0 && (landed.y - 60.0).abs() < 2.0,
         "the pointer landed at {landed:?}"
     );
+}
 
-    // Hiding the cursor is real; naming a shape is recorded and not applied,
-    // and neither is an error.
-    session.shell.set_cursor(window, None).expect("hide");
-    session
-        .shell
-        .set_cursor(window, Some(CursorIcon::Crosshair))
-        .expect("shape");
+/// A cursor shape is the cursor the server shows over the window, loaded once
+/// per shape, and hiding shows the blank cursor.
+///
+/// Read back through XFixes from the peer, which sees what the user would: a
+/// window's `CWCursor` is write-only from outside, but the cursor it makes the
+/// server display is not. Each cursor resource carries its own serial, so a
+/// shape that came back as the *same* serial is the same cursor — the cache,
+/// observed from another process — and one reloaded would be a new serial.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_cursor_shape_is_shown_over_the_window_and_loaded_once() {
+    let mut session = Session::open();
+    assert!(session.shell.caps().contains(ShellCaps::CURSOR_SHAPE));
+    let window = session.window(&desc("cursor"));
+    let (x, y) = session.point_in(window, 100, 100);
+    session.peer.motion(x, y);
+    session.pump_until("the pointer to enter", |session| {
+        session.events.iter().any(|event| {
+            matches!(
+                event,
+                ShellEvent::PointerFocus { entered: true, .. } | ShellEvent::PointerMotion { .. }
+            )
+        })
+    });
+    /// The cursor the peer sees the server showing.
+    fn shown(session: &mut Session) -> CursorImage {
+        session
+            .peer
+            .cursor_image()
+            .expect("libxcb-xfixes and XFixes 2 on the server")
+    }
+    /// Sets `cursor` and waits for the server to show a cursor other than
+    /// `before`.
+    ///
+    /// A wait for the serial to move rather than one read: the shell's request
+    /// and the peer's query travel on different connections, and the server
+    /// owes no order between them.
+    fn set(
+        session: &mut Session,
+        window: WindowId,
+        cursor: Option<CursorIcon>,
+        before: u32,
+    ) -> CursorImage {
+        session
+            .shell
+            .set_cursor(window, cursor)
+            .expect("set_cursor");
+        let mut now = None;
+        session.pump_until_reporting(
+            "the server to show the new cursor",
+            |session| {
+                let image = shown(session);
+                let moved = image.serial != before;
+                now = Some(image);
+                moved
+            },
+            |_| format!("; still serial {before} after {cursor:?}"),
+        );
+        now.expect("the wait read it")
+    }
+    let inherited = shown(&mut session);
+
+    let text = set(
+        &mut session,
+        window,
+        Some(CursorIcon::Text),
+        inherited.serial,
+    );
+    assert!(
+        !text.is_invisible(),
+        "the text cursor draws something: {}x{}",
+        text.width,
+        text.height
+    );
+    let pointer = set(&mut session, window, Some(CursorIcon::Pointer), text.serial);
+    assert_ne!(
+        pointer.serial, inherited.serial,
+        "a shape is not the root's"
+    );
+    assert_ne!(pointer.pixels, text.pixels, "two shapes, two images");
+
+    let again = set(&mut session, window, Some(CursorIcon::Text), pointer.serial);
+    assert_eq!(
+        again.serial, text.serial,
+        "the second Text is the cursor loaded for the first, not a reload"
+    );
+
+    // The blank cursor is the backend's 1×1 one. Its pixel is not asserted:
+    // it comes from a pixmap whose contents the protocol leaves undefined.
+    let hidden = set(&mut session, window, None, again.serial);
+    assert_eq!(
+        (hidden.width, hidden.height),
+        (1, 1),
+        "hiding shows the blank cursor"
+    );
 }
 
 /// A burst past the per-pump cap does not leave `wait_events` asleep on events
