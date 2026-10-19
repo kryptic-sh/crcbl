@@ -485,6 +485,8 @@ const NO_PREMULTIPLIED_ALPHA: &str =
 /// drawn opaque: a window that silently is not what was asked is the failure
 /// `crcbl-vk`'s refusal of a transparent Win32 window exists to prevent, and
 /// unlike a pacing preference there is no fallback that still looks right.
+/// A program that would rather have a solid background says so with
+/// [`Transparency::Preferred`], which the adapter walk reads, not this.
 ///
 /// An opaque window gets [`CompositeAlpha::Opaque`], as a presenter always
 /// has, even where premultiplied is also offered: Vulkan on Wayland can offer
@@ -497,6 +499,24 @@ fn composite_alpha_for(transparent: bool, offered: &[CompositeAlpha]) -> Option<
     offered
         .contains(&CompositeAlpha::PreMultiplied)
         .then_some(CompositeAlpha::PreMultiplied)
+}
+
+/// What a [`Presenter`] does with a transparent window that no adapter can
+/// composite.
+///
+/// Read only for a window made with `WindowDesc::transparent`; an opaque
+/// window is opaque whatever this says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Transparency {
+    /// Refuse the open with [`PresentError::Unusable`], as a window that is
+    /// silently not what was asked is worse than none. The default.
+    #[default]
+    Required,
+    /// Fall back to the first adapter that can present the window at all, and
+    /// present it opaque, with a warning in the log. For a program that would
+    /// rather draw a solid background than no window; it asks
+    /// [`Presenter::composite_alpha`] what it got.
+    Preferred,
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +552,10 @@ pub struct PresenterDesc<'a> {
     /// [`PowerPreference::LowPower`] by default, because a program on this
     /// crate is an app. See [`crate::adapter::rank`].
     pub power_preference: PowerPreference,
+    /// What to do with a transparent window no adapter can composite:
+    /// [`Transparency::Required`] refuses the open, [`Transparency::Preferred`]
+    /// presents it opaque.
+    pub transparency: Transparency,
     /// Features the device must have. A device without them is an error.
     pub required_features: Features,
     /// Features to enable if present. Absent ones are simply not enabled — ask
@@ -561,6 +585,7 @@ impl Default for PresenterDesc<'_> {
             adapter_pin: None,
             adapter_pick: None,
             power_preference: PowerPreference::LowPower,
+            transparency: Transparency::Required,
             required_features: Features::empty(),
             // `PRESENT_FEEDBACK` is asked for here because `acquire` already
             // calls `wait_until_presented` every frame: a device that has the
@@ -697,6 +722,8 @@ pub struct PendingPresenter {
     adapter_pick: Option<OwnedPick>,
     /// [`PresenterDesc::power_preference`].
     power_preference: PowerPreference,
+    /// [`PresenterDesc::transparency`].
+    transparency: Transparency,
 }
 
 /// An [`AdapterPick`] that owns its name, for a [`PendingPresenter`] that
@@ -749,6 +776,7 @@ impl PendingPresenter {
             adapter_pin: desc.adapter_pin.map(str::to_owned),
             adapter_pick: desc.adapter_pick.map(OwnedPick::new),
             power_preference: desc.power_preference,
+            transparency: desc.transparency,
         })
     }
 
@@ -1074,6 +1102,7 @@ impl Presenter {
         let mut chosen = None;
         let mut last_error = None;
         let mut alpha_refused = false;
+        let mut opaque_fallback = None;
         for &adapter in candidates {
             match instance.surface_caps(surface, adapter.id) {
                 Ok(caps) if caps.preferred_format().is_some() => {
@@ -1086,6 +1115,9 @@ impl Presenter {
                             caps.composite_alpha
                         );
                         alpha_refused = true;
+                        if opaque_fallback.is_none() {
+                            opaque_fallback = Some((adapter, caps));
+                        }
                         continue;
                     };
                     let device_caps = match instance.adapter_caps(adapter.id) {
@@ -1113,6 +1145,25 @@ impl Presenter {
                     );
                     last_error = Some(error);
                 }
+            }
+        }
+        // Only once every adapter was asked: one that composites the window as
+        // it was made always wins over drawing it opaque.
+        if chosen.is_none()
+            && open.transparency == Transparency::Preferred
+            && let Some((adapter, caps)) = opaque_fallback
+        {
+            match instance.adapter_caps(adapter.id) {
+                Ok(device_caps) => {
+                    log::warn!(
+                        "hal: no adapter offers premultiplied alpha for this transparent \
+                         window; presenting it opaque on {:?}, as Transparency::Preferred \
+                         allows",
+                        adapter.name
+                    );
+                    chosen = Some((adapter.clone(), caps, CompositeAlpha::Opaque, device_caps));
+                }
+                Err(error) => last_error = Some(error),
             }
         }
         let Some((adapter, caps, composite_alpha, device_caps)) = chosen else {
@@ -1335,6 +1386,15 @@ impl Presenter {
             .adapters()
             .into_iter()
             .find(|info| info.id == self.adapter)
+    }
+
+    /// The composite alpha the swapchain presents with:
+    /// [`CompositeAlpha::PreMultiplied`] for a transparent window composited
+    /// as it was made, [`CompositeAlpha::Opaque`] for an opaque one, or for a
+    /// transparent one [`Transparency::Preferred`] let fall back.
+    #[must_use]
+    pub const fn composite_alpha(&self) -> CompositeAlpha {
+        self.config.composite_alpha
     }
 
     /// The graphics queue everything is submitted to.

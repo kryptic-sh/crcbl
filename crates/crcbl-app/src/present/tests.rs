@@ -1177,8 +1177,19 @@ fn open_alpha_context(
     target: crcbl_hal::SurfaceTarget,
     adapter_pin: Option<&str>,
 ) -> Result<(HeadlessShell, Presenter), PresentError> {
+    open_alpha_context_with(instance, target, adapter_pin, Transparency::Required)
+}
+
+/// [`open_alpha_context`], with what a transparent window may fall back to.
+fn open_alpha_context_with(
+    instance: crcbl_hal::null::NullInstance,
+    target: crcbl_hal::SurfaceTarget,
+    adapter_pin: Option<&str>,
+    transparency: Transparency,
+) -> Result<(HeadlessShell, Presenter), PresentError> {
     let (shell, mut pending) = adapter_walk_request(adapter_pin);
     pending.target = target;
+    pending.transparency = transparency;
     pending.stage = Presenter::start_device(Box::new(instance), &pending)?;
     let gpu = loop {
         if let Some(presenter) = pending.poll()? {
@@ -2902,4 +2913,53 @@ fn command_retirement_waits_are_excluded_from_cpu_work() {
             gpu.destroy().expect("release resources");
         },
     );
+}
+
+/// **`Transparency::Preferred` presents a transparent window opaque only when
+/// no adapter can composite it, and says so.**
+///
+/// Red when the fallback is taken while a later adapter offers premultiplied
+/// alpha, when it is not taken at all, or when `Presenter::composite_alpha`
+/// reports anything but what the swapchain was built with.
+#[test]
+fn a_preferred_transparency_falls_back_to_opaque_only_when_it_must() {
+    use crcbl_hal::AdapterId;
+    use crcbl_hal::null::NullInstance;
+
+    let opaque = vec![CompositeAlpha::Opaque];
+    let both = vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied];
+    let (_shell, mut gpu) = open_alpha_context_with(
+        alpha_instance(
+            NullInstance::gpu_driven().with_adapters(2),
+            &[opaque.clone(), both],
+        ),
+        wayland_target(true),
+        None,
+        Transparency::Preferred,
+    )
+    .expect("the second adapter composites the window");
+    assert_eq!(gpu.adapter, AdapterId(1), "premultiplied wins over opaque");
+    assert_eq!(gpu.composite_alpha(), CompositeAlpha::PreMultiplied);
+    gpu.drain().expect("nothing was submitted");
+    gpu.destroy().expect("teardown");
+
+    let (_shell, mut gpu) = open_alpha_context_with(
+        alpha_instance(
+            NullInstance::gpu_driven().with_adapters(2),
+            &[opaque.clone(), opaque],
+        ),
+        wayland_target(true),
+        None,
+        Transparency::Preferred,
+    )
+    .expect("no adapter composites the window, and opaque was allowed");
+    assert_eq!(gpu.adapter, AdapterId(0), "the first adapter that serves");
+    assert_eq!(gpu.composite_alpha(), CompositeAlpha::Opaque);
+    assert_eq!(
+        gpu.config.desc(gpu.surface).composite_alpha,
+        CompositeAlpha::Opaque,
+        "the swapchain is built opaque"
+    );
+    gpu.drain().expect("nothing was submitted");
+    gpu.destroy().expect("teardown");
 }

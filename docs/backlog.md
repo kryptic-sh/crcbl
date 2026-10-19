@@ -28,11 +28,11 @@ SVG text shaping and the Unicode text work have shipped; what is left:
 1. **Input method (S9): the shell half is pikr's need, and it is in.** pikr runs
    its own loop (not `crcbl-app`), already calls `set_text_input`, and is wiring
    `TextPreedit` and `set_text_input_area` itself against 0.5.0's Win32 backend,
-   which it will verify with the Microsoft IME; AppKit's half is the in-flight
-   slice. Separately, for `crcbl-app`'s own users and not pikr:
+   which it will verify with the Microsoft IME; AppKit's half shipped
+   2026-10-19. Separately, for `crcbl-app`'s own users and not pikr:
    `crcbl_app::TextPump` draws no pre-edit at the caret and never calls
    `set_text_input_area`, so the candidate window sits at the window's origin.
-   Build both in `crcbl-app` and `crcbl-ui`'s text field after the items below.
+   Build both in `crcbl-app` and `crcbl-ui`'s text field.
 
 **Adapter choice, left over from the 2026-10-19 slice** (lazy describe,
 `PowerPreference`, `AdapterPick`, `Instance::display_adapter`; the policy is
@@ -86,10 +86,6 @@ SVG text shaping and the Unicode text work have shipped; what is left:
   cannot be exercised between keys. Options: an "events due at pump N" queue on
   `HeadlessShell`, or holding injected events until the next `wait_events`. The
   first is explicit and keeps `inject` as it is; prefer it.
-- **`Presenter` refuses a transparent window with no premultiplied adapter**
-  (policy, pikr). pikr's owner decided it warns and draws opaque instead. Add an
-  opt-in on `PresenterDesc` to accept opaque when no adapter offers
-  `PreMultiplied`, and report which alpha mode it got.
 - **`Shell::set_input_region` (S5): what is unverified, and AppKit.** Built
   2026-10-20 on Wayland (`wl_surface.set_input_region`, committed at once, in
   `wayland/region.rs`), X11 (a SHAPE input shape through a `dlopen`ed

@@ -54,7 +54,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   one and a struct literal of `AdapterInfo` names the other.
 - **`crcbl_app::present::PresenterDesc` and `crcbl::engine::GpuContextDesc` have
   `power_preference` and `adapter_pick` fields**, for the adapter choice below,
-  so a struct literal without `..Default::default()` needs them.
+  so a struct literal without `..Default::default()` needs them; `PresenterDesc`
+  also has `transparency`.
 
 ### Added
 
@@ -160,6 +161,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   nothing. `HeadlessShell::input_region` reads the last region back. A
   passthrough popup stays passthrough. The trait method has a default, so other
   implementations keep compiling.
+- **`PresenterDesc::transparency` lets a transparent window fall back to
+  opaque.** `Transparency::Required`, the default, refuses the open when no
+  adapter offers premultiplied alpha, as before; `Transparency::Preferred`
+  presents the window opaque on the first adapter that can present it at all,
+  with a warning, and `Presenter::composite_alpha` says which alpha the
+  swapchain got. An adapter that composites the window always wins over the
+  fallback.
 
 ### Changed
 

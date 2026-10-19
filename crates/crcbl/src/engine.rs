@@ -113,7 +113,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crcbl_app::present::{PendingPresenter, PresentError, Presenter, PresenterDesc};
+use crcbl_app::present::{PendingPresenter, PresentError, Presenter, PresenterDesc, Transparency};
 use crcbl_core::time::{ManualTime, MonotonicTime, TimeSource};
 use crcbl_hal::Device;
 #[cfg(doc)]
@@ -1060,6 +1060,7 @@ impl GpuContextDesc<'_> {
             adapter_pin: pin,
             adapter_pick: self.adapter_pick,
             power_preference: self.power_preference,
+            transparency: Transparency::Required,
             required_features: self.required_features,
             optional_features: self.optional_features,
             pacing: self.settings.pacing(self.label, self.pacing),
