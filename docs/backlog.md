@@ -3,6 +3,31 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## NEXT: speed up CI (asked by the owner, 2026-10-20)
+
+Main's CI wall time grew from about 41 min (run 39088257372, 2026-10-18) to
+52–71 min (runs 39261359247 to 39301759963, 2026-10-19), while total runner time
+barely moved (222 against 233 runner-minutes, 46 jobs each). Measured from the
+GitHub API:
+
+- **Queueing is most of the growth.** In run 39287773047 `mtl e2e (macos-15)`
+  started 25.7 min after the run did and `build + test (macos-latest)` 35 min
+  after, where both started at once on 2026-10-18. Branch CI and mutant runs
+  dispatched beside main compete for the account's few macOS runners. Fix: give
+  `workflow_dispatch` an input naming the jobs to run, so a mutant or a platform
+  check runs one job instead of all 46, and stop dispatching full runs for them.
+- **The critical path is `mtl e2e (macos-15)`, 41–44 min alone.** Two steps are
+  most of it: "Draw a frame through ForwardRenderer on Metal" (19.4 min) and
+  "Draw the lit mesh on Metal" (16.1 min), where the same draws take 5.3 and 6.3
+  min on lavapipe. Likely each step builds its own binary with a different
+  feature set and so recompiles; check the commands, share one build (same
+  features, `--no-run` once), or split the job so the steps run in parallel.
+- **`vk e2e (lavapipe)` grew from 20.9 to 27.6 min** over the same day; the lit
+  mesh, the forward renderer and the viewer's suite are its longest steps. Not
+  yet explained.
+- Every job already uses `Swatinem/rust-cache`; whether the caches hit (keys,
+  size limits, the macOS jobs) is not checked.
+
 ## HIGH PRIORITY: what lyr and pikr still need (2026-10-15)
 
 **The owner decided on 2026-10-15 that the first crates.io release would wait
