@@ -59,6 +59,12 @@ SVG text shaping and the Unicode text work have shipped; what is left:
    `set_text_input_area`, so the candidate window sits at the window's origin.
    Build both in `crcbl-app` and `crcbl-ui`'s text field.
 
+**Behaviour, not a bug: Windows shell icons are straight alpha** (measured by
+pikr, 2026-10-20). `IShellItemImageFactory::GetImage` bitmaps on Windows 11 are
+not premultiplied: of 15,071 partly transparent pixels across 139 icons, 7,105
+have a colour channel above alpha. Nothing in crcbl converts shell icons today;
+if something does, it must not treat them as premultiplied on the way in.
+
 **Adapter choice, left over from the 2026-10-19 slice** (lazy describe,
 `PowerPreference`, `AdapterPick`, `Instance::display_adapter`; the policy is
 `crcbl_app::adapter::choose` and `rank`):
