@@ -135,6 +135,8 @@ pub enum Declaration {
     OutlineColor([f32; 4]),
     /// `outline-offset`, in pixels.
     OutlineOffset(f32),
+    /// `opacity`, clamped into `0..=1`.
+    Opacity(f32),
     /// `background-image`; `None` is `none`.
     BackgroundImage(Option<ImageName>),
     /// `border-image-source`; `None` is `none`.
@@ -215,6 +217,7 @@ impl Declaration {
             Self::OutlineWidth(value) => style.outline_width = value,
             Self::OutlineColor(value) => style.outline_color = value,
             Self::OutlineOffset(value) => style.outline_offset = value,
+            Self::Opacity(value) => style.opacity = value,
             Self::BackgroundImage(value) => style.background_image = value,
             Self::BorderImageSource(value) => style.border_image.source = value,
             Self::BorderImageSlice(sides, value) => {
@@ -278,6 +281,7 @@ impl NodeStyle {
             D::OutlineWidth(self.outline_width),
             D::OutlineColor(self.outline_color),
             D::OutlineOffset(self.outline_offset),
+            D::Opacity(self.opacity),
             D::BackgroundImage(self.background_image),
             D::BorderImageSource(self.border_image.source),
             D::BorderImageFill(self.border_image.fill),
@@ -382,6 +386,7 @@ mod tests {
             outline_width: 2.0,
             outline_color: [0.9, 0.8, 0.7, 0.6],
             outline_offset: -1.0,
+            opacity: 0.75,
             nav_up: NavTarget::None,
             nav_right: NavTarget::Id(crate::tree::NavId::new("next")),
             nav_wrap: NavWrap::Horizontal,

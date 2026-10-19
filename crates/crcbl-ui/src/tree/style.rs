@@ -544,6 +544,12 @@ pub struct NodeStyle {
     /// `border-image-*`: a nine-sliced picture over the border box, drawn in
     /// place of `border-color` while its source is set.
     pub border_image: BorderImage,
+    /// `opacity`, in `0..=1`: below one, the node and its subtree are drawn
+    /// as one [`DrawList::push_opacity`](crate::draw_list::DrawList::push_opacity)
+    /// group, faded together. Not inherited — the fade of a subtree is its
+    /// root's group, and a child's own opacity is a group inside it, so the
+    /// two multiply.
+    pub opacity: f32,
 
     // -- navigation -----------------------------------------------------------
     /// `nav-up`.
@@ -604,6 +610,7 @@ impl NodeStyle {
         outline_offset: 0.0,
         background_image: None,
         border_image: BorderImage::NONE,
+        opacity: 1.0,
         nav_up: NavTarget::Auto,
         nav_right: NavTarget::Auto,
         nav_down: NavTarget::Auto,

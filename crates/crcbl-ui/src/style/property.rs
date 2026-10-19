@@ -38,6 +38,7 @@
 //! | `outline-offset` | px, either sign |
 //! | `outline-color` | colour |
 //! | `outline` | `none` \| a px width and a colour, in either order |
+//! | `opacity` | number \| percentage, clamped into `0..=1` |
 //! | `nav-up` `nav-right` `nav-down` `nav-left` | `auto` \| `none` \| `#id` |
 //! | `nav-wrap` | `none` \| `horizontal` \| `vertical` \| `both` |
 //! | `background-image` | `none` \| an image |
@@ -121,9 +122,17 @@
 //! `overline` or `line-through`; the line is drawn in the text's colour. It
 //! is inherited — see [`TextDecoration`].
 //!
-//! Not in the subset: `opacity` — the draw list has no group opacity to give
-//! it, and multiplying each command's alpha is not what `opacity` means where
-//! children overlap — `inherit`, `!important`, `em` and every other unit.
+//! # Opacity
+//!
+//! `opacity` takes a number or a percentage, and one outside `0..=1` is
+//! clamped into it rather than rejected, as CSS clamps it. Below one the node
+//! is drawn with its subtree as one opacity group — see
+//! [`DrawList::push_opacity`](crate::draw_list::DrawList::push_opacity) — so
+//! its text fades over its faded background rather than letting the
+//! background show through. It is not inherited, and a child's own opacity
+//! fades it again inside its parent's.
+//!
+//! Not in the subset: `inherit`, `!important`, `em` and every other unit.
 
 use crcbl_core::input::CursorIcon;
 use crcbl_core::srgb;
@@ -191,6 +200,7 @@ pub(crate) enum Property {
     OutlineWidth,
     OutlineColor,
     OutlineOffset,
+    Opacity,
     Nav(Direction),
     NavWrap,
     BackgroundImage,
@@ -277,6 +287,7 @@ impl Property {
             "outline-width" => Self::OutlineWidth,
             "outline-color" => Self::OutlineColor,
             "outline-offset" => Self::OutlineOffset,
+            "opacity" => Self::Opacity,
             "nav-up" => Self::Nav(Direction::Up),
             "nav-right" => Self::Nav(Direction::Right),
             "nav-down" => Self::Nav(Direction::Down),
@@ -497,6 +508,7 @@ impl Property {
                 Self::OutlineWidth => out.push(D::OutlineWidth(px(input, Sign::NonNegative)?)),
                 Self::OutlineColor => out.push(D::OutlineColor(color(input)?)),
                 Self::OutlineOffset => out.push(D::OutlineOffset(px(input, Sign::Any)?)),
+                Self::Opacity => out.push(D::Opacity(opacity(input)?)),
                 Self::Nav(direction) => out.push(D::Nav(direction, nav_target(input)?)),
                 Self::NavWrap => out.push(D::NavWrap(keyword(input, |name| {
                     Some(match_ignore_ascii_case! { name,
@@ -606,6 +618,7 @@ impl Property {
             Self::OutlineWidth => to.outline_width = from.outline_width,
             Self::OutlineColor => to.outline_color = from.outline_color,
             Self::OutlineOffset => to.outline_offset = from.outline_offset,
+            Self::Opacity => to.opacity = from.opacity,
             Self::Nav(direction) => *to.nav_mut(direction) = from.nav(direction),
             Self::NavWrap => to.nav_wrap = from.nav_wrap,
             Self::BackgroundImage => to.background_image = from.background_image,
@@ -671,6 +684,22 @@ fn number(input: &mut Parser<'_>) -> Result<f32, Invalid> {
     let value = input.expect_number()?;
     if Sign::NonNegative.admits(value) {
         Ok(value)
+    } else {
+        invalid()
+    }
+}
+
+/// `opacity`'s number or percentage, clamped into `0..=1` as CSS clamps it:
+/// out of range is not invalid.
+fn opacity(input: &mut Parser<'_>) -> Result<f32, Invalid> {
+    let value = match *input.next()? {
+        Token::Number { value, .. } => value,
+        // Already divided by a hundred, as `length_auto`'s is.
+        Token::Percentage { unit_value, .. } => unit_value,
+        _ => return invalid(),
+    };
+    if value.is_finite() {
+        Ok(value.clamp(0.0, 1.0))
     } else {
         invalid()
     }
@@ -1914,6 +1943,40 @@ mod tests {
         ] {
             assert!(parse("color", css).is_err(), "`color: {css}` was accepted");
         }
+    }
+
+    /// **`opacity` takes a number or a percentage, clamped into `0..=1`** —
+    /// out of range is clamped, as CSS clamps it, not refused — and refuses a
+    /// unit, a keyword and a second value. `initial` puts it back at one.
+    #[test]
+    fn opacity_takes_a_number_or_a_percentage_clamped() {
+        for (css, opacity) in [
+            ("0.8", 0.8),
+            ("80%", 0.8),
+            ("0", 0.0),
+            ("1", 1.0),
+            ("1.5", 1.0),
+            ("-2", 0.0),
+            ("250%", 1.0),
+        ] {
+            assert_eq!(
+                style_of(&[("opacity", css)]).opacity,
+                opacity,
+                "opacity: {css}"
+            );
+        }
+        assert_eq!(NodeStyle::DEFAULT.opacity, 1.0);
+        for css in ["0.5px", "auto", "none", "0.5 0.5", "", "50% !important"] {
+            assert!(
+                parse("opacity", css).is_err(),
+                "`opacity: {css}` was accepted"
+            );
+        }
+        let mut style = style_of(&[("opacity", "0.25")]);
+        Property::from_name("opacity")
+            .expect("known")
+            .copy(&NodeStyle::DEFAULT, &mut style);
+        assert_eq!(style.opacity, 1.0);
     }
 
     /// **`initial` restores exactly the fields a property owns**, shorthand or

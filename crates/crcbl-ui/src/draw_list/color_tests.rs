@@ -246,3 +246,36 @@ fn a_shaped_flag_ligature_draws_in_colour() {
     assert_eq!(max.x - min.x, SIZE);
     assert_eq!(images.images().len(), 1);
 }
+
+/// **An opacity group moves with the quads inserted before it and takes in
+/// the ones inserted inside it**: a group around an emoji's run still covers
+/// the run and its quad, and one after it still covers only its own command.
+#[test]
+fn opacity_groups_move_with_the_inserted_quads() {
+    let mut list = DrawList::new();
+    list.push_opacity(0.5);
+    emoji_runs(&mut list, Vec2::new(0.0, 20.0), "\u{1F600}");
+    list.pop_opacity().expect("pushed above");
+    list.push_opacity(0.25);
+    list.rect(Vec2::ZERO, Vec2::ONE, INK);
+    list.pop_opacity().expect("pushed above");
+    let mut images = ImageAtlas::new();
+    let mut cache = ColorGlyphCache::new();
+    cache.begin_frame(&mut images);
+    list.resolve_color_glyphs(&mut cache, &mut images, 1.0);
+
+    assert_eq!(kinds(&list), ["glyphs 0", "image", "other"]);
+    assert_eq!(
+        list.opacity_groups(),
+        &[
+            OpacityGroup {
+                commands: 0..2,
+                opacity: 0.5,
+            },
+            OpacityGroup {
+                commands: 2..3,
+                opacity: 0.25,
+            },
+        ]
+    );
+}

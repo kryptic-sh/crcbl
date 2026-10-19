@@ -920,3 +920,98 @@ fn the_cursor_is_the_topmost_nodes_inherited_and_held_through_a_drag() {
         "released, the root's again"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Opacity
+// ---------------------------------------------------------------------------
+
+/// Each command's kind and colour, in paint order: a `Rect`'s fill, a text
+/// span's colour, an outline's colour.
+fn painted(list: &DrawList) -> Vec<(&'static str, [f32; 4])> {
+    list.commands()
+        .iter()
+        .map(|command| match command {
+            crate::draw_list::DrawCommand::Rect { color, .. } => ("rect", *color),
+            crate::draw_list::DrawCommand::Text { color, .. } => ("text", *color),
+            crate::draw_list::DrawCommand::RectOutline { color, .. } => ("outline", *color),
+            other => panic!("this tree draws no {other:?}"),
+        })
+        .collect()
+}
+
+/// **A node below full opacity is drawn with its subtree as one group**: its
+/// box and everything inside it, a faded child as a group nested in it, and a
+/// sibling at full opacity outside both. Not inherited: the child of a faded
+/// node keeps its own opacity of one. Its outline, painted after the layer
+/// and outside every group, is faded by its own and its ancestors' opacity
+/// multiplied.
+#[test]
+fn a_faded_node_draws_its_subtree_as_one_group_and_nested_ones_multiply() {
+    let mut ui = Ui::new();
+    ui.add_stylesheet(
+        "fade.css",
+        ".box { background: #ff0000; opacity: 0.5; }
+         .inner { background: #0000ff; opacity: 50%; outline: 2px #00ff00; }
+         .plain { background: #000000; }",
+    );
+    let mut keys = Vec::new();
+    frame(&mut ui, idle(), |ui| {
+        ui.block("", &[], |ui| {
+            let faded = ui.block(".box", &[], |ui| {
+                keys.push(ui.span("", "hi", &[]).key);
+                let inner = ui.block(".inner", &[], |ui| {
+                    ui.span("", "in", &[]);
+                });
+                keys.push(inner.key);
+            });
+            keys.insert(0, faded.key);
+            keys.push(ui.block(".plain", &[], |_| {}).key);
+        });
+    });
+    assert_eq!(style_of(&ui, keys[1]).opacity, 1.0, "not inherited");
+    assert_eq!(style_of(&ui, keys[2]).opacity, 0.5);
+    let mut list = DrawList::new();
+    ui.emit(&mut list);
+    assert_eq!(
+        painted(&list),
+        [
+            ("rect", RED),
+            ("text", [1.0; 4]),
+            ("rect", BLUE),
+            ("text", [1.0; 4]),
+            ("rect", BLACK),
+            ("outline", [0.0, 1.0, 0.0, 0.25]),
+        ]
+    );
+    assert_eq!(
+        list.opacity_groups(),
+        &[
+            crate::draw_list::OpacityGroup {
+                commands: 0..4,
+                opacity: 0.5,
+            },
+            crate::draw_list::OpacityGroup {
+                commands: 2..4,
+                opacity: 0.5,
+            },
+        ]
+    );
+    assert_eq!(list.pop_opacity(), Err(crate::draw_list::OpacityUnderflow));
+}
+
+/// **At full opacity, or with none set, a node pushes no group**, so a tree
+/// that never says `opacity` draws exactly as it did.
+#[test]
+fn a_node_at_full_opacity_pushes_no_group() {
+    let mut ui = Ui::new();
+    ui.add_stylesheet("full.css", ".a { background: #ff0000; opacity: 1; }");
+    frame(&mut ui, idle(), |ui| {
+        ui.block(".a", &[], |ui| {
+            ui.span("", "x", &[]);
+        });
+    });
+    let mut list = DrawList::new();
+    ui.emit(&mut list);
+    assert_eq!(list.len(), 2);
+    assert!(list.opacity_groups().is_empty());
+}

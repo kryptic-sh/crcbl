@@ -13,6 +13,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`crcbl_ui::Triangles` has a `groups: Vec<OpacityRun>` field,
+  `crcbl_ui::tree::NodeStyle` an `opacity` field and
+  `crcbl_ui::style::Declaration` an `Opacity` member**, for the opacity groups
+  below, so a struct literal of `Triangles`, a `NodeStyle` literal without
+  `..NodeStyle::DEFAULT`, or an exhaustive match on `Declaration` needs them.
+  The initial opacity, one, draws every existing tree exactly as before.
+
 ### Added
 
 - **`ShellCaps::CURSOR_SHAPE` is set on X11 when libxcb-cursor is installed**,
@@ -36,6 +45,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Marked text arrives as `TextPreedit` with its cursor as a byte offset, ending
   with an empty one, and `set_text_input_area` places the candidate window at
   the caret through `firstRectForCharacterRange:`.
+- **`DrawList::push_opacity` and `pop_opacity` draw CSS opacity groups, and the
+  `opacity` style property uses them.** The commands between a push and its pop
+  are drawn into a layer of their own and blended over what is below at the
+  group's opacity, so a faded box's text covers its own background instead of
+  letting it show through, as multiplying each command's alpha did; nested
+  groups multiply. `crcbl-frame`'s UI pass (and so `crcbl-render`'s) draws each
+  group into a pooled `Rgba16Float` layer the size of the target and blends back
+  only the group's bounds; a group at one costs nothing, and one at zero draws
+  nothing. `pop_opacity` with no group open returns `OpacityUnderflow`, as
+  `pop_clip` returns `ClipUnderflow`. In a stylesheet, `opacity` takes a number
+  or a percentage, clamped into `0..=1`, and fades the node with its subtree; it
+  is not inherited. A frame with groups records more passes than
+  `UiRenderer::MAX_PASSES`, which still bounds a frame without them.
 
 ### Fixed
 

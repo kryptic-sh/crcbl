@@ -25,6 +25,8 @@
 //! * [`menu`] is the shipped art — `crates/crcbl-render/assets/menu.crpix` — in
 //!   two framebuffers of different *shapes*, with corner blocks compared between
 //!   them.
+//! * [`opacity`] is the UI pass's opacity groups: a faded group's top command
+//!   hiding its bottom one, and nested groups multiplying.
 //!
 //! They lived in `crates/crcbl-vk/tests/vk_e2e/` and therefore ran on Vulkan
 //! alone, so Metal, D3D12 and wgpu had no evidence that the sprite pass drew
@@ -94,6 +96,7 @@ pub(crate) const SUITE: &str = "crcbl sprite e2e";
 mod button_skin;
 mod menu;
 mod nine_slice;
+mod opacity;
 mod sprite;
 
 // The fixture, out of `tests/gpu_scene/` rather than beside the root, because

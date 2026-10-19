@@ -175,7 +175,10 @@
 //! outside the border box, one [`DrawList::rect_outline`] — or a
 //! [`DrawList::rounded_rect`], its radii grown by the offset, when the node has
 //! any. Each open pop-up is drawn after all of that, outlines and all, as a
-//! layer of its own.
+//! layer of its own. A node whose `opacity` is below one is drawn with its
+//! subtree inside one [`DrawList::push_opacity`] group; its outline, drawn
+//! outside the groups, has its colour's alpha multiplied by its own opacity
+//! and every ancestor's instead.
 //!
 //! # Text measures through Taffy
 //!

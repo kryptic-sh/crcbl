@@ -9,7 +9,8 @@
 //!                       a copy when either atlas changed, then two
 //!                       alpha-blended passes onto the same target, after the
 //!                       tonemap — and after every pass that writes a texture
-//!                       the draw list samples
+//!                       the draw list samples; an opacity group cuts its half
+//!                       into more, around `ui-opacity` passes into its layer
 //! ```
 //!
 //! The UI pass uses the same target as the tonemap pass, compositing on top
@@ -106,6 +107,15 @@
 //! image's group is built once and kept while frames keep sampling it — see
 //! `textures::TextureGroups`.
 //!
+//! # An opacity group is a layer the graph pools
+//!
+//! [`DrawList::push_opacity`] groups are drawn into a layer each — a transient
+//! image of the graph, `Rgba16Float` and the target's size — and blended back
+//! as one quad through a second pipeline that blends premultiplied colour,
+//! with `ui.slang` unchanged. A half with a group in it is more than one pass:
+//! `opacity`'s module docs have the order and why the layer is the size it is.
+//! A frame with no group records exactly the passes it always did.
+//!
 //! # Per-pass constants are a uniform buffer, on every tier
 //!
 //! `ui.slang` needs one thing from the CPU each pass — the framebuffer size it
@@ -150,16 +160,16 @@
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BlendState, BufferDesc,
-    BufferHandle, BufferImageCopy, BufferUsage, ColorTargetState, ColorWrites, Device, Extent3d,
-    FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageAspect,
-    ImageSubresourceLayers, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
-    Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, QueueHandle, ResourceState,
-    SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
-    ShaderStages, StoreOp, check_portable_storage_buffers,
+    BufferHandle, BufferImageCopy, BufferUsage, ClearValue, ColorTargetState, ColorWrites, Device,
+    Extent3d, FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError,
+    ImageAspect, ImageSubresourceLayers, ImageUsage, ImageViewHandle, ImageViewType, IndexFormat,
+    LoadOp, MemoryLocation, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
+    QueueHandle, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, check_portable_storage_buffers,
 };
 
 use crcbl_shaders::{Stage, UI};
-use crcbl_ui::draw_list::{ColorGlyphs, DrawList, Vertex2d};
+use crcbl_ui::draw_list::{ColorGlyphs, DrawList, OpacityRun, QUAD_INDICES, Vertex2d};
 use crcbl_ui::font::atlas::{GLYPH_MAX_PAGES, GLYPH_PAGE_SIZE, GLYPH_RASTER_BUDGET, GlyphAtlas};
 use crcbl_ui::font::color::ColorGlyphCache;
 use crcbl_ui::image::{ImageAtlas, PAGE_SIZE, TexelRect};
@@ -175,12 +185,15 @@ use crate::texture::{
     ClearedTextureDesc, TexturePatch, UploadedTexture, stage_region, upload_cleared_texture,
     upload_texture,
 };
+use crate::transient::TransientImageDesc;
 
+mod opacity;
 mod textures;
 
 use crcbl_ui::draw_list::TextureRun;
+use opacity::{LAYER_FORMAT, QUAD_VERTEX_COUNT, Source, Target};
 pub use textures::UiTexture;
-use textures::{TextureGroups, draws, image_of};
+use textures::{TextureGroups, image_of};
 
 /// The constant block matching `ui.slang`'s `UiConstants`.
 ///
@@ -255,6 +268,12 @@ pub struct UiRenderer {
     // Pipeline state
     pipeline_layout: PipelineLayoutHandle,
     pipeline: GraphicsPipelineHandle,
+    /// The pipeline that blends an opacity group's layer back onto the target:
+    /// the same shader, blending premultiplied colour.
+    composite_pipeline: GraphicsPipelineHandle,
+    /// [`Self::pipeline`] and [`Self::composite_pipeline`] for drawing into a
+    /// layer, whose format is not the target's.
+    layer_pipelines: [GraphicsPipelineHandle; 2],
     bind_group_layout: BindGroupLayoutHandle,
 
     // Glyph atlas
@@ -302,6 +321,11 @@ pub struct UiRenderer {
     /// Per frame in flight, the index runs that sample a renderer-owned
     /// texture, as [`begin_frame`](Self::begin_frame) tessellated them.
     last_texture_runs: Vec<Vec<TextureRun>>,
+    /// Per frame in flight, the opacity groups that drew anything. Each one's
+    /// layer quad follows the list's geometry in the rings: its indices after
+    /// [`Self::last_index_count`]'s, its vertices after
+    /// [`Self::last_vertex_count`]'s, written by the pass that draws it.
+    last_groups: Vec<Vec<OpacityRun>>,
 
     // Per-frame bind groups (each contains atlas+sampler+vertex_buffer+constants)
     frame_groups: Vec<BindGroupHandle>,
@@ -736,34 +760,63 @@ impl UiRenderer {
             // `crcbl_render::forward`.
             dxil: &UI.dxil_containers(),
         })?;
-        let ui_targets = [ColorTargetState {
-            format: target_format,
-            blend: Some(BlendState::alpha()),
-            write_mask: ColorWrites::ALL,
-        }];
-        let ui_pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
-            label: Some("ui compositing"),
-            layout: pipeline_layout,
-            vertex: ShaderEntry {
-                module: ui_module,
-                entry_point: vertex_entry,
-            },
-            fragment: Some(ShaderEntry {
-                module: ui_module,
-                entry_point: fragment_entry,
-            }),
-            primitive: PrimitiveState::default(), // TriangleList, no culling
-            depth_stencil: None,
-            multisample: Default::default(),
-            color_targets: &ui_targets,
-        });
+        // Four pipelines of one shader: the draw list's own blend and the
+        // premultiplied one a layer is blended back with, each for the target
+        // and for a layer — dynamic rendering holds a pipeline to the format it
+        // was built for. Built up front, so a frame that opens its first
+        // opacity group creates nothing.
+        let mut create = |label: &'static str, format: Format, blend: BlendState| {
+            let targets = [ColorTargetState {
+                format,
+                blend: Some(blend),
+                write_mask: ColorWrites::ALL,
+            }];
+            let pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some(label),
+                layout: pipeline_layout,
+                vertex: ShaderEntry {
+                    module: ui_module,
+                    entry_point: vertex_entry,
+                },
+                fragment: Some(ShaderEntry {
+                    module: ui_module,
+                    entry_point: fragment_entry,
+                }),
+                primitive: PrimitiveState::default(), // TriangleList, no culling
+                depth_stencil: None,
+                multisample: Default::default(),
+                color_targets: &targets,
+            })?;
+            rollback.pipelines.push(pipeline);
+            Ok::<_, HalError>(pipeline)
+        };
+        let created = [
+            ("ui compositing", target_format, BlendState::alpha()),
+            ("ui layer blend", target_format, BlendState::premultiplied()),
+            ("ui layer", LAYER_FORMAT, BlendState::alpha()),
+            (
+                "ui nested layer blend",
+                LAYER_FORMAT,
+                BlendState::premultiplied(),
+            ),
+        ]
+        .map(|(label, format, blend)| create(label, format, blend));
         device.destroy_shader_module(ui_module);
-        let pipeline = ui_pipeline?;
-        rollback.pipelines.push(pipeline);
+        let [
+            pipeline,
+            composite_pipeline,
+            layer_pipeline,
+            layer_composite_pipeline,
+        ] = created;
+        let (pipeline, composite_pipeline) = (pipeline?, composite_pipeline?);
+        let (layer_pipeline, layer_composite_pipeline) =
+            (layer_pipeline?, layer_composite_pipeline?);
 
         Ok(Self {
             pipeline_layout,
             pipeline,
+            composite_pipeline,
+            layer_pipelines: [layer_pipeline, layer_composite_pipeline],
             bind_group_layout,
             atlas,
             atlas_sampler,
@@ -784,6 +837,7 @@ impl UiRenderer {
             blank_group,
             texture_groups: TextureGroups::new(frames_in_flight),
             last_texture_runs: vec![Vec::new(); frames_in_flight],
+            last_groups: vec![Vec::new(); frames_in_flight],
             frame_groups,
             vertex_buffers,
             index_buffers,
@@ -873,9 +927,10 @@ impl UiRenderer {
         };
         let crcbl_ui::draw_list::Triangles {
             vertices,
-            indices,
+            mut indices,
             overlay,
             textures,
+            groups,
         } = draw_list.to_triangles_with_colors(
             Some(atlas),
             Some(&mut self.glyphs),
@@ -887,9 +942,19 @@ impl UiRenderer {
         self.stage_images(device, idx)?;
         self.stage_glyphs(device, idx)?;
 
+        // Each opacity group's layer quad goes after the list's geometry: its
+        // indices now, and its vertices, which depend on the extent, from the
+        // pass that draws it — see `add_segment`.
+        let list_indices = indices.len();
+        for group in 0..groups.len() {
+            let base = (vertices.len() + group * QUAD_VERTEX_COUNT as usize) as u32;
+            indices.extend(QUAD_INDICES.map(|index| base + index));
+        }
+        let quad_vertices = groups.len() * QUAD_VERTEX_COUNT as usize;
+
         // Grow the ring buffers only when this frame genuinely needs more room.
         // Both sides of every comparison here are **bytes**.
-        let vb_needed = (vertices.len() * std::mem::size_of::<Vertex2d>()) as u64;
+        let vb_needed = ((vertices.len() + quad_vertices) * std::mem::size_of::<Vertex2d>()) as u64;
         let ib_needed = (indices.len() * std::mem::size_of::<u32>()) as u64;
 
         // The vertex buffer is named by the frame's bind group, so replacing it
@@ -937,9 +1002,10 @@ impl UiRenderer {
         // the uploads succeeded keeps a failed write from drawing new counts over
         // stale indices (a Vulkan OOB index read).
         self.last_vertex_count[idx] = vertices.len();
-        self.last_index_count[idx] = indices.len();
+        self.last_index_count[idx] = list_indices;
         self.last_overlay_index[idx] = overlay;
         self.last_texture_runs[idx] = textures;
+        self.last_groups[idx] = groups;
 
         // Only a new vertex buffer needs a new bind group; the atlas and the
         // sampler never change, so a steady-state frame writes no descriptors.
@@ -1056,7 +1122,8 @@ impl UiRenderer {
         Ok(())
     }
 
-    /// The most passes [`add_passes`](Self::add_passes) adds to a frame.
+    /// The most passes [`add_passes`](Self::add_passes) adds to a frame with
+    /// no opacity group in its draw list.
     ///
     /// Four: the image atlas's `ui-images` copy on a frame that registered a
     /// picture, the glyph pages' `ui-glyphs` copy on a frame that rasterised a
@@ -1066,7 +1133,11 @@ impl UiRenderer {
     ///
     /// The most rather than the count. What a caller sizing
     /// [`PassTimers`](crate::timing::PassTimers) adds up — see that module's
-    /// docs.
+    /// docs. **An opacity group adds passes past it**: at least one into its
+    /// layer, and one more for what its parent draws after it. The count
+    /// follows the draw list, so no constant bounds it; timers sized by this
+    /// time a frame of groups as far as they go, as that module says of any
+    /// frame longer than their capacity.
     pub const MAX_PASSES: u32 = 4;
 
     /// This frame's two index ranges: the HUD half, then the overlay half.
@@ -1091,24 +1162,35 @@ impl UiRenderer {
 
     /// What the last [`begin_frame`](Self::begin_frame) left this pass to draw.
     ///
-    /// **Off `segments`, the same two index ranges
-    /// [`add_passes`](Self::add_passes) branches on**, and off the same split
-    /// of each into draws, so a half this reports as drawn is a half that gets
-    /// a pass and the two cannot disagree. One draw of one instance per
-    /// non-empty half and texture run: a frame with no overlay and no texture
-    /// on it reports one, a paused frame reports two, a frame with a view drawn
-    /// in the middle of its HUD reports three, and an empty draw list reports
-    /// nothing.
+    /// **Off the same plan of passes and draws
+    /// [`add_passes`](Self::add_passes) records** — `segments`' two index
+    /// ranges, each split into a draw per texture run and cut around its
+    /// opacity groups — so a draw this counts is a draw that gets recorded and
+    /// the two cannot disagree. One draw of one instance per non-empty half
+    /// and texture run, and per opacity group one more, its layer blended
+    /// back: a frame with no overlay and no texture on it reports one, a paused
+    /// frame reports two, a frame with a view drawn in the middle of its HUD
+    /// reports three, and an empty draw list reports nothing.
     ///
-    /// The triangles are the index counts of the halves actually drawn —
-    /// `draw_list.to_triangles_split` produced them and the pipeline's
+    /// The triangles are the index counts of those draws — the draw list's
+    /// expansion produced them, and each layer quad is two, and the pipeline's
     /// `PrimitiveState::default()` is a triangle list, so the count is a
     /// division and not an estimate.
     #[must_use]
     pub fn counters(&self) -> FrameCounters {
         let (below, above) = self.segments();
-        let runs = &self.last_texture_runs[self.frame];
-        let recorded = (draws(below.clone(), runs).len() + draws(above.clone(), runs).len()) as u64;
+        let mut recorded = 0;
+        let mut indices = 0;
+        for segment in [below, above] {
+            for pass in self.plan(segment) {
+                recorded += pass.draws.len() as u64;
+                indices += pass
+                    .draws
+                    .iter()
+                    .map(|draw| draw.indices.len() as u64)
+                    .sum::<u64>();
+            }
+        }
         if recorded == 0 {
             return FrameCounters::default();
         }
@@ -1116,7 +1198,7 @@ impl UiRenderer {
             draws: recorded,
             instances: recorded,
             drawn: Some(recorded),
-            triangles: Some((below.len() + above.len()) as u64 / 3),
+            triangles: Some(indices / 3),
             // No cluster geometry and no readback: a known zero and no second
             // lag to declare — see [`crate::counters`].
             clusters: Some(0),
@@ -1325,6 +1407,10 @@ impl UiRenderer {
     ///
     /// **One draw per bind of set 1** — see [`textures::draws`]: a half with no
     /// texture run in it is the one draw it always was.
+    ///
+    /// **An opacity group cuts the half into passes** — see [`opacity`]: each
+    /// group's own are `ui-opacity` passes into its layer, a transient image of
+    /// `graph` made the first time the plan draws into it.
     fn add_segment<'a>(
         &'a self,
         graph: &mut RenderGraph<'a>,
@@ -1332,47 +1418,138 @@ impl UiRenderer {
         pages: [Option<ImageId>; 2],
         textures: &[UiTexture],
     ) {
-        let Segment {
-            target,
-            extent,
-            label,
-            indices,
-        } = segment;
-        if indices.is_empty() {
-            return; // nothing to draw
+        let groups = &self.last_groups[self.frame];
+        let mut layers: Vec<Option<ImageId>> = vec![None; groups.len()];
+        let layer_desc = TransientImageDesc::new(
+            segment.extent,
+            LAYER_FORMAT,
+            ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+        );
+        for pass in self.plan(segment.indices.clone()) {
+            let (image, label) = match pass.target {
+                Target::Frame => (segment.target, segment.label),
+                Target::Layer(group) => (
+                    *layers[group]
+                        .get_or_insert_with(|| graph.create_image("ui opacity layer", layer_desc)),
+                    "ui-opacity",
+                ),
+            };
+            // Each draw with the image it samples, resolved now, while the
+            // caller's pairing is in hand; the view behind the image is the
+            // graph's to realise, so that waits for the body.
+            let draws: Vec<PlannedDraw> = pass
+                .draws
+                .into_iter()
+                .map(|draw| match draw.source {
+                    Source::Indices(texture) => PlannedDraw {
+                        indices: draw.indices,
+                        image: texture.and_then(|id| image_of(textures, id)),
+                        layer: None,
+                    },
+                    Source::Layer(group) => PlannedDraw {
+                        indices: draw.indices,
+                        image: Some(layers[group].expect(
+                            "the plan draws a group's layer before it blends the layer back",
+                        )),
+                        layer: Some(group),
+                    },
+                })
+                .collect();
+            self.add_pass(
+                graph,
+                PassTarget {
+                    image,
+                    label,
+                    extent: segment.extent,
+                    layer: pass.target != Target::Frame,
+                    clear: pass.clear,
+                },
+                draws,
+                pages,
+            );
         }
+    }
 
-        let pipeline = self.pipeline;
+    /// The passes and draws of one half: [`opacity::plan`] over this frame's
+    /// texture runs and opacity groups, whose layer quads follow the list's
+    /// indices.
+    fn plan(&self, segment: Range<u32>) -> Vec<opacity::Pass> {
+        opacity::plan(
+            segment,
+            &self.last_texture_runs[self.frame],
+            &self.last_groups[self.frame],
+            self.last_index_count[self.frame] as u32,
+        )
+    }
+
+    /// Adds one planned pass: `draws` onto `target`, sampling `pages` when
+    /// this frame uploaded into them.
+    ///
+    /// A draw of a group's layer writes that group's quad into the vertex ring
+    /// first, from the body, as the constants are written: it is placed by the
+    /// extent, which [`begin_frame`](Self::begin_frame) never sees. It is a
+    /// host write into this frame's slot, so it lands before the frame is
+    /// submitted.
+    fn add_pass<'a>(
+        &'a self,
+        graph: &mut RenderGraph<'a>,
+        target: PassTarget,
+        draws: Vec<PlannedDraw>,
+        pages: [Option<ImageId>; 2],
+    ) {
+        let PassTarget {
+            image: target,
+            label,
+            extent,
+            layer,
+            clear,
+        } = target;
+        let [pipeline, composite_pipeline] = if layer {
+            self.layer_pipelines
+        } else {
+            [self.pipeline, self.composite_pipeline]
+        };
         let pipeline_layout = self.pipeline_layout;
         let bg = self.frame_groups[self.frame];
         let index_buffer = self.index_buffers[self.frame];
+        let vertex_buffer = self.vertex_buffers[self.frame];
         let constants = self.constant_buffers[self.frame];
         let slot = self.frame;
         let texture_layout = self.texture_layout;
         let blank_group = self.blank_group;
         let groups = &self.texture_groups;
+        let quad_base = self.last_vertex_count[self.frame];
+        let quads: Vec<(u64, [Vertex2d; 4])> = draws
+            .iter()
+            .filter_map(|draw| draw.layer)
+            .map(|group| {
+                let first = quad_base + group * QUAD_VERTEX_COUNT as usize;
+                let offset = (first * size_of::<Vertex2d>()) as u64;
+                (
+                    offset,
+                    self.last_groups[self.frame][group].layer_quad(extent),
+                )
+            })
+            .collect();
 
-        // Each draw with the image it samples, resolved now, while the caller's
-        // pairing is in hand; the view behind the image is the graph's to
-        // realise, so that waits for the body.
-        let planned: Vec<(Range<u32>, Option<ImageId>)> =
-            draws(indices, &self.last_texture_runs[self.frame])
-                .into_iter()
-                .map(|draw| {
-                    let image = draw.texture.and_then(|id| image_of(textures, id));
-                    (draw.indices, image)
-                })
-                .collect();
-
-        let mut pass = graph
-            .add_render_pass(label)
-            // Draw on top of the tonemapped target with alpha blending.
-            .color(target, LoadOp::Load, StoreOp::Store, Default::default());
+        let (load, clear_value) = if clear {
+            // Transparent: what blends over nothing leaves premultiplied
+            // colour behind, which is what the layer quad blends back.
+            (LoadOp::Clear, ClearValue::color([0.0; 4]))
+        } else {
+            // Draw on top of what is there — the tonemapped target, or the
+            // layer's earlier passes — with alpha blending.
+            (LoadOp::Load, ClearValue::default())
+        };
+        let mut pass =
+            graph
+                .add_render_pass(label)
+                .color(target, load, StoreOp::Store, clear_value);
         for page in pages.into_iter().flatten() {
             pass = pass.read_image(page);
         }
         let mut sampled: Vec<ImageId> = Vec::new();
-        for image in planned.iter().filter_map(|(_, image)| *image) {
+        for image in draws.iter().filter_map(|draw| draw.image) {
             if !sampled.contains(&image) {
                 sampled.push(image);
                 pass = pass.read_image(image);
@@ -1395,27 +1572,50 @@ impl UiRenderer {
                 crcbl_core::log::error!("graph: ui constants write failed: {error}");
                 return;
             }
+            for (offset, quad) in &quads {
+                if let Err(error) =
+                    ctx.device()
+                        .write_buffer(vertex_buffer, *offset, bytemuck::cast_slice(quad))
+                {
+                    // The constants' answer: this pass draws nothing this
+                    // frame, and the log says why.
+                    crcbl_core::log::error!("graph: ui layer quad write failed: {error}");
+                    return;
+                }
+            }
             // A group the device refused skips its draw and nothing else, as
             // `crcbl_render::bind_group_cache` skips a pass; the log says why.
-            let bound: Vec<(Range<u32>, BindGroupHandle)> = planned
+            let bound: Vec<(Range<u32>, BindGroupHandle, GraphicsPipelineHandle)> = draws
                 .into_iter()
-                .filter_map(|(range, image)| {
-                    let group = match image {
+                .filter_map(|draw| {
+                    let group = match draw.image {
                         None => blank_group,
                         Some(image) => {
                             let view = ctx.image_view(image);
                             groups.group(ctx.device(), texture_layout, slot, view)?
                         }
                     };
-                    Some((range, group))
+                    let pipeline = if draw.layer.is_some() {
+                        composite_pipeline
+                    } else {
+                        pipeline
+                    };
+                    Some((draw.indices, group, pipeline))
                 })
                 .collect();
             let encoder = ctx.encoder();
-            encoder.bind_graphics_pipeline(pipeline);
-            encoder.bind_group(0, bg, &[], pipeline_layout);
-            encoder.bind_index_buffer(index_buffer, 0, IndexFormat::Uint32);
+            let mut current_pipeline = None;
             let mut current = None;
-            for (range, group) in bound {
+            for (range, group, pipeline) in bound {
+                if current_pipeline != Some(pipeline) {
+                    // Everything again after a switch: the layout is the same,
+                    // but no backend is held here to keeping it bound.
+                    encoder.bind_graphics_pipeline(pipeline);
+                    encoder.bind_group(0, bg, &[], pipeline_layout);
+                    encoder.bind_index_buffer(index_buffer, 0, IndexFormat::Uint32);
+                    current_pipeline = Some(pipeline);
+                    current = None;
+                }
                 if current != Some(group) {
                     encoder.bind_group(TEXTURE_SET, group, &[], pipeline_layout);
                     current = Some(group);
@@ -1460,6 +1660,10 @@ impl UiRenderer {
         device.destroy_sampler(self.image_sampler);
         self.image_page.destroy(device);
         device.destroy_graphics_pipeline(self.pipeline);
+        device.destroy_graphics_pipeline(self.composite_pipeline);
+        for pipeline in self.layer_pipelines {
+            device.destroy_graphics_pipeline(pipeline);
+        }
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.bind_group_layout);
         device.destroy_bind_group_layout(self.texture_layout);
@@ -1532,6 +1736,27 @@ struct Segment {
     extent: (u32, u32),
     label: &'static str,
     indices: Range<u32>,
+}
+
+/// Where [`UiRenderer::add_pass`] draws: the image, the pass's label, the
+/// extent the shader divides by, whether the image is an opacity group's layer
+/// — which picks the pipelines built for its format — and whether the pass
+/// clears it first.
+struct PassTarget {
+    image: ImageId,
+    label: &'static str,
+    extent: (u32, u32),
+    layer: bool,
+    clear: bool,
+}
+
+/// One draw of a planned pass, resolved against the graph: its indices, the
+/// image its set 1 binds — the transparent placeholder for `None` — and, for
+/// the draw that blends a layer back, which group's.
+struct PlannedDraw {
+    indices: Range<u32>,
+    image: Option<ImageId>,
+    layer: Option<usize>,
 }
 
 /// One frame's staged image-atlas copy: where the bytes are and where they go.
@@ -1631,3 +1856,6 @@ mod tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod texture_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod opacity_tests;

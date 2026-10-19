@@ -21,7 +21,7 @@ watcher and a grapheme crate stay declined until a caller needs them.
 
 **pikr's remaining gaps, prioritised by the owner on 2026-10-19** (relayed by
 pikr, which is fully on 0.5.0). Order of work, after the slices already in
-flight (opacity groups, AppKit input method, the Win32 popup leave fix):
+flight (AppKit input method, the Win32 popup leave fix):
 
 1. **Input method (S9): the shell half is pikr's need, and it is in.** pikr runs
    its own loop (not `crcbl-app`), already calls `set_text_input`, and is wiring
@@ -108,18 +108,30 @@ and the clear cap says the pacing is not the compositor's. Declined: a finite
 acquire timeout as the fix, which turns a hang into a busy retry and still
 blocks the loop for the timeout. A window destroyed with a frame pending gets no
 `FrameReady`: the request dies with it (the Wayland callback is destroyed with
-the surface), as lyr asked to have settled. After opacity groups; M.
+the surface), as lyr asked to have settled. M.
 
-**Decided 2026-10-19: the draw list gets opacity groups, asked by lyr.** lyr's
-theme draws each module box (rounded rect, border and text) at CSS
-`opacity: 0.8` over a transparent bar; multiplying each command's alpha, which
-lyr ships meanwhile, lets the box's background show through its own text. Build
-`DrawList::push_opacity(f32)` and `pop_opacity()` with CSS semantics: the
-commands between them are drawn into a layer, which is then composited faded, in
-both GPU UI passes (`crcbl-frame`'s `ui_pass` and `crcbl-render`'s) on Vulkan,
-D3D12 and Metal, plus the `opacity` style property (see "What UI rung 4 shipped
-without" below). Declined: per-command alpha as the meaning of a group, which is
-what `opacity` is not. Next after S9 on AppKit; M to L.
+**Opacity groups (`DrawList::push_opacity`, the `opacity` property): what is not
+verified.** Run on D3D12 and Vulkan (with validation) on an RX 7900 XTX through
+`crates/crcbl/tests/sprite_e2e/opacity.rs`; **Metal has not run it** — CI's
+"Draw the sprite pass on Metal" step will, as will WARP and lavapipe — and
+**WebGPU has never drawn a group**: there is no native WebGPU backend and no
+browser gate draws one, so the `Rgba16Float` layer and the premultiplied
+pipeline are unexercised there. Tell lyr it can drop its per-command alpha once
+Metal is green.
+
+- **Each group clears a layer the size of the target**, though only its bounds
+  are blended back: `ui.slang` places vertices by one viewport and has no offset
+  constant, so a bounds-sized layer needs a shader change (and new artifacts).
+  Worth it only if a full-screen UI with many faded groups shows up in a
+  profile; siblings already share one layer through the graph's aliasing.
+- **Behaviour that is not a bug**: a frame with groups records more passes than
+  `UiRenderer::MAX_PASSES`, so `PassTimers` sized by it time such a frame as far
+  as they go. A node's outline is painted outside every group, after the layer,
+  and is faded by multiplying its alpha by its own and its ancestors' opacity;
+  that equals the group because the ring never overlaps itself.
+- **`DrawList::push_command` adapters drop groups**: `Menu::render_art` copies
+  image commands one at a time and would lose a group a menu stylesheet set. No
+  shipped menu sets `opacity`.
 
 **Every backend, the owner's rule from 2026-10-17** (relayed by lyr): every
 feature built for lyr and pikr must work on every backend — Wayland, X11, Win32
@@ -6925,12 +6937,10 @@ scene menu with the gaps below.
 - **No application loads or polls a stylesheet**, and `Ui::style_stats` is shown
   in neither the debug panel nor an inspector.
 - **Not in the property subset** (re-checked 2026-09-24 against
-  `crcbl_ui::style`'s `Property::parse`): `opacity`, because the draw list has
-  no group opacity and multiplying each command's alpha is not what `opacity`
-  means where children overlap (opacity groups are decided, 2026-10-19, under
-  the lyr and pikr section); `inherit` and `!important` (`initial` and `unset`
-  exist); the `border` and `font` shorthands; `em` and the other relative units.
-  The scope-creep rule applies: each lands when the editor or a sample needs it.
+  `crcbl_ui::style`'s `Property::parse`): `inherit` and `!important` (`initial`
+  and `unset` exist); the `border` and `font` shorthands; `em` and the other
+  relative units. The scope-creep rule applies: each lands when the editor or a
+  sample needs it.
 - **The sRGB transfer function has two copies left** beside `crcbl_core::srgb`:
   `crcbl-image`'s SVG filters, which do not depend on `crcbl-core` and would
   need the edge, and `crcbl-golden`'s, which depends on nothing by design (see

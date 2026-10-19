@@ -32,6 +32,19 @@
 //! draws, and the UI's rendering rules (`docs/notes/tooling.md`) keep batching
 //! as the reason.
 //!
+//! # Opacity groups composite as one layer
+//!
+//! [`push_opacity`](DrawList::push_opacity) opens a group that every command
+//! pushed until the matching [`pop_opacity`](DrawList::pop_opacity) belongs to,
+//! and a renderer draws the group's commands into a layer of their own and then
+//! blends that layer over what is below at the group's opacity — CSS's
+//! `opacity`. That is not the same picture as multiplying each command's alpha:
+//! where a group's text covers its own background, the faded text shows over
+//! the faded background, rather than the background showing through the text.
+//! Groups nest, and a nested group is a layer inside its parent's layer, so
+//! their opacities multiply. The groups are a side table, as the clips are:
+//! see [`OpacityGroup`] and [`Triangles::groups`].
+//!
 //! # Logical pixels, recorded in window pixels
 //!
 //! A game can lay its UI out in **logical** pixels — for a reference window,
@@ -260,6 +273,36 @@ impl fmt::Display for ClipUnderflow {
 }
 
 impl std::error::Error for ClipUnderflow {}
+
+/// [`DrawList::pop_opacity`] was called with no opacity group pushed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpacityUnderflow;
+
+impl fmt::Display for OpacityUnderflow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("pop_opacity was called with no opacity group pushed")
+    }
+}
+
+impl std::error::Error for OpacityUnderflow {}
+
+/// One opacity group of a [`DrawList`]: the commands
+/// [`push_opacity`](DrawList::push_opacity) and
+/// [`pop_opacity`](DrawList::pop_opacity) enclosed, and the opacity their layer
+/// is blended over what is below at.
+///
+/// A group nested in another lies inside its parent's range, and groups are
+/// listed in the order they were pushed, so a parent always comes before its
+/// children.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpacityGroup {
+    /// Its commands, as a range of [`DrawList::commands`]. A group still open
+    /// covers every command pushed so far.
+    pub commands: Range<usize>,
+    /// The opacity, at least zero and below one: a group at one is never
+    /// recorded.
+    pub opacity: f32,
+}
 
 /// A rounded rectangle's four corner radii, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -626,6 +669,12 @@ pub struct DrawList {
     /// The clips pushed and not yet popped, each already intersected with the
     /// one beneath it. Empty means [`ClipRect::NONE`].
     clip_stack: Vec<ClipRect>,
+    /// Every opacity group pushed, in push order.
+    groups: Vec<OpacityGroup>,
+    /// The opacity groups pushed and not yet popped: each one's index in
+    /// [`Self::groups`], or `None` for a group at an opacity of one, which
+    /// records nothing but still has to be popped.
+    opacity_stack: Vec<Option<usize>>,
     /// Where [`begin_overlay`](DrawList::begin_overlay) last cut the list.
     ///
     /// `None` on a list nobody cut, which puts every command below the cut.
@@ -661,7 +710,61 @@ pub struct Triangles {
     /// same texture. Every other index samples only the atlases. A run never
     /// straddles [`overlay`](Self::overlay): the cut ends one.
     pub textures: Vec<TextureRun>,
+    /// The opacity groups that drew anything, in the list's push order, so a
+    /// parent comes before the groups nested in it and a nested group's
+    /// indices lie inside its parent's. A group at an opacity of zero is not
+    /// here: its triangles were left out. None straddles
+    /// [`overlay`](Self::overlay), because the cut closes every open group.
+    pub groups: Vec<OpacityRun>,
 }
+
+/// A stretch of [`Triangles::indices`] a renderer draws into a layer of its
+/// own and then blends over what is below at [`opacity`](Self::opacity): one
+/// [`OpacityGroup`] as the expansion left it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpacityRun {
+    /// Its indices, as a range of [`Triangles::indices`]. Never empty.
+    pub indices: Range<u32>,
+    /// The opacity its layer is blended at, above zero and below one.
+    pub opacity: f32,
+    /// The screen rectangle its triangles can cover: every vertex, each
+    /// clamped into the clip it is drawn under. A renderer composites the
+    /// layer over this rectangle and no more.
+    pub bounds: ClipRect,
+}
+
+impl OpacityRun {
+    /// The quad that blends this run's layer over what is below: a layer the
+    /// size of a `viewport`-pixel target, drawn back over
+    /// [`bounds`](Self::bounds) snapped outward to whole pixels and kept inside
+    /// the viewport, so each fragment samples exactly the texel under it.
+    ///
+    /// A [`Primitive::Texture`] quad with nothing clipped, its UVs the layer's
+    /// own, and its colour the opacity in every lane: the layer holds
+    /// premultiplied colour, so what fades it is all four channels times the
+    /// opacity, blended `src + dst * (1 - src.a)`. Indexed by
+    /// [`QUAD_INDICES`], as every quad the expansion pushes is.
+    #[must_use]
+    pub fn layer_quad(&self, viewport: (u32, u32)) -> [Vertex2d; 4] {
+        let size = Vec2::new(viewport.0 as f32, viewport.1 as f32);
+        let min = self.bounds.min.floor().max(Vec2::ZERO).min(size);
+        let max = self.bounds.max.ceil().max(min).min(size);
+        let uv = |pos: Vec2| {
+            if size.x > 0.0 && size.y > 0.0 {
+                pos / size
+            } else {
+                Vec2::ZERO
+            }
+        };
+        let color = [self.opacity; 4];
+        quad_corners(min, max).map(|pos| Vertex2d::new(pos, uv(pos), color, Primitive::Texture))
+    }
+}
+
+/// How the four vertices of every quad the expansion pushes are indexed, from
+/// the quad's first vertex: two triangles sharing the diagonal from its first
+/// vertex to its third.
+pub const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
 
 /// A stretch of [`Triangles::indices`] that samples one renderer-owned texture:
 /// what a renderer binds that texture for before drawing it.
@@ -681,6 +784,8 @@ impl DrawList {
             commands: Vec::new(),
             clips: Vec::new(),
             clip_stack: Vec::new(),
+            groups: Vec::new(),
+            opacity_stack: Vec::new(),
             overlay_start: None,
             scale: 1.0,
         }
@@ -745,6 +850,10 @@ impl DrawList {
         };
         self.commands.push(command);
         self.clips.push(self.clip());
+        let len = self.commands.len();
+        for open in self.opacity_stack.iter().flatten() {
+            self.groups[*open].commands.end = len;
+        }
     }
 
     /// Push a filled rectangle command.
@@ -1047,6 +1156,60 @@ impl DrawList {
         &self.clips
     }
 
+    /// Opens an opacity group: everything pushed until the matching
+    /// [`pop_opacity`](Self::pop_opacity) is drawn as one layer, which is then
+    /// blended over what is below at `opacity` — CSS's `opacity`, not each
+    /// command's alpha multiplied; see the
+    /// [module docs](self#opacity-groups-composite-as-one-layer).
+    ///
+    /// `opacity` is clamped into `0..=1`, as CSS clamps it. **At one the group
+    /// costs nothing**: nothing is recorded and no layer is drawn, though the
+    /// push still wants its pop. At zero the group's commands stay in the list
+    /// — so a frame can still be read back — and the expansion leaves them out
+    /// of the triangles. A NaN opacity is taken as one, as
+    /// [`set_scale`](Self::set_scale) takes a scale that means nothing: a
+    /// division gone wrong upstream leaves the content drawn rather than
+    /// hiding it.
+    ///
+    /// A group left open at the end of the frame covers everything pushed
+    /// after it, as a clip left pushed does, until
+    /// [`begin_overlay`](Self::begin_overlay) or [`clear`](Self::clear).
+    pub fn push_opacity(&mut self, opacity: f32) {
+        let opacity = if opacity.is_nan() {
+            1.0
+        } else {
+            opacity.clamp(0.0, 1.0)
+        };
+        if opacity == 1.0 {
+            self.opacity_stack.push(None);
+            return;
+        }
+        let start = self.commands.len();
+        self.opacity_stack.push(Some(self.groups.len()));
+        self.groups.push(OpacityGroup {
+            commands: start..start,
+            opacity,
+        });
+    }
+
+    /// Closes the opacity group the last [`push_opacity`](Self::push_opacity)
+    /// opened.
+    ///
+    /// # Errors
+    ///
+    /// [`OpacityUnderflow`] when no group is open, and nothing changes — an
+    /// error rather than a panic, for [`pop_clip`](Self::pop_clip)'s reason.
+    pub fn pop_opacity(&mut self) -> Result<(), OpacityUnderflow> {
+        self.opacity_stack.pop().map(|_| ()).ok_or(OpacityUnderflow)
+    }
+
+    /// Every opacity group pushed, in push order, so each parent comes before
+    /// its children; see [`OpacityGroup`].
+    #[must_use]
+    pub fn opacity_groups(&self) -> &[OpacityGroup] {
+        &self.groups
+    }
+
     /// Consume the draw list and return its commands.
     #[must_use]
     pub fn into_commands(self) -> Vec<DrawCommand> {
@@ -1076,10 +1239,15 @@ impl DrawList {
     /// and a clip a game pushed and forgot to pop would otherwise cut the debug
     /// panel and the console down to that game's scroll view.
     ///
+    /// **And it closes every open opacity group**, for the same reason: a group
+    /// a game forgot to pop would otherwise fade the console with it. So no
+    /// group ever straddles the cut.
+    ///
     /// [`clear`](Self::clear) drops the cut along with the commands.
     pub fn begin_overlay(&mut self) {
         self.overlay_start = Some(self.commands.len());
         self.clip_stack.clear();
+        self.opacity_stack.clear();
     }
 
     /// The commands below the cut — the game's HUD and GUI.
@@ -1124,8 +1292,8 @@ impl DrawList {
         self.commands.is_empty()
     }
 
-    /// Clear all commands, every pushed clip and the overlay cut (reuse the
-    /// allocation across frames).
+    /// Clear all commands, every pushed clip, every opacity group and the
+    /// overlay cut (reuse the allocation across frames).
     ///
     /// The cut goes with them: a frame that kept the previous frame's cut would
     /// put its first few commands above a menu for no reason anyone wrote down.
@@ -1133,6 +1301,8 @@ impl DrawList {
         self.commands.clear();
         self.clips.clear();
         self.clip_stack.clear();
+        self.groups.clear();
+        self.opacity_stack.clear();
         self.overlay_start = None;
     }
 
@@ -1159,6 +1329,9 @@ impl DrawList {
         let mut commands = Vec::with_capacity(self.commands.len());
         let mut clips = Vec::with_capacity(self.clips.len());
         let mut overlay = None;
+        // Where each command lands, and one past the last: what moves the
+        // opacity groups' ranges along with the quads inserted before them.
+        let mut moved = Vec::with_capacity(self.commands.len() + 1);
         for (index, (mut command, clip)) in core::mem::take(&mut self.commands)
             .into_iter()
             .zip(core::mem::take(&mut self.clips))
@@ -1167,6 +1340,7 @@ impl DrawList {
             if Some(index) == cut {
                 overlay = Some(commands.len());
             }
+            moved.push(commands.len());
             let quads = match &mut command {
                 DrawCommand::Glyphs {
                     origin,
@@ -1190,6 +1364,10 @@ impl DrawList {
                 commands.push(quad);
                 clips.push(clip);
             }
+        }
+        moved.push(commands.len());
+        for group in &mut self.groups {
+            group.commands = moved[group.commands.start]..moved[group.commands.end];
         }
         self.commands = commands;
         self.clips = clips;
@@ -1285,12 +1463,24 @@ impl DrawList {
         let cut = self.overlay_start();
         let mut overlay = 0;
         let mut textures: Vec<TextureRun> = Vec::new();
+        // The commands a group at an opacity of zero hides, which draw nothing.
+        let mut hidden = vec![false; self.commands.len()];
+        for group in self.groups.iter().filter(|group| group.opacity == 0.0) {
+            hidden[group.commands.clone()].fill(true);
+        }
+        // Where each command's vertices and indices start, and one past the
+        // last: what turns a group's commands into its triangles.
+        let mut starts = Vec::with_capacity(self.commands.len() + 1);
         for (index, (cmd, clip)) in self.commands.iter().zip(&self.clips).enumerate() {
             if index == cut {
                 overlay = indices.len();
             }
             let first = vertices.len();
             let first_index = indices.len() as u32;
+            starts.push((first, first_index));
+            if hidden[index] {
+                continue;
+            }
             expand(
                 cmd,
                 (atlas, glyphs.as_deref_mut(), colors.as_mut()),
@@ -1324,13 +1514,44 @@ impl DrawList {
         if cut == self.commands.len() {
             overlay = indices.len();
         }
+        starts.push((vertices.len(), indices.len() as u32));
+        let groups = self
+            .groups
+            .iter()
+            .filter(|group| group.opacity > 0.0)
+            .filter_map(|group| {
+                let (first, first_index) = starts[group.commands.start];
+                let (end, end_index) = starts[group.commands.end];
+                (end_index > first_index).then(|| OpacityRun {
+                    indices: first_index..end_index,
+                    opacity: group.opacity,
+                    bounds: bounds(&vertices[first..end]),
+                })
+            })
+            .collect();
         Triangles {
             vertices,
             indices,
             overlay,
             textures,
+            groups,
         }
     }
+}
+
+/// The rectangle `vertices` can cover, each vertex clamped into its own clip
+/// first: a fragment outside its clip is discarded, so nothing past it is
+/// drawn.
+fn bounds(vertices: &[Vertex2d]) -> ClipRect {
+    let mut min = Vec2::splat(f32::MAX);
+    let mut max = Vec2::splat(f32::MIN);
+    for vertex in vertices {
+        let [x0, y0, x1, y1] = vertex.clip;
+        let pos = vertex.pos.max(Vec2::new(x0, y0)).min(Vec2::new(x1, y1));
+        min = min.min(pos);
+        max = max.max(pos);
+    }
+    ClipRect { min, max }
 }
 
 /// Where colour glyphs are drawn from: the cache that rasterises and holds
@@ -1819,7 +2040,7 @@ fn push_quad_free(
     for pos in [p0, p1, p2, p3] {
         vertices.push(Vertex2d::new(pos, Vec2::ZERO, color, Primitive::Solid));
     }
-    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    indices.extend(QUAD_INDICES.map(|index| base + index));
 }
 
 /// Push one untextured triangle, used for stroke corners.
@@ -1861,15 +2082,24 @@ fn push_quad(
     indices: &mut Vec<u32>,
 ) {
     let base = vertices.len() as u32;
-    for (pos, uv) in [
-        (Vec2::new(min.x, max.y), Vec2::new(uv_min.x, uv_max.y)),
-        (Vec2::new(max.x, max.y), Vec2::new(uv_max.x, uv_max.y)),
-        (Vec2::new(max.x, min.y), Vec2::new(uv_max.x, uv_min.y)),
-        (Vec2::new(min.x, min.y), Vec2::new(uv_min.x, uv_min.y)),
-    ] {
+    for (pos, uv) in quad_corners(min, max)
+        .into_iter()
+        .zip(quad_corners(uv_min, uv_max))
+    {
         vertices.push(Vertex2d::new(pos, uv, color, primitive));
     }
-    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    indices.extend(QUAD_INDICES.map(|index| base + index));
+}
+
+/// An axis-aligned quad's corners in [`push_quad`]'s order: bottom-left,
+/// bottom-right, top-right, top-left.
+fn quad_corners(min: Vec2, max: Vec2) -> [Vec2; 4] {
+    [
+        Vec2::new(min.x, max.y),
+        Vec2::new(max.x, max.y),
+        Vec2::new(max.x, min.y),
+        Vec2::new(min.x, min.y),
+    ]
 }
 
 // SAFETY: Vertex2d is `#[repr(C)]` with only f32 fields (Vec2 is 2×f32,
@@ -1884,6 +2114,8 @@ unsafe impl bytemuck::Zeroable for Vertex2d {}
 
 #[cfg(all(test, feature = "parsed-font"))]
 mod color_tests;
+#[cfg(test)]
+mod opacity_tests;
 #[cfg(test)]
 mod scale_tests;
 #[cfg(test)]

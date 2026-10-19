@@ -476,6 +476,29 @@ mod tests {
         );
     }
 
+    /// **An `opacity` the property does not take is a warning quoting it**,
+    /// as every other property's is, and the declarations around it stand.
+    #[test]
+    fn an_invalid_opacity_is_a_warning_and_the_rest_stands() {
+        let (sheet, diagnostics) =
+            Stylesheet::parse("fade.css", ".a { opacity: 50px; width: 1px; opacity: 40% }");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].severity, Severity::Warning);
+        assert_eq!((diagnostics[0].line, diagnostics[0].column), (1, 6));
+        assert!(
+            diagnostics[0].message.contains("`50px`") && diagnostics[0].message.contains("opacity"),
+            "{}",
+            diagnostics[0]
+        );
+        assert_eq!(
+            set(&sheet.rules[0]),
+            [
+                Declaration::Width(LengthAuto::Px(1.0)),
+                Declaration::Opacity(0.4),
+            ]
+        );
+    }
+
     /// **A bad rule is skipped to the end of its block and every rule after it
     /// still parses** — and each problem is reported at its own line and column.
     #[test]

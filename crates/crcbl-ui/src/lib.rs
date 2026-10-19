@@ -83,8 +83,8 @@ pub use debug::{
     REFLECTED_DECIMALS, ReflectedSection,
 };
 pub use draw_list::{
-    Border, ClipRect, ClipUnderflow, CornerRadii, DrawCommand, DrawList, Primitive, TextureRun,
-    Triangles, Vertex2d,
+    Border, ClipRect, ClipUnderflow, CornerRadii, DrawCommand, DrawList, OpacityGroup, OpacityRun,
+    OpacityUnderflow, Primitive, QUAD_INDICES, TextureRun, Triangles, Vertex2d,
 };
 pub use grid_drag::{
     CellGrid, CellResponse, DragFrame, DropFeedback, DropTarget, Dropped, GridCell, GridDrag,

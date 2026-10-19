@@ -125,17 +125,41 @@ impl Ui {
             }
             let stored = self.store.get(node.slot);
             let (min, max) = stored.rect;
+            // Painted outside every opacity group, so faded by them here: the
+            // ring is drawn without overlapping itself, and its alpha times
+            // the opacity is what the group would have drawn.
+            let mut style = node.style;
+            style.outline_color[3] *= self.drawn_opacity(node);
             list.push_clip(stored.clip.min, stored.clip.max);
-            paint_outline(list, &node.style, min, max);
+            paint_outline(list, &style, min, max);
             list.pop_clip()
                 .expect("the clip pushed above is still on the stack");
         }
+    }
+
+    /// The opacity `node` is drawn at: its own times every ancestor's, the
+    /// groups it is drawn inside.
+    fn drawn_opacity(&self, node: &super::FrameNode) -> f32 {
+        let mut opacity = node.style.opacity;
+        let mut parent = node.parent;
+        while let Some(index) = parent {
+            let ancestor = &self.nodes[index];
+            opacity *= ancestor.style.opacity;
+            parent = ancestor.parent;
+        }
+        opacity
     }
 
     fn emit_node(&self, index: usize, list: &mut DrawList) {
         let node = &self.nodes[index];
         if node.style.display == Display::None {
             return;
+        }
+        // The node and its subtree as one group, faded together: CSS's
+        // `opacity`, which an opacity of one leaves out.
+        let faded = node.style.opacity < 1.0;
+        if faded {
+            list.push_opacity(node.style.opacity);
         }
         let (min, max) = self.store.get(node.slot).rect;
         match node.content {
@@ -220,6 +244,10 @@ impl Ui {
         if clipped {
             list.pop_clip()
                 .expect("the clip pushed above is still on the stack");
+        }
+        if faded {
+            list.pop_opacity()
+                .expect("the group pushed above is still open");
         }
     }
 }
