@@ -55,6 +55,31 @@ flight (opacity groups, AppKit input method, the Win32 popup leave fix):
    larger). A grapheme crate was declined on 2026-10-16 "until a caller needs
    them"; pikr is that caller now.
 
+**Open from 2026-10-19, raised by pikr and lyr, not started:**
+
+- **`crcbl_app::window::wait_for_configure` drops every event it pumps** (a bug,
+  pikr). It counts them into `events: &mut u64` and logs them, so a
+  `FocusRefused`, `ScaleFactorChanged` or early `Key` before the first size
+  never reaches the caller's loop; pikr's own `wait_for_size` hit exactly this.
+  Fix: hand the events back (a callback, as `Shell::pump` takes), updating the
+  callers in `crcbl::engine` and `crates/crcbl/tests/seam_from_outside.rs`.
+  Breaking, so it belongs in a minor release.
+- **`Presenter` refuses a transparent window with no premultiplied adapter**
+  (policy, pikr). pikr's owner decided it warns and draws opaque instead. Add an
+  opt-in on `PresenterDesc` to accept opaque when no adapter offers
+  `PreMultiplied`, and report which alpha mode it got.
+- **Win32 popup leave (lyr): not reproduced on CI.** lyr reported that once a
+  `Passthrough` popup opens from a panel, the panel never gets
+  `PointerFocus { entered: false }`. The e2e test
+  `win32_e2e::a_passthrough_popup_does_not_disarm_its_parents_pointer_leave`
+  (branch `win32-popup-leave`) passed on CI's real desktop **without** a fix,
+  with a normal foreground window as the parent. lyr's parent is a `Panel`
+  (`WS_EX_NOACTIVATE`, topmost, never foreground), so the next step is the same
+  test with a panel parent and no foreground call; if that goes red, the fix is
+  to re-arm `TrackMouseEvent` on every `WM_MOUSEMOVE` rather than only on the
+  derived entry (`proc.rs`, `msg::MOUSE_MOVE`), which is written but not applied
+  because nothing has yet shown it is needed.
+
 **Decided 2026-10-19: panels can be reconfigured, asked by lyr.** A panel's size
 and margins are fixed at `create_window`, so lyr's notification stack (an
 Overlay panel whose height follows the toasts) and its bar's height on reload
