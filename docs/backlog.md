@@ -43,12 +43,6 @@ flight (AppKit input method, the Win32 popup leave fix):
    GPU readback per pointer move.
 3. **Shaping in SVG text.** `crcbl-image`'s SVG text draws one glyph a char from
    the cmap; move it onto `harfrust`, which the workspace already has.
-4. **Bidi (UAX #9), line breaking (UAX #14) and grapheme clusters (UAX #29):
-   needs the owner's approval of new dependencies**, so it waits. The candidates
-   are `unicode-bidi`, `unicode-linebreak` and `unicode-segmentation` (or
-   ICU4X's `icu_segmenter`, which covers both breaking and clusters but is far
-   larger). A grapheme crate was declined on 2026-10-16 "until a caller needs
-   them"; pikr is that caller now.
 
 **Adapter choice, left over from the 2026-10-19 slice** (lazy describe,
 `PowerPreference`, `AdapterPick`, `Instance::display_adapter`; the policy is

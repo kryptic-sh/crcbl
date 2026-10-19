@@ -40,7 +40,6 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Left` and `Right`; `NodeStyle`'s initial `text_align` is `Start`. They follow
   the paragraph's direction, so left-to-right text sits where it did, and an
   exhaustive match on `TextAlign` needs the two arms.
-
 - **`crcbl_hal::AdapterInfo` no longer carries `caps`, and `crcbl_hal::Instance`
   has a required `adapter_caps(AdapterId)`.** `Instance::adapters` now lists who
   each adapter is without opening a device, and `adapter_caps` answers what one
@@ -93,7 +92,6 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **Word moves and a double-click's word follow UAX #29's word boundaries**
   (`crcbl_ui::edit::{word_left, word_right, run_at}`), so `can't`, `3.14` and a
   word with a combining mark in it are one word each.
-
 - **`ShellCaps::CURSOR_SHAPE` is set on X11 when libxcb-cursor is installed**,
   and `set_cursor` with a shape then shows the user's XCursor theme's cursor for
   it, or a glyph of the core cursor font when no theme has the shape. The
@@ -128,14 +126,6 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   or a percentage, clamped into `0..=1`, and fades the node with its subtree; it
   is not inherited. A frame with groups records more passes than
   `UiRenderer::MAX_PASSES`, which still bounds a frame without them.
-
-### Changed
-
-- **A zero-width joiner joins only emoji**, as UAX #29 has it: `a`, ZWJ, `b` is
-  two caret stops and two clusters for fallback, where it was one. A combining
-  mark after a space now joins the space, and a paragraph's hyphenated word is
-  shaped whole, so a font's kerning reaches across the hyphen there as it
-  already did in a span.
 - **A program chooses its adapter by power preference or by name.**
   `crcbl_app::adapter::PowerPreference` (`HighPerformance` or `LowPower`) ranks
   discrete against integrated GPUs when nothing names an adapter, and
@@ -160,6 +150,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A zero-width joiner joins only emoji**, as UAX #29 has it: `a`, ZWJ, `b` is
+  two caret stops and two clusters for fallback, where it was one. A combining
+  mark after a space now joins the space, and a paragraph's hyphenated word is
+  shaped whole, so a font's kerning reaches across the hyphen there as it
+  already did in a span.
 - **The default adapter is ranked rather than taken in enumeration order.**
   `Presenter` (apps) defaults to `PowerPreference::LowPower`, so on a machine
   with an integrated and a discrete GPU and nothing else deciding, an app opens
