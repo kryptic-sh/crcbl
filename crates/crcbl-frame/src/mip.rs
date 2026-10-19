@@ -31,6 +31,8 @@
 //! channels beside it are different numbers, so nothing about them may be
 //! coupled by the mipper.
 
+use crcbl_core::srgb;
+
 /// Resample `pixels`, a tightly packed `width × height` RGBA8 sRGB image, onto
 /// a square `extent`, alpha-weighted and in linear light.
 ///
@@ -361,23 +363,12 @@ fn source_span(at: u32, extent: u32, source: u32) -> (u32, u32) {
 /// The IEC 61966-2-1 transfer function, which is what `Rgba8UnormSrgb` decodes
 /// with.
 fn srgb_to_linear(value: u8) -> f32 {
-    let encoded = f32::from(value) / 255.0;
-    if encoded <= 0.040_45 {
-        encoded / 12.92
-    } else {
-        ((encoded + 0.055) / 1.055).powf(2.4)
-    }
+    srgb::decode(f32::from(value) / 255.0)
 }
 
 /// The inverse of [`srgb_to_linear`], rounded to a byte.
 fn linear_to_srgb(value: f32) -> u8 {
-    let linear = value.clamp(0.0, 1.0);
-    let encoded = if linear <= 0.003_130_8 {
-        12.92 * linear
-    } else {
-        1.055 * linear.powf(1.0 / 2.4) - 0.055
-    };
-    quantise(encoded)
+    quantise(srgb::encode(value.clamp(0.0, 1.0)))
 }
 
 /// A `0..=1` fraction as the nearest byte.

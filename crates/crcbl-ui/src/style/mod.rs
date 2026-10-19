@@ -49,6 +49,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 pub(crate) use cascade::{Candidates, InheritedId, Origin, Resolver, RuleIndex};
+pub use property::from_srgb8;
 pub(crate) use selector::{Element, NodeSelector};
 pub use selector::{PseudoClasses, Selector, Specificity};
 pub use sheet::{Diagnostic, Severity, Stylesheet};

@@ -126,6 +126,7 @@
 //! children overlap — `inherit`, `!important`, `em` and every other unit.
 
 use crcbl_core::input::CursorIcon;
+use crcbl_core::srgb;
 use cssparser::color::{parse_hash_color, parse_named_color};
 use cssparser::{ParseError, Parser, Token, match_ignore_ascii_case};
 
@@ -1209,9 +1210,9 @@ fn rgb(input: &mut Parser<'_>) -> Result<[f32; 4], Invalid> {
         alpha(input)?
     };
     Ok([
-        srgb_to_linear(red),
-        srgb_to_linear(green),
-        srgb_to_linear(blue),
+        srgb::decode(red),
+        srgb::decode(green),
+        srgb::decode(blue),
         opacity,
     ])
 }
@@ -1248,24 +1249,21 @@ fn color_function(input: &mut Parser<'_>) -> Result<[f32; 4], Invalid> {
     let [red, green, blue] = if linear {
         channels
     } else {
-        channels.map(srgb_to_linear)
+        channels.map(srgb::decode)
     };
     Ok([red, green, blue, alpha])
 }
 
-fn from_srgb8(r: u8, g: u8, b: u8, alpha: f32) -> [f32; 4] {
-    let decode = |channel: u8| srgb_to_linear(f32::from(channel) / 255.0);
+/// An sRGB colour's bytes, `#rrggbb` as a theme writes it, as the linear
+/// `[r, g, b, a]` a [`DrawList`](crate::draw_list::DrawList) takes.
+///
+/// The channels go through [`crcbl_core::srgb::decode`]; `alpha` is coverage,
+/// not a colour, and passes through as it is. This is what a stylesheet's
+/// `#rrggbb` decodes to.
+#[must_use]
+pub fn from_srgb8(r: u8, g: u8, b: u8, alpha: f32) -> [f32; 4] {
+    let decode = |channel: u8| srgb::decode(f32::from(channel) / 255.0);
     [decode(r), decode(g), decode(b), alpha]
-}
-
-/// One sRGB-encoded channel in `0..=1` as linear light: IEC 61966-2-1's
-/// transfer function, which is what an sRGB swapchain encodes back through.
-fn srgb_to_linear(encoded: f32) -> f32 {
-    if encoded <= 0.040_45 {
-        encoded / 12.92
-    } else {
-        ((encoded + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 #[cfg(test)]

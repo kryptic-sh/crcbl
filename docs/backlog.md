@@ -6842,8 +6842,10 @@ scene menu with the gaps below.
   the lyr and pikr section); `inherit` and `!important` (`initial` and `unset`
   exist); the `border` and `font` shorthands; `em` and the other relative units.
   The scope-creep rule applies: each lands when the editor or a sample needs it.
-- **The sRGB transfer function now exists twice** — in `crcbl-render`'s mip
-  generation and in `crcbl-ui`'s colour parsing — and belongs in one place.
+- **The sRGB transfer function has two copies left** beside `crcbl_core::srgb`:
+  `crcbl-image`'s SVG filters, which do not depend on `crcbl-core` and would
+  need the edge, and `crcbl-golden`'s, which depends on nothing by design (see
+  its `srgb` module docs).
 - **Untested**: trimming the definition cache at its cap, and a stylesheet write
   caught half-finished that happens to parse.
 - **A block left open at the end of a file is not reported**: `cssparser` closes

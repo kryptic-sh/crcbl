@@ -21,6 +21,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   library is loaded with `dlopen`, so a system without it keeps the bit clear
   and records the shape as before. Each shape is loaded once per shell, so a UI
   setting the cursor on every hover costs no reload.
+- **`crcbl_ui::style::from_srgb8`** turns a theme's `#rrggbb` bytes into the
+  linear `[r, g, b, a]` a `DrawList` takes, the way a stylesheet colour decodes.
+  The transfer function itself is public as
+  `crcbl_core::srgb::{decode, encode}`, which `crcbl-ui` and `crcbl-frame`'s mip
+  generation now share.
 
 ### Fixed
 

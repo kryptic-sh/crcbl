@@ -30,6 +30,8 @@
 //!   per-agent sampling at a fixed rate and a staggered phase, reporting each
 //!   sample at its exact time inside the tick. Sample times come from an
 //!   integer index, never an accumulated sum; see the module docs.
+//! * [`srgb`] — the sRGB transfer function, [`decode`](srgb::decode) to linear
+//!   light and [`encode`](srgb::encode) back, for colour authored in sRGB.
 //! * [`stats`] — [`percentile_of`](stats::percentile_of) and
 //!   [`MIN_PERCENTILE_SAMPLES`](stats::MIN_PERCENTILE_SAMPLES), the nearest-rank
 //!   arithmetic the debug panel's budget row and `crcbl bench` both report
@@ -59,6 +61,7 @@ pub mod logarithm;
 pub mod player;
 pub mod rand;
 pub mod schedule;
+pub mod srgb;
 pub mod stats;
 pub mod surface;
 pub mod time;
