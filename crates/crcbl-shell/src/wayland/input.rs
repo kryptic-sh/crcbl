@@ -509,7 +509,7 @@ impl WaylandShell {
             .as_ref()
             .map_or(Keysym::NONE, |keymap| keymap.keysym(key));
         let event_time = self.time.event_time(time);
-        self.queue.push_back(ShellEvent::Key {
+        let event = ShellEvent::Key {
             window,
             device: seat.device,
             time: event_time,
@@ -519,7 +519,10 @@ impl WaylandShell {
             state: ButtonState::from_pressed(pressed),
             repeat: false,
             modifiers: seat.modifiers,
-        });
+        };
+        let popup = self.window(window).ok().and_then(|state| state.popup_input);
+        let dismissed = crate::role::escape_dismisses(popup, &event);
+        self.queue.push_back(event);
         // Text follows its key, never precedes it: a field that inserts a
         // character before it has seen the keystroke cannot implement "Ctrl
         // suppresses text".
@@ -529,6 +532,9 @@ impl WaylandShell {
                 time: event_time,
                 text,
             });
+        }
+        if dismissed {
+            self.close_requested(window);
         }
 
         let repeats = self.seats[index]

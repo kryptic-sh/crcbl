@@ -138,6 +138,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   an editing key. The press is now dropped, its release is matched by scan code
   and dropped whichever virtual key it carries, and a focus loss forgets the
   pending releases. `ShellEvent::Key` documents the contract.
+- **`Escape` now dismisses a `PopupInput::Grab` popup**, on Win32, Wayland,
+  AppKit and the headless backend, as `PopupInput::Grab` always documented: a
+  fresh press delivered to the popup queues its `CloseRequested`, which
+  `reply_close_request` answers as any other, so a menu can answer `Keep` to
+  back out of a submenu. The `Key` press is still delivered, before the request,
+  and a repeat or a release does not dismiss.
 
 ## [0.5.0] - 2026-10-18
 

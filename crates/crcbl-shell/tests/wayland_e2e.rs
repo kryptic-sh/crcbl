@@ -3787,3 +3787,90 @@ fn a_grabbing_popup_is_dismissed_by_a_click_outside_it() {
     drop(input);
     session.shell.destroy_window(window).expect("destroy");
 }
+
+/// Escape on a grabbing popup: the popup hears the key, then a close request
+/// it may answer `Keep` to, and the next Escape asks again.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn escape_on_a_grabbing_popup_is_delivered_then_asks_it_to_close() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e escape owner");
+    // A click inside the window: the input serial the grab quotes.
+    input.move_to(100, 100, LAYOUT_SIZE);
+    input.button(evdev::BTN_LEFT, true);
+    input.button(evdev::BTN_LEFT, false);
+    session.pump_until("the click", |session| {
+        session
+            .events
+            .iter()
+            .filter(|event| event.name() == "Button")
+            .count()
+            >= 2
+    });
+
+    let menu = session.create(&popup(
+        "crcbl e2e escaped menu",
+        LogicalSize::new(200.0, 100.0),
+        PopupDesc {
+            parent: window,
+            anchor: LogicalRect::new(LogicalPoint::new(90.0, 90.0), LogicalSize::new(20.0, 20.0)),
+            placement: PopupPlacement::Below,
+            input: PopupInput::Grab,
+        },
+    ));
+    session.pump_until("the menu's first configure", |session| {
+        session.size(menu).is_some()
+    });
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, menu).expect("map");
+    session.settle(Duration::from_millis(200));
+    session.take_names();
+
+    let asked = |session: &Session| {
+        session
+            .events
+            .iter()
+            .filter(|event| **event == ShellEvent::CloseRequested { window: menu })
+            .count()
+    };
+    input.tap(evdev::KEY_ESC);
+    session.pump_until("the menu's dismissal", |session| asked(session) == 1);
+    let escape = session
+        .events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                ShellEvent::Key {
+                    window: target,
+                    key_code: Some(KeyCode::Escape),
+                    state: ButtonState::Pressed,
+                    ..
+                } if *target == menu
+            )
+        })
+        .expect("the menu heard the Escape press");
+    let request = session
+        .events
+        .iter()
+        .position(|event| *event == ShellEvent::CloseRequested { window: menu })
+        .expect("the request");
+    assert!(
+        escape < request,
+        "the key comes first: {:?}",
+        session.events
+    );
+
+    // Kept open, as a submenu backing out would be, and asked again.
+    session
+        .shell
+        .reply_close_request(menu, CloseReply::Keep)
+        .expect("keep");
+    input.tap(evdev::KEY_ESC);
+    session.pump_until("the second dismissal", |session| asked(session) == 2);
+    session
+        .shell
+        .reply_close_request(menu, CloseReply::Close)
+        .expect("close");
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}

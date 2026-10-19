@@ -2946,6 +2946,84 @@ fn a_grabbing_popup_closes_when_it_loses_the_keyboard_and_a_pointer_one_does_not
 
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn escape_on_a_grabbing_popup_is_delivered_then_asks_it_to_close() {
+    /// `VK_ESCAPE`.
+    const VK_ESCAPE: usize = 0x1B;
+    let mut shell = shell();
+    let parent = window(&mut shell);
+    shell.pump(&mut |_| {});
+    let grab = shell
+        .create_window(&popup_desc(
+            "crcbl popup escape grab",
+            LogicalSize::new(200.0, 150.0),
+            menu_against(parent, crate::PopupInput::Grab),
+        ))
+        .expect("a popup");
+    let pointer = shell
+        .create_window(&popup_desc(
+            "crcbl popup escape pointer",
+            LogicalSize::new(200.0, 150.0),
+            menu_against(parent, crate::PopupInput::Pointer),
+        ))
+        .expect("a popup");
+    shell.pump(&mut |_| {});
+    // A desktop shared with other processes may already have taken the
+    // keyboard from the grabbing popup, which asked it to close; that
+    // request is kept, so the one below can only come from the Escape.
+    if shell.window_state(grab).expect("live").close_pending {
+        shell
+            .reply_close_request(grab, crate::CloseReply::Keep)
+            .expect("keep");
+    }
+    let (grab_hwnd, pointer_hwnd) = (hwnd_of(&shell, grab), hwnd_of(&shell, pointer));
+    // The key edges and the requests, in the order they were queued.
+    let pump_edges = |shell: &mut Win32Shell| {
+        let mut edges = Vec::new();
+        shell.pump(&mut |event| match event {
+            ShellEvent::Key {
+                window,
+                key_code: Some(KeyCode::Escape),
+                state,
+                repeat,
+                ..
+            } => edges.push((window, Some((state, repeat)))),
+            ShellEvent::CloseRequested { window } => edges.push((window, None)),
+            _ => {}
+        });
+        edges
+    };
+
+    send_key(grab_hwnd, msg::KEY_DOWN, VK_ESCAPE, 0x0001, false, false);
+    assert_eq!(
+        pump_edges(&mut shell),
+        [(grab, Some((ButtonState::Pressed, false))), (grab, None)],
+        "the key, then the request"
+    );
+    // Kept open — a submenu backing out — so a repeat and a release ask
+    // nothing, and the next fresh press asks again.
+    shell
+        .reply_close_request(grab, crate::CloseReply::Keep)
+        .expect("keep");
+    send_key(grab_hwnd, msg::KEY_DOWN, VK_ESCAPE, 0x0001, false, true);
+    send_key(grab_hwnd, msg::KEY_UP, VK_ESCAPE, 0x0001, false, true);
+    assert!(
+        pump_edges(&mut shell).iter().all(|(_, key)| key.is_some()),
+        "neither a repeat nor a release dismisses"
+    );
+    send_key(grab_hwnd, msg::KEY_DOWN, VK_ESCAPE, 0x0001, false, false);
+    assert_eq!(pump_edges(&mut shell).last(), Some(&(grab, None)));
+
+    // A popup that does not hold the keyboard only hears the key.
+    send_key(pointer_hwnd, msg::KEY_DOWN, VK_ESCAPE, 0x0001, false, false);
+    assert_eq!(
+        pump_edges(&mut shell),
+        [(pointer, Some((ButtonState::Pressed, false)))]
+    );
+    shell.destroy_window(parent).expect("destroy");
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_passthrough_popup_is_not_there_for_the_pointer() {
     let mut shell = shell();
     let parent = window(&mut shell);

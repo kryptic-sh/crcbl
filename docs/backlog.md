@@ -212,6 +212,17 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      Win32 reports one for both. Same `isKeyWindow` read-back as `show_panel`,
      S; left out because no session test shows a grabbing popup and the runner
      never activates, so nothing would tell a refusal from a regression.
+   - S17 `Escape` dismissing a `PopupInput::Grab` popup on AppKit
+     (`appkit::input` `translate_input` calling `role::escape_dismisses`, since
+     2026-10-19) is verified by type-checking only, for the same reason: no
+     session test shows a grabbing popup or sends it a key. Wayland's is covered
+     by the CI-only
+     `escape_on_a_grabbing_popup_is_delivered_then_asks_it_to_close` e2e test,
+     Win32's by the desktop test of the same name, and the decision by unit
+     tests in `role` and `headless`. X11 builds no popups (`POPUP` is clear), so
+     it has nothing to dismiss. Also unverified anywhere: that AppKit delivers
+     `keyDown:` for Escape to a key `NSPanel`'s view rather than answering it as
+     `cancelOperation:` first.
    - **Decided 2026-10-17: `ShellCaps::TEXT_IME` is split**, keeping the name
      for a real input method end to end (pre-edit as `TextPreedit`, commits,
      `set_text_input` and `set_text_input_area` acted on) and adding

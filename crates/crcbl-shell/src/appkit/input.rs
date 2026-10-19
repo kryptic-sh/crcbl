@@ -155,7 +155,7 @@ impl AppKitShell {
             } => {
                 let time = self.event_time(seconds);
                 let key_code = keys::key_code(keycode);
-                self.queue_event(ShellEvent::Key {
+                let event = ShellEvent::Key {
                     window,
                     device: KEYBOARD_DEVICE,
                     time,
@@ -165,7 +165,17 @@ impl AppKitShell {
                     state,
                     repeat,
                     modifiers: keys::modifiers(flags),
-                });
+                };
+                let popup = self
+                    .window(window)
+                    .ok()
+                    .and_then(|state| state.popup)
+                    .map(|popup| popup.input);
+                let dismissed = crate::role::escape_dismisses(popup, &event);
+                self.queue_event(event);
+                if dismissed {
+                    self.close_requested(window);
+                }
             }
 
             RawEvent::FlagsChanged {

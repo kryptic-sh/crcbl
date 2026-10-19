@@ -249,6 +249,7 @@ impl WaylandShell {
                 popup: popup_proxy,
                 parent: Some(popup.parent),
                 placement: Some(popup.placement),
+                popup_input: Some(popup.input),
                 panel_monitor: None,
                 decoration: ptr::null_mut(),
                 fractional_scale,

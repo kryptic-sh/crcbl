@@ -1922,6 +1922,8 @@ struct WlWindow {
     /// Where a popup is placed against its anchor, kept so it can be placed
     /// again when it is repositioned.
     placement: Option<crate::PopupPlacement>,
+    /// What input a popup takes, which decides whether `Escape` dismisses it.
+    popup_input: Option<crate::PopupInput>,
     /// The monitor a panel was created for, whose removal asks it to close.
     panel_monitor: Option<MonitorId>,
     decoration: *mut WlProxy,
@@ -3765,6 +3767,7 @@ impl Shell for WaylandShell {
                 popup: ptr::null_mut(),
                 parent: None,
                 placement: None,
+                popup_input: None,
                 panel_monitor: panel.and_then(|panel| panel.monitor),
                 decoration,
                 fractional_scale,
@@ -5058,6 +5061,7 @@ mod tests {
             popup: ptr::null_mut(),
             parent: None,
             placement: None,
+            popup_input: None,
             panel_monitor: None,
             decoration: ptr::null_mut(),
             fractional_scale: ptr::null_mut(),

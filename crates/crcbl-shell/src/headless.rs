@@ -229,6 +229,8 @@ struct HeadlessWindow {
     accept_drops: bool,
     /// The window a popup belongs to, which takes it along when destroyed.
     parent: Option<WindowId>,
+    /// What input a popup takes, which decides whether `Escape` dismisses it.
+    popup_input: Option<crate::PopupInput>,
     /// The monitor a panel was created for, whose unplugging asks it to close.
     panel_monitor: Option<MonitorId>,
     /// [`Shell::set_text_input`]'s last word.
@@ -723,7 +725,7 @@ impl HeadlessShell {
         state: ButtonState,
         repeat: bool,
     ) -> Result<(), ShellError> {
-        self.check_window(window)?;
+        let popup_input = self.window(window)?.popup_input;
         self.saw_interaction = true;
         let event = ShellEvent::Key {
             window,
@@ -736,7 +738,12 @@ impl HeadlessShell {
             repeat,
             modifiers: self.modifiers,
         };
+        let dismissed = crate::role::escape_dismisses(popup_input, &event);
         self.queue.push_back(event);
+        // As the real backends do: one request until it is answered.
+        if dismissed && !self.window(window)?.close_pending {
+            self.request_close(window)?;
+        }
         Ok(())
     }
 
@@ -1477,13 +1484,13 @@ impl Shell for HeadlessShell {
             }
         };
 
-        let (parent, panel_monitor) = match desc.role {
+        let (parent, popup_input, panel_monitor) = match desc.role {
             crate::WindowRole::Popup(popup) => {
                 self.window(popup.parent)?;
-                (Some(popup.parent), None)
+                (Some(popup.parent), Some(popup.input), None)
             }
-            crate::WindowRole::Panel(panel) => (None, panel.monitor),
-            crate::WindowRole::Toplevel => (None, None),
+            crate::WindowRole::Panel(panel) => (None, None, panel.monitor),
+            crate::WindowRole::Toplevel => (None, None, None),
         };
         let countdown = self.configure_delay;
         let window: WindowId = self
@@ -1508,6 +1515,7 @@ impl Shell for HeadlessShell {
                 close_pending: false,
                 accept_drops: desc.accept_drops,
                 parent,
+                popup_input,
                 panel_monitor,
                 text_input: None,
                 #[cfg(feature = "accesskit")]
@@ -2260,6 +2268,65 @@ mod tests {
             shell.reposition_popup(window, anchor, moved),
             Err(ShellError::InvalidDescriptor(_))
         ));
+    }
+
+    /// Escape on a grabbing popup is delivered and then asks the popup to
+    /// close, once until answered; a popup that does not hold the keyboard
+    /// only hears the key.
+    #[test]
+    fn escape_on_a_grabbing_popup_is_delivered_then_asks_it_to_close() {
+        let (mut shell, window) = shell_with_configured_window();
+        let popup_of = |shell: &mut HeadlessShell, input| {
+            shell
+                .create_window(&WindowDesc {
+                    role: crate::WindowRole::Popup(crate::PopupDesc {
+                        parent: window,
+                        anchor: crate::LogicalRect::default(),
+                        placement: crate::PopupPlacement::Below,
+                        input,
+                    }),
+                    ..WindowDesc::default()
+                })
+                .expect("a popup")
+        };
+        let menu = popup_of(&mut shell, crate::PopupInput::Grab);
+        let tooltip = popup_of(&mut shell, crate::PopupInput::Pointer);
+        settle(&mut shell);
+        let is_close = |event: &ShellEvent| matches!(event, ShellEvent::CloseRequested { .. });
+
+        shell.key_press(menu, KeyCode::Escape).expect("press");
+        let events = drain(&mut shell);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    ShellEvent::Key {
+                        key_code: Some(KeyCode::Escape),
+                        ..
+                    },
+                    ShellEvent::CloseRequested { window: closed },
+                ] if *closed == menu
+            ),
+            "the key, then the request: {events:?}"
+        );
+        // Unanswered, a second press and a repeat ask nothing more.
+        shell.key_press(menu, KeyCode::Escape).expect("press");
+        shell.key_repeat(menu, KeyCode::Escape).expect("repeat");
+        assert!(!drain(&mut shell).iter().any(is_close));
+
+        // Kept open — backing out of a submenu — the next press asks again.
+        shell
+            .reply_close_request(menu, CloseReply::Keep)
+            .expect("keep");
+        shell.key_release(menu, KeyCode::Escape).expect("release");
+        shell.key_press(menu, KeyCode::Enter).expect("press");
+        assert!(!drain(&mut shell).iter().any(is_close), "not these");
+        shell.key_press(menu, KeyCode::Escape).expect("press");
+        assert!(drain(&mut shell).iter().any(is_close));
+
+        shell.key_press(tooltip, KeyCode::Escape).expect("press");
+        shell.key_press(window, KeyCode::Escape).expect("press");
+        assert!(!drain(&mut shell).iter().any(is_close));
     }
 
     #[test]

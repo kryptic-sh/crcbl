@@ -231,7 +231,36 @@ pub enum PopupInput {
     /// `Escape` dismisses it, which arrives as a
     /// [`CloseRequested`](crate::ShellEvent::CloseRequested) for it. A menu or
     /// a calendar is this.
+    ///
+    /// `Escape` is still delivered: the popup hears the
+    /// [`Key`](crate::ShellEvent::Key) press first and the `CloseRequested`
+    /// after it, so a consumer can tell a dismissal by the keyboard from one by
+    /// a click, and can answer [`CloseReply::Keep`](crate::CloseReply::Keep)
+    /// to back out of a submenu instead of closing the whole menu. Only a
+    /// fresh press dismisses — an auto-repeat or a release does not.
     Grab,
+}
+
+/// Whether `key`, delivered to a window whose popup input is `popup`, asks
+/// for that window to close: a fresh press of `Escape` on a
+/// [`PopupInput::Grab`] popup, as that variant documents. `popup` is `None`
+/// for a window that is not a popup.
+///
+/// Every backend that builds popups calls this after queueing the key, and on
+/// `true` queues the window's
+/// [`CloseRequested`](crate::ShellEvent::CloseRequested) through its own
+/// close-request path, so a request already pending is not repeated.
+pub(crate) fn escape_dismisses(popup: Option<PopupInput>, key: &crate::ShellEvent) -> bool {
+    popup == Some(PopupInput::Grab)
+        && matches!(
+            key,
+            crate::ShellEvent::Key {
+                key_code: Some(crcbl_core::KeyCode::Escape),
+                state: crcbl_core::input::ButtonState::Pressed,
+                repeat: false,
+                ..
+            }
+        )
 }
 
 /// What every backend checks before it builds a window: that its caps cover
@@ -359,6 +388,51 @@ mod tests {
     use crate::{
         HeadlessShell, LogicalRect, MonitorId, Shell, ShellCaps, ShellError, ShellEvent, WindowDesc,
     };
+
+    #[test]
+    fn only_a_fresh_escape_press_on_a_grabbing_popup_dismisses_it() {
+        use crcbl_core::KeyCode;
+        use crcbl_core::input::{ButtonState, DeviceId, Keysym, Modifiers, Scancode};
+
+        let window = crate::WindowId::from_bits(1 << 32).expect("a valid handle");
+        let key = |key_code, state, repeat| ShellEvent::Key {
+            window,
+            device: DeviceId(1),
+            time: crcbl_core::EventTime::ZERO,
+            scancode: Scancode(0),
+            key_code,
+            keysym: Keysym::NONE,
+            state,
+            repeat,
+            modifiers: Modifiers::empty(),
+        };
+        let escape = key(Some(KeyCode::Escape), ButtonState::Pressed, false);
+        let grab = Some(PopupInput::Grab);
+        assert!(super::escape_dismisses(grab, &escape));
+
+        // Not a release, a repeat, another key, or a key with no name.
+        let released = key(Some(KeyCode::Escape), ButtonState::Released, false);
+        let repeated = key(Some(KeyCode::Escape), ButtonState::Pressed, true);
+        let enter = key(Some(KeyCode::Enter), ButtonState::Pressed, false);
+        let unnamed = key(None, ButtonState::Pressed, false);
+        for other in [&released, &repeated, &enter, &unnamed] {
+            assert!(!super::escape_dismisses(grab, other), "{other:?}");
+        }
+        // And not on a popup that does not hold the keyboard, or on a window
+        // that is no popup at all.
+        for input in [
+            Some(PopupInput::Pointer),
+            Some(PopupInput::Passthrough),
+            None,
+        ] {
+            assert!(!super::escape_dismisses(input, &escape), "{input:?}");
+        }
+        // Only a key event is a keystroke.
+        assert!(!super::escape_dismisses(
+            grab,
+            &ShellEvent::CloseRequested { window }
+        ));
+    }
 
     fn panel(anchor: PanelAnchor) -> PanelDesc<'static> {
         PanelDesc {

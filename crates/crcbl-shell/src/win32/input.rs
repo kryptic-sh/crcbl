@@ -596,7 +596,7 @@ impl Win32Shell {
                 {
                     return;
                 }
-                self.queue_event(ShellEvent::Key {
+                let event = ShellEvent::Key {
                     window,
                     device,
                     time,
@@ -606,7 +606,17 @@ impl Win32Shell {
                     state,
                     repeat,
                     modifiers: Self::modifiers_now(),
-                });
+                };
+                let popup = self
+                    .window(window)
+                    .ok()
+                    .and_then(|state| state.popup)
+                    .map(|popup| popup.input);
+                let dismissed = crate::role::escape_dismisses(popup, &event);
+                self.queue_event(event);
+                if dismissed {
+                    self.close_requested(window);
+                }
             }
 
             RawEvent::Char { unit, millis, .. } => {
