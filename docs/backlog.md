@@ -19,6 +19,22 @@ approved as a dependency of `crcbl-shell` and goes ahead after the release;
 breaking change, so a minor bump); `crcbl-cli` stays unpublished; the `notify`
 watcher and a grapheme crate stay declined until a caller needs them.
 
+**Decided 2026-10-19: frame pacing events, asked by lyr.** A bar on an output
+the compositor has turned off (DPMS, through hypridle) gets no
+`wl_surface.frame` callback, and a FIFO present there can block: the Wayland
+backend requests no frame callbacks, `crcbl-app`'s `Pacing::Auto` is
+`PresentMode::Fifo`, and `crcbl-vk` acquires with no timeout (`u64::MAX`). Read
+from the source, not observed on a DPMS-off output. Build
+`Shell::request_frame(window)` and `ShellEvent::FrameReady { window }`: on
+Wayland a `wl_surface.frame` request that rides the next commit (the WSI's
+present commits it) and the event when the callback fires; a new cap,
+`ShellCaps::FRAME_CALLBACK`, set where the compositor paces it (Wayland, and
+AppKit if `CADisplayLink`/occlusion gives a real signal); elsewhere the event
+arrives at the next pump after the request, so one code path works everywhere
+and the clear cap says the pacing is not the compositor's. Declined: a finite
+acquire timeout as the fix, which turns a hang into a busy retry and still
+blocks the loop for the timeout. After opacity groups; M.
+
 **Decided 2026-10-19: the draw list gets opacity groups, asked by lyr.** lyr's
 theme draws each module box (rounded rect, border and text) at CSS
 `opacity: 0.8` over a transparent bar; multiplying each command's alpha, which
