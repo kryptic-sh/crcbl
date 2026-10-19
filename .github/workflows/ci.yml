@@ -7,7 +7,26 @@ on:
     # A `v*` tag is a release; the release jobs at the end of this file run
     # only for one.
     tags: ['v*']
+  # **A dispatch can run a few jobs instead of all of them.** A mutant or a
+  # platform check needs one job, and dispatching the whole matrix for it took
+  # the account's few macOS runners from main: in run 39287773047 main's
+  # `mtl e2e (macos-15)` started 26.9 min late while branch runs held them.
+  # Name the job ids (the keys under `jobs:`) comma-separated with no spaces:
+  #
+  #     gh workflow run ci.yml --ref <branch> -f jobs=wayland-e2e,x11-e2e
+  #
+  # Left empty, a dispatch runs everything, as a push does. `install-packages`
+  # brings `build` along, which it needs. Push, pull request and tag runs
+  # ignore the input entirely, and the release jobs never run on a dispatch.
+  # `dispatch-selection` fails the run on a name that selects nothing, so a
+  # typo cannot pass as a green run that tested nothing.
   workflow_dispatch:
+    inputs:
+      jobs:
+        description:
+          Job ids to run, comma-separated with no spaces (empty runs all)
+        type: string
+        default: ''
 
 # Least privilege by default; the release jobs that need it opt themselves up
 # to `contents: write` at job level.
@@ -49,8 +68,39 @@ concurrency:
 # 6-hour runner budget silently; the nextest `slow-timeout` in
 # `.config/nextest.toml` is the same guard one level down, per test.
 jobs:
+  # Checks a dispatch's `jobs` input (see `workflow_dispatch` above). A name
+  # passes only if some job's `if:` selects it by that exact name, so a typo,
+  # a space after a comma or a release job each fail here instead of skipping
+  # everything quietly. Not in any `needs:` list: it never runs on a push, and
+  # a skipped need would skip the release.
+  dispatch-selection:
+    name: dispatch job selection
+    if: github.event_name == 'workflow_dispatch' && inputs.jobs != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Every selected job exists and can be selected
+        env:
+          JOBS: ${{ inputs.jobs }}
+        run: |
+          set -euo pipefail
+          STATUS=0
+          IFS=',' read -ra WANTED <<<"$JOBS"
+          for JOB in "${WANTED[@]}"; do
+              if [[ ! "$JOB" =~ ^[a-z0-9-]+$ ]] \
+                  || ! grep -qF ",$JOB,'" .github/workflows/ci.yml; then
+                  echo "::error::'$JOB' selects no job; name job ids from ci.yml, comma-separated, no spaces"
+                  STATUS=1
+              fi
+          done
+          exit "$STATUS"
+
   fmt:
     name: rustfmt
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',fmt,')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -87,6 +137,9 @@ jobs:
   # the summary test holds to the bash helper.
   shell:
     name: shell (e2e harness guards)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',shell,')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -169,6 +222,9 @@ jobs:
 
   clippy:
     name: clippy (linux)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',clippy,')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -178,6 +234,14 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          # **Every `rust-cache` step here saves on main and nowhere else.**
+          # GitHub keeps 10 GB of caches per repository and evicts the least
+          # recently used past it. On 2026-10-20 the repository held 10.7 GB,
+          # and branch, pull-request and tag refs owned 4.98 GB of it: mutant
+          # dispatches and dependabot runs saving caches no later run on main
+          # can restore, and pushing main's own out. Every ref can still
+          # restore main's caches, so a branch run starts as warm as before.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # Explicit scopes so it is visible which jobs share a cache. Coverage
           # can never share (llvm-cov injects `-C instrument-coverage`); the
           # cross-platform legs are keyed by runner OS automatically.
@@ -271,6 +335,9 @@ jobs:
 
   docs:
     name: rustdoc
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',docs,')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -282,6 +349,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: docs
       # ALSA headers for `cpal`; see the action for why it retries.
       - name: Install the ALSA headers cpal links against
@@ -340,6 +408,9 @@ jobs:
 
   machete:
     name: cargo-machete (unused deps)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',machete,')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -355,6 +426,9 @@ jobs:
 
   prettier:
     name: prettier (markdown, web, workflows)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',prettier,')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -390,6 +464,9 @@ jobs:
 
   deny:
     name: cargo-deny
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',deny,')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -451,6 +528,9 @@ jobs:
   # thing that broke first.
   wasm32:
     name: build + clippy (wasm32)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',wasm32,')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -461,6 +541,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: wasm32
       # The P5 deliverable, named on its own so a failure says which half broke
       # before the workspace sweep buries it in a hundred other crates.
@@ -523,6 +604,9 @@ jobs:
   # needed beyond the target's `rust-std`.
   freebsd:
     name: check (freebsd)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',freebsd,')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -533,6 +617,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: freebsd
       - run: >-
           cargo clippy --locked --all-features --all-targets -p crcbl-shell -p
@@ -568,6 +653,9 @@ jobs:
   # this crate's `cdylib` example, which miri's target cannot produce.
   miri-jobs:
     name: miri (crcbl-jobs)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',miri-jobs,')
     runs-on: ubuntu-latest
     # Measured on the first (cold-cache) run: 1.4 min end to end, of which
     # about a minute is interpretation and the rest `cargo miri setup` and a
@@ -589,6 +677,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: miri-jobs
       # **`build.warnings` is relaxed for the sysroot build and nothing else.**
       # `setup-rust-toolchain@v2` exports `CARGO_BUILD_WARNINGS=deny` for every
@@ -616,6 +705,9 @@ jobs:
   # in about 49 seconds of interpretation.
   miri-steam:
     name: miri (crcbl-steam)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',miri-steam,')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -630,6 +722,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: miri-steam
       # See `miri-jobs` for why the sysroot build relaxes `build.warnings`.
       - run: CARGO_BUILD_WARNINGS=warn cargo miri setup
@@ -656,6 +749,9 @@ jobs:
   # nowhere else. It brings up its own Xvfb; the step below only installs one.
   jobs-worker-e2e:
     name: threaded wasm gates (linux)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',jobs-worker-e2e,')
     # Measured on the first (cold-cache) run: five minutes end to end — 48 s
     # for the jobs gate and 223 s for horde's, the rest setup. This is headroom
     # over that, not a budget: what it is really guarding is a `-Z build-std`
@@ -672,6 +768,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: jobs-worker-e2e
       # No npm step and no `node_modules`: the gate's tools are hand-written
       # ESM, and the DevTools client needs the global `WebSocket` Node 22 added.
@@ -712,6 +809,9 @@ jobs:
   # Linux is the developer's daily driver, so it carries the full gate.
   test-linux:
     name: test (linux)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',test-linux,')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -724,6 +824,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -839,6 +940,9 @@ jobs:
   # and must stay green even while the platform crates are empty.
   test-cross-platform:
     name: build + test (${{ matrix.os }})
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',test-cross-platform,')
     runs-on: ${{ matrix.os }}
     # Windows and macOS runners are roughly 2x slower than Linux.
     timeout-minutes: 45
@@ -853,6 +957,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -982,6 +1087,9 @@ jobs:
   # harness itself fails when the suite reports zero tests run.
   wayland-e2e:
     name: wayland e2e (nested sway)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',wayland-e2e,')
     runs-on: ubuntu-latest
     # Compositor startup plus a full compile of the shell crate's test targets.
     timeout-minutes: 30
@@ -992,6 +1100,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -1039,6 +1148,9 @@ jobs:
   # zero tests run.
   x11-e2e:
     name: x11 e2e (Xvfb)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',x11-e2e,')
     runs-on: ubuntu-latest
     # Server startup plus a full compile of the shell crate's test targets.
     timeout-minutes: 30
@@ -1049,6 +1161,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -1129,6 +1242,9 @@ jobs:
   # one is running.
   samples-windowed:
     name: samples windowed (Xvfb)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',samples-windowed,')
     runs-on: ubuntu-latest
     # Every sample binary and the engine behind them, compiled from cold.
     timeout-minutes: 30
@@ -1139,6 +1255,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       # The `x11-e2e` job's list, without the packages this gate has no use for:
       # `openbox`, since there is no window-manager assertion here, and
@@ -1189,6 +1306,9 @@ jobs:
   # and a claim nothing executes is one that stops being true quietly.
   windowed-e2e:
     name: windowed swapchain e2e (Xvfb)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',windowed-e2e,')
     runs-on: ubuntu-latest
     # Server startup plus a full compile of the umbrella crate's test targets.
     timeout-minutes: 30
@@ -1199,6 +1319,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -1247,6 +1368,9 @@ jobs:
   # it and a 1024×768 display, which is what the suite is written against.
   win32-e2e:
     name: win32 e2e (real desktop)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',win32-e2e,')
     runs-on: windows-latest
     # A Windows runner is roughly 2x slower than a Linux one, and this compiles
     # the shell crate's test targets and both helper binaries from cold.
@@ -1258,6 +1382,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -1324,6 +1449,9 @@ jobs:
   # WARP is part of the OS.
   dx12-e2e:
     name: dx12 e2e (software adapter)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',dx12-e2e,')
     runs-on: windows-latest
     # A Windows runner is roughly 2x slower than a Linux one, and this compiles
     # the backend's test target from cold.
@@ -1335,6 +1463,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -1567,6 +1696,9 @@ jobs:
   # rather than part of `test-linux`.
   cli-e2e:
     name: cli e2e (scaffold builds and runs)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',cli-e2e,')
     runs-on: ubuntu-latest
     # A cold engine compile plus the scaffolded project's own.
     timeout-minutes: 30
@@ -1577,6 +1709,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -1647,6 +1780,9 @@ jobs:
   # docs record and its tolerance is calibrated against.
   vk-e2e:
     name: vk e2e (lavapipe)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',vk-e2e,')
     runs-on: ubuntu-latest
     # A software rasteriser is slow, but this suite renders 64x48.
     timeout-minutes: 30
@@ -1657,6 +1793,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -2332,6 +2469,9 @@ jobs:
   # build reports the record-time hazard `validation_gate` demands.
   vk-e2e-windows:
     name: vk e2e (lavapipe, windows)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',vk-e2e-windows,')
     runs-on: windows-latest
     # A Windows runner is roughly 2x slower than a Linux one, this compiles the
     # backend's test targets from cold, the suite renders on a software
@@ -2371,6 +2511,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -2647,6 +2788,9 @@ jobs:
 
   mtl-hardware-e2e:
     name: mtl hardware e2e (macos-26)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',mtl-hardware-e2e,')
     # macOS 15's hosted driver aborts on native indirect command buffers.
     # Keep all hardware probes on macOS 26, where the full suite passes;
     # the renderer below uses macOS 15 for working texture shader validation.
@@ -2659,6 +2803,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -2677,6 +2822,9 @@ jobs:
 
   mtl-e2e:
     name: mtl e2e (macos-15)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',mtl-e2e,')
     # macOS 26's hosted paravirtual driver reports false texture-usage faults
     # under shader validation, including in a standalone native Metal draw.
     # macOS 15 passes that control and all 59 strict renderer goldens.
@@ -2696,6 +2844,14 @@ jobs:
     # "Metal's debug layer warns on every bind, and the mesh suite pays for it";
     # the growth itself is under "The Metal e2e job's suites grew to half an
     # hour".
+    #
+    # **The forward-pass and lit-mesh suites run in `mtl-e2e-mesh`, beside this
+    # job rather than after it.** Together this job was the run's critical path
+    # at 41 to 44 minutes, and its time is test execution, not compilation:
+    # in run 39287773047 each suite's build finished in under 30 s while the
+    # render suite ran 19.4 min, the lit mesh 16.1 and the forward pass 6.4.
+    # Sharing one build would have saved seconds; running the suites on two
+    # runners at once halves the wall time for about a minute of extra setup.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -2742,6 +2898,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: test
       - uses: ./.github/actions/cargo-tool
         with:
@@ -2838,6 +2995,75 @@ jobs:
           MTL_DEBUG_LAYER_WARNING_MODE: nslog
         run: crates/crcbl/tests/run-draw-gen-e2e.sh
 
+      # The sprite pass on Metal. Until this step existed no Metal run had drawn
+      # a sprite quad at all: `render_e2e`'s `sprite` scene is the screenshot
+      # path's black-box golden and makes none of the placement, frame-selection,
+      # filtering or seam claims this suite does.
+      #
+      # Same validation switches as the renderer steps, for the reason argued at
+      # the ForwardRenderer one — `MTL_SHADER_VALIDATION` deliberately absent.
+      - name: Draw the sprite pass on Metal
+        env:
+          CRCBL_GPU: mtl
+          MTL_DEBUG_LAYER: '1'
+          MTL_DEBUG_LAYER_ERROR_MODE: nslog
+          MTL_DEBUG_LAYER_WARNING_MODE: nslog
+        run: crates/crcbl/tests/run-sprite-e2e.sh
+
+      # The physical-tiling count on Metal retains its diagnostic API logging
+      # settings without shader validation until separately verified under the
+      # strict settings the mesh suite uses in `mtl-e2e-mesh`. This suite draws
+      # no UI pass.
+      - name: Count the physical tiling on Metal
+        env:
+          CRCBL_GPU: mtl
+          MTL_DEBUG_LAYER: '1'
+          MTL_DEBUG_LAYER_ERROR_MODE: nslog
+          MTL_DEBUG_LAYER_WARNING_MODE: nslog
+        run: crates/crcbl/tests/run-tiling-e2e.sh
+
+      # See the WARP step of the same name. This arm is the one with no local
+      # measurement behind it — there is no Metal device here — so it is the arm
+      # to read first if the suite goes red.
+      - name: Draw an imported glTF on Metal
+        env:
+          CRCBL_GPU: mtl
+          MTL_DEBUG_LAYER: '1'
+          MTL_DEBUG_LAYER_ERROR_MODE: nslog
+          MTL_DEBUG_LAYER_WARNING_MODE: nslog
+        run: crates/crcbl/tests/run-gltf-e2e.sh
+
+      - name: Upload golden-image diffs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-diff-metal
+          path: target/golden-diff/
+          if-no-files-found: ignore
+
+  # The two longest Metal suites after the render suite, split off `mtl-e2e` so
+  # they run at the same time as it — see that job for the measurements. Same
+  # image, same cache and the same validation switches; only the runner differs.
+  mtl-e2e-mesh:
+    name: mtl e2e forward + mesh (macos-15)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',mtl-e2e-mesh,')
+    runs-on: macos-15
+    # `mtl-e2e`'s cap, for the reasons given there.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: test
+      - uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-nextest@0.9.146
       # The forward pass's own state on Metal. Until this step existed no Metal
       # run had read a single shadow-atlas texel or froxel count: the goldens the
       # ForwardRenderer step compares are exactly what a shadow pass that
@@ -2856,21 +3082,6 @@ jobs:
           MTL_SHADER_VALIDATION_REPORT_TO_STDERR: '1'
           MTL_SHADER_VALIDATION_ABORT_ON_FAULT: '1'
         run: crates/crcbl/tests/run-forward-e2e.sh
-
-      # The sprite pass on Metal. Until this step existed no Metal run had drawn
-      # a sprite quad at all: `render_e2e`'s `sprite` scene is the screenshot
-      # path's black-box golden and makes none of the placement, frame-selection,
-      # filtering or seam claims this suite does.
-      #
-      # Same validation switches as the renderer steps, for the reason argued at
-      # the ForwardRenderer one — `MTL_SHADER_VALIDATION` deliberately absent.
-      - name: Draw the sprite pass on Metal
-        env:
-          CRCBL_GPU: mtl
-          MTL_DEBUG_LAYER: '1'
-          MTL_DEBUG_LAYER_ERROR_MODE: nslog
-          MTL_DEBUG_LAYER_WARNING_MODE: nslog
-        run: crates/crcbl/tests/run-sprite-e2e.sh
 
       # The lit mesh on Metal — the last of the five clusters, and the one whose
       # migration was a redesign rather than a move. Half of `vk_e2e/mesh.rs`
@@ -2898,37 +3109,19 @@ jobs:
           MTL_SHADER_VALIDATION_ABORT_ON_FAULT: '1'
         run: crates/crcbl/tests/run-mesh-e2e.sh
 
-      # The physical-tiling count on Metal retains its diagnostic API logging
-      # settings without shader validation until separately verified under the
-      # strict settings used by the mesh suite above. This suite draws no UI pass.
-      - name: Count the physical tiling on Metal
-        env:
-          CRCBL_GPU: mtl
-          MTL_DEBUG_LAYER: '1'
-          MTL_DEBUG_LAYER_ERROR_MODE: nslog
-          MTL_DEBUG_LAYER_WARNING_MODE: nslog
-        run: crates/crcbl/tests/run-tiling-e2e.sh
-
-      # See the WARP step of the same name. This arm is the one with no local
-      # measurement behind it — there is no Metal device here — so it is the arm
-      # to read first if the suite goes red.
-      - name: Draw an imported glTF on Metal
-        env:
-          CRCBL_GPU: mtl
-          MTL_DEBUG_LAYER: '1'
-          MTL_DEBUG_LAYER_ERROR_MODE: nslog
-          MTL_DEBUG_LAYER_WARNING_MODE: nslog
-        run: crates/crcbl/tests/run-gltf-e2e.sh
-
       - name: Upload golden-image diffs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: golden-diff-metal
+          name: golden-diff-metal-mesh
           path: target/golden-diff/
           if-no-files-found: ignore
+
   shaders:
     name: shaders (committed artifacts match their sources)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',shaders,')
     runs-on: ubuntu-latest
     # Raised from 10 when `dxc` was added: its archive is around 492 MiB and
     # dominates the job's wall clock. See the install step.
@@ -3060,6 +3253,9 @@ jobs:
 
   decoder-fuzz:
     name: decoder fuzz (libFuzzer)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',decoder-fuzz,')
     runs-on: ubuntu-latest
     # The fuzzer is independently bounded below; this remains the guard for a
     # compiler, runner, or libFuzzer regression that ignores its run limit.
@@ -3072,6 +3268,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: decoder-fuzz
           workspaces: crates/crcbl-net/fuzz -> target
       - uses: ./.github/actions/cargo-tool
@@ -3126,6 +3323,9 @@ jobs:
   # judged to match.
   svg-corpus:
     name: svg corpus (crcbl-image against resvg)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',svg-corpus,')
     runs-on: ubuntu-latest
     # Fetching the themes and rendering every icon twice takes minutes; this
     # bounds a wedged fetch or render.
@@ -3144,6 +3344,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: svg-corpus
       # The version the recorded floors were measured against: a different
       # resvg antialiases differently and would move them.
@@ -3202,6 +3403,9 @@ jobs:
 
   coverage:
     name: coverage (linux)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',coverage,')
     runs-on: ubuntu-latest
     # Instrumented build plus a full suite re-run.
     timeout-minutes: 45
@@ -3223,6 +3427,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: coverage
       - uses: ./.github/actions/cargo-tool
         with:
@@ -3302,6 +3507,9 @@ jobs:
 
   package:
     name: package (crates.io dry run)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',package,')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -3311,6 +3519,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: package
       - name: Install the ALSA headers cpal links against
         timeout-minutes: 8
@@ -3349,7 +3558,11 @@ jobs:
 
   build:
     name: build ${{ matrix.target }}
-    if: github.event_name != 'pull_request'
+    if:
+      github.event_name != 'pull_request' && (github.event_name !=
+      'workflow_dispatch' || inputs.jobs == '' || contains(format(',{0},',
+      inputs.jobs), ',build,') || contains(format(',{0},', inputs.jobs),
+      ',install-packages,'))
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -3394,6 +3607,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: ${{ matrix.target }}
       - name: Install the ALSA headers cpal links against
         if: runner.os == 'Linux'
@@ -3476,7 +3690,10 @@ jobs:
   install-packages:
     name: install the ${{ matrix.image }} ${{ matrix.arch }} package
     needs: [build]
-    if: github.event_name != 'pull_request'
+    if:
+      github.event_name != 'pull_request' && (github.event_name !=
+      'workflow_dispatch' || inputs.jobs == '' || contains(format(',{0},',
+      inputs.jobs), ',install-packages,'))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
@@ -3550,6 +3767,7 @@ jobs:
         vk-e2e-windows,
         mtl-hardware-e2e,
         mtl-e2e,
+        mtl-e2e-mesh,
         shaders,
         decoder-fuzz,
         coverage,
