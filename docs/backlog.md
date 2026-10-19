@@ -55,6 +55,18 @@ flight (opacity groups, AppKit input method, the Win32 popup leave fix):
    larger). A grapheme crate was declined on 2026-10-16 "until a caller needs
    them"; pikr is that caller now.
 
+**Decided 2026-10-19: panels can be reconfigured, asked by lyr.** A panel's size
+and margins are fixed at `create_window`, so lyr's notification stack (an
+Overlay panel whose height follows the toasts) and its bar's height on reload
+destroy and recreate the panel, a fresh surface and swapchain each time. Build
+`Shell::set_panel(window, size, &PanelDesc)`: size, anchor, margins, reserve,
+layer and keyboard change in place (`zwlr_layer_surface_v1`'s setters and a
+commit on Wayland, `SetWindowPos` and the appbar on Win32, `setFrame:` and the
+level on AppKit), reported through the usual `Resized`/configuration; the
+namespace and the monitor cannot change on Wayland, so changing either is a
+named error everywhere. Declined: narrower `set_panel_size`/`set_panel_margins`,
+which would grow a call per field. After frame pacing; M.
+
 **Decided 2026-10-19: frame pacing events, asked by lyr.** A bar on an output
 the compositor has turned off (DPMS, through hypridle) gets no
 `wl_surface.frame` callback, and a FIFO present there can block: the Wayland
