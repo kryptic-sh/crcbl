@@ -82,9 +82,10 @@ use std::time::{Duration, Instant};
 
 use crcbl_shell::{
     ButtonState, ClipboardContent, ClipboardOffer, ContactId, CursorIcon, DeviceId, DisplayMode,
-    KeyCode, Keysym, LogicalSize, MimeType, PhysicalPoint, PhysicalRect, PointerButton,
-    PointerMode, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
-    SurfaceTarget, TouchPhase, WindowDesc, WindowId, parse_uri_list,
+    KeyCode, Keysym, LogicalPoint, LogicalRect, LogicalSize, MimeType, PhysicalPoint, PhysicalRect,
+    PointerButton, PointerMode, PopupDesc, PopupInput, PopupPlacement, ScrollDelta, Shell,
+    ShellBackend, ShellCaps, ShellError, ShellEvent, SurfaceTarget, TouchPhase, WindowDesc,
+    WindowId, WindowRole, parse_uri_list,
 };
 
 /// PS/2 set 1 scan codes, spelled as the sender takes them and as
@@ -2531,6 +2532,92 @@ fn a_pointer_driven_by_another_process_moves_clicks_and_scrolls() {
         .shell
         .set_cursor(window, Some(CursorIcon::Crosshair))
         .expect("shape");
+}
+
+/// A passthrough popup shown while the pointer is in its parent leaves the
+/// parent's leave notification armed.
+///
+/// A tooltip is exactly this: the pointer rests on a bar, the bar opens a
+/// passthrough popup beside it, and the pointer then leaves both. The bar has
+/// to hear [`PointerFocus`](ShellEvent::PointerFocus) with `entered: false`,
+/// or it never closes the tooltip. `TrackMouseEvent` is one-shot and showing
+/// another window of the thread can cancel it, so this is the order that
+/// catches a leave armed only on the entry.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_passthrough_popup_does_not_disarm_its_parents_pointer_leave() {
+    /// Where the pointer rests in the parent: clear of the popup below.
+    const REST: PhysicalPoint = PhysicalPoint::new(300.0, 200.0);
+    /// How far inside the primary screen's corner the pointer is sent.
+    const INSET: i32 = 20;
+
+    let mut session = Session::open();
+    let window = session.window("leave");
+    session.foreground(window);
+    session
+        .shell
+        .warp_pointer(window, REST)
+        .expect("POINTER_WARP is claimed");
+    session.pump_until("the pointer to enter", |session| {
+        session.events.iter().any(|event| {
+            matches!(event, ShellEvent::PointerFocus { window: w, entered: true, .. } if *w == window)
+        })
+    });
+    session.settle();
+
+    let popup = session.window_with(&WindowDesc {
+        title: "tooltip",
+        app_id: "sh.kryptic.crcbl.e2e",
+        size: LogicalSize::new(120.0, 40.0),
+        role: WindowRole::Popup(PopupDesc {
+            parent: window,
+            anchor: LogicalRect::new(LogicalPoint::new(20.0, 20.0), LogicalSize::new(60.0, 20.0)),
+            placement: PopupPlacement::Below,
+            input: PopupInput::Passthrough,
+        }),
+        ..WindowDesc::default()
+    });
+    session.settle();
+    assert!(
+        !session.events.iter().any(|event| matches!(
+            event,
+            ShellEvent::PointerFocus { window: w, entered: false, .. } if *w == window
+        )),
+        "the pointer has not moved, so it has not left: {:?}",
+        session.events
+    );
+    session.events.clear();
+
+    // A corner of the primary screen outside both windows, as a point in the
+    // parent's client coordinates, which is what the warp takes.
+    let (width, height) = desktop::primary_screen();
+    let parent = desktop::window_rect(session.hwnd(window));
+    let shown = desktop::window_rect(session.hwnd(popup));
+    let inside = |rect: &desktop::Rect, x: i32, y: i32| {
+        (rect.left..rect.right).contains(&x) && (rect.top..rect.bottom).contains(&y)
+    };
+    let (x, y) = [
+        (INSET, INSET),
+        (width - INSET, INSET),
+        (INSET, height - INSET),
+        (width - INSET, height - INSET),
+    ]
+    .into_iter()
+    .find(|&(x, y)| !inside(&parent, x, y) && !inside(&shown, x, y))
+    .expect("the windows do not cover every corner of the primary screen");
+    let origin = desktop::client_to_screen(session.hwnd(window), 0, 0);
+    session
+        .shell
+        .warp_pointer(
+            window,
+            PhysicalPoint::new(f64::from(x - origin.x), f64::from(y - origin.y)),
+        )
+        .expect("POINTER_WARP is claimed");
+    session.pump_until("the pointer to leave the parent", |session| {
+        session.events.iter().any(|event| {
+            matches!(event, ShellEvent::PointerFocus { window: w, entered: false, .. } if *w == window)
+        })
+    });
 }
 
 /// Both thumb buttons, clicked from another process, arrive as the buttons
