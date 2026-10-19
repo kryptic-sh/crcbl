@@ -417,7 +417,7 @@ mod parsed {
         let sans = Font::sans();
         let a = sans.glyph_id('A');
         let mut shaped = Vec::new();
-        crate::font::shape::shape(sans, SIZE, "AV", 0..2, &mut shaped);
+        crate::font::shape::shape(sans, SIZE, "AV", 0..2, false, &mut shaped);
         let scale = sans.metrics().scale(SIZE);
         let advance = sans.advance(a) * scale;
         assert!(

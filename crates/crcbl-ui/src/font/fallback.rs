@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(cluster_face(&font, keycap), 1);
         assert_eq!(cluster_face(&font, "1\u{20E3}"), 0);
         let mut glyphs = Vec::new();
-        shape::shape(&font, 16.0, keycap, 0..keycap.len(), &mut glyphs);
+        shape::shape(&font, 16.0, keycap, 0..keycap.len(), false, &mut glyphs);
         assert_eq!(glyphs.len(), 1, "one ligature: {glyphs:?}");
         assert_eq!(glyphs[0].face, 1);
         assert!(shaped.has_color_glyph(glyphs[0].glyph));

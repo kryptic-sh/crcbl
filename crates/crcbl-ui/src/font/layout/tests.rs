@@ -1,4 +1,5 @@
 use super::*;
+use crate::font::shape::shape;
 use crate::font::{SANS_TTF, fixtures};
 
 const SIZE: f32 = 16.0;
@@ -218,7 +219,7 @@ fn a_mark_is_drawn_at_the_shapers_offset() {
     let font = Font::sans();
     let layout = TextLayout::new(font, "xh\u{301}", SIZE, LINE, None);
     let mut shaped = Vec::new();
-    shape(font, SIZE, "xh\u{301}", 0..4, &mut shaped);
+    shape(font, SIZE, "xh\u{301}", 0..4, false, &mut shaped);
     assert_eq!(layout.glyphs().len(), 3);
     let baseline = layout.lines()[0].baseline;
     let pen = shaped[0].advance + shaped[1].advance;
@@ -298,27 +299,33 @@ fn the_wrap_width_is_whole_pixels() {
 #[test]
 fn caret_stops_sit_on_cluster_pens() {
     let font = Font::sans();
-    let mut stops = Vec::new();
-    caret_stops(font, "Ta h\u{301}", SIZE, &mut stops);
+    let mut carets = Carets::default();
+    caret_stops(font, "Ta h\u{301}", SIZE, &mut carets);
     let layout = TextLayout::new(font, "Ta h\u{301}", SIZE, LINE, None);
     let x: Vec<f32> = layout.glyphs().iter().map(|glyph| glyph.offset.x).collect();
     // T, a, space, h, the mark (inside h's cluster), the end.
-    assert_eq!(stops.len(), 6);
-    assert_eq!(stops[..2], [x[0], x[1]]);
-    assert_eq!(stops[3], x[2], "the stop before h is where h is drawn");
-    assert_eq!(stops[4], stops[3], "the mark takes its base's stop");
-    assert_eq!(stops[5], layout.width());
+    assert_eq!(carets.stops.len(), 6);
+    assert_eq!(carets.stops[..2], [x[0], x[1]]);
+    assert_eq!(
+        carets.stops[3], x[2],
+        "the stop before h is where h is drawn"
+    );
+    assert_eq!(
+        carets.stops[4], carets.stops[3],
+        "the mark takes its base's stop"
+    );
+    assert_eq!(carets.stops[5], layout.width());
 
     // The shaped face's flag is one glyph for one cluster; two flags' worth
     // of regional indicators is two clusters and two glyphs.
     let flags = Font::sans().with_fallback(&[fixtures::shaped()]);
     let text = "\u{1F1FA}\u{1F1F8}\u{1F1FA}\u{1F1F8}";
-    caret_stops(&flags, text, SIZE, &mut stops);
-    assert_eq!(stops, [0.0, 0.0, SIZE, SIZE, 2.0 * SIZE]);
+    caret_stops(&flags, text, SIZE, &mut carets);
+    assert_eq!(carets.stops, [0.0, 0.0, SIZE, SIZE, 2.0 * SIZE]);
     // Heart and fire with no joiner are two clusters the face ligates into
     // one glyph an em wide: the stop between them is half way across it.
-    caret_stops(&flags, "\u{2764}\u{1F525}", SIZE, &mut stops);
-    assert_eq!(stops, [0.0, SIZE / 2.0, SIZE]);
+    caret_stops(&flags, "\u{2764}\u{1F525}", SIZE, &mut carets);
+    assert_eq!(carets.stops, [0.0, SIZE / 2.0, SIZE]);
 }
 
 /// **Soft breaks are UAX #14's**: a line breaks after a hyphen inside a
@@ -367,4 +374,195 @@ fn a_word_cut_inside_is_shaped_again_where_the_cut_matters() {
     let widths: Vec<f32> = cut.lines().iter().map(|line| line.width).collect();
     assert_eq!(widths, [16.0, 16.0], "the kerning survived the cut");
     assert_eq!(x(&cut), [0.0, 0.0]);
+}
+
+/// Each glyph's x in `layout`, by the byte its cluster starts at.
+fn x_by_byte(layout: &TextLayout) -> Vec<(usize, f32)> {
+    let mut pairs: Vec<(usize, f32)> = layout
+        .bytes
+        .iter()
+        .zip(layout.glyphs())
+        .map(|(&byte, glyph)| (byte, glyph.offset.x))
+        .collect();
+    pairs.sort_by_key(|&(byte, _)| byte);
+    pairs
+}
+
+/// **An Arabic word in a Latin paragraph is drawn right to left in its
+/// place**: its glyphs' x falls as its chars go on, the Latin before it is
+/// left of all of them and the Latin after it right of all of them.
+#[test]
+fn an_arabic_word_in_a_latin_line_runs_right_to_left() {
+    let font = Font::sans();
+    let arabic = "\u{627}\u{644}\u{639}\u{631}\u{628}\u{64A}\u{629}";
+    let text = format!("ab {arabic} cd");
+    let layout = TextLayout::new(font, &text, SIZE, LINE, None);
+    let x = x_by_byte(&layout);
+    let end = 3 + arabic.len();
+    let within = |from: usize, to: usize| -> Vec<f32> {
+        x.iter()
+            .filter(|&&(byte, _)| (from..to).contains(&byte))
+            .map(|&(_, x)| x)
+            .collect()
+    };
+    let (latin, word, after) = (within(0, 3), within(3, end), within(end, text.len()));
+    assert!(word.len() >= 2, "the word is one glyph");
+    assert!(
+        word.windows(2).all(|pair| pair[0] > pair[1]),
+        "the Arabic runs left to right: {word:?}"
+    );
+    let low = word.iter().fold(f32::MAX, |low, &x| low.min(x));
+    let high = word.iter().fold(f32::MIN, |high, &x| high.max(x));
+    assert!(latin.iter().all(|&x| x < low), "ab is not before it");
+    assert!(after.iter().all(|&x| x > high), "cd is not after it");
+}
+
+/// **A Hebrew paragraph runs right to left and starts at the right**: its
+/// first word is right of its second, `start` alignment puts the line against
+/// the box's right edge and `left` against its left, and an override turns
+/// Latin letters right to left glyph for glyph.
+#[test]
+fn a_hebrew_paragraph_is_ordered_and_aligned_right_to_left() {
+    let font = Font::sans();
+    let first = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
+    let text = format!("{first} \u{5E2}\u{5D5}\u{5DC}\u{5DD}");
+    let mut layout = TextLayout::new(font, &text, SIZE, LINE, None);
+    let x = x_by_byte(&layout);
+    let first_left = x
+        .iter()
+        .filter(|&&(byte, _)| byte < first.len())
+        .fold(f32::MAX, |low, &(_, x)| low.min(x));
+    assert!(
+        x.iter()
+            .filter(|&&(byte, _)| byte > first.len())
+            .all(|&(_, x)| x < first_left),
+        "the second word is not left of the first"
+    );
+    layout.align(300.0, TextAlign::Start);
+    let room = 300.0 - layout.lines()[0].width;
+    assert_eq!(
+        layout.lines()[0].offset,
+        room,
+        "start is not the right edge"
+    );
+    layout.align(300.0, TextAlign::Left);
+    assert_eq!(layout.lines()[0].offset, 0.0);
+    layout.align(300.0, TextAlign::End);
+    assert_eq!(layout.lines()[0].offset, 0.0, "end is not the left edge");
+
+    let forced = TextLayout::new(font, "\u{202E}abc\u{202C}", SIZE, LINE, None);
+    let mut glyphs: Vec<(f32, GlyphId)> = forced
+        .glyphs()
+        .iter()
+        .map(|glyph| (glyph.offset.x, glyph.glyph))
+        .collect();
+    glyphs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let ids: Vec<GlyphId> = glyphs.into_iter().map(|(_, glyph)| glyph).collect();
+    assert_eq!(ids, ['c', 'b', 'a'].map(|c| font.glyph_id(c)));
+}
+
+/// **A line wrapped in a right-to-left paragraph keeps its logical words**:
+/// the first line holds the first words, ordered right to left, as wide as
+/// they are.
+#[test]
+fn a_wrapped_hebrew_paragraph_breaks_in_logical_order() {
+    let font = Font::sans();
+    let word = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
+    let text = format!("{word} {word} {word}");
+    let one = TextLayout::new(font, word, SIZE, LINE, None).width();
+    let two = TextLayout::new(font, &format!("{word} {word}"), SIZE, LINE, None).width();
+    let layout = TextLayout::new(font, &text, SIZE, LINE, Some(wrap_width(two + 1.0)));
+    let widths: Vec<f32> = layout.lines().iter().map(|line| line.width).collect();
+    assert_eq!(widths.len(), 2);
+    assert!((widths[0] - two).abs() < 1e-3 && (widths[1] - one).abs() < 1e-3);
+    let first: Vec<usize> = layout.bytes[layout.lines()[0].glyphs.clone()].to_vec();
+    assert!(first.iter().all(|&byte| byte < 2 * word.len() + 1));
+    let x = x_by_byte(&layout);
+    let second_word = x
+        .iter()
+        .filter(|&&(byte, _)| byte > word.len() && byte < 2 * word.len() + 1);
+    assert!(
+        second_word.clone().all(|&(_, x)| x < one),
+        "the line's second word is not on its left"
+    );
+}
+
+/// **Caret stops in mixed text sit on leading edges**: the stop before the
+/// first char of a right-to-left run is the run's right edge, the stop after
+/// it that char's left edge, and the end of the line — after the run's last
+/// char — the run's left edge; each char's trailing edge is the far side of
+/// its cluster.
+#[test]
+fn caret_stops_in_a_right_to_left_run_sit_on_leading_edges() {
+    let font = Font::sans();
+    let text = "ab \u{5D0}\u{5D1}\u{5D2}";
+    let mut carets = Carets::default();
+    caret_stops(font, text, SIZE, &mut carets);
+    let layout = TextLayout::new(font, text, SIZE, LINE, None);
+    let x = x_by_byte(&layout);
+    let run_left = TextLayout::new(font, "ab ", SIZE, LINE, None).width() + {
+        let mut shaped = Vec::new();
+        shape(font, SIZE, " ", 0..1, false, &mut shaped);
+        shaped[0].advance
+    };
+    let right = layout.width();
+    assert_eq!(carets.stops.len(), 7);
+    assert_eq!(
+        carets.stops[3], right,
+        "the run's start is not its right edge"
+    );
+    let aleph = x.iter().find(|&&(byte, _)| byte == 3).expect("drawn").1;
+    assert_eq!(
+        carets.stops[4], aleph,
+        "after aleph is not aleph's left edge"
+    );
+    assert_eq!(carets.trailing[3], aleph);
+    assert!(
+        (carets.stops[6] - run_left).abs() < 1e-3,
+        "the end is not the run's left"
+    );
+    assert_eq!(carets.stops[..2], [x[0].1, x[1].1]);
+    assert!(
+        carets.stops[2] < carets.stops[6],
+        "the space is right of the run"
+    );
+    assert_eq!(carets.width, right);
+
+    // Two Hebrew words: the second, after the first in the text, is left of
+    // it on the screen.
+    caret_stops(font, "ab \u{5D0}\u{5D1} \u{5D2}\u{5D3}", SIZE, &mut carets);
+    assert_eq!(
+        carets.stops[3], carets.width,
+        "the first word is not rightmost"
+    );
+    assert!(
+        carets.stops[6] < carets.stops[4],
+        "the second word is not left of the first"
+    );
+}
+
+/// **Hit testing and selection read the clusters' boxes, not their order**:
+/// in mixed text the stop nearest a point inside the first Hebrew letter is
+/// one of its edges, the char under the run's left end is its last letter,
+/// and a selection's stretch of one level spans its chars' boxes.
+#[test]
+fn hit_tests_and_spans_follow_the_boxes_in_mixed_text() {
+    let font = Font::sans();
+    let mut carets = Carets::default();
+    caret_stops(font, "ab \u{5D0}\u{5D1}\u{5D2}", SIZE, &mut carets);
+    let (aleph_left, run_right, run_left) = (carets.stops[4], carets.stops[3], carets.stops[6]);
+    assert_eq!(carets.nearest(aleph_left + 0.1), 4);
+    assert_eq!(
+        carets.nearest(run_right + 5.0),
+        3,
+        "past the end is the run's start"
+    );
+    assert_eq!(carets.nearest(-5.0), 0);
+    assert_eq!(carets.char_at(aleph_left + 0.1), 3);
+    assert_eq!(carets.char_at(run_left + 0.1), 5);
+    assert_eq!(carets.char_at(-1.0), 0);
+    assert_eq!(carets.span(1..3), (carets.stops[1], carets.trailing[2]));
+    assert_eq!(carets.span(3..4), (aleph_left, run_right));
+    assert_eq!(carets.span(3..6), (run_left, run_right));
+    assert_eq!(carets.span(0..0), (0.0, 0.0));
 }

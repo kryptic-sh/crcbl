@@ -69,11 +69,13 @@ skrifa = { workspace = true, optional = true }
 # it adds this one crate and no second table reader. Behind the `parsed-font`
 # feature below.
 harfrust = { workspace = true, optional = true }
-# Line break opportunities (UAX #14), and grapheme clusters and word
-# boundaries (UAX #29), for `font`'s layout, `tree`'s paragraphs and `edit`'s
-# caret, approved on 2026-10-19. Not behind `parsed-font`: `edit::LineEdit`
-# and a paragraph's bitmap-font runs, which every build has, stop the caret
-# and break lines by them too.
+# Line break opportunities (UAX #14), grapheme clusters and word boundaries
+# (UAX #29) and bidirectional levels (UAX #9), for `font`'s layout, `tree`'s
+# paragraphs and `edit`'s caret, approved on 2026-10-19. Not behind
+# `parsed-font`: `edit::LineEdit` and a paragraph's bitmap-font runs, which
+# every build has, stop the caret and break lines by them too, and the
+# levels are read by the same layout code.
+unicode-bidi = { workspace = true }
 unicode-linebreak = { workspace = true }
 unicode-segmentation = { workspace = true }
 

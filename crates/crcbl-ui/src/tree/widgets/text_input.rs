@@ -63,9 +63,15 @@
 //! part is not worth adding them for.
 //!
 //! The selection and the caret are placed after layout, by `Ui::layout`,
-//! from the boundaries of every cluster in the span's own font — so the
+//! from the edges of every cluster in the span's own font — so the
 //! highlight spans exactly the glyphs selected and the caret sits on the
-//! boundary it names, in the bitmap font and a parsed one alike. Their
+//! boundary it names, in the bitmap font and a parsed one alike. In text
+//! with right-to-left levels the caret before a char stands at its
+//! cluster's leading edge — the right edge of a right-to-left cluster — and
+//! the selection is one `.text-input-selection` block for each stretch of
+//! one bidi level it reaches into, since a selection across a change of
+//! direction is several pieces on the screen. The arrows still move the
+//! caret in logical order, one cluster at a time. Their
 //! `position: absolute` in `default.css` keeps them out of the span's flow.
 //! The same pass scrolls the block: while it is engaged or pressed, by the
 //! least that keeps the caret inside its content box, and never past the end
@@ -86,7 +92,8 @@ use super::{Ui, WidgetKind, WidgetState, typed};
 use crate::console::caret_shown;
 use crate::edit::{ClipboardOp, Edit, LineEdit, run_at};
 use crate::font::Font;
-use crate::font::layout::caret_stops;
+use crate::font::bidi::char_runs;
+use crate::font::layout::{Carets, caret_stops};
 use crate::style::{Declaration, NodeSelector, PseudoClasses};
 use crate::text::FontAtlas;
 use crate::tree::emit::content_width;
@@ -162,10 +169,10 @@ pub struct TextInputOptions<'a> {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EditState {
     line: LineEdit,
-    /// Where each caret stop of what the span drew lies, from the span's
-    /// content left edge, as last laid out: one more than its characters.
-    boundaries: Vec<f32>,
-    /// A hash of what `boundaries` was measured from.
+    /// Where each caret stop and cluster edge of what the span drew lies,
+    /// from the span's content left edge, as last laid out.
+    carets: Carets,
+    /// A hash of what `carets` was measured from.
     measured: u64,
     /// The span's content left edge from the block's border box, unscrolled,
     /// as last laid out.
@@ -218,23 +225,6 @@ impl EditState {
     pub(super) fn refuse(&mut self) {
         self.refused = true;
     }
-
-    /// The caret stop nearest `x`, measured from the span's content left edge.
-    fn index_at(&self, x: f32) -> usize {
-        self.boundaries
-            .windows(2)
-            .position(|pair| x < (pair[0] + pair[1]) * 0.5)
-            .unwrap_or(self.boundaries.len().saturating_sub(1))
-    }
-
-    /// The character under `x`: the last whose left edge is at or before it.
-    fn char_at(&self, x: f32) -> usize {
-        let stops = self.boundaries.len().saturating_sub(1);
-        self.boundaries[..stops]
-            .iter()
-            .rposition(|&left| left <= x)
-            .unwrap_or(0)
-    }
 }
 
 /// What [`Ui::line_block`] builds on: the node and what it keeps.
@@ -257,9 +247,10 @@ pub(crate) struct TextFit {
     key: NodeKey,
     block: usize,
     text: usize,
-    selection: Option<usize>,
+    /// Each `.text-input-selection` block and the chars it covers: the
+    /// selection's part in one stretch of one bidi level.
+    selection: Vec<(usize, core::ops::Range<usize>)>,
     caret: Option<usize>,
-    range: core::ops::Range<usize>,
     caret_at: usize,
     /// Engaged or pressed: the view follows the caret.
     active: bool,
@@ -267,31 +258,33 @@ pub(crate) struct TextFit {
     placeholder: bool,
 }
 
-/// Each caret stop of `text` at `style`'s size in `font` — the bitmap font
-/// when that is `None` — from its left edge, one before each char and one at
-/// the end: in the bitmap font every advance, and in a parsed font
-/// [`caret_stops`]'s, placed as [`crate::font::layout::TextLayout`] shapes
-/// and places the glyphs. The stop before a cluster is where it is drawn; a
-/// char inside one, where [`crate::edit::LineEdit`] never puts the caret,
-/// shares its cluster's stop.
+/// The caret stops and cluster edges of `text` at `style`'s size in `font` —
+/// the bitmap font when that is `None` — from its left edge: in the bitmap
+/// font every advance, left to right, and in a parsed font [`caret_stops`]'s,
+/// placed as [`crate::font::layout::TextLayout`] shapes and places the glyphs.
+/// A char inside a cluster, where [`crate::edit::LineEdit`] never puts the
+/// caret, shares its cluster's edges.
 fn measure(
     atlas: &FontAtlas,
     font: Option<&Font>,
     text: &str,
     style: &NodeStyle,
-    out: &mut Vec<f32>,
+    out: &mut Carets,
 ) {
     match font {
         None => {
-            out.clear();
-            out.push(0.0);
+            out.stops.clear();
+            out.trailing.clear();
+            out.stops.push(0.0);
             let scale = style.font_size / NATURAL_FONT_SIZE;
             let mut buffer = [0; 4];
             let mut pen = 0.0;
             for c in text.chars() {
                 pen += atlas.text_width(c.encode_utf8(&mut buffer), scale);
-                out.push(pen);
+                out.stops.push(pen);
+                out.trailing.push(pen);
             }
+            out.width = pen;
         }
         Some(font) => caret_stops(font, text, style.font_size, out),
     }
@@ -462,17 +455,21 @@ impl Ui {
             key,
             block: self.nodes.len(),
             text: 0,
-            selection: None,
+            selection: Vec::new(),
             caret: None,
-            range: range.clone(),
             caret_at: state.line.caret(),
             active,
             placeholder,
         };
         let response = self.open_block(key, parsed, inline, Behavior::ENGAGE, pseudo, |ui| {
             if active && !placeholder && !range.is_empty() {
-                fit.selection = Some(ui.nodes.len());
-                ui.block(".text-input-selection", &[], |_| {});
+                for run in char_runs(shown) {
+                    let chars = range.start.max(run.start)..range.end.min(run.end);
+                    if !chars.is_empty() {
+                        fit.selection.push((ui.nodes.len(), chars));
+                        ui.block(".text-input-selection", &[], |_| {});
+                    }
+                }
             }
             fit.text = ui.nodes.len();
             let class = if placeholder {
@@ -503,18 +500,18 @@ impl Ui {
         };
         let x = self.pointer.pos.x - (node.rect.0.x - node.scroll_offset.x + state.origin);
         if state.held {
-            return !state.words && state.line.place(state.index_at(x), true);
+            return !state.words && state.line.place(state.carets.nearest(x), true);
         }
         let pos = self.pointer.pos;
         if self.second_press(state.last_press) {
             state.last_press = None;
             state.words = true;
             let chars: Vec<char> = state.line.text().chars().collect();
-            state.line.select(run_at(&chars, state.char_at(x)))
+            state.line.select(run_at(&chars, state.carets.char_at(x)))
         } else {
             state.last_press = Some((self.text_clock, pos));
             state.words = false;
-            state.line.place(state.index_at(x), false)
+            state.line.place(state.carets.nearest(x), false)
         }
     }
 
@@ -607,19 +604,13 @@ impl Ui {
                     .as_ref()
                     .map(|font| (font.id(), self.fallback_hash)),
             ));
-            if state.boundaries.is_empty() || state.measured != hash {
-                measure(
-                    atlas,
-                    span.font.as_ref(),
-                    shown,
-                    style,
-                    &mut state.boundaries,
-                );
+            if state.carets.stops.is_empty() || state.measured != hash {
+                measure(atlas, span.font.as_ref(), shown, style, &mut state.carets);
                 state.measured = hash;
             }
-            let stops = &state.boundaries;
-            let last = stops.len() - 1;
-            let at = |index: usize, origin: f32| (origin + stops[index.min(last)]).round();
+            let carets = &state.carets;
+            let last = carets.stops.len() - 1;
+            let at = |index: usize, origin: f32| (origin + carets.stops[index.min(last)]).round();
 
             let span_layout = span.layout;
             let block = self.nodes[fit.block].layout;
@@ -646,15 +637,17 @@ impl Ui {
                     offset = caret_x + caret_width - inset - view;
                 }
             }
-            let reach = (at(last, origin) + caret_width - inset - view).max(0.0);
+            let reach = ((origin + carets.width).round() + caret_width - inset - view).max(0.0);
             stored.scroll_offset = Vec2::new(offset.clamp(0.0, reach), 0.0);
 
             let top = span_layout.location.y;
             let height = span_layout.size.height;
-            if let Some(index) = fit.selection {
-                let left = at(fit.range.start, origin);
-                let right = at(fit.range.end, origin);
-                let layout = &mut self.nodes[index].layout;
+            for (index, chars) in &fit.selection {
+                let shown_chars = carets.trailing.len();
+                let chars = chars.start.min(shown_chars)..chars.end.min(shown_chars);
+                let (left, right) = carets.span(chars);
+                let (left, right) = ((origin + left).round(), (origin + right).round());
+                let layout = &mut self.nodes[*index].layout;
                 layout.location = taffy::Point { x: left, y: top };
                 layout.size = taffy::Size {
                     width: right - left,
@@ -690,18 +683,18 @@ mod fallback_tests {
             font_size: 20.0,
             ..NodeStyle::default()
         };
-        let mut stops = Vec::new();
+        let mut carets = Carets::default();
         measure(
             &FontAtlas::built_in(),
             Some(&font),
             text,
             &style,
-            &mut stops,
+            &mut carets,
         );
         let layout = TextLayout::new(&font, text, style.font_size, 24.0, None);
         let x: Vec<f32> = layout.glyphs().iter().map(|glyph| glyph.offset.x).collect();
         assert_eq!(layout.faces(), [0, 1, 0]);
         assert_eq!(x[2] - x[1], style.font_size, "the emoji is an em wide");
-        assert_eq!(stops, [0.0, x[1], x[1], x[2], layout.width()]);
+        assert_eq!(carets.stops, [0.0, x[1], x[1], x[2], layout.width()]);
     }
 }

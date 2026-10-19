@@ -70,9 +70,6 @@ flight (AppKit input method, the Win32 popup leave fix):
    GPU readback per pointer move.
 4. **Shaping in SVG text.** `crcbl-image`'s SVG text draws one glyph a char from
    the cmap; move it onto `harfrust`, which the workspace already has.
-5. **Bidi (UAX #9)**, the half of this item still open: the owner approved
-   `unicode-bidi`, `unicode-linebreak` and `unicode-segmentation` on 2026-10-19,
-   and line breaking (UAX #14) and grapheme clusters (UAX #29) shipped that day.
 
 **Open from 2026-10-19, raised by pikr and lyr, not started:**
 
@@ -1099,9 +1096,7 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      ligature lookups by hand through `skrifa::raw` — it would cover ligatures
      only, be wrong for marks, contextual forms and complex scripts, and be a
      second shaping engine to keep right; `rustybuzz` is archived.
-   - Not done, shaping: **bidi** (UAX #9) — a right-to-left run is shaped
-     (Arabic joins) but laid out in logical order left to right, and caret and
-     breaking assume monotone clusters; **SVG text** in `crcbl-image`
+   - Not done, shaping: **SVG text** in `crcbl-image`
      (`crates/crcbl-image/src/svg/text*`) still draws one glyph a char from the
      cmap — moving it onto `harfrust` is the follow-up; **script and language**
      come only from `harfrust`'s `Buffer::guess_segment_properties` per run (no
@@ -1156,6 +1151,42 @@ Each step lands in the crate the later steps build on, so the seam goes first.
        so `a`, ZWJ, `b` is two caret stops; a mark after a space joins the
        space; and a paragraph word with a hyphen is shaped whole, so kerning
        reaches across the hyphen there as it already did in a span.
+   - **Bidi (UAX #9), shipped 2026-10-19**: `font::bidi` on `unicode-bidi`;
+     `TextLayout` (`font/layout/fill.rs`), paragraphs (`tree/inline.rs`) and the
+     text input (`layout::caret_stops`, `Carets`, `widgets/text_input.rs`) shape
+     each level's pieces in its direction, break lines in logical order and
+     place each line in L2's visual order; `TextAlign::Start` and `End` follow
+     the paragraph. Not done or not verified:
+     - **Arrows move in logical order**: Left goes to the previous cluster in
+       the text, which in a right-to-left run is the one to its right on the
+       screen. Visual movement (Left always goes left, crossing direction
+       boundaries the way the platform does) is not built; it needs a map from
+       each caret stop to its visual neighbours, which `Carets` could carry.
+     - **A caret at a direction boundary has one place**: the position between
+       `ab ` and a Hebrew word stands at the Hebrew word's right edge (the next
+       char's leading edge), never at the end of `ab `; platforms that show two
+       carets, or pick by the direction last typed, are not followed.
+     - **A right-to-left text input's trailing spaces lie left of zero**: a
+       layout does not place the spaces a line ends with, so `caret_stops` puts
+       them past the line's end on the left, and the caret after them can sit
+       left of the input's content box, where scrolling does not follow (the
+       scroll offset is clamped at zero). Not seen in a test.
+     - **No `direction` property and no `dir`**: a paragraph's direction is
+       always its first strong char's (P2 and P3, as `dir=auto` per paragraph),
+       so an empty or digits-only Hebrew field starts left to right.
+     - **The bitmap font is not reordered when drawn**: a paragraph's bitmap
+       fragment draws its chars left to right from the fragment's left
+       (`emit_paragraph`), though its glyphs are placed in visual order; it has
+       no right-to-left glyphs to draw.
+     - **SVG text** in `crcbl-image` has no bidi, as it has no shaping (item 4
+       of pikr's gaps).
+     - **No real right-to-left font is tested**: the tests read `.notdef` glyphs
+       of Hebrew and Arabic in the committed font, and an override (U+202E) that
+       turns Latin right to left glyph for glyph, so Arabic joining, mirroring
+       and mark placement are trusted to `harfrust`.
+     - **Not measured**: each line of a paragraph with right-to-left levels
+       copies the paragraph's levels (`ParagraphBidiInfo::reordered_levels`), so
+       a long right-to-left paragraph pays its length once per line.
    - Coverage gaps, shaping: no real complex-script font (Devanagari, Arabic,
      Thai) is tested, so reordering and joining are trusted to `harfrust`'s own
      conformance suite; no real emoji font is tested in the suite (too large to
@@ -6910,8 +6941,8 @@ pending.
 - **Untested**: the `…` glyph in a registered font (the synthetic fixed-pitch
   font maps nothing past Latin-1, so the registered path is covered with the
   `...` fallback and the `…` path only in the committed font); a real TTF
-  registered; the pixels of a cut span (no golden); right-to-left text, which
-  the crate shapes but lays out left to right.
+  registered; the pixels of a cut span (no golden); right-to-left text, whose
+  lines are reordered since 2026-10-19 but which no ellipsis test cuts.
 
 ## What the fitted, scrolled menu left open (2026-09-25)
 
@@ -6994,9 +7025,6 @@ scene menu with the gaps below.
 - **`line-height` is ignored for bitmap-font spans** and takes no percentages.
 - **A shelf emptied by eviction keeps its height**, so a fragmented page can
   refuse a glyph; it is counted as unplaced.
-- **Shaped, but left to right only.** Text is shaped with `harfrust` since
-  2026-10-17 (see the colour emoji item's shaping entry); UAX #9 bidi is not
-  done, so right-to-left text is laid out in logical order.
 - **What app-registered fonts (`Ui::register_font`) left open.** Only the
   _first_ non-built-in name ahead of a list's first built-in family is kept
   (`NodeStyle::family_name`), so in `font-family: Roboto, Inter, sans-serif`

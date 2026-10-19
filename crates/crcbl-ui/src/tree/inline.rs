@@ -8,7 +8,13 @@
 //! * **A run boundary is not a break.** Soft breaks are found in the runs'
 //!   texts joined, and words are the runs between spaces whichever runs they
 //!   are in, so `un` in one run and `known` in the next is one word that
-//!   never breaks between them.
+//!   never breaks between them. Bidi levels are found in the joined text
+//!   too, so a paragraph's direction is its first strong char's whichever
+//!   run holds it, and each line's glyphs are put in visual order across
+//!   runs; a fragment is one run's stretch of one level, unbroken on the
+//!   screen, and a line's fragments run left to right. The bitmap font draws
+//!   a fragment's chars left to right whatever its level, having no
+//!   right-to-left glyphs to draw.
 //! * **A stretch with no soft break wider than the wrap width is broken
 //!   between clusters**, at the last one that fits and never before the
 //!   first — CSS's `overflow-wrap: break-word`, so a long link in a
@@ -52,6 +58,7 @@ use core::ops::Range;
 
 use glam::Vec2;
 
+use crate::font::bidi::{Bidi, visual_order};
 use crate::font::layout::{PositionedGlyph, TextAlign, wrap_width};
 use crate::font::shape::{ShapedGlyph, shape};
 use crate::font::{Font, FontId, GlyphId, breaks, cluster};
@@ -151,6 +158,9 @@ pub(crate) struct InlineGlyph {
     /// Whether cutting before it changes the shaping of either side, as
     /// [`ShapedGlyph::unsafe_to_break`] says; never in the bitmap font.
     pub unsafe_to_break: bool,
+    /// Its bidi level on its line, rule L1 applied; zero in a paragraph
+    /// with no right-to-left level.
+    pub level: u8,
     /// Its pen position from the paragraph's left.
     pub x: f32,
     pub advance: f32,
@@ -184,6 +194,8 @@ pub(crate) struct InlineLine {
     pub height: f32,
     /// Its width, the spaces it ends with excluded.
     pub width: f32,
+    /// Whether its paragraph runs right to left.
+    pub rtl: bool,
     /// How far alignment moved it right.
     pub offset: f32,
 }
@@ -209,14 +221,90 @@ enum Token {
     Newline(usize),
 }
 
+/// The paragraph's runs' texts joined, where breaks and bidi levels are
+/// found, and where each run's text starts in it.
+struct Joined {
+    text: String,
+    starts: Vec<usize>,
+}
+
+impl Joined {
+    fn new(runs: &[InlineRun<'_>]) -> Self {
+        let mut text = String::new();
+        let mut starts = Vec::with_capacity(runs.len());
+        for run in runs {
+            starts.push(text.len());
+            text.push_str(run.text);
+        }
+        Self { text, starts }
+    }
+
+    /// The run holding byte `at`.
+    fn run_at(&self, at: usize) -> usize {
+        self.starts.partition_point(|&start| start <= at) - 1
+    }
+
+    /// The parts of bytes `range` in each run they reach into.
+    fn parts(&self, range: Range<usize>) -> Vec<Segment> {
+        let mut parts = Vec::new();
+        for (run, &start) in self.starts.iter().enumerate() {
+            let end = self.starts.get(run + 1).copied().unwrap_or(self.text.len());
+            let (from, to) = (range.start.max(start), range.end.min(end));
+            if from < to {
+                parts.push((run, from - start..to - start));
+            }
+        }
+        parts
+    }
+}
+
+/// One paragraph of the joined text: its bytes, and its levels when any
+/// runs right to left.
+struct Paragraph<'j> {
+    bytes: Range<usize>,
+    bidi: Option<Bidi<'j>>,
+}
+
 /// What glyphs are pushed from: the paragraph's runs, the bitmap font a
-/// bitmap run advances by, and the soft breaks.
+/// bitmap run advances by, the soft breaks and the bidi levels.
 struct Source<'s, 'r> {
     runs: &'s [InlineRun<'r>],
     atlas: &'s FontAtlas,
+    joined: &'s Joined,
+    paragraphs: Vec<Paragraph<'s>>,
     /// Every soft break, as the run it is in and the byte of that run's text
     /// it falls before, in order.
     soft: Vec<(usize, usize)>,
+}
+
+impl Source<'_, '_> {
+    /// The paragraph holding byte `at` of the joined text.
+    fn paragraph(&self, at: usize) -> &Paragraph<'_> {
+        let index = self
+            .paragraphs
+            .partition_point(|paragraph| paragraph.bytes.end < at);
+        &self.paragraphs[index.min(self.paragraphs.len() - 1)]
+    }
+
+    /// `segments` — parts of one paragraph — cut where the bidi level
+    /// changes: each part, and whether it runs right to left.
+    fn directed(&self, segments: &[Segment]) -> Vec<(Segment, bool)> {
+        let mut out = Vec::with_capacity(segments.len());
+        for (run, bytes) in segments {
+            let at = self.joined.starts[*run] + bytes.start;
+            let paragraph = self.paragraph(at);
+            let Some(bidi) = &paragraph.bidi else {
+                out.push(((*run, bytes.clone()), false));
+                continue;
+            };
+            let local = at - paragraph.bytes.start;
+            for (piece, rtl) in bidi.runs(local..local + bytes.len()) {
+                let start = bytes.start + piece.start - local;
+                out.push(((*run, start..start + piece.len()), rtl));
+            }
+        }
+        out
+    }
 }
 
 /// A word token placed in the layout: its glyphs and its parts.
@@ -226,44 +314,24 @@ struct PlacedWord {
 }
 
 /// The paragraph's runs as words, spaces and hard breaks, in order, and its
-/// soft breaks. Breaks are found by [`crate::font::breaks`] in the runs'
-/// texts joined, so a run boundary is never a break of its own.
-fn tokens(runs: &[InlineRun<'_>]) -> (Vec<Token>, Vec<(usize, usize)>) {
-    let mut joined = String::new();
-    // Where each run's text starts in `joined`.
-    let mut starts = Vec::with_capacity(runs.len());
-    for run in runs {
-        starts.push(joined.len());
-        joined.push_str(run.text);
-    }
-    // The run holding `joined`'s byte `at`.
-    let run_at = |at: usize| starts.partition_point(|&start| start <= at) - 1;
-    // The parts of `joined`'s bytes `range` in each run they reach into.
-    let parts = |range: Range<usize>| -> Vec<Segment> {
-        let mut parts = Vec::new();
-        for (run, &start) in starts.iter().enumerate() {
-            let end = start + runs[run].text.len();
-            let (from, to) = (range.start.max(start), range.end.min(end));
-            if from < to {
-                parts.push((run, from - start..to - start));
-            }
-        }
-        parts
-    };
+/// soft breaks: breaks are found by [`crate::font::breaks`] in the runs'
+/// texts `joined`, cut into `paragraphs`, so a run boundary is never a break
+/// of its own.
+fn tokens(joined: &Joined, paragraphs: &[Paragraph<'_>]) -> (Vec<Token>, Vec<(usize, usize)>) {
     let (mut tokens, mut soft) = (Vec::new(), Vec::new());
-    let mut paragraphs = breaks::paragraphs(&joined).peekable();
-    while let Some(paragraph) = paragraphs.next() {
-        let text = &joined[paragraph.clone()];
-        let at = paragraph.start;
+    for (index, paragraph) in paragraphs.iter().enumerate() {
+        let at = paragraph.bytes.start;
+        let text = &joined.text[paragraph.bytes.clone()];
         for byte in breaks::soft_breaks(text) {
-            let run = run_at(at + byte);
-            soft.push((run, at + byte - starts[run]));
+            let run = joined.run_at(at + byte);
+            soft.push((run, at + byte - joined.starts[run]));
         }
         let mut chars = text.char_indices().peekable();
         while let Some((start, c)) = chars.next() {
             if c == ' ' {
                 tokens.extend(
-                    parts(at + start..at + start + 1)
+                    joined
+                        .parts(at + start..at + start + 1)
                         .into_iter()
                         .map(Token::Space),
                 );
@@ -273,10 +341,10 @@ fn tokens(runs: &[InlineRun<'_>]) -> (Vec<Token>, Vec<(usize, usize)>) {
             while let Some((next, c)) = chars.next_if(|&(_, c)| c != ' ') {
                 end = next + c.len_utf8();
             }
-            tokens.push(Token::Word(parts(at + start..at + end)));
+            tokens.push(Token::Word(joined.parts(at + start..at + end)));
         }
-        if paragraphs.peek().is_some() {
-            tokens.push(Token::Newline(run_at(paragraph.end)));
+        if index + 1 < paragraphs.len() {
+            tokens.push(Token::Newline(joined.run_at(paragraph.bytes.end)));
         }
     }
     (tokens, soft)
@@ -333,8 +401,21 @@ impl InlineLayout {
         };
         // Only a definite width breaks a word between clusters.
         let break_words = matches!(wrap, Wrap::Width(_));
-        let (tokens, soft) = tokens(runs);
-        let source = Source { runs, atlas, soft };
+        let joined = Joined::new(runs);
+        let paragraphs: Vec<Paragraph<'_>> = breaks::paragraphs(&joined.text)
+            .map(|bytes| Paragraph {
+                bidi: Bidi::new(&joined.text[bytes.clone()]),
+                bytes,
+            })
+            .collect();
+        let (tokens, soft) = tokens(&joined, &paragraphs);
+        let source = Source {
+            runs,
+            atlas,
+            joined: &joined,
+            paragraphs,
+            soft,
+        };
         // Each finished line's glyphs and the run its metrics fall back to.
         let mut finished: Vec<(Range<usize>, usize)> = Vec::new();
         let mut words: Vec<PlacedWord> = Vec::new();
@@ -384,7 +465,7 @@ impl InlineLayout {
             }
         }
         finished.push((line.first..line.end, last_run));
-        layout.finish(runs, &finished);
+        layout.finish(&source, &finished);
         layout
     }
 
@@ -483,9 +564,10 @@ impl InlineLayout {
     /// space — not. See the module docs for which parts are shaped together.
     fn push(&mut self, source: &Source<'_, '_>, segments: &[Segment], drawn: bool) {
         let runs = source.runs;
+        let parts = source.directed(segments);
         let mut at = 0;
-        while at < segments.len() {
-            let (run, bytes) = &segments[at];
+        while at < parts.len() {
+            let ((run, bytes), rtl) = &parts[at];
             let input = &runs[*run];
             let RunFont::Parsed(font) = input.font else {
                 if let RunFont::Bitmap(scale) = input.font {
@@ -495,29 +577,25 @@ impl InlineLayout {
                 continue;
             };
             let key = input.shaping_key();
-            let together = segments[at..]
+            let together: Vec<Segment> = parts[at..]
                 .iter()
-                .take_while(|(run, _)| runs[*run].shaping_key() == key)
-                .count();
-            self.push_shaped(
-                source,
-                font,
-                input.size,
-                &segments[at..at + together],
-                drawn,
-            );
-            at += together;
+                .take_while(|((run, _), next)| runs[*run].shaping_key() == key && next == rtl)
+                .map(|(part, _)| part.clone())
+                .collect();
+            at += together.len();
+            self.push_shaped(source, font, input.size, &together, *rtl, drawn);
         }
     }
 
     /// Appends `segments`, each in a run of `font` at `size`, shaped
-    /// together.
+    /// together, right to left when `rtl` says so.
     fn push_shaped(
         &mut self,
         source: &Source<'_, '_>,
         font: &Font,
         size: f32,
         segments: &[Segment],
+        rtl: bool,
         drawn: bool,
     ) {
         let runs = source.runs;
@@ -526,14 +604,14 @@ impl InlineLayout {
         // segments joined; one segment is shaped in its run's own text.
         let mut starts = Vec::with_capacity(segments.len());
         if let [(run, bytes)] = segments {
-            shape(font, size, runs[*run].text, bytes.clone(), &mut shaped);
+            shape(font, size, runs[*run].text, bytes.clone(), rtl, &mut shaped);
         } else {
             let mut joined = String::new();
             for (run, bytes) in segments {
                 starts.push(joined.len());
                 joined.push_str(&runs[*run].text[bytes.clone()]);
             }
-            shape(font, size, &joined, 0..joined.len(), &mut shaped);
+            shape(font, size, &joined, 0..joined.len(), rtl, &mut shaped);
         }
         // Where each cluster of the segments starts, as its run and byte: a
         // glyph that starts a cluster the shaper split, such as a flag's
@@ -578,6 +656,7 @@ impl InlineLayout {
                 breakable,
                 soft: breakable && source.soft.binary_search(&(run, start)).is_ok(),
                 unsafe_to_break: glyph.unsafe_to_break,
+                level: 0,
                 x: 0.0,
                 advance: glyph.advance,
                 shift: glyph.offset,
@@ -609,6 +688,7 @@ impl InlineLayout {
                     breakable: at == 0,
                     soft: at == 0 && source.soft.binary_search(&(run, start)).is_ok(),
                     unsafe_to_break: false,
+                    level: 0,
                     x: 0.0,
                     advance: source.atlas.glyph(c).advance * scale,
                     shift: Vec2::ZERO,
@@ -628,30 +708,78 @@ impl InlineLayout {
         pen
     }
 
-    /// Cuts each line in `finished` into fragments by run and stacks the
-    /// lines; see the module docs for the vertical metrics.
-    fn finish(&mut self, runs: &[InlineRun<'_>], finished: &[(Range<usize>, usize)]) {
+    /// Puts the glyphs of the line `glyphs` in visual order — rule L2 — and
+    /// places them again from its left edge, when its paragraph has
+    /// right-to-left levels. Returns whether its paragraph runs right to
+    /// left, and whether it was reordered.
+    fn reorder(&mut self, source: &Source<'_, '_>, glyphs: Range<usize>) -> (bool, bool) {
+        let Some(first) = self.glyphs.get(glyphs.start) else {
+            return (false, false);
+        };
+        let joined = |glyph: &InlineGlyph| source.joined.starts[glyph.run] + glyph.start;
+        let start = joined(first);
+        let paragraph = source.paragraph(start);
+        let Some(bidi) = &paragraph.bidi else {
+            return (false, false);
+        };
+        let at = paragraph.bytes.start;
+        let last = &self.glyphs[glyphs.end - 1];
+        let end = source.joined.starts[last.run] + last.end;
+        let levels = bidi.line_levels(start - at..end - at);
+        let line = &mut self.glyphs[glyphs];
+        let line_levels: Vec<_> = line
+            .iter()
+            .map(|glyph| levels[joined(glyph) - at])
+            .collect();
+        let mut pen = 0.0;
+        for index in visual_order(&line_levels) {
+            line[index].level = line_levels[index].number();
+            line[index].x = pen;
+            pen += line[index].advance;
+        }
+        (bidi.rtl(), true)
+    }
+
+    /// Puts each line in `finished` in visual order, cuts it into fragments —
+    /// each one run's stretch of one level, so one piece on the screen — and
+    /// stacks the lines; see the module docs for the vertical metrics.
+    fn finish(&mut self, source: &Source<'_, '_>, finished: &[(Range<usize>, usize)]) {
+        let runs = source.runs;
         let mut top = 0.0;
         for (index, (glyphs, fallback)) in finished.iter().enumerate() {
+            let (rtl, reordered) = self.reorder(source, glyphs.clone());
             let first = self.fragments.len();
             let mut at = glyphs.start;
             while at < glyphs.end {
-                let run = self.glyphs[at].run;
+                let (run, level) = (self.glyphs[at].run, self.glyphs[at].level);
                 let start = at;
-                while at < glyphs.end && self.glyphs[at].run == run {
+                while at < glyphs.end
+                    && (self.glyphs[at].run, self.glyphs[at].level) == (run, level)
+                {
                     at += 1;
                 }
                 let (head, tail) = (self.glyphs[start], self.glyphs[at - 1]);
+                let left = self.glyphs[start..at]
+                    .iter()
+                    .fold(f32::INFINITY, |left, glyph| left.min(glyph.x));
+                let right = self.glyphs[start..at]
+                    .iter()
+                    .fold(f32::NEG_INFINITY, |right, glyph| {
+                        right.max(glyph.x + glyph.advance)
+                    });
                 self.fragments.push(Fragment {
                     run,
                     line: index,
                     glyphs: start..at,
                     text: head.start..tail.end,
-                    x: head.x,
-                    width: tail.x + tail.advance - head.x,
+                    x: left,
+                    width: right - left,
                 });
             }
             let fragments = first..self.fragments.len();
+            if reordered {
+                self.fragments[fragments.clone()].sort_by(|a, b| a.x.total_cmp(&b.x));
+            }
             let mut on_line: Vec<&InlineRun<'_>> = self.fragments[fragments.clone()]
                 .iter()
                 .map(|fragment| &runs[fragment.run])
@@ -670,6 +798,7 @@ impl InlineLayout {
                 baseline: top + above,
                 height: above + below,
                 width,
+                rtl,
                 offset: 0.0,
             });
             top += above + below;
@@ -682,11 +811,7 @@ impl InlineLayout {
     pub fn align(&mut self, width: f32, align: TextAlign) {
         for line in &mut self.lines {
             let room = (width - line.width).max(0.0);
-            let offset = match align {
-                TextAlign::Left => 0.0,
-                TextAlign::Center => room * 0.5,
-                TextAlign::Right => room,
-            };
+            let offset = room * align.share(line.rtl);
             let shift = offset - line.offset;
             for fragment in &mut self.fragments[line.fragments.clone()] {
                 fragment.x += shift;
@@ -755,165 +880,4 @@ impl InlineLayout {
 }
 
 #[cfg(all(test, feature = "parsed-font"))]
-mod tests {
-    use super::*;
-    use crate::font::fixtures;
-
-    const SIZE: f32 = 16.0;
-
-    /// Each line's text, its fragments' texts joined, and its width.
-    fn lines(layout: &InlineLayout, runs: &[InlineRun<'_>]) -> Vec<(String, f32)> {
-        layout
-            .lines()
-            .iter()
-            .map(|line| {
-                let text = layout.fragments()[line.fragments.clone()]
-                    .iter()
-                    .map(|fragment| &runs[fragment.run].text[fragment.text.clone()])
-                    .collect();
-                (text, line.width)
-            })
-            .collect()
-    }
-
-    /// **A word too wide is broken between clusters and never inside one**:
-    /// at a width nothing fits, each `h` with its accent — two glyphs, one
-    /// cluster — keeps a line of its own.
-    #[test]
-    fn an_overlong_word_never_breaks_inside_a_cluster() {
-        let run = InlineRun::new(
-            "hh\u{301}h\u{301}",
-            RunFont::Parsed(Font::sans()),
-            SIZE,
-            20.0,
-        );
-        let runs = [run];
-        let layout = InlineLayout::new(&runs, Wrap::Width(1.0), &FontAtlas::built_in());
-        let texts: Vec<String> = lines(&layout, &runs)
-            .into_iter()
-            .map(|(text, _)| text)
-            .collect();
-        assert_eq!(texts, ["h", "h\u{301}", "h\u{301}"]);
-    }
-
-    /// **A word too wide is never broken inside a UAX #29 cluster the shaper
-    /// split**: `harfrust` gives an Arabic number sign (U+0600, a prepended
-    /// mark) a cluster of its own, apart from the digit it joins, and the
-    /// word still breaks only between the two clusters UAX #29 finds.
-    #[test]
-    fn an_overlong_word_never_breaks_inside_a_cluster_the_shaper_split() {
-        let text = "\u{600}1\u{600}2";
-        let runs = [InlineRun::new(
-            text,
-            RunFont::Parsed(Font::sans()),
-            SIZE,
-            20.0,
-        )];
-        let layout = InlineLayout::new(&runs, Wrap::Width(1.0), &FontAtlas::built_in());
-        let starts: Vec<usize> = layout.glyphs.iter().map(|glyph| glyph.start).collect();
-        assert_eq!(
-            starts,
-            [0, 2, 3, 5],
-            "the shaper joined the sign to its digit"
-        );
-        let texts: Vec<String> = lines(&layout, &runs)
-            .into_iter()
-            .map(|(text, _)| text)
-            .collect();
-        assert_eq!(texts, ["\u{600}1", "\u{600}2"]);
-    }
-
-    /// **Soft breaks are UAX #14's across runs**: a word in two runs breaks
-    /// after its hyphen, and closing punctuation after a space never starts
-    /// a line, so the word before it goes down with it; at min-content every
-    /// soft break is taken, between ideographs too.
-    #[test]
-    fn soft_breaks_follow_uax_14_across_runs() {
-        let font = Font::sans();
-        let atlas = FontAtlas::built_in();
-        let runs = [
-            InlineRun::new("The well-", RunFont::Parsed(font), SIZE, 20.0),
-            InlineRun::new("known fox )", RunFont::Parsed(font), SIZE, 20.0),
-        ];
-        let texts = |wrap: Wrap| -> Vec<String> {
-            let layout = InlineLayout::new(&runs, wrap, &atlas);
-            lines(&layout, &runs)
-                .into_iter()
-                .map(|(text, _)| text)
-                .collect()
-        };
-        assert_eq!(texts(Wrap::MinContent), ["The", "well-", "known", "fox )"]);
-        let width = |text: &str| -> f32 {
-            let run = [InlineRun::new(text, RunFont::Parsed(font), SIZE, 20.0)];
-            lines(&InlineLayout::new(&run, Wrap::None, &atlas), &run)[0].1
-        };
-        let fox = width("The well-known fox") + 1.0;
-        assert!(width("The well-known fox )") > fox, "the punctuation fits");
-        assert_eq!(texts(Wrap::Width(fox)), ["The well-known", "fox )"]);
-        let ideographs = [InlineRun::new(
-            "\u{65E5}\u{672C}",
-            RunFont::Parsed(font),
-            SIZE,
-            20.0,
-        )];
-        let layout = InlineLayout::new(&ideographs, Wrap::MinContent, &atlas);
-        assert_eq!(layout.lines().len(), 2, "no break between ideographs");
-    }
-
-    /// **A paragraph draws a mark at the shaper's offset from its pen**, on
-    /// its line's baseline, and the mark takes no width.
-    #[test]
-    fn a_mark_is_drawn_at_the_shapers_offset() {
-        let font = Font::sans();
-        let runs = [InlineRun::new(
-            "xh\u{301}",
-            RunFont::Parsed(font),
-            SIZE,
-            20.0,
-        )];
-        let layout = InlineLayout::new(&runs, Wrap::None, &FontAtlas::built_in());
-        let mut shaped = Vec::new();
-        shape(font, SIZE, "xh\u{301}", 0..4, &mut shaped);
-        let fragment = &layout.fragments()[0];
-        let (_, glyphs, _) = &layout.face_runs(fragment)[0];
-        let baseline = layout.lines()[0].baseline;
-        let pen = shaped[0].advance + shaped[1].advance;
-        assert_ne!(
-            shaped[2].offset,
-            Vec2::ZERO,
-            "the font does not move the mark"
-        );
-        assert_eq!(
-            glyphs[2].offset,
-            Vec2::new(pen, baseline) + shaped[2].offset
-        );
-        assert_eq!(fragment.width, pen);
-    }
-
-    /// **A word broken between clusters has its sides shaped again apart**:
-    /// three hearts kerned together are each a heart's own width once each
-    /// takes a line, with nothing of the kerning towards the next.
-    #[test]
-    fn a_broken_word_is_shaped_again_on_each_side() {
-        let hearts = fixtures::shaped();
-        let run = InlineRun::new(
-            "\u{2764}\u{2764}\u{2764}",
-            RunFont::Parsed(&hearts),
-            SIZE,
-            20.0,
-        );
-        let runs = [run];
-        let whole = InlineLayout::new(&runs, Wrap::None, &FontAtlas::built_in());
-        assert_eq!(
-            lines(&whole, &runs)[0].1,
-            13.0 + 13.0 + 16.0,
-            "the hearts kern"
-        );
-        let broken = InlineLayout::new(&runs, Wrap::Width(20.0), &FontAtlas::built_in());
-        let widths: Vec<f32> = lines(&broken, &runs)
-            .into_iter()
-            .map(|(_, width)| width)
-            .collect();
-        assert_eq!(widths, [16.0, 16.0, 16.0]);
-    }
-}
+mod tests;

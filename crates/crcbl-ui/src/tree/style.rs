@@ -601,7 +601,7 @@ impl NodeStyle {
         font_weight: FontWeight::NORMAL,
         font_style: FontStyle::Normal,
         line_height: LineHeight::Normal,
-        text_align: TextAlign::Left,
+        text_align: TextAlign::Start,
         white_space: WhiteSpace::Normal,
         cursor: Some(CursorIcon::Default),
         text_overflow: TextOverflow::Clip,

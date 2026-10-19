@@ -181,7 +181,7 @@ fn inherited_properties_reach_descendants_and_nothing_else_does() {
     );
     assert_eq!(
         (initial.font_family, initial.line_height, initial.text_align),
-        (FontFamily::Bitmap, LineHeight::Normal, TextAlign::Left)
+        (FontFamily::Bitmap, LineHeight::Normal, TextAlign::Start)
     );
     let deep = style_of(&ui, keys[4]);
     assert_eq!(

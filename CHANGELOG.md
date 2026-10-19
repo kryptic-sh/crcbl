@@ -32,6 +32,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `harfrust`'s flag for whether cutting the text where the glyph's cluster
   starts would shape either side differently, which the line breakers read to
   cut a word without shaping it again. A `ShapedGlyph` struct literal needs it.
+- **`crcbl_ui::font::shape::shape` takes an `rtl: bool`** before `out`: `true`
+  shapes the run right to left, its glyphs still returned in logical order. Pass
+  `false` for what it did before.
+- **`crcbl_ui::tree::TextAlign` has `Start` and `End`**, and they are its
+  default and what a stylesheet's `start` and `end` mean, where those were
+  `Left` and `Right`; `NodeStyle`'s initial `text_align` is `Start`. They follow
+  the paragraph's direction, so left-to-right text sits where it did, and an
+  exhaustive match on `TextAlign` needs the two arms.
 
 ### Added
 
@@ -54,6 +62,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   syllable written in jamo and every emoji sequence whole, where the old rule
   knew Latin combining marks and a few emoji sequences. Backspace and Delete
   take a whole cluster in every script.
+- **Right-to-left and mixed text is laid out in visual order (UAX #9)**, through
+  `unicode-bidi`, in `TextLayout`, a tree's spans and paragraphs, and text
+  inputs. A paragraph runs right to left when its first strong char is Hebrew or
+  Arabic (or an embedding, override or isolate starts one); each run of one
+  level is shaped in its direction, lines are broken in logical order, and each
+  line's runs are placed in the order rule L2 gives, so an Arabic app name in a
+  Latin line draws right to left in its place and a Hebrew paragraph sits
+  against the right edge under `text-align: start`. A text input puts its caret
+  at the leading edge of the cluster after it and draws a selection that crosses
+  a change of direction as one block for each side; the arrows still move in
+  logical order. Text with no right-to-left char is laid out exactly as before,
+  and ASCII is never analysed.
 - **Word moves and a double-click's word follow UAX #29's word boundaries**
   (`crcbl_ui::edit::{word_left, word_right, run_at}`), so `can't`, `3.14` and a
   word with a combining mark in it are one word each.

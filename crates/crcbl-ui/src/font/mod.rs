@@ -23,6 +23,7 @@
 //! * [`cluster`] — the runs of chars that fall back, break and take the
 //!   caret as one: UAX #29's grapheme clusters.
 //! * `breaks` — where a line must end and where it may: UAX #14.
+//! * `bidi` — each char's direction and a line's visual order: UAX #9.
 //! * [`shape`] — clusters to positioned glyphs through `harfrust`: GSUB and
 //!   GPOS, kerning and marks, ligatures and emoji sequences.
 //! * [`layout`] — shaped words placed and greedily broken into lines.
@@ -74,14 +75,16 @@
 //! file a user picked — parse, register and draw like the committed font,
 //! and are freed with the last clone of the [`Font`] rather than leaked.
 //!
-//! # Shaped, left to right
+//! # Shaped, in both directions
 //!
 //! Text is shaped by [`shape`]: each cluster goes to the first face that maps
 //! all of it — see [`fallback`] — a cluster no face has a glyph for draws
-//! `.notdef`, and the font's GSUB and GPOS apply. There is no bidi, so
-//! right-to-left text is shaped but laid out left to right.
+//! `.notdef`, and the font's GSUB and GPOS apply. A right-to-left run is
+//! shaped right to left, and [`layout`] puts each line's runs in the visual
+//! order UAX #9 gives them.
 
 pub mod atlas;
+pub(crate) mod bidi;
 pub(crate) mod breaks;
 pub mod cluster;
 pub mod color;

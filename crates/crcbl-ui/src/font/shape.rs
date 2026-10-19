@@ -11,17 +11,21 @@
 //!
 //! # What a run is shaped with
 //!
-//! * **Left to right, always.** The script is `harfrust`'s guess from the
-//!   run's chars (`Buffer::guess_segment_properties`), and the language is
-//!   unset. A right-to-left run is shaped — Arabic joins — but laid out in
-//!   logical order, left to right: there is no bidi.
+//! * **In the direction the caller asks for**: left to right, or right to
+//!   left for a run of an odd bidi level (`font::bidi`), which is
+//!   shaped as such — mirrored brackets, Arabic joining — and comes back in
+//!   logical order all the same, the glyphs `harfrust` puts in visual order
+//!   reversed, so a caller places it by walking its glyphs backwards from the
+//!   run's left edge. The script is `harfrust`'s guess from the run's chars
+//!   (`Buffer::guess_segment_properties`), and the language is unset.
 //! * **The text around the run is its context**, so a contextual lookup sees
 //!   past the run's edges; nothing outside the run is shaped.
 //! * **Default-ignorable chars are removed** — the zero-width joiner and the
 //!   variation selectors among them — once GSUB has seen them, so they draw
 //!   nothing and take no width.
 //! * **Clusters are monotone graphemes** (`harfrust`'s default), so a glyph's
-//!   cluster never comes before the one of the glyph before it.
+//!   cluster never comes before the one of the glyph before it, in either
+//!   direction.
 //! * **A synthesised bold** ([`face::Synthesis`](super::face::Synthesis))
 //!   widens each glyph that advances at all by
 //!   [`face::SYNTHETIC_BOLD_EM`](super::face::SYNTHETIC_BOLD_EM); a mark with
@@ -56,8 +60,9 @@ pub struct ShapedGlyph {
 }
 
 /// Appends to `out` the glyphs `range` of `text` shapes into in `font` — and
-/// the fallback faces it carries — at `size` pixels per em, in order. The
-/// text outside `range` is context only; every glyph's
+/// the fallback faces it carries — at `size` pixels per em, right to left
+/// when `rtl` says so, in logical order. The text outside `range` is context
+/// only; every glyph's
 /// [`cluster`](ShapedGlyph::cluster) is a byte offset in `text`. See the
 /// module docs.
 ///
@@ -65,7 +70,14 @@ pub struct ShapedGlyph {
 ///
 /// If `range` is not a char-boundary range of `text`, or `text` is longer
 /// than `u32::MAX` bytes, which `harfrust` numbers clusters in.
-pub fn shape(font: &Font, size: f32, text: &str, range: Range<usize>, out: &mut Vec<ShapedGlyph>) {
+pub fn shape(
+    font: &Font,
+    size: f32,
+    text: &str,
+    range: Range<usize>,
+    rtl: bool,
+    out: &mut Vec<ShapedGlyph>,
+) {
     let mut run: Option<(u8, Range<usize>)> = None;
     for cluster in cluster::clusters(&text[range.clone()]) {
         let bytes = range.start + cluster.start..range.start + cluster.end;
@@ -74,14 +86,14 @@ pub fn shape(font: &Font, size: f32, text: &str, range: Range<usize>, out: &mut 
             Some((current, run)) if *current == face => run.end = bytes.end,
             _ => {
                 if let Some((face, run)) = run.take() {
-                    shape_run(font, face, size, text, run, out);
+                    shape_run(font, face, size, text, run, rtl, out);
                 }
                 run = Some((face, bytes));
             }
         }
     }
     if let Some((face, run)) = run {
-        shape_run(font, face, size, text, run, out);
+        shape_run(font, face, size, text, run, rtl, out);
     }
 }
 
@@ -93,12 +105,14 @@ fn shape_run(
     _size: f32,
     _text: &str,
     _range: Range<usize>,
+    _rtl: bool,
     _out: &mut Vec<ShapedGlyph>,
 ) {
     match font.face(face).parsed.never {}
 }
 
-/// Appends `range` of `text` shaped in `font`'s face `face` at `size`.
+/// Appends `range` of `text` shaped in `font`'s face `face` at `size`, right
+/// to left when `rtl` says so, in logical order.
 #[cfg(feature = "parsed-font")]
 fn shape_run(
     font: &Font,
@@ -106,6 +120,7 @@ fn shape_run(
     size: f32,
     text: &str,
     range: Range<usize>,
+    rtl: bool,
     out: &mut Vec<ShapedGlyph>,
 ) {
     let drawn = font.face(face);
@@ -120,7 +135,7 @@ fn shape_run(
         nominal(drawn, face, scale, text, range, out);
         return;
     };
-    let buffer = run_shaper(shaper, text, range);
+    let buffer = run_shaper(shaper, text, range, rtl);
     let first = out.len();
     for (info, position) in buffer.glyph_infos().iter().zip(buffer.glyph_positions()) {
         let mut advance = position.x_advance as f32;
@@ -139,14 +154,23 @@ fn shape_run(
             unsafe_to_break: info.unsafe_to_break(),
         });
     }
+    if rtl {
+        out[first..].reverse();
+    }
     if let Some(glyph) = out.get_mut(first) {
         glyph.unsafe_to_break = false;
     }
 }
 
-/// `range` of `text` shaped by `shaper`, as the module docs say a run is.
+/// `range` of `text` shaped by `shaper`, right to left when `rtl` says so,
+/// as the module docs say a run is: its glyphs in visual order.
 #[cfg(feature = "parsed-font")]
-fn run_shaper(shaper: &harfrust::Font, text: &str, range: Range<usize>) -> harfrust::Buffer {
+fn run_shaper(
+    shaper: &harfrust::Font,
+    text: &str,
+    range: Range<usize>,
+    rtl: bool,
+) -> harfrust::Buffer {
     let mut buffer = harfrust::Buffer::new();
     for (at, c) in text[range.clone()].char_indices() {
         let cluster = u32::try_from(range.start + at)
@@ -155,7 +179,11 @@ fn run_shaper(shaper: &harfrust::Font, text: &str, range: Range<usize>) -> harfr
     }
     buffer.set_pre_context(&text[..range.start]);
     buffer.set_post_context(&text[range.end..]);
-    buffer.set_direction(harfrust::Direction::LeftToRight);
+    buffer.set_direction(if rtl {
+        harfrust::Direction::RightToLeft
+    } else {
+        harfrust::Direction::LeftToRight
+    });
     buffer.guess_segment_properties();
     buffer.set_flags(harfrust::BufferFlags::REMOVE_DEFAULT_IGNORABLES);
     harfrust::shape(
@@ -173,7 +201,7 @@ fn run_shaper(shaper: &harfrust::Font, text: &str, range: Range<usize>) -> harfr
 #[cfg(feature = "parsed-font")]
 pub(super) fn shapes_to_colour(face: &Font, cluster: &str) -> bool {
     match &face.parsed.shaper {
-        Some(shaper) => run_shaper(shaper, cluster, 0..cluster.len())
+        Some(shaper) => run_shaper(shaper, cluster, 0..cluster.len(), false)
             .glyph_infos()
             .iter()
             .any(|info| face.has_color_glyph(GlyphId(info.glyph_id))),
@@ -227,7 +255,7 @@ mod tests {
     /// `text` shaped whole in `font`.
     fn shaped(font: &Font, text: &str) -> Vec<ShapedGlyph> {
         let mut out = Vec::new();
-        shape(font, SIZE, text, 0..text.len(), &mut out);
+        shape(font, SIZE, text, 0..text.len(), false, &mut out);
         out
     }
 
@@ -346,13 +374,69 @@ mod tests {
         }
     }
 
+    /// **A right-to-left run is `harfrust`'s right-to-left shaping, back in
+    /// logical order**: its glyphs reversed are the glyphs, clusters and
+    /// advances `harfrust` gives the same text shaped right to left, which
+    /// differ from the left-to-right ones as kerning is looked up the other
+    /// way round.
+    #[test]
+    fn a_right_to_left_run_is_harfrusts_reversed() {
+        let font = Font::sans();
+        let scale = font.metrics().scale(SIZE);
+        let text = "AVAT";
+        let mut got = Vec::new();
+        shape(font, SIZE, text, 0..text.len(), true, &mut got);
+        let shaper = harfrust::Font::new(crate::font::SANS_TTF, 0).expect("reads");
+        let mut buffer = harfrust::Buffer::new();
+        buffer.push_str(text);
+        buffer.set_direction(harfrust::Direction::RightToLeft);
+        buffer.guess_segment_properties();
+        harfrust::shape(
+            &harfrust::ShaperFont::new(&shaper),
+            &mut buffer,
+            harfrust::ShapeOptions::new(),
+        )
+        .expect("shapes");
+        let want: Vec<(GlyphId, usize, f32)> = buffer
+            .glyph_infos()
+            .iter()
+            .zip(buffer.glyph_positions())
+            .rev()
+            .map(|(info, at)| {
+                (
+                    GlyphId(info.glyph_id),
+                    info.cluster as usize,
+                    at.x_advance as f32 * scale,
+                )
+            })
+            .collect();
+        let got: Vec<(GlyphId, usize, f32)> = got
+            .iter()
+            .map(|glyph| (glyph.glyph, glyph.cluster, glyph.advance))
+            .collect();
+        assert_eq!(got, want);
+        let clusters: Vec<usize> = got.iter().map(|glyph| glyph.1).collect();
+        assert_eq!(clusters, [0, 1, 2, 3], "not in logical order");
+        assert_ne!(
+            got,
+            {
+                let mut ltr = Vec::new();
+                shape(font, SIZE, text, 0..text.len(), false, &mut ltr);
+                ltr.iter()
+                    .map(|glyph| (glyph.glyph, glyph.cluster, glyph.advance))
+                    .collect::<Vec<_>>()
+            },
+            "the direction changed nothing, so the test cannot tell it was set"
+        );
+    }
+
     /// **A run is shaped only where asked**: shaping part of a text appends
     /// that part's glyphs, clusters counted in the whole text.
     #[test]
     fn only_the_range_is_shaped_with_clusters_in_the_whole_text() {
         let font = Font::sans();
         let mut out = Vec::new();
-        shape(font, SIZE, "ab cd", 3..5, &mut out);
+        shape(font, SIZE, "ab cd", 3..5, false, &mut out);
         let clusters: Vec<usize> = out.iter().map(|glyph| glyph.cluster).collect();
         assert_eq!(clusters, [3, 4]);
         assert_eq!(out[0].glyph, font.glyph_id('c'));

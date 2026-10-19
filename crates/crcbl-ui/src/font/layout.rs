@@ -6,9 +6,10 @@
 //!   breaks, which `font::breaks` lists — end a line, always; an
 //!   empty string, and an empty line between two newlines, is still one line
 //!   tall.
-//! * **Soft breaks are UAX #14's**, taken only where a [`cluster`] starts:
-//!   after the spaces following a word, after a hyphen, between two
-//!   ideographs, and never before closing punctuation, even after a space.
+//! * **Soft breaks are UAX #14's**, taken only where a
+//!   [`cluster`](super::cluster) starts: after the spaces following a word,
+//!   after a hyphen, between two ideographs, and never before closing
+//!   punctuation, even after a space.
 //!   Words are the runs between spaces (U+0020), so a soft break after a
 //!   hyphen or between ideographs falls inside one. A line takes words
 //!   greedily; once its last word's right edge passes the wrap width, it is
@@ -39,6 +40,17 @@
 //! word's glyphs are advanced by the shaper's advances at their face's scale
 //! and drawn at the shaper's offsets from the pen.
 //!
+//! # Bidirectional text
+//!
+//! A paragraph with right-to-left levels (`font::bidi`) is shaped
+//! in pieces of one level each, a right-to-left piece right to left; lines are
+//! broken in logical order, and each finished line's pieces are then placed
+//! from its left edge in the visual order rule L2 gives, a right-to-left
+//! piece's glyphs from its last. [`TextAlign::Start`] and [`TextAlign::End`]
+//! follow the paragraph's direction, so a Hebrew paragraph sits against the
+//! right edge by default. A paragraph with none is laid out exactly as it was
+//! before bidi existed.
+//!
 //! # Fallback faces
 //!
 //! Each cluster is drawn by the face
@@ -59,10 +71,13 @@ use core::ops::Range;
 
 use glam::Vec2;
 
-use super::shape::{ShapedGlyph, shape};
-use super::{Font, GlyphId, cluster};
+use super::shape::ShapedGlyph;
+use super::{Font, GlyphId};
 
+mod carets;
 mod fill;
+
+pub(crate) use carets::{Carets, caret_stops};
 
 /// How close below a whole pixel a width may be and still count as that pixel.
 ///
@@ -81,13 +96,30 @@ pub fn wrap_width(width: f32) -> f32 {
 /// `text-align`: where each line sits across its box.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TextAlign {
-    /// Against the left edge — `left` and `start`.
+    /// Against the edge its paragraph starts at — `start`: the left of a
+    /// left-to-right paragraph, the right of a right-to-left one.
     #[default]
+    Start,
+    /// Against the edge its paragraph ends at — `end`.
+    End,
+    /// Against the left edge — `left`.
     Left,
     /// Centred — `center`.
     Center,
-    /// Against the right edge — `right` and `end`.
+    /// Against the right edge — `right`.
     Right,
+}
+
+impl TextAlign {
+    /// How much of the room beside a line goes to its left, for a line of a
+    /// paragraph that runs right to left when `rtl` says so.
+    pub(crate) fn share(self, rtl: bool) -> f32 {
+        match (self, rtl) {
+            (Self::Left, _) | (Self::Start, false) | (Self::End, true) => 0.0,
+            (Self::Center, _) => 0.5,
+            (Self::Right, _) | (Self::Start, true) | (Self::End, false) => 1.0,
+        }
+    }
 }
 
 /// One glyph as laid out.
@@ -127,6 +159,8 @@ pub struct TextLayout {
     /// The text's length in bytes.
     text_len: usize,
     lines: Vec<TextLine>,
+    /// Whether each line's paragraph runs right to left.
+    rtl: Vec<bool>,
     line_height: f32,
 }
 
@@ -163,60 +197,6 @@ fn pieces(paragraph: &str) -> impl Iterator<Item = (Range<usize>, bool)> + '_ {
     })
 }
 
-/// Each caret stop of `text` — one line, unbroken — in `font` at `size`,
-/// written to `out` from its left edge: one before each char and one at the
-/// end, placed as [`TextLayout`] places the glyphs.
-///
-/// A stop before the first char of a [`cluster`] is where the shaper put that
-/// cluster's pen. The shaper may join several clusters into one glyph — a
-/// ligature — and their stops then share its width evenly. A char inside a
-/// cluster, where no caret stands, takes its cluster's stop.
-pub(crate) fn caret_stops(font: &Font, text: &str, size: f32, out: &mut Vec<f32>) {
-    out.clear();
-    // Each shaped cluster: its first byte, its pen and its width.
-    let mut shaped_clusters: Vec<(usize, f32, f32)> = Vec::new();
-    let mut shaped = Vec::new();
-    let mut pen = 0.0;
-    for (piece, _) in pieces(text) {
-        shaped.clear();
-        shape(font, size, text, piece, &mut shaped);
-        for glyph in &shaped {
-            match shaped_clusters.last_mut() {
-                Some((start, _, width)) if *start == glyph.cluster => *width += glyph.advance,
-                _ => shaped_clusters.push((glyph.cluster, pen, glyph.advance)),
-            }
-            pen += glyph.advance;
-        }
-    }
-    let starts: Vec<usize> = cluster::clusters(text).map(|range| range.start).collect();
-    let mut stops = starts.iter().map(|&start| {
-        // The shaped cluster it lies in, and the cluster starts that share it.
-        let at = shaped_clusters.partition_point(|&(first, _, _)| first <= start);
-        let Some(&(first, left, width)) = at.checked_sub(1).map(|at| &shaped_clusters[at]) else {
-            return 0.0;
-        };
-        let end = shaped_clusters
-            .get(at)
-            .map_or(text.len(), |&(next, _, _)| next);
-        let sharing =
-            &starts[starts.partition_point(|&s| s < first)..starts.partition_point(|&s| s < end)];
-        // A shaped cluster that starts inside a rule cluster counts its own
-        // start as one more share before the first.
-        let lead = usize::from(sharing.first() != Some(&first));
-        let index = sharing.partition_point(|&s| s < start) + lead;
-        left + width * index as f32 / (sharing.len() + lead) as f32
-    });
-    let mut current = 0.0;
-    let mut next_start = starts.iter().peekable();
-    for (byte, _) in text.char_indices() {
-        if next_start.next_if(|&&start| start == byte).is_some() {
-            current = stops.next().unwrap_or(current);
-        }
-        out.push(current);
-    }
-    out.push(pen);
-}
-
 impl TextLayout {
     /// Lays `text` out in `font` — and the fallback faces it carries — at
     /// `size` pixels per em, lines `line_height` apart, broken to fit `wrap`
@@ -234,6 +214,7 @@ impl TextLayout {
             bytes: Vec::with_capacity(text.len()),
             text_len: text.len(),
             lines: Vec::new(),
+            rtl: Vec::new(),
             line_height,
         };
         // Every glyph as shaped, beside `glyphs`: its advance and offset.
@@ -256,13 +237,9 @@ impl TextLayout {
     /// line wider than the box starts at its left edge, as CSS starts an
     /// overflowing line.
     pub fn align(&mut self, width: f32, align: TextAlign) {
-        for line in &mut self.lines {
+        for (line, &rtl) in self.lines.iter_mut().zip(&self.rtl) {
             let room = (width - line.width).max(0.0);
-            let offset = match align {
-                TextAlign::Left => 0.0,
-                TextAlign::Center => room * 0.5,
-                TextAlign::Right => room,
-            };
+            let offset = room * align.share(rtl);
             for glyph in &mut self.glyphs[line.glyphs.clone()] {
                 glyph.offset.x += offset - line.offset;
             }

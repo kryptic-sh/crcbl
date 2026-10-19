@@ -1,5 +1,6 @@
-//! Filling a [`TextLayout`]'s lines: pieces shaped and placed greedily, and
-//! each line cut at a soft break once it overflows — the rules the parent
+//! Filling a [`TextLayout`]'s lines: pieces shaped and placed greedily in
+//! logical order, each line cut at a soft break once it overflows, and each
+//! finished line's pieces put in visual order — the rules the parent
 //! module's docs give.
 
 use core::ops::Range;
@@ -7,6 +8,7 @@ use core::ops::Range;
 use glam::Vec2;
 
 use super::{PositionedGlyph, TextLayout, TextLine, pieces};
+use crate::font::bidi::{Bidi, visual_order};
 use crate::font::shape::{ShapedGlyph, shape};
 use crate::font::{Font, breaks};
 
@@ -18,6 +20,9 @@ struct Piece {
     /// Its glyphs in the layout; none for spaces, which draw nothing.
     glyphs: Range<usize>,
     spaces: bool,
+    /// Whether it runs right to left: shaped so, and its glyphs placed from
+    /// the last.
+    rtl: bool,
     /// Where its pen starts on the line.
     pen: f32,
     /// Where its pen ends.
@@ -39,6 +44,8 @@ struct Filler<'a> {
     start: usize,
     /// Its soft breaks, as bytes of the paragraph.
     soft: Vec<usize>,
+    /// Its levels, when any runs right to left.
+    bidi: Option<Bidi<'a>>,
     /// The line being filled: its first glyph and its pieces, in order.
     first: usize,
     line: Vec<Piece>,
@@ -67,19 +74,27 @@ pub(super) fn fill(
             paragraph,
             start: bytes.start,
             soft: breaks::soft_breaks(paragraph),
+            bidi: Bidi::new(paragraph),
             line: Vec::new(),
         };
         for (piece, spaces) in pieces(paragraph) {
-            filler.add(piece, spaces);
+            match &filler.bidi {
+                Some(bidi) => {
+                    for (run, rtl) in bidi.runs(piece) {
+                        filler.add(run, spaces, rtl);
+                    }
+                }
+                None => filler.add(piece, spaces, false),
+            }
         }
         let kept = filler.words_end(filler.line.len());
         filler.finish(kept);
     }
 }
 
-/// Places `piece`'s glyphs in `glyphs` from a pen at `pen`, each at its pen
-/// plus its shaper's offset in `shaped`, and records where its pen starts
-/// and ends.
+/// Places `piece`'s glyphs in `glyphs` from a pen at `pen` — the last first
+/// when it runs right to left — each at its pen plus its shaper's offset in
+/// `shaped`, and records where its pen starts and ends.
 fn place(piece: &mut Piece, glyphs: &mut [PositionedGlyph], shaped: &[ShapedGlyph], pen: f32) {
     piece.pen = pen;
     if piece.spaces {
@@ -87,17 +102,23 @@ fn place(piece: &mut Piece, glyphs: &mut [PositionedGlyph], shaped: &[ShapedGlyp
         return;
     }
     let mut pen = pen;
-    for at in piece.glyphs.clone() {
+    let mut put = |at: usize| {
         glyphs[at].offset.x = pen + shaped[at].offset.x;
         pen += shaped[at].advance;
+    };
+    if piece.rtl {
+        piece.glyphs.clone().rev().for_each(&mut put);
+    } else {
+        piece.glyphs.clone().for_each(&mut put);
     }
     piece.end = pen;
 }
 
 impl Filler<'_> {
-    /// Shapes the piece `bytes` of the paragraph — spaces or a word — onto
-    /// the line, and cuts the line until it fits.
-    fn add(&mut self, bytes: Range<usize>, spaces: bool) {
+    /// Shapes the piece `bytes` of the paragraph — spaces or a word, right to
+    /// left when `rtl` says so — onto the line, and cuts the line until it
+    /// fits.
+    fn add(&mut self, bytes: Range<usize>, spaces: bool, rtl: bool) {
         let pen = self.line.last().map_or(0.0, |piece| piece.end);
         let first = self.shaped.len();
         shape(
@@ -105,12 +126,14 @@ impl Filler<'_> {
             self.size,
             self.paragraph,
             bytes.clone(),
+            rtl,
             self.shaped,
         );
         let mut piece = Piece {
             bytes,
             glyphs: first..first,
             spaces,
+            rtl,
             pen,
             end: pen,
             advance: 0.0,
@@ -240,6 +263,7 @@ impl Filler<'_> {
                 self.size,
                 self.paragraph,
                 head.bytes.clone(),
+                piece.rtl,
                 &mut halves,
             );
             let middle = piece.glyphs.start + halves.len();
@@ -248,6 +272,7 @@ impl Filler<'_> {
                 self.size,
                 self.paragraph,
                 tail.bytes.clone(),
+                piece.rtl,
                 &mut halves,
             );
             let end = piece.glyphs.start + halves.len();
@@ -283,7 +308,9 @@ impl Filler<'_> {
     }
 
     /// Finishes the line with its first `kept` pieces: its glyphs to the end
-    /// of the last, and its width to that one's right edge.
+    /// of the last, its width to that one's right edge, and — in a paragraph
+    /// with right-to-left levels — those pieces placed again from its left
+    /// edge in visual order.
     fn finish(&mut self, kept: usize) {
         let last = kept.checked_sub(1).map(|last| &self.line[last]);
         self.layout.lines.push(TextLine {
@@ -292,5 +319,24 @@ impl Filler<'_> {
             baseline: 0.0,
             offset: 0.0,
         });
+        self.layout
+            .rtl
+            .push(self.bidi.as_ref().is_some_and(Bidi::rtl));
+        let (Some(bidi), Some(last)) = (&self.bidi, kept.checked_sub(1)) else {
+            return;
+        };
+        let line = &mut self.line[..kept];
+        let levels = bidi.line_levels(line[0].bytes.start..line[last].bytes.end);
+        let order = visual_order(
+            &line
+                .iter()
+                .map(|piece| levels[piece.bytes.start])
+                .collect::<Vec<_>>(),
+        );
+        let mut pen = 0.0;
+        for index in order {
+            place(&mut line[index], &mut self.layout.glyphs, self.shaped, pen);
+            pen = line[index].end;
+        }
     }
 }

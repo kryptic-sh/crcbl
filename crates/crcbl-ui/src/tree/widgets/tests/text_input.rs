@@ -563,6 +563,78 @@ fn the_selection_and_the_caret_sit_on_the_glyphs_they_name() {
     );
 }
 
+/// **A selection across a change of direction is a rectangle for each
+/// side**: in `ab ` and three Hebrew letters, selecting from after `a` to
+/// after the first Hebrew letter draws one block over `b` and the space and
+/// one over that letter alone, at the run's right end; the caret, after that
+/// letter, stands at its left edge.
+#[cfg(feature = "parsed-font")]
+#[test]
+fn a_selection_across_a_direction_change_is_one_block_a_side() {
+    use crate::font::layout::{Carets, caret_stops};
+    let mut ui = Ui::new();
+    ui.add_stylesheet(
+        "sans.css",
+        "text-input { font-family: sans-serif; font-size: 20px; }",
+    );
+    let text = "ab \u{5D0}\u{5D1}\u{5D2}";
+    let mut values = [String::from(text), String::new()];
+    page(&mut ui, idle(), NavInput::default(), quiet(), &mut values);
+    page(&mut ui, idle(), NavInput::NAVIGATION, quiet(), &mut values);
+    let engaged = page(&mut ui, idle(), NavInput::ACCEPT, quiet(), &mut values);
+    let edits = [
+        step(Motion::Home, false),
+        step(Motion::Right, false),
+        step(Motion::Right, true),
+        step(Motion::Right, true),
+        step(Motion::Right, true),
+    ];
+    page(
+        &mut ui,
+        idle(),
+        NavInput::NAVIGATION,
+        typed(edits),
+        &mut values,
+    );
+    let key = engaged.name.key;
+    let span = part(&ui, key, ".text-input-text").expect("text");
+    let size = style_of(&ui, span).font_size;
+    let mut carets = Carets::default();
+    caret_stops(Font::sans(), text, size, &mut carets);
+    let (text_min, _) = rect(&ui, span);
+    let at = |x: f32| (text_min.x + x).round();
+    let parent = ui
+        .nodes
+        .iter()
+        .position(|node| node.key == key)
+        .expect("built");
+    let blocks: Vec<(f32, f32)> = ui
+        .nodes
+        .iter()
+        .filter(|node| node.parent == Some(parent))
+        .filter(|node| {
+            ui.selectors[node.selector.0..node.selector.1].contains(".text-input-selection")
+        })
+        .map(|node| {
+            let (min, max) = rect(&ui, node.key);
+            (min.x, max.x)
+        })
+        .collect();
+    assert_eq!(
+        blocks,
+        [
+            (at(carets.stops[1]), at(carets.trailing[2])),
+            (at(carets.stops[4]), at(carets.stops[3])),
+        ]
+    );
+    assert!(
+        carets.stops[3] > carets.stops[4],
+        "the Hebrew is not right to left"
+    );
+    let caret = part(&ui, key, ".text-input-caret").expect("caret");
+    assert_eq!(rect(&ui, caret).0.x, at(carets.stops[4]));
+}
+
 /// **A line longer than the input scrolls to keep its caret in view**: the
 /// caret inside the content box and the end of the line against it; Home
 /// scrolls back to the start; and an input no longer engaged shows its start.

@@ -466,9 +466,11 @@ impl Property {
                 Self::LineHeight => out.push(D::LineHeight(line_height(input)?)),
                 Self::TextAlign => out.push(D::TextAlign(keyword(input, |name| {
                     Some(match_ignore_ascii_case! { name,
-                        "left" | "start" => TextAlign::Left,
+                        "start" => TextAlign::Start,
+                        "end" => TextAlign::End,
+                        "left" => TextAlign::Left,
                         "center" => TextAlign::Center,
-                        "right" | "end" => TextAlign::Right,
+                        "right" => TextAlign::Right,
                         _ => return None,
                     })
                 })?)),
@@ -1729,8 +1731,9 @@ mod tests {
         assert_eq!(height("0"), LineHeight::Multiple(0.0));
         assert_eq!(height("18px"), LineHeight::Px(18.0));
         let align = |css| style_of(&[("text-align", css)]).text_align;
-        assert_eq!(align("start"), TextAlign::Left);
-        assert_eq!(align("end"), TextAlign::Right);
+        assert_eq!(align("start"), TextAlign::Start);
+        assert_eq!(align("left"), TextAlign::Left);
+        assert_eq!(align("end"), TextAlign::End);
         assert_eq!(align("right"), TextAlign::Right);
     }
 

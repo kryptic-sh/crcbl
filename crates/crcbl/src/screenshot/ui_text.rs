@@ -283,6 +283,7 @@ pub fn ui_text_pair_kerning() -> f32 {
         UI_TEXT_PAIR_SIZE,
         UI_TEXT_PAIR,
         0..UI_TEXT_PAIR.len(),
+        false,
         &mut shaped,
     );
     let first = shaped[0];
