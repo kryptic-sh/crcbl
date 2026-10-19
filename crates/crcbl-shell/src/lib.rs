@@ -275,7 +275,6 @@ pub mod role;
 pub mod waker;
 pub mod window;
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) mod keysym;
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]

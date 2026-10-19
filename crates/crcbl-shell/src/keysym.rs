@@ -1,8 +1,8 @@
 //! The one `KeyCode` → keysym mapping that has no platform in it.
 //!
-//! Compiled wherever a consumer exists — the AppKit and Win32 backends — and,
-//! under `cfg(test)`, on every host so the table's own tests run in `cargo
-//! test` on the machine the engine is developed on.
+//! Compiled on every target: the AppKit and Win32 backends read it, and so
+//! does the [headless](crate::headless) backend, which runs everywhere and
+//! reports the same keysyms a real backend would.
 //!
 //! Most of a backend's keysym work is layout-shaped and stays in the backend:
 //! which scancode a physical key has, whether a character key answers for a
