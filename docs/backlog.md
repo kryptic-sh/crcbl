@@ -2556,6 +2556,26 @@ snap shipped; what is left was declined:
   thickets keep 60% of speed through a game-local multiplier, and it stays in
   the game until a second caller wants one.
 
+**Decided 2026-10-20: take EW's route following into `crcbl-nav`** (offered by
+EW, proven there and probe-tested on generated maps; EW keeps doorway passage
+order, squad spacing and giving up a route a squadmate blocks). One slice,
+queued after lyr's `set_panel`:
+
+- **Waypoint following** (EW `game_ai.rs` `next_route_waypoint`,
+  `route_waypoint_reach`): a waypoint short of the route's last is dropped once
+  within 0.4 m and walked to with a 0.2 m stop distance; the last uses the
+  caller's stop distance. Dropping every waypoint within a 1 m stop distance cut
+  corners into doorway jambs; over EW's seeds 0–8, two-minute patrol probes went
+  from 1–2 frozen agents per seed to none, and pursuit stalls from 3/1/4 to 0.
+  Any arrival forecast must use the same per-waypoint reach.
+- **A bounded walk toward an off-grid goal** (EW `RouteMap::plan_toward`): when
+  planning fails, clamp the goal into the `SpanGrid` region, take
+  `nearest_walkable` there, and if that is unreachable step back toward the
+  start — `nearest_walkable`'s sibling, "walk as far toward X as this grid
+  goes".
+- **Stall detection by headway from an anchor**, not a per-tick speed floor,
+  which never fires for an agent jostling against another.
+
 Raised by EW on 2026-10-19, not a request yet:
 
 - **`SpanGrid::nearest_walkable` can snap to a floor the start cannot reach.**
