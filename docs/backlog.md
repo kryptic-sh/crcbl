@@ -125,18 +125,18 @@ if something does, it must not treat them as premultiplied on the way in.
   `set_mode` because it is in window coordinates and keeps the frame);
   `ShellCaps::INPUT_REGION` says where. Declined, 2026-10-19: hit testing by
   pixel alpha, which needs a GPU readback per pointer move.
-  - **Only CI can verify**, and none of it has run: the desktop tests
+  - **Verified:** branch CI on 2026-10-20 ran green with the desktop test
     `win32_e2e::the_pointer_outside_an_input_region_reaches_the_window_beneath`
     (`WindowFromPoint` as the judge), `wayland_e2e::` and
     `x11_e2e::the_pointer_outside_an_input_region_leaves_the_window`, and
-    `x11_e2e`'s new `INPUT_REGION` cap assertion (`libxcb-shape0` was added to
-    the job's packages). Their mutants: `SetWindowRgn` skipped in
-    `apply_input_region` (the Win32 test's outside point should go red); the
-    `Resized` arm's rebuild deleted in `win32/shell.rs` (the grown caption
-    should go red); `set_mode`'s rebuild deleted (the caption back from
-    borderless should go red); `wl_surface::commit` deleted in `region.rs` (the
-    Wayland leave should time out); `apply_input_shape` returning early (the X11
-    leave should time out).
+    `x11_e2e`'s `INPUT_REGION` cap assertion; each of those three went red under
+    its mutant (`SetWindowRgn` skipped, `wl_surface::commit` deleted in
+    `region.rs`, `apply_input_shape` returning early). pikr on 0.6.0 set
+    `PhysicalRect::rounded` on its transparent window: `GetWindowRgnBox` reports
+    a complex region over the whole window and a magnified screenshot shows the
+    desktop outside the corner (no click through it was tried). **Not run:** the
+    mutants deleting the `Resized` arm's rebuild and `set_mode`'s rebuild in
+    `win32/shell.rs`.
   - **Unverified on Win32:** that a window region clips a DirectComposition
     window's drawing (documented as clipping, which is the safe direction: a
     caller gives the outer bound either way), and whether a captioned window
