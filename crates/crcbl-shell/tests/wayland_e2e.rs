@@ -1630,6 +1630,84 @@ fn pointer_focus_motion_and_buttons_come_back_in_window_pixels() {
     session.shell.destroy_window(window).expect("destroy");
 }
 
+/// How many [`ShellEvent::FrameReady`] in `events` answer `window`.
+fn frames_for(events: &[ShellEvent], window: WindowId) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, ShellEvent::FrameReady { window: w } if *w == window))
+        .count()
+}
+
+/// The compositor answers a frame request after the commit that carries it:
+/// once however many requests shared it, again for a request made after the
+/// answer, and not at all for a window destroyed first.
+///
+/// Each commit is [`map_window`](crcbl_shell::wayland_test_support::map_window)
+/// attaching a fresh buffer, which stands in for the swapchain's present.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_frame_request_is_answered_after_the_next_commit() {
+    /// Long enough for a second answer to have arrived had there been one:
+    /// several of the output's refreshes.
+    const QUIET: Duration = Duration::from_millis(300);
+
+    let mut session = Session::open();
+    assert!(
+        session.shell.caps().contains(ShellCaps::FRAME_CALLBACK),
+        "wl_surface.frame is core protocol"
+    );
+    let window = session.create_mapped(&desc("crcbl e2e frame", LogicalSize::new(640.0, 360.0)));
+    let commit = |session: &Session| {
+        crcbl_shell::wayland_test_support::map_window(&*session.shell, window)
+            .expect("commit a buffer");
+    };
+    let quiet = |session: &mut Session| {
+        let until = Instant::now() + QUIET;
+        while Instant::now() < until {
+            session.pump();
+            session.shell.wait_events(Some(Duration::from_millis(20)));
+        }
+    };
+
+    session.take_names();
+    session.shell.request_frame(window).expect("a frame");
+    session.shell.request_frame(window).expect("the same frame");
+    commit(&session);
+    session.pump_until("the frame callback", |session| {
+        frames_for(&session.events, window) > 0
+    });
+    quiet(&mut session);
+    assert_eq!(
+        frames_for(&session.events, window),
+        1,
+        "two requests before the answer share it: {:?}",
+        session.names()
+    );
+
+    session.take_names();
+    session.shell.request_frame(window).expect("the next frame");
+    commit(&session);
+    session.pump_until("the second frame callback", |session| {
+        frames_for(&session.events, window) > 0
+    });
+
+    session.take_names();
+    session.shell.request_frame(window).expect("a frame");
+    commit(&session);
+    session.shell.destroy_window(window).expect("destroy");
+    quiet(&mut session);
+    assert_eq!(
+        frames_for(&session.events, window),
+        0,
+        "the request went with the window: {:?}",
+        session.names()
+    );
+    assert!(matches!(
+        session.shell.request_frame(window),
+        Err(ShellError::InvalidWindow { .. })
+    ));
+}
+
 /// The pointer outside an input region is not the window's: moving there
 /// leaves the window as moving onto any other surface would, and `None` gives
 /// the whole window back.

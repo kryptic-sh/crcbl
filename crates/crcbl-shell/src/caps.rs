@@ -325,6 +325,18 @@ bitflags::bitflags! {
         /// region is accepted and the whole window keeps the pointer, so a
         /// launcher's transparent corners stay its own.
         const INPUT_REGION = 1 << 24;
+
+        /// [`ShellEvent::FrameReady`](crate::ShellEvent::FrameReady) is paced
+        /// by the compositor: it comes when the compositor wants the window's
+        /// next frame, and is held back while nothing of the window is shown.
+        ///
+        /// Wayland's `wl_surface.frame`, which a compositor does not answer
+        /// for a surface on an output it has turned off — the case where a
+        /// FIFO present can block forever. Clear everywhere else, where
+        /// `FrameReady` comes at the next [`pump`](crate::Shell::pump) after
+        /// the request whatever is on screen, so the loop that waits for it
+        /// runs unchanged and the pacing is the present mode's.
+        const FRAME_CALLBACK = 1 << 25;
     }
 }
 

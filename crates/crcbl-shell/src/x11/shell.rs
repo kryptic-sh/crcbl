@@ -506,6 +506,11 @@ impl Shell for X11Shell {
     /// delivery.
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
         self.keep_alive();
+        let windows = &self.windows;
+        self.queue.extend(
+            self.frames
+                .take_due(|window| windows.contains(window.cast())),
+        );
         // Drain by count, not `while let`: a sink that creates a window must
         // not be able to spin this loop, and whatever it queued belongs to the
         // next frame — which is what the socket would have done anyway.
@@ -544,8 +549,10 @@ impl Shell for X11Shell {
     /// those events are in libxcb's queue with nothing left on the socket, so
     /// the poll below would sleep on a descriptor that will never become
     /// readable for them. See [`undrained_events`](X11Shell::undrained_events).
+    /// And when a frame is due: the next pump answers it, and nothing on the
+    /// socket would end the sleep for it.
     fn wait_events(&mut self, timeout: Option<Duration>) {
-        if self.lost.is_some() || self.undrained_events {
+        if self.lost.is_some() || self.undrained_events || self.frames.is_pending() {
             return;
         }
         let mut deadline = timeout;
@@ -789,6 +796,18 @@ impl Shell for X11Shell {
         let xid = self.window(window)?.id;
         self.conn.apply_input_shape(xid, region);
         self.conn.flush();
+        Ok(())
+    }
+
+    /// Answered at the next pump: X11 has no frame callback, so
+    /// [`ShellCaps::FRAME_CALLBACK`] is clear.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle.
+    fn request_frame(&mut self, window: WindowId) -> Result<(), ShellError> {
+        self.window(window)?;
+        self.frames.request(window);
         Ok(())
     }
 

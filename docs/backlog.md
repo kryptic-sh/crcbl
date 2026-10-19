@@ -187,25 +187,48 @@ commit on Wayland, `SetWindowPos` and the appbar on Win32, `setFrame:` and the
 level on AppKit), reported through the usual `Resized`/configuration; the
 namespace and the monitor cannot change on Wayland, so changing either is a
 named error everywhere. Declined: narrower `set_panel_size`/`set_panel_margins`,
-which would grow a call per field. After frame pacing; M.
+which would grow a call per field. M.
 
-**Decided 2026-10-19: frame pacing events, asked by lyr.** A bar on an output
-the compositor has turned off (DPMS, through hypridle) gets no
-`wl_surface.frame` callback, and a FIFO present there can block: the Wayland
-backend requests no frame callbacks, `crcbl-app`'s `Pacing::Auto` is
-`PresentMode::Fifo`, and `crcbl-vk` acquires with no timeout (`u64::MAX`). Read
-from the source, not observed on a DPMS-off output. Build
-`Shell::request_frame(window)` and `ShellEvent::FrameReady { window }`: on
-Wayland a `wl_surface.frame` request that rides the next commit (the WSI's
-present commits it) and the event when the callback fires; a new cap,
-`ShellCaps::FRAME_CALLBACK`, set where the compositor paces it (Wayland, and
-AppKit if `CADisplayLink`/occlusion gives a real signal); elsewhere the event
-arrives at the next pump after the request, so one code path works everywhere
-and the clear cap says the pacing is not the compositor's. Declined: a finite
-acquire timeout as the fix, which turns a hang into a busy retry and still
-blocks the loop for the timeout. A window destroyed with a frame pending gets no
-`FrameReady`: the request dies with it (the Wayland callback is destroyed with
-the surface), as lyr asked to have settled. M.
+**Frame pacing (`Shell::request_frame`, `ShellEvent::FrameReady`): what is
+left.** Built as decided on 2026-10-19 for lyr: Wayland answers with
+`wl_surface.frame` and sets `ShellCaps::FRAME_CALLBACK`; X11, Win32, AppKit, the
+web and `HeadlessShell` answer at the next pump through `frame::FrameRequests`.
+
+- **Nothing uses it yet, so lyr's hang is not fixed.** `crcbl-app`'s loop still
+  presents every frame, `Pacing::Auto` still asks for `PresentMode::Fifo`, and
+  `crcbl-vk` still acquires with `u64::MAX`. The fix is the loop requesting a
+  frame before each present and skipping the next present until `FrameReady`
+  where `FRAME_CALLBACK` is set; until then lyr must drive it itself. S.
+- **Never run against an output that is off.** The Wayland e2e
+  (`a_frame_request_is_answered_after_the_next_commit`) shows a commit is
+  answered, once for two requests, and that a destroyed window is not; that a
+  compositor withholds `done` from a surface on a powered-off output is read
+  from the protocol, not observed. sway can turn a headless output off with
+  `swaymsg output HEADLESS-1 power off`, so an e2e that asserts no `FrameReady`
+  for a while and one after `power on` is possible.
+- **Two Wayland mechanisms no event can show.** Destroying the window's
+  `wl_callback` in `destroy_objects`, and the early return that shares one
+  callback between requests, only stop a proxy leaking: without either, the
+  orphaned callback's `done` finds no window in `frame_done` and is dropped, so
+  every test stays green. Kept for the leak, not proven by a mutant.
+- **Only CI runs the e2e halves.** The Wayland, X11 and Win32 e2e tests were
+  compiled locally and not run; the pump and `wait_events` paths of X11, Win32
+  and AppKit have no unit test, since each needs a live window. AppKit has no
+  test of `request_frame` at all: `tests/appkit_session.rs` was not extended.
+- **AppKit could be paced, and is not** (`FRAME_CALLBACK` clear). A display link
+  (`-[NSView displayLinkWithTarget:selector:]`, macOS 14) or the window's
+  occlusion state (`NSWindowOcclusionStateVisible`) would be the signal; either
+  needs a run-loop callback into the shell. Not small; the owner's call whether
+  lyr needs it on macOS.
+- **Considered for X11 and Win32, not built:** `_NET_WM_FRAME_DRAWN` from a
+  compositing window manager on X11, and DWM's composition clock on Win32. Both
+  backends leave pacing to the present mode; whether a FIFO present blocks on an
+  output that is off there, as it can on Wayland, is not known.
+- **Behaviour that is not a bug:** on Wayland the request rides the next commit
+  of any kind, so the commit that acknowledges a configure or sets an input
+  region also carries it; and a request with no commit after it is never
+  answered, so a loop that requests and then does not present waits forever.
+  `request_frame` itself never commits.
 
 **Opacity groups (`DrawList::push_opacity`, the `opacity` property): what is not
 verified.** Run on D3D12 and Vulkan (with validation) on an RX 7900 XTX through

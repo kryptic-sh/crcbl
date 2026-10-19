@@ -668,6 +668,10 @@ fn the_capability_set_is_x11_shaped() {
         !caps.contains(ShellCaps::TEXT_IME),
         "no XIM, IBus or Fcitx client, so no input method reaches this backend"
     );
+    assert!(
+        !caps.contains(ShellCaps::FRAME_CALLBACK),
+        "X11 has no frame callback, so a frame is answered at the next pump"
+    );
     // And one that depends on nothing at all: XDND is client-to-client client
     // messages plus a selection, with no extension and no window manager under
     // it. The bit is a claim, and the claim is cashed by
@@ -1507,6 +1511,50 @@ fn modifiers_are_stamped_on_the_event_they_modify() {
             "and the keysym is the shifted one"
         );
     }
+}
+
+/// A frame is answered at the next pump, once however many requests shared
+/// it, a wait does not sleep while it is due, and a window destroyed first is
+/// not answered at all.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_frame_is_answered_at_the_next_pump() {
+    /// Far longer than a wait with nothing to sleep through takes.
+    const LONG_WAIT: Duration = Duration::from_secs(30);
+
+    let mut session = Session::open();
+    let window = session.window(&desc("frame"));
+    let frames = |events: &[ShellEvent], of: WindowId| {
+        events
+            .iter()
+            .filter(|event| matches!(event, ShellEvent::FrameReady { window } if *window == of))
+            .count()
+    };
+    session.pump();
+    session.take_names();
+    session.shell.request_frame(window).expect("a frame");
+    session.shell.request_frame(window).expect("the same frame");
+    let start = Instant::now();
+    session.shell.wait_events(Some(LONG_WAIT));
+    assert!(
+        start.elapsed() < LONG_WAIT / 2,
+        "slept {:?} with a frame due",
+        start.elapsed()
+    );
+    session.pump();
+    assert_eq!(frames(&session.events, window), 1, "{:?}", session.names());
+    session.take_names();
+    session.pump();
+    assert_eq!(frames(&session.events, window), 0, "nothing asked again");
+
+    session.shell.request_frame(window).expect("a frame");
+    session.shell.destroy_window(window).expect("destroy");
+    session.pump();
+    assert_eq!(frames(&session.events, window), 0, "{:?}", session.names());
+    assert!(matches!(
+        session.shell.request_frame(window),
+        Err(ShellError::InvalidWindow { .. })
+    ));
 }
 
 /// The pointer outside an input shape is not the window's: moving there

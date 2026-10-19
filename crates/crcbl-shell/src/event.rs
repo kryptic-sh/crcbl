@@ -441,6 +441,21 @@ pub enum ShellEvent {
         active: bool,
     },
 
+    /// A good time to present the window's next frame: the answer to a
+    /// [`request_frame`](crate::Shell::request_frame).
+    ///
+    /// **One per request**, however many requests were made before it came,
+    /// and none for a window destroyed first. Where
+    /// [`ShellCaps::FRAME_CALLBACK`](crate::ShellCaps::FRAME_CALLBACK) is set
+    /// the compositor sends it, and may hold it back for as long as nothing of
+    /// the window is visible — an output it has turned off, a hidden window —
+    /// which is when presenting would block or be wasted. Elsewhere it arrives
+    /// at the next [`pump`](crate::Shell::pump) after the request.
+    FrameReady {
+        /// The window that may present.
+        window: WindowId,
+    },
+
     /// A file was dropped on the window.
     ///
     /// One event per file: a multi-file drop produces several. Only delivered
@@ -559,6 +574,7 @@ impl ShellEvent {
             | Self::DroppedFile { window, .. }
             | Self::FocusRefused { window }
             | Self::FullScreenApp { window, .. }
+            | Self::FrameReady { window }
             | Self::ClipboardData { window, .. } => Some(*window),
             #[cfg(feature = "accesskit")]
             Self::AccessibilityActivated { window }
@@ -593,6 +609,7 @@ impl ShellEvent {
             | Self::MonitorRemoved { .. }
             | Self::FocusRefused { .. }
             | Self::FullScreenApp { .. }
+            | Self::FrameReady { .. }
             | Self::ClipboardData { .. } => None,
             #[cfg(feature = "accesskit")]
             Self::AccessibilityActivated { .. }
@@ -637,6 +654,7 @@ impl ShellEvent {
             Self::MonitorRemoved { .. } => "MonitorRemoved",
             Self::FocusRefused { .. } => "FocusRefused",
             Self::FullScreenApp { .. } => "FullScreenApp",
+            Self::FrameReady { .. } => "FrameReady",
             Self::DroppedFile { .. } => "DroppedFile",
             Self::ClipboardData { .. } => "ClipboardData",
             #[cfg(feature = "accesskit")]
@@ -820,6 +838,7 @@ mod tests {
                 window,
                 active: true,
             },
+            ShellEvent::FrameReady { window },
         ];
         #[cfg(feature = "accesskit")]
         let events = {

@@ -213,6 +213,9 @@ pub struct AppKitShell {
     /// The `EnableSecureEventInput` this shell holds, kept balanced. See
     /// [`refresh_secure_input`](Self::refresh_secure_input).
     secure_input: SecureInput,
+    /// [`Shell::request_frame`]s the next pump answers; see
+    /// [`caps`](Shell::caps) for why [`ShellCaps::FRAME_CALLBACK`] is clear.
+    frames: crate::frame::FrameRequests,
     caps: ShellCaps,
 }
 
@@ -270,6 +273,7 @@ impl AppKitShell {
             woken: false,
             composing: Composing::default(),
             secure_input: SecureInput::default(),
+            frames: crate::frame::FrameRequests::default(),
             caps: super::caps(),
         };
         // SAFETY: the main thread, with a pool in scope.
@@ -1070,6 +1074,11 @@ impl Shell for AppKitShell {
     ///   window, a frame late. Whether the window server lets a click through a
     ///   fully transparent pixel of a non-opaque window's Metal layer is
     ///   unverified, and nothing here relies on it.
+    /// * [`FRAME_CALLBACK`](ShellCaps::FRAME_CALLBACK) — **nothing here asks
+    ///   the system when to draw.** A display link (`CADisplayLink` from an
+    ///   `NSView`, macOS 14) or the window's occlusion state could pace
+    ///   [`FrameReady`](ShellEvent::FrameReady), and neither is wired, so it
+    ///   comes at the next [`pump`](Shell::pump). `docs/backlog.md` carries it.
     fn caps(&self) -> ShellCaps {
         self.caps
     }
@@ -1457,6 +1466,11 @@ impl Shell for AppKitShell {
         // calls back into AppKit drains into a pool as it always did.
         let _pool = AutoreleasePool::push();
         self.keep_alive();
+        let windows = &self.windows;
+        self.queue.extend(
+            self.frames
+                .take_due(|window| windows.contains(window.cast())),
+        );
         // Drain by count, not `while let`: a sink that creates a window must not
         // be able to spin this loop, and whatever it queued belongs to the next
         // frame — which is what the event queue would have done anyway.
@@ -1484,8 +1498,13 @@ impl Shell for AppKitShell {
     /// Blocks until an event arrives or `timeout` elapses.
     ///
     /// See [`wait`](Self::wait) for why the queue is drained first and why the
-    /// reason it came back is a value rather than a duration.
+    /// reason it came back is a value rather than a duration. A frame that is
+    /// due ends the wait before it starts: the next pump answers it, and no
+    /// event would.
     fn wait_events(&mut self, timeout: Option<Duration>) {
+        if self.frames.is_pending() {
+            return;
+        }
         match self.wait(timeout) {
             Wake::TimedOut | Wake::Event | Wake::Woken => {}
         }
@@ -1955,6 +1974,14 @@ impl Shell for AppKitShell {
             }
         }
         self.refresh_secure_input();
+        Ok(())
+    }
+
+    /// Answered at the next pump; see [`caps`](Shell::caps) for why
+    /// [`ShellCaps::FRAME_CALLBACK`] is clear.
+    fn request_frame(&mut self, window: WindowId) -> Result<(), ShellError> {
+        self.window(window)?;
+        self.frames.request(window);
         Ok(())
     }
 }

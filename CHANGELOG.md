@@ -13,6 +13,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`Shell::request_frame` is a required trait method**, so a `Shell`
+  implemented outside this workspace must add it: answering a request takes
+  state a provided default could not keep.
+
+### Added
+
+- **`Shell::request_frame` and `ShellEvent::FrameReady { window }`**, for a loop
+  that presents only when the window should draw. A status bar on an output the
+  compositor has turned off is never asked for a frame there, and a FIFO present
+  to it could block the loop for as long as the output stayed off. Ask before
+  presenting; the answer says when to present the next frame. Requests made
+  before the answer share one `FrameReady`, and a window destroyed first gets
+  none. On Wayland it is `wl_surface.frame`, answered by the compositor after
+  the commit the swapchain's present makes, and `ShellCaps::FRAME_CALLBACK` says
+  so; on X11, Win32, AppKit, the web and `HeadlessShell` the answer comes at the
+  next `pump` and the bit is clear, so one loop works everywhere, and
+  `wait_events` does not sleep while an answer is due.
+  `HeadlessShell::frame_requested` says whether a request is outstanding.
+
 ## [0.6.0] - 2026-10-20
 
 ### Breaking

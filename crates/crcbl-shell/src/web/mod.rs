@@ -48,7 +48,11 @@
 //! [`SERVER_DECORATIONS`](ShellCaps::SERVER_DECORATIONS) because a canvas is
 //! placed and framed by the document, not by a window system;
 //! [`ASPECT_HINT_HONORED`](ShellCaps::ASPECT_HINT_HONORED) because there is no
-//! interactive resize for the browser to constrain.
+//! interactive resize for the browser to constrain;
+//! [`FRAME_CALLBACK`](ShellCaps::FRAME_CALLBACK) because a
+//! [`FrameReady`](ShellEvent::FrameReady) comes at the next pump: the
+//! browser paces when the shim runs a pump at all, from
+//! `requestAnimationFrame`, and not this event.
 //!
 //! # Mouselook, and exactly what `RAW_POINTER_MOTION` promises here
 //!
@@ -1044,6 +1048,8 @@ pub struct WebShell {
     pointer_mode: PointerMode,
     cursor: Option<CursorIcon>,
     close_pending: bool,
+    /// [`Shell::request_frame`]s the next pump answers.
+    frames: crate::frame::FrameRequests,
 }
 
 impl WebShell {
@@ -1087,6 +1093,7 @@ impl WebShell {
             pointer_mode: PointerMode::Free,
             cursor: Some(CursorIcon::Default),
             close_pending: false,
+            frames: crate::frame::FrameRequests::default(),
         }
     }
 
@@ -1336,6 +1343,13 @@ impl Shell for WebShell {
             let mut bridge = self.shared.borrow_mut();
             (bridge.queue.drain(..).collect(), bridge.fullscreen)
         };
+        // Taken before the sink runs, so a request it makes is the next
+        // pump's.
+        let live = self.window;
+        let frames: Vec<ShellEvent> = self
+            .frames
+            .take_due(|window| live == Some(window))
+            .collect();
         // Before the queue, and applied to the *existing* configuration too: a
         // `fullscreenchange` and the resize it causes arrive in either order,
         // and one that arrives second must not leave the mode describing the
@@ -1359,6 +1373,9 @@ impl Shell for WebShell {
                 _ => {}
             }
             sink(event);
+        }
+        for frame in frames {
+            sink(frame);
         }
     }
 
@@ -1465,6 +1482,18 @@ impl Shell for WebShell {
     ) -> Result<(), ShellError> {
         self.check(window)?;
         Err(Self::unsupported("pointer warp"))
+    }
+
+    /// Answered at the next pump, which the shim runs from
+    /// `requestAnimationFrame`.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle.
+    fn request_frame(&mut self, window: WindowId) -> Result<(), ShellError> {
+        self.check(window)?;
+        self.frames.request(window);
+        Ok(())
     }
 
     fn reply_close_request(
@@ -1600,6 +1629,29 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A frame is answered once, at the next pump, and not for a canvas whose
+    /// window was destroyed first.
+    #[test]
+    fn a_requested_frame_comes_at_the_next_pump() {
+        let (mut shell, window) = shell_with_window(13);
+        assert!(!shell.caps().contains(ShellCaps::FRAME_CALLBACK));
+        shell.request_frame(window).expect("a frame");
+        shell.request_frame(window).expect("the same frame");
+        assert_eq!(drain(&mut shell), [ShellEvent::FrameReady { window }]);
+        assert_eq!(drain(&mut shell), [], "nothing asked again");
+
+        shell.request_frame(window).expect("a frame");
+        shell.destroy_window(window).expect("destroy");
+        assert!(
+            !drain(&mut shell).contains(&ShellEvent::FrameReady { window }),
+            "the request went with the window"
+        );
+        assert!(matches!(
+            shell.request_frame(window),
+            Err(ShellError::InvalidWindow { .. })
+        ));
     }
 
     #[test]

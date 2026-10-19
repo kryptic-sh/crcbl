@@ -275,6 +275,7 @@ pub mod role;
 pub mod waker;
 pub mod window;
 
+pub(crate) mod frame;
 pub(crate) mod keysym;
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -944,6 +945,60 @@ pub trait Shell: core::fmt::Debug {
         let _ = region;
         self.window_state(window).map(|_| ())
     }
+
+    /// Asks for a [`ShellEvent::FrameReady`] when `window` should present its
+    /// next frame.
+    ///
+    /// For a loop that presents only when told to: a status bar on an output
+    /// the compositor has turned off is never asked for a frame there, and a
+    /// FIFO present to it can block the loop for as long as the output stays
+    /// off. Ask **before** presenting the frame the answer paces, then present
+    /// the next one once it comes. The first frame needs no answer.
+    ///
+    /// ```
+    /// # use crcbl_shell::{HeadlessShell, Shell, ShellEvent, WindowDesc};
+    /// # let mut shell = HeadlessShell::new();
+    /// # let window = shell.create_window(&WindowDesc::default())?;
+    /// let mut may_present = true;
+    /// # let mut presented = 0;
+    /// for _ in 0..3 {
+    ///     shell.pump(&mut |event| {
+    ///         if let ShellEvent::FrameReady { window: ready } = event {
+    ///             may_present |= ready == window;
+    ///         }
+    ///     });
+    ///     if may_present {
+    ///         shell.request_frame(window)?;
+    ///         // … record and present …
+    /// #       presented += 1;
+    ///         may_present = false;
+    ///     }
+    /// }
+    /// // With no compositor to hold it back, each answer came at the next pump.
+    /// assert_eq!(presented, 3);
+    /// # Ok::<(), crcbl_shell::ShellError>(())
+    /// ```
+    ///
+    /// Requests made before the answer comes share it: one `FrameReady`
+    /// answers them all. A window destroyed with a request outstanding gets no
+    /// answer.
+    ///
+    /// Where [`ShellCaps::FRAME_CALLBACK`] is set — Wayland, as
+    /// `wl_surface.frame` — the compositor answers. The request is surface
+    /// state that rides the next commit, which is the one the swapchain's
+    /// present makes, and this call commits nothing itself, so a window that
+    /// asks and then never presents may never be answered. Everywhere else
+    /// the answer comes at the next [`pump`](Self::pump), and
+    /// [`wait_events`](Self::wait_events) does not sleep while one is due.
+    ///
+    /// A required method, unlike its neighbours: a default could validate the
+    /// handle but not keep the request, and a request nothing answers stalls
+    /// the loop waiting for it.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    fn request_frame(&mut self, window: WindowId) -> Result<(), ShellError>;
 
     /// Tells the input method what text field in `window` is taking typing:
     /// `Some(purpose)` as a field gains the keyboard focus, `None` as it loses

@@ -144,6 +144,7 @@ use crcbl_core::input::{
 use crcbl_core::time::{ManualTime, TimeSource};
 use crcbl_core::{EventTime, Pool, SurfaceTarget};
 
+use crate::frame::FrameRequests;
 use crate::waker::WakeSignal;
 use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
@@ -320,6 +321,8 @@ pub struct HeadlessShell {
     configure_delay: u32,
     /// The doorbell [`waker`](Shell::waker) hands out, made on the first ask.
     wake: Option<Arc<HeadlessWake>>,
+    /// [`Shell::request_frame`]s the next pump answers.
+    frames: FrameRequests,
 }
 
 /// The headless shell's doorbell: a flag and the condition variable a wait
@@ -405,6 +408,7 @@ impl HeadlessShell {
             waits: 0,
             configure_delay: DEFAULT_CONFIGURE_DELAY,
             wake: None,
+            frames: FrameRequests::default(),
         }
     }
 
@@ -1068,6 +1072,20 @@ impl HeadlessShell {
         Ok(self.window(window)?.input_region.as_deref())
     }
 
+    /// Whether the window has asked for a frame, with
+    /// [`Shell::request_frame`], that the next pump has yet to answer.
+    ///
+    /// Headless-only, for the same reason as [`title`](Self::title): a test
+    /// of a loop that paces itself reads whether the loop asked.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    pub fn frame_requested(&self, window: WindowId) -> Result<bool, ShellError> {
+        self.window(window)?;
+        Ok(self.frames.contains(window))
+    }
+
     /// Starts a pretend assistive technology reading `window`, raising
     /// [`ShellEvent::AccessibilityActivated`]. Does nothing if one already is.
     ///
@@ -1696,6 +1714,11 @@ impl Shell for HeadlessShell {
 
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
         self.keep_alive();
+        let windows = &self.windows;
+        self.queue.extend(
+            self.frames
+                .take_due(|window| windows.contains(window.cast())),
+        );
         // Drain by count rather than `while let`: a sink that injects further
         // events (a UI that opens a window on a click) must not be able to spin
         // this loop forever, and the events it queued belong to the next frame
@@ -1724,8 +1747,9 @@ impl Shell for HeadlessShell {
     ///
     /// This shell reports [`ShellCaps::EVENT_WAIT`] by default, and that bit
     /// says `wait_events` *genuinely blocks* — so it does: with the capability
-    /// set and nothing already queued, this really sleeps for `timeout`, and an
-    /// editor-style idle loop tested here idles rather than spinning. Without
+    /// set, nothing already queued and no frame due, this really sleeps for
+    /// `timeout`, and an editor-style idle loop tested here idles rather than
+    /// spinning. Without
     /// the capability it returns immediately, like every backend that cannot
     /// block.
     ///
@@ -1740,7 +1764,10 @@ impl Shell for HeadlessShell {
     /// rings.
     fn wait_events(&mut self, timeout: Option<Duration>) {
         self.waits += 1;
-        if !self.caps.contains(ShellCaps::EVENT_WAIT) || !self.queue.is_empty() {
+        if !self.caps.contains(ShellCaps::EVENT_WAIT)
+            || !self.queue.is_empty()
+            || self.frames.is_pending()
+        {
             return;
         }
         match (&self.wake, timeout) {
@@ -1807,6 +1834,16 @@ impl Shell for HeadlessShell {
         region: Option<&[PhysicalRect]>,
     ) -> Result<(), ShellError> {
         self.window_mut(window)?.input_region = region.map(<[PhysicalRect]>::to_vec);
+        Ok(())
+    }
+
+    /// Answered at the next pump, as every backend without
+    /// [`ShellCaps::FRAME_CALLBACK`] answers; there is no compositor to hold
+    /// it back. [`frame_requested`](HeadlessShell::frame_requested) reads
+    /// whether one is outstanding.
+    fn request_frame(&mut self, window: WindowId) -> Result<(), ShellError> {
+        self.window(window)?;
+        self.frames.request(window);
         Ok(())
     }
 
@@ -3134,6 +3171,66 @@ mod tests {
             Err(ShellError::InvalidWindow { .. })
         ));
         assert!(shell.input_region(window).is_err());
+    }
+
+    fn frames_for(events: &[ShellEvent], window: WindowId) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, ShellEvent::FrameReady { window: w } if *w == window))
+            .count()
+    }
+
+    #[test]
+    fn requests_for_a_frame_share_one_answer_at_the_next_pump() {
+        let (mut shell, window) = shell_with_configured_window();
+        assert!(!shell.frame_requested(window).expect("live"));
+        shell.request_frame(window).expect("a frame");
+        shell.request_frame(window).expect("the same frame");
+        assert!(shell.frame_requested(window).expect("live"));
+        let events = drain(&mut shell);
+        assert_eq!(frames_for(&events, window), 1, "{:?}", names(&events));
+        assert!(!shell.frame_requested(window).expect("live"));
+        assert_eq!(
+            frames_for(&drain(&mut shell), window),
+            0,
+            "nothing asked again"
+        );
+        shell.request_frame(window).expect("the next frame");
+        assert_eq!(frames_for(&drain(&mut shell), window), 1);
+    }
+
+    #[test]
+    fn a_window_destroyed_with_a_frame_requested_is_not_answered() {
+        let (mut shell, doomed) = shell_with_configured_window();
+        let kept = shell
+            .create_window(&WindowDesc::default())
+            .expect("a second window");
+        settle(&mut shell);
+        shell.request_frame(doomed).expect("a frame");
+        shell.request_frame(kept).expect("a frame");
+        shell.destroy_window(doomed).expect("destroy");
+        let events = drain(&mut shell);
+        assert_eq!(frames_for(&events, doomed), 0, "{:?}", names(&events));
+        assert_eq!(frames_for(&events, kept), 1, "the other window still asked");
+        assert!(matches!(
+            shell.request_frame(doomed),
+            Err(ShellError::InvalidWindow { .. })
+        ));
+        assert!(shell.frame_requested(doomed).is_err());
+    }
+
+    #[test]
+    fn a_wait_does_not_sleep_through_a_frame_that_is_due() {
+        let (mut shell, window) = shell_with_configured_window();
+        shell.request_frame(window).expect("a frame");
+        let start = std::time::Instant::now();
+        shell.wait_events(Some(LONG_WAIT));
+        assert!(
+            start.elapsed() < LONG_WAIT / 2,
+            "slept {:?} with a frame due",
+            start.elapsed()
+        );
+        assert_eq!(frames_for(&drain(&mut shell), window), 1);
     }
 
     #[test]

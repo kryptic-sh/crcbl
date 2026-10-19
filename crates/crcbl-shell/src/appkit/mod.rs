@@ -431,7 +431,8 @@ mod tests {
         // `PANEL_RESERVE` because macOS lets nothing but the menu bar and the
         // Dock reserve space. `PANEL_EXCLUSIVE_KEYBOARD` because an exclusive panel is made key
         // once, and the user can click another window. `INPUT_REGION` because
-        // an `NSWindow` has no input region.
+        // an `NSWindow` has no input region. `FRAME_CALLBACK` because no
+        // display link is wired.
         for absent in [
             ShellCaps::FRACTIONAL_SCALE,
             ShellCaps::HW_UPSCALE,
@@ -439,6 +440,7 @@ mod tests {
             ShellCaps::PANEL_RESERVE,
             ShellCaps::PANEL_EXCLUSIVE_KEYBOARD,
             ShellCaps::INPUT_REGION,
+            ShellCaps::FRAME_CALLBACK,
         ] {
             assert!(!caps.contains(absent), "{absent:?} is not implemented");
         }

@@ -224,6 +224,10 @@ pub struct Win32Shell {
     /// keyed by this — but the seam promises ids are unique within a shell, and
     /// a consumer with two reads in flight tells them apart by nothing else.
     next_request: u32,
+    /// [`Shell::request_frame`]s the next pump answers: nothing in a plain
+    /// `HWND`'s messages paces presents, so
+    /// [`ShellCaps::FRAME_CALLBACK`] is clear.
+    frames: crate::frame::FrameRequests,
     caps: ShellCaps,
 }
 
@@ -336,6 +340,7 @@ impl Win32Shell {
             consumed: Consumed::default(),
             visibility: Visibility::default(),
             next_request: 1,
+            frames: crate::frame::FrameRequests::default(),
             caps: Self::latch_caps(raw_motion),
         };
         shell.monitors = shell.enumerate_monitors();
@@ -1636,6 +1641,11 @@ impl Shell for Win32Shell {
     /// costs and why the alternative is a decision above this crate.
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
         self.keep_alive();
+        let windows = &self.windows;
+        self.queue.extend(
+            self.frames
+                .take_due(|window| windows.contains(window.cast())),
+        );
         // Drain by count, not `while let`: a sink that creates a window must
         // not be able to spin this loop, and whatever it queued belongs to the
         // next frame — which is what the message queue would have done anyway.
@@ -1669,7 +1679,13 @@ impl Shell for Win32Shell {
     /// sleeps**, so there is never work waiting when the sleep starts. See
     /// there for why that is the drain rather than `MWMO_INPUTAVAILABLE`, and
     /// for the CI run that decided it.
+    ///
+    /// A frame that is due is work of the same kind with no message behind
+    /// it, so the wait returns at once while one is.
     fn wait_events(&mut self, timeout: Option<Duration>) {
+        if self.frames.is_pending() {
+            return;
+        }
         // A wait that cannot wait turns an editor idling at zero frames per
         // second into one spinning a core, and says nothing while it does it.
         // Nothing can be done about it here — the caller has no alternative to
@@ -2110,6 +2126,14 @@ impl Shell for Win32Shell {
         }
         Self::apply_input_region(state.raw(), region)?;
         state.input_region = region.map(<[PhysicalRect]>::to_vec);
+        Ok(())
+    }
+
+    /// Answered at the next pump: nothing in a plain `HWND`'s messages paces
+    /// presents, so [`ShellCaps::FRAME_CALLBACK`] is clear.
+    fn request_frame(&mut self, window: WindowId) -> Result<(), ShellError> {
+        self.window(window)?;
+        self.frames.request(window);
         Ok(())
     }
 

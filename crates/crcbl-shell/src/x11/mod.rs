@@ -764,6 +764,9 @@ pub struct X11Shell {
     /// The doorbell [`waker`](Shell::waker) hands out, made on the first ask
     /// and polled beside the connection from then on.
     wake: Option<std::sync::Arc<crate::linux::wake::WakePipe>>,
+    /// [`Shell::request_frame`]s the next pump answers: X11 has no frame
+    /// callback, so [`ShellCaps::FRAME_CALLBACK`] is clear.
+    frames: crate::frame::FrameRequests,
     lost: Option<String>,
 }
 
@@ -930,6 +933,7 @@ impl X11Shell {
             has_window_manager,
             undrained_events: false,
             wake: None,
+            frames: crate::frame::FrameRequests::default(),
             lost: None,
         };
         shell.monitors = shell.enumerate_monitors();

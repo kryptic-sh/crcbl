@@ -614,6 +614,15 @@ fn an_input_region_is_applied() {
     }
 }
 
+/// Nothing in a plain `HWND`'s messages paces presents, so a frame is answered
+/// at the next pump and the bit says the compositor is not the one pacing.
+#[test]
+fn frames_are_not_paced_by_the_compositor() {
+    for raw_motion in [false, true] {
+        assert!(!Win32Shell::latch_caps(raw_motion).contains(ShellCaps::FRAME_CALLBACK));
+    }
+}
+
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_capabilities_are_exactly_what_this_backend_implements() {
@@ -657,6 +666,7 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
     // A capability that overstates itself is worse than one that is missing.
     assert!(!caps.contains(ShellCaps::HW_UPSCALE));
     assert!(!caps.contains(ShellCaps::PANEL_EXCLUSIVE_KEYBOARD));
+    assert!(!caps.contains(ShellCaps::FRAME_CALLBACK));
     assert_eq!(caps, shell.caps(), "latched for the shell's lifetime");
 
     // And the methods agree with the bits, which is what makes them

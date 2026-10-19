@@ -254,6 +254,7 @@ impl WaylandShell {
                 decoration: ptr::null_mut(),
                 fractional_scale,
                 viewport,
+                frame_callback: ptr::null_mut(),
                 title: desc.title.to_string(),
                 requested_size: desc.size,
                 requested_mode: desc.mode,

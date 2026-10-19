@@ -56,7 +56,8 @@
 //! | `zwp_text_input_v3` | [`TextPreedit`](ShellEvent::TextPreedit) and composed [`TextCommit`](ShellEvent::TextCommit), for a window that named a field with [`Shell::set_text_input`] — see [`text_input`] |
 //!
 //! And a window's input region with core `wl_surface.set_input_region` — see
-//! [`region`] and [`Shell::set_input_region`].
+//! [`region`] and [`Shell::set_input_region`] — and frame pacing with core
+//! `wl_surface.frame` — see [`frame`] and [`Shell::request_frame`].
 //!
 //! Still deliberately absent: touch, tablet, the *primary*
 //! selection (`wp_primary_selection_v1` — middle-click paste, which the seam
@@ -172,6 +173,7 @@ mod data;
 mod data_device;
 mod fd;
 pub mod ffi;
+mod frame;
 mod input;
 mod layer;
 mod popup;
@@ -222,8 +224,8 @@ use protocol::relative_pointer::{zwp_relative_pointer_manager_v1, zwp_relative_p
 use protocol::text_input::zwp_text_input_manager_v3;
 use protocol::viewporter::{wp_viewport, wp_viewporter};
 use protocol::wayland::{
-    wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source,
-    wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
+    wl_callback, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer,
+    wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
 };
 use protocol::xdg_decoration::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1};
 use protocol::xdg_output::{zxdg_output_manager_v1, zxdg_output_v1};
@@ -413,6 +415,8 @@ enum ObjectKind {
     LayerSurface,
     Decoration,
     FractionalScale,
+    /// A `wl_callback` from `wl_surface.frame`; see [`frame`].
+    FrameCallback,
     Seat,
     Pointer,
     Keyboard,
@@ -488,6 +492,9 @@ enum RawEvent {
     SurfaceLeave {
         surface: usize,
         output: usize,
+    },
+    FrameDone {
+        callback: usize,
     },
     XdgSurfaceConfigure {
         xdg_surface: usize,
@@ -931,6 +938,14 @@ unsafe extern "C" fn dispatch(
                     _ => None,
                 };
                 sink.events.extend(raw);
+            }
+        }
+        ObjectKind::FrameCallback => {
+            // SAFETY: see the note above the `match`.
+            if let Some(wl_callback::Event::Done { .. }) =
+                unsafe { wl_callback::decode_event(opcode, args) }
+            {
+                sink.events.push(RawEvent::FrameDone { callback: proxy });
             }
         }
         ObjectKind::XdgSurface => {
@@ -1933,6 +1948,9 @@ struct WlWindow {
     decoration: *mut WlProxy,
     fractional_scale: *mut WlProxy,
     viewport: *mut WlProxy,
+    /// The `wl_callback` of a [`Shell::request_frame`] not yet answered, or
+    /// null; see [`frame`].
+    frame_callback: *mut WlProxy,
     title: String,
     requested_size: LogicalSize,
     requested_mode: DisplayMode,
@@ -2248,6 +2266,9 @@ impl WaylandShell {
         caps.insert(ShellCaps::TRANSPARENT);
         // `wl_surface.set_input_region` is core protocol on every surface.
         caps.insert(ShellCaps::INPUT_REGION);
+        // So is `wl_surface.frame`, which the compositor answers when it wants
+        // the surface's next frame.
+        caps.insert(ShellCaps::FRAME_CALLBACK);
         // `xdg_wm_base`, which `open` requires, has had popups from version 1,
         // and moves them from version 3.
         caps.insert(ShellCaps::POPUP);
@@ -2828,6 +2849,7 @@ impl WaylandShell {
                 RawEvent::SurfaceLeave { surface, output } => {
                     self.surface_output_changed(surface, output, false);
                 }
+                RawEvent::FrameDone { callback } => self.frame_done(callback),
                 RawEvent::ToplevelConfigure {
                     toplevel,
                     width,
@@ -3422,6 +3444,10 @@ impl WaylandShell {
                 .release(window.fractional_scale, wp_fractional_scale_v1::destroy);
             self.conn.release(window.viewport, wp_viewport::destroy);
         }
+        // An unanswered frame request goes with its window, and is never
+        // answered: the seam promises no `FrameReady` for a destroyed window.
+        // `wl_callback` has no destructor request, so this is client-side.
+        self.conn.destroy(window.frame_callback);
         // Protocol destructors, not client-side frees: a `wl_surface` the
         // compositor was never told about stays on screen, with its last
         // buffer, until the connection closes. Order matters: the role object
@@ -3802,6 +3828,7 @@ impl Shell for WaylandShell {
                 decoration,
                 fractional_scale,
                 viewport,
+                frame_callback: ptr::null_mut(),
                 title: desc.title.to_string(),
                 requested_size: desc.size,
                 requested_mode: desc.mode,
@@ -3998,6 +4025,10 @@ impl Shell for WaylandShell {
         region: Option<&[PhysicalRect]>,
     ) -> Result<(), ShellError> {
         self.apply_input_region(window, region)
+    }
+
+    fn request_frame(&mut self, window: WindowId) -> Result<(), ShellError> {
+        self.request_frame_callback(window)
     }
 
     fn monitors(&self) -> &[MonitorInfo] {
@@ -5106,6 +5137,7 @@ mod tests {
             decoration: ptr::null_mut(),
             fractional_scale: ptr::null_mut(),
             viewport: ptr::null_mut(),
+            frame_callback: ptr::null_mut(),
             title: String::new(),
             requested_size: LogicalSize::new(640.0, 480.0),
             requested_mode: DisplayMode::Windowed,
