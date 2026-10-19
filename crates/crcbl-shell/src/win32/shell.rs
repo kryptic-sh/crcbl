@@ -142,6 +142,10 @@ pub(super) struct WinWindow {
     /// dismisses it, and its parent, which destroys it when it goes. `None`
     /// for every other window. See [`popup`](super::popup).
     pub(super) popup: Option<crate::PopupDesc>,
+    /// What [`set_input_region`](Shell::set_input_region) last gave, kept to
+    /// build the window region again against a new frame; `None` for the
+    /// whole window.
+    input_region: Option<Vec<PhysicalRect>>,
 }
 
 impl WinWindow {
@@ -367,7 +371,8 @@ impl Win32Shell {
             .union(ShellCaps::POPUP)
             .union(ShellCaps::POPUP_REPOSITION)
             .union(ShellCaps::TRANSPARENT)
-            .union(ShellCaps::CURSOR_SHAPE);
+            .union(ShellCaps::CURSOR_SHAPE)
+            .union(ShellCaps::INPUT_REGION);
         #[cfg(feature = "accesskit")]
         let caps = caps.union(ShellCaps::ACCESSIBILITY);
         if raw_motion {
@@ -883,6 +888,17 @@ impl Win32Shell {
                         continue;
                     }
                     state.last_size = Some(size);
+                    // The window region is in window coordinates, so a new size
+                    // moves the frame it keeps. After the restatement check, so
+                    // nothing the rebuild itself sends can start it again; a
+                    // mode change, which keeps the size, rebuilds in `set_mode`.
+                    if let Some(region) = state.input_region.as_deref()
+                        && let Err(error) = Self::apply_input_region(hwnd as Handle, Some(region))
+                    {
+                        crcbl_core::log::warn!(
+                            "the input region was not rebuilt for the new frame: {error}"
+                        );
+                    }
                     state.pending = Some(WindowConfiguration {
                         size,
                         scale_factor: state.scale_factor,
@@ -1240,9 +1256,16 @@ impl Shell for Win32Shell {
     ///   Vulkan refuses such a surface by name in `create_surface`, which is
     ///   how a caller on that backend finds out; the shell cannot know which
     ///   backend will draw. A pixel of alpha zero is still hit by the pointer
-    ///   (this is not a layered window); click-through is `WM_NCHITTEST`'s, as
-    ///   [`PopupInput::Passthrough`](crate::PopupInput::Passthrough) already
-    ///   answers it.
+    ///   (this is not a layered window); click-through to another program is
+    ///   [`INPUT_REGION`](ShellCaps::INPUT_REGION)'s.
+    /// * [`INPUT_REGION`](ShellCaps::INPUT_REGION) — a window region, which
+    ///   Windows hit-tests before any window procedure is asked, so the pointer
+    ///   outside it reaches the window beneath in any process.
+    ///   `WM_NCHITTEST`'s `HTTRANSPARENT`, which
+    ///   [`PopupInput::Passthrough`](crate::PopupInput::Passthrough) answers,
+    ///   only reaches windows of the same thread. The region also clips what
+    ///   the window draws, and keeps the frame of a captioned window; see
+    ///   [`set_input_region`](Shell::set_input_region).
     /// * [`ACCESSIBILITY`](ShellCaps::ACCESSIBILITY), only when built with the
     ///   `accesskit` feature — each window has a UI Automation adapter that
     ///   answers `WM_GETOBJECT` with the tree `update_accessibility` sent, and
@@ -1378,6 +1401,7 @@ impl Shell for Win32Shell {
             transparent: desc.transparent,
             panel,
             popup,
+            input_region: None,
         };
         if desc.transparent {
             Self::apply_transparent_chrome(hwnd.as_ptr());
@@ -1553,6 +1577,10 @@ impl Shell for Win32Shell {
         let state = self.window_mut(window)?;
         state.pending = Some(config);
         state.last_size = Some(config.size);
+        // The frame came or went, and the window region keeps it.
+        if let Some(region) = state.input_region.as_deref() {
+            Self::apply_input_region(state.raw(), Some(region))?;
+        }
         Ok(())
     }
 
@@ -2061,6 +2089,27 @@ impl Shell for Win32Shell {
         let area = area.map(geometry::rect_from);
         self.shared.set_input_area(key, area);
         input::place_ime(hwnd, area);
+        Ok(())
+    }
+
+    /// A window region built from the rectangles and the window's frame, and
+    /// built again on every resize and mode change, since it is in window
+    /// coordinates and keeps the frame. A passthrough popup keeps answering `HTTRANSPARENT`
+    /// everywhere and gets no region, which would only clip its drawing.
+    fn set_input_region(
+        &mut self,
+        window: WindowId,
+        region: Option<&[PhysicalRect]>,
+    ) -> Result<(), ShellError> {
+        let state = self.window_mut(window)?;
+        if state
+            .popup
+            .is_some_and(|popup| popup.input == crate::PopupInput::Passthrough)
+        {
+            return Ok(());
+        }
+        Self::apply_input_region(state.raw(), region)?;
+        state.input_region = region.map(<[PhysicalRect]>::to_vec);
         Ok(())
     }
 

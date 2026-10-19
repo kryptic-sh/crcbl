@@ -74,6 +74,45 @@ impl Conn {
         Some(first_event)
     }
 
+    /// Checks that SHAPE can give a window an input shape, answering the
+    /// library to give it with.
+    ///
+    /// `None` when libxcb-shape is missing, when the server has no SHAPE, or
+    /// when it is older than 1.1, the version that added input shapes; then
+    /// [`INPUT_REGION`](crate::ShellCaps::INPUT_REGION) stays clear.
+    pub(super) fn setup_shape(&self) -> Option<&'static ffi::ShapeLib> {
+        let shape = self.ext.shape?;
+        // SAFETY: as `setup_randr` — libxcb owns the returned reply.
+        let query =
+            unsafe { (self.lib.get_extension_data)(self.raw(), ffi::extension_ptr(shape.id)) };
+        if query.is_null() {
+            return None;
+        }
+        // SAFETY: `query` is libxcb's cached reply.
+        if unsafe { (*query).present } == 0 {
+            crcbl_core::log::debug!("the X server has no SHAPE extension");
+            return None;
+        }
+        // SAFETY: the connection is live; a null error pointer discards the
+        // error, and a null reply is handled below.
+        let reply = unsafe {
+            let cookie = (shape.query_version)(self.raw());
+            (shape.query_version_reply)(self.raw(), cookie, core::ptr::null_mut())
+        };
+        if reply.is_null() {
+            return None;
+        }
+        // SAFETY: `reply` is a live reply this call owns.
+        let (major, minor) = unsafe { ((*reply).major_version, (*reply).minor_version) };
+        // SAFETY: freed exactly once.
+        unsafe { ffi::free_reply(reply) };
+        if (major, minor) < (1, 1) {
+            crcbl_core::log::debug!("SHAPE {major}.{minor} has no input shapes");
+            return None;
+        }
+        Some(shape)
+    }
+
     /// Negotiates XInput 2 and selects raw motion on the root window.
     ///
     /// Returns the extension's **major opcode**, not an event base — XI2

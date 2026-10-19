@@ -25,8 +25,8 @@ use crcbl_shell::wayland_test_support::{
 use crcbl_shell::{
     ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalPoint, LogicalRect,
     LogicalSize, Modifiers, MonitorInfo, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer,
-    PhysicalSize, PointerButton, PointerMode, PopupDesc, PopupInput, PopupPlacement, Reserve,
-    ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
+    PhysicalRect, PhysicalSize, PointerButton, PointerMode, PopupDesc, PopupInput, PopupPlacement,
+    Reserve, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
     SurfaceTarget, TextPurpose, WindowDesc, WindowId, WindowRole,
 };
 
@@ -1625,6 +1625,83 @@ fn pointer_focus_motion_and_buttons_come_back_in_window_pixels() {
         position.is_some(),
         "a click carries where it happened; that is the whole event"
     );
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// The pointer outside an input region is not the window's: moving there
+/// leaves the window as moving onto any other surface would, and `None` gives
+/// the whole window back.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn the_pointer_outside_an_input_region_leaves_the_window() {
+    let mut session = Session::open();
+    assert!(
+        session.shell.caps().contains(ShellCaps::INPUT_REGION),
+        "wl_surface.set_input_region is core protocol"
+    );
+    let (window, input) = session.with_input("crcbl e2e input region");
+    // The right half of the fullscreen window.
+    let half = OUTPUT_SIZE.width / 2;
+    let middle = OUTPUT_SIZE.height / 2;
+    let region = [PhysicalRect::new(
+        i32::try_from(half).expect("an output is narrower than i32::MAX"),
+        0,
+        OUTPUT_SIZE.width - half,
+        OUTPUT_SIZE.height,
+    )];
+    session
+        .shell
+        .set_input_region(window, Some(&region))
+        .expect("set_input_region");
+    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, window).expect("roundtrip");
+
+    let at = |position: Option<crcbl_shell::PhysicalPoint>, x: u32| {
+        position.is_some_and(|position| (position.x - f64::from(x)).abs() < 2.0)
+    };
+    let inside = half + half / 2;
+    input.move_to(inside, middle, LAYOUT_SIZE);
+    session.pump_until("the pointer over the region", |session| {
+        session.events.iter().any(|event| match event {
+            ShellEvent::PointerFocus {
+                window: w,
+                entered: true,
+                position,
+                ..
+            } => *w == window && at(*position, inside),
+            ShellEvent::PointerMotion { window: w, abs, .. } => *w == window && at(*abs, inside),
+            _ => false,
+        })
+    });
+
+    session.take_names();
+    input.move_to(half / 2, middle, LAYOUT_SIZE);
+    session.pump_until("the pointer to leave outside the region", |session| {
+        session.events.iter().any(|event| {
+            matches!(event, ShellEvent::PointerFocus { window: w, entered: false, .. } if *w == window)
+        })
+    });
+
+    session.take_names();
+    session
+        .shell
+        .set_input_region(window, None)
+        .expect("the whole window back");
+    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, window).expect("roundtrip");
+    let outside = half / 4;
+    input.move_to(outside, middle, LAYOUT_SIZE);
+    session.pump_until("the pointer to enter where the region was not", |session| {
+        session.events.iter().any(|event| match event {
+            ShellEvent::PointerFocus {
+                window: w,
+                entered: true,
+                position,
+                ..
+            } => *w == window && at(*position, outside),
+            _ => false,
+        })
+    });
 
     drop(input);
     session.shell.destroy_window(window).expect("destroy");

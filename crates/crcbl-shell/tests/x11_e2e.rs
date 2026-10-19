@@ -41,9 +41,9 @@ use crcbl_shell::x11_test_support::{
 };
 use crcbl_shell::{
     ButtonState, ClipboardContent, ClipboardOffer, CloseReply, CursorIcon, DisplayMode, KeyCode,
-    LogicalSize, MimeType, Modifiers, PhysicalPoint, PhysicalSize, PointerButton, PointerMode,
-    ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
-    SurfaceTarget, WindowDesc, WindowId,
+    LogicalSize, MimeType, Modifiers, PhysicalPoint, PhysicalRect, PhysicalSize, PointerButton,
+    PointerMode, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
+    SizeConstraints, SurfaceTarget, WindowDesc, WindowId,
 };
 
 /// X11 keycodes, which are evdev codes plus eight. Spelled out rather than
@@ -653,6 +653,10 @@ fn the_capability_set_is_x11_shaped() {
     assert!(
         caps.contains(ShellCaps::CURSOR_SHAPE),
         "libxcb-cursor is installed, so a shape is the theme's cursor for it"
+    );
+    assert!(
+        caps.contains(ShellCaps::INPUT_REGION),
+        "libxcb-shape is installed and Xvfb has SHAPE 1.1"
     );
 
     // Absent for reasons rather than for want of work.
@@ -1503,6 +1507,77 @@ fn modifiers_are_stamped_on_the_event_they_modify() {
             "and the keysym is the shifted one"
         );
     }
+}
+
+/// The pointer outside an input shape is not the window's: moving there
+/// leaves the window, as moving onto any other window would, and `None`
+/// restores the whole window.
+///
+/// With no window manager the pointer outside goes to the root; under one, to
+/// the frame the client sits in. Either way it is not this window's.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn the_pointer_outside_an_input_region_leaves_the_window() {
+    let mut session = Session::open();
+    let window = session.window(&desc("input region"));
+    let size = session
+        .shell
+        .window_state(window)
+        .expect("live window")
+        .size()
+        .expect("configured");
+    let (width, height) = (
+        i16::try_from(size.width).expect("a test window fits in an i16"),
+        i16::try_from(size.height).expect("a test window fits in an i16"),
+    );
+    let half = width / 2;
+    let inside = session.point_in(window, half + half / 2, height / 2);
+    let outside = session.point_in(window, half / 2, height / 2);
+    let elsewhere = session.point_in(window, half / 4, height / 2);
+    session
+        .shell
+        .set_input_region(
+            window,
+            Some(&[PhysicalRect::new(
+                i32::from(half),
+                0,
+                size.width - u32::from(half.unsigned_abs()),
+                size.height,
+            )]),
+        )
+        .expect("set_input_region");
+    session.pump();
+    session.take_names();
+
+    let ours = |session: &Session, entered: bool| {
+        session.events.iter().any(|event| match event {
+            ShellEvent::PointerFocus {
+                window: w,
+                entered: e,
+                ..
+            } => *w == window && *e == entered,
+            ShellEvent::PointerMotion { window: w, .. } => entered && *w == window,
+            _ => false,
+        })
+    };
+    session.peer.motion(inside.0, inside.1);
+    session.pump_until("the pointer over the region", |session| ours(session, true));
+    session.take_names();
+    session.peer.motion(outside.0, outside.1);
+    session.pump_until("the pointer to leave outside the region", |session| {
+        ours(session, false)
+    });
+
+    session
+        .shell
+        .set_input_region(window, None)
+        .expect("the whole window back");
+    session.pump();
+    session.take_names();
+    session.peer.motion(elsewhere.0, elsewhere.1);
+    session.pump_until("the pointer back where the region was not", |session| {
+        ours(session, true)
+    });
 }
 
 /// The pointer's three event kinds, including the wheel that X11 spells as

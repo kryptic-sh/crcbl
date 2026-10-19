@@ -147,6 +147,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`crcbl::screenshot::OffscreenSetup::adapter_caps`** says what the adapter a
   setup opened on can do, beside `caps`, which says what its device was opened
   with.
+- **`Shell::set_input_region` lets the pointer through a window's transparent
+  parts**, to whatever is behind it, another program's window included: a
+  launcher's rounded panel no longer keeps the clicks on its corners. It takes
+  the rectangles, in client device pixels, the window keeps the pointer in, and
+  `None` gives the whole window back; `PhysicalRect::rounded` builds them for a
+  rounded rectangle, as an outer bound. Wayland sets `wl_surface`'s input
+  region, X11 a SHAPE input shape (libxcb-shape, loaded with `dlopen`), and
+  Win32 a window region, which also clips what the window draws and keeps a
+  captioned window's frame. `ShellCaps::INPUT_REGION` says where it is acted on;
+  it is clear on AppKit and the web, where the call is validated and does
+  nothing. `HeadlessShell::input_region` reads the last region back. A
+  passthrough popup stays passthrough. The trait method has a default, so other
+  implementations keep compiling.
 
 ### Changed
 

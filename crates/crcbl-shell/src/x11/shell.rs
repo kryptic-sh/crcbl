@@ -8,9 +8,9 @@ use crcbl_core::SurfaceTarget;
 
 use super::{
     ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode, MimeType, MonitorInfo,
-    PhysicalPoint, PointerMode, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
-    SizeConstraints, TRANSFER_POLL, WindowConfiguration, WindowDesc, WindowId, WindowState,
-    X11Shell, XWindow, ffi,
+    PhysicalPoint, PhysicalRect, PointerMode, Shell, ShellBackend, ShellCaps, ShellError,
+    ShellEvent, SizeConstraints, TRANSFER_POLL, WindowConfiguration, WindowDesc, WindowId,
+    WindowState, X11Shell, XWindow, ffi,
 };
 
 /// Everything a window wants to hear about.
@@ -233,6 +233,11 @@ impl Shell for X11Shell {
     /// [`WindowDesc::accept_drops`](crate::WindowDesc::accept_drops). See
     /// [`xdnd`](super::xdnd) for the version negotiated and what happens with
     /// the versions that are not.
+    ///
+    /// [`INPUT_REGION`](ShellCaps::INPUT_REGION) is set when libxcb-shape
+    /// loaded and the server speaks SHAPE 1.1, the version with input shapes;
+    /// a window manager is not involved, since the shape is on the client's own
+    /// window.
     fn caps(&self) -> ShellCaps {
         self.caps
     }
@@ -764,6 +769,25 @@ impl Shell for X11Shell {
         self.window_mut(window)?.cursor = Some(cursor);
         let locked = self.window(window)?.pointer_mode == PointerMode::Locked;
         self.apply_cursor(xid, Some(cursor), locked);
+        self.conn.flush();
+        Ok(())
+    }
+
+    /// A SHAPE input shape, set from the rectangles, or the default shape
+    /// restored with `None`. Without libxcb-shape or SHAPE 1.1 on the server,
+    /// [`ShellCaps::INPUT_REGION`] is clear and the request is validated and
+    /// not applied.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle.
+    fn set_input_region(
+        &mut self,
+        window: WindowId,
+        region: Option<&[PhysicalRect]>,
+    ) -> Result<(), ShellError> {
+        let xid = self.window(window)?.id;
+        self.conn.apply_input_shape(xid, region);
         self.conn.flush();
         Ok(())
     }

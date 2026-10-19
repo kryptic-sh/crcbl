@@ -430,13 +430,15 @@ mod tests {
         // overstates itself is worse than one that is missing.
         // `PANEL_RESERVE` because macOS lets nothing but the menu bar and the
         // Dock reserve space. `PANEL_EXCLUSIVE_KEYBOARD` because an exclusive panel is made key
-        // once, and the user can click another window.
+        // once, and the user can click another window. `INPUT_REGION` because
+        // an `NSWindow` has no input region.
         for absent in [
             ShellCaps::FRACTIONAL_SCALE,
             ShellCaps::HW_UPSCALE,
             ShellCaps::POINTER_CONFINE,
             ShellCaps::PANEL_RESERVE,
             ShellCaps::PANEL_EXCLUSIVE_KEYBOARD,
+            ShellCaps::INPUT_REGION,
         ] {
             assert!(!caps.contains(absent), "{absent:?} is not implemented");
         }

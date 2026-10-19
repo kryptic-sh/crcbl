@@ -287,6 +287,76 @@ impl PhysicalRect {
             && (x as i64 - self.x as i64) < self.width as i64
             && (y as i64 - self.y as i64) < self.height as i64
     }
+
+    /// This rectangle with its corners rounded to `radius` device pixels, as
+    /// the union of rectangles
+    /// [`Shell::set_input_region`](crate::Shell::set_input_region) takes.
+    ///
+    /// An **outer bound**: every pixel a corner's quarter circle covers at all
+    /// is inside, so a panel drawn with antialiased rounded corners keeps its
+    /// whole edge — which matters on Win32, where the region also clips what
+    /// the window draws. Neighbouring rows with the same inset are merged, so
+    /// the count grows with the radius rather than the height, and the
+    /// rectangles never overlap. The radius is clamped to half the shorter
+    /// side; an empty rectangle gives none.
+    #[must_use]
+    pub fn rounded(self, radius: u32) -> Vec<Self> {
+        if self.width == 0 || self.height == 0 {
+            return Vec::new();
+        }
+        let radius = radius.min(self.width / 2).min(self.height / 2);
+        let insets: Vec<u32> = (0..radius).map(|row| corner_inset(radius, row)).collect();
+        let mut rects: Vec<Self> = Vec::new();
+        let mut push = |top: u32, height: u32, inset: u32| {
+            if height == 0 {
+                return;
+            }
+            let row = Self::new(
+                self.x.saturating_add_unsigned(inset),
+                self.y.saturating_add_unsigned(top),
+                self.width - 2 * inset,
+                height,
+            );
+            match rects.last_mut() {
+                Some(last)
+                    if last.x == row.x
+                        && last.width == row.width
+                        && i64::from(last.y) + i64::from(last.height) == i64::from(row.y) =>
+                {
+                    last.height += height;
+                }
+                _ => rects.push(row),
+            }
+        };
+        for (row, &inset) in (0..radius).zip(&insets) {
+            push(row, 1, inset);
+        }
+        push(radius, self.height - 2 * radius, 0);
+        for (row, &inset) in (0..radius).zip(&insets).rev() {
+            push(self.height - 1 - row, 1, inset);
+        }
+        rects
+    }
+}
+
+/// How many columns of row `row` (counted from the edge) lie wholly outside a
+/// corner's quarter circle of `radius`: the columns the disc does not reach.
+///
+/// The circle's centre is `radius` in from both edges, and the row's nearest
+/// point to it is its inner edge, `radius - row - 1` away vertically, where
+/// the circle reaches `s = sqrt(radius² - d²)` from the centre. A column
+/// overlaps the disc exactly when its inner edge is past `radius - s`, so the
+/// inset is `floor(radius - s)`, which in integers is `radius - ceil(s)`.
+fn corner_inset(radius: u32, row: u32) -> u32 {
+    let (radius, d) = (u64::from(radius), u64::from(radius - row - 1));
+    let squared = radius * radius - d * d;
+    let root = squared.isqrt();
+    let ceil = if root * root == squared {
+        root
+    } else {
+        root + 1
+    };
+    u32::try_from(radius - ceil).expect("the inset is at most the radius, which is a u32")
 }
 
 impl fmt::Display for PhysicalRect {
@@ -561,5 +631,84 @@ mod tests {
         let widest = PhysicalRect::new(i32::MIN, 0, u32::MAX, 1080);
         assert!(widest.contains(i32::MAX - 1, 0));
         assert!(!widest.contains(i32::MAX, 0));
+    }
+
+    /// Whether a disc of `radius` centred `radius` in from a corner overlaps
+    /// the pixel `(x, y)` counted from that corner: the pixel's nearest point
+    /// to the centre is its inner corner, and the overlap is strict, as an
+    /// antialiased edge with any coverage at all needs.
+    fn corner_covers(radius: i64, x: i64, y: i64) -> bool {
+        if x >= radius || y >= radius {
+            return true;
+        }
+        let (dx, dy) = (radius - x - 1, radius - y - 1);
+        dx * dx + dy * dy < radius * radius
+    }
+
+    #[test]
+    fn a_rounded_rectangle_is_exactly_the_pixels_its_corners_cover() {
+        for (rect, radius) in [
+            (PhysicalRect::new(0, 0, 40, 30), 10),
+            (PhysicalRect::new(-7, 13, 31, 64), 6),
+            (PhysicalRect::new(5, 5, 20, 20), 10),
+            // Clamped to half the shorter side.
+            (PhysicalRect::new(0, 0, 9, 50), 30),
+            (PhysicalRect::new(0, 0, 12, 8), 1),
+            (PhysicalRect::new(3, 4, 12, 8), 0),
+        ] {
+            let rects = rect.rounded(radius);
+            let r = i64::from(radius.min(rect.width / 2).min(rect.height / 2));
+            let (width, height) = (i64::from(rect.width), i64::from(rect.height));
+            for y in 0..height {
+                for x in 0..width {
+                    let covered = corner_covers(r, x.min(width - 1 - x), y.min(height - 1 - y));
+                    let px = i32::try_from(i64::from(rect.x) + x).expect("small");
+                    let py = i32::try_from(i64::from(rect.y) + y).expect("small");
+                    let hits = rects.iter().filter(|part| part.contains(px, py)).count();
+                    assert_eq!(
+                        hits,
+                        usize::from(covered),
+                        "{rect} r{radius}: pixel ({x},{y}) in {hits} of {rects:?}"
+                    );
+                }
+            }
+            // Nothing outside the rectangle.
+            for part in &rects {
+                assert!(part.x >= rect.x && part.y >= rect.y, "{part} in {rect}");
+                assert!(
+                    i64::from(part.x) + i64::from(part.width) <= i64::from(rect.x) + width
+                        && i64::from(part.y) + i64::from(part.height) <= i64::from(rect.y) + height,
+                    "{part} in {rect}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rounded_corner_insets_rows_by_the_known_amounts_and_merges_equal_ones() {
+        // Radius 10: the row nearest the edge reaches the circle at
+        // `10 - sqrt(19)`, so five whole columns are outside; then four, two,
+        // two, one, and nothing from row five on.
+        let rects = PhysicalRect::new(0, 0, 100, 60).rounded(10);
+        let insets: Vec<(i32, u32)> = rects.iter().map(|part| (part.x, part.height)).collect();
+        assert_eq!(
+            insets,
+            [
+                (5, 1),
+                (4, 1),
+                (2, 2),
+                (1, 1),
+                (0, 50),
+                (1, 1),
+                (2, 2),
+                (4, 1),
+                (5, 1)
+            ]
+        );
+        assert_eq!(rects[4], PhysicalRect::new(0, 5, 100, 50));
+        // No radius is the rectangle itself, and an empty one is nothing.
+        let square = PhysicalRect::new(3, 4, 12, 8);
+        assert_eq!(square.rounded(0), [square]);
+        assert!(PhysicalRect::new(0, 0, 0, 8).rounded(4).is_empty());
     }
 }

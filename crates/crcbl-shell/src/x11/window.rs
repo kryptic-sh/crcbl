@@ -11,6 +11,7 @@ use super::{
     Conn, CursorIcon, DisplayMode, MonitorId, PhysicalSize, ShellError, SizeHints,
     WindowConfiguration, WmStateAction, X11Shell, XWindow, ffi, keys,
 };
+use crate::PhysicalRect;
 
 impl X11Shell {
     /// Sets both title properties.
@@ -414,6 +415,45 @@ impl X11Shell {
 }
 
 impl Conn {
+    /// Gives `xid` the input shape
+    /// [`set_input_region`](crate::Shell::set_input_region) asked for, or the
+    /// default one, the whole window, with `None`. Does nothing without
+    /// SHAPE, which [`INPUT_REGION`](crate::ShellCaps::INPUT_REGION) says.
+    ///
+    /// A window's coordinates are its client area's on X11, since a window
+    /// manager's frame is a window of its own, so the rectangles go as given.
+    pub(super) fn apply_input_shape(&self, xid: u32, region: Option<&[PhysicalRect]>) {
+        let Some(shape) = self.shape else {
+            return;
+        };
+        use ffi::value::{CLIP_UNSORTED, PIXMAP_NONE, SHAPE_INPUT, SHAPE_SET};
+        match region {
+            // SAFETY: the connection and window are live; a `None` pixmap is
+            // the protocol's own "back to the default shape".
+            None => unsafe {
+                (shape.mask)(self.raw(), SHAPE_SET, SHAPE_INPUT, xid, 0, 0, PIXMAP_NONE);
+            },
+            Some(region) => {
+                let rects = shape_rectangles(region);
+                // SAFETY: the connection and window are live, and `rects`
+                // holds exactly the count passed, read before the call returns.
+                unsafe {
+                    (shape.rectangles)(
+                        self.raw(),
+                        SHAPE_SET,
+                        SHAPE_INPUT,
+                        CLIP_UNSORTED,
+                        xid,
+                        0,
+                        0,
+                        u32::try_from(rects.len()).unwrap_or(u32::MAX),
+                        rects.as_ptr(),
+                    );
+                }
+            }
+        }
+    }
+
     /// Destroys a window, ignoring the case where the server already did.
     pub(super) fn destroy_x_window(&self, xid: u32) {
         // SAFETY: the connection is live. Destroying a window that is already
@@ -422,6 +462,27 @@ impl Conn {
         // reach it is a race the outcome of which is the one we wanted.
         unsafe { (self.lib.destroy_window)(self.raw(), xid) };
     }
+}
+
+/// An input region as the 16-bit rectangles SHAPE takes, each clipped to the
+/// coordinate range the protocol has, empty ones dropped.
+pub(super) fn shape_rectangles(region: &[PhysicalRect]) -> Vec<ffi::Rectangle> {
+    let clip = |value: i64| value.clamp(i64::from(i16::MIN), i64::from(i16::MAX));
+    region
+        .iter()
+        .filter_map(|rect| {
+            let left = clip(i64::from(rect.x));
+            let top = clip(i64::from(rect.y));
+            let width = clip(i64::from(rect.x) + i64::from(rect.width)) - left;
+            let height = clip(i64::from(rect.y) + i64::from(rect.height)) - top;
+            Some(ffi::Rectangle {
+                x: i16::try_from(left).ok()?,
+                y: i16::try_from(top).ok()?,
+                width: u16::try_from(width).ok().filter(|&width| width > 0)?,
+                height: u16::try_from(height).ok().filter(|&height| height > 0)?,
+            })
+        })
+        .collect()
 }
 
 /// A `u32` slice as native-endian bytes, for `ChangeProperty` format 32.
@@ -453,6 +514,30 @@ mod tests {
         assert_eq!(words_to_bytes(&[]), Vec::<u8>::new());
         assert_eq!(signed_words_to_bytes(&[-1]).len(), 4);
         assert_eq!(signed_words_to_bytes(&[-1]), (-1i32).to_ne_bytes());
+    }
+
+    #[test]
+    fn an_input_region_is_clipped_to_shapes_sixteen_bits_and_drops_empty_rectangles() {
+        let rects = shape_rectangles(&[
+            PhysicalRect::new(10, 20, 300, 40),
+            PhysicalRect::new(5, 5, 0, 10),
+            PhysicalRect::new(-40_000, 30_000, 80_000, 10_000),
+            PhysicalRect::new(40_000, 0, 10, 10),
+        ]);
+        let fields: Vec<(i16, i16, u16, u16)> = rects
+            .iter()
+            .map(|rect| (rect.x, rect.y, rect.width, rect.height))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (10, 20, 300, 40),
+                // Both far edges stop at `i16::MAX`, the near ones at the
+                // protocol's floor.
+                (i16::MIN, 30_000, 65_535, 2_767),
+            ],
+            "the empty rectangle and the one wholly past the range are gone"
+        );
     }
 
     #[test]

@@ -512,6 +512,67 @@ pub const fn rect_from(area: PhysicalRect) -> Rect {
     }
 }
 
+/// An input region as the `RECT`s of a window region, which is in **window**
+/// coordinates: each rectangle moved by `client_origin`, where the client area
+/// starts in the window, plus the frame around a `client`-sized client area in
+/// a `window`-sized window, so a captioned window keeps its title bar and
+/// borders while its client area is shaped.
+///
+/// A frameless window has a zero origin and equal sizes, and gets the moved
+/// rectangles alone. Empty rectangles are dropped, and far edges saturate as
+/// in [`rect_from`].
+#[must_use]
+pub fn window_region(
+    region: &[PhysicalRect],
+    client_origin: Point,
+    client: (i32, i32),
+    window: (i32, i32),
+) -> Vec<Rect> {
+    let (left, top) = (client_origin.x, client_origin.y);
+    let right = left.saturating_add(client.0);
+    let bottom = top.saturating_add(client.1);
+    let frame = [
+        Rect {
+            left: 0,
+            top: 0,
+            right: window.0,
+            bottom: top,
+        },
+        Rect {
+            left: 0,
+            top: bottom,
+            right: window.0,
+            bottom: window.1,
+        },
+        Rect {
+            left: 0,
+            top,
+            right: left,
+            bottom,
+        },
+        Rect {
+            left: right,
+            top,
+            right: window.0,
+            bottom,
+        },
+    ];
+    let shaped = region.iter().map(|&area| {
+        let rect = rect_from(area);
+        Rect {
+            left: rect.left.saturating_add(left),
+            top: rect.top.saturating_add(top),
+            right: rect.right.saturating_add(left),
+            bottom: rect.bottom.saturating_add(top),
+        }
+    });
+    frame
+        .into_iter()
+        .chain(shaped)
+        .filter(|rect| rect.right > rect.left && rect.bottom > rect.top)
+        .collect()
+}
+
 /// A client `RECT` as the seam's physical size.
 ///
 /// `GetClientRect` always answers with a zero origin, so only the extent is
@@ -964,6 +1025,63 @@ mod tests {
         assert_eq!(
             (huge.left, huge.top, huge.right, huge.bottom),
             (-5, 10, i32::MAX, i32::MAX)
+        );
+    }
+
+    fn corners(rects: &[Rect]) -> Vec<(i32, i32, i32, i32)> {
+        rects
+            .iter()
+            .map(|rect| (rect.left, rect.top, rect.right, rect.bottom))
+            .collect()
+    }
+
+    #[test]
+    fn a_frameless_windows_region_is_its_client_rectangles() {
+        let panel = [
+            PhysicalRect::new(4, 0, 92, 1),
+            PhysicalRect::new(0, 1, 100, 48),
+            PhysicalRect::new(10, 20, 0, 5),
+        ];
+        let rects = window_region(&panel, Point { x: 0, y: 0 }, (100, 50), (100, 50));
+        assert_eq!(
+            corners(&rects),
+            [(4, 0, 96, 1), (0, 1, 100, 49)],
+            "the empty rectangle is dropped and no frame is added"
+        );
+        assert!(window_region(&[], Point { x: 0, y: 0 }, (100, 50), (100, 50)).is_empty());
+    }
+
+    #[test]
+    fn a_captioned_windows_region_keeps_its_frame_and_moves_its_client_rectangles() {
+        // An 8-pixel border and a 31-pixel caption around a 640x360 client.
+        let origin = Point { x: 8, y: 31 };
+        let rects = window_region(
+            &[PhysicalRect::new(320, 0, 320, 360)],
+            origin,
+            (640, 360),
+            (656, 399),
+        );
+        assert_eq!(
+            corners(&rects),
+            [
+                (0, 0, 656, 31),
+                (0, 391, 656, 399),
+                (0, 31, 8, 391),
+                (648, 31, 656, 391),
+                (328, 31, 648, 391),
+            ]
+        );
+        // A rectangle reaching past `i32::MAX` saturates rather than wrapping
+        // left of its own near edge.
+        let far = window_region(
+            &[PhysicalRect::new(i32::MAX - 20, 0, 100, 1)],
+            origin,
+            (640, 360),
+            (656, 399),
+        );
+        assert_eq!(
+            far.last().map(|rect| (rect.left, rect.right)),
+            Some((i32::MAX - 12, i32::MAX))
         );
     }
 

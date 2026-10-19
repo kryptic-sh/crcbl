@@ -235,6 +235,8 @@ struct HeadlessWindow {
     panel_monitor: Option<MonitorId>,
     /// [`Shell::set_text_input`]'s last word.
     text_input: Option<TextPurpose>,
+    /// [`Shell::set_input_region`]'s last word: `None` for the whole window.
+    input_region: Option<Vec<PhysicalRect>>,
     /// Whether a pretend assistive technology is reading the window, and what
     /// it has been sent since it started.
     #[cfg(feature = "accesskit")]
@@ -1052,6 +1054,20 @@ impl HeadlessShell {
         Ok(self.window(window)?.text_input)
     }
 
+    /// The rectangles the window last limited its pointer input to, with
+    /// [`Shell::set_input_region`]; `None` while it takes the pointer
+    /// everywhere.
+    ///
+    /// Headless-only, for the same reason as [`title`](Self::title). Kept as
+    /// given, empty rectangles included, so a test reads back what it sent.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    pub fn input_region(&self, window: WindowId) -> Result<Option<&[PhysicalRect]>, ShellError> {
+        Ok(self.window(window)?.input_region.as_deref())
+    }
+
     /// Starts a pretend assistive technology reading `window`, raising
     /// [`ShellEvent::AccessibilityActivated`]. Does nothing if one already is.
     ///
@@ -1518,6 +1534,7 @@ impl Shell for HeadlessShell {
                 popup_input,
                 panel_monitor,
                 text_input: None,
+                input_region: None,
                 #[cfg(feature = "accesskit")]
                 accessibility: None,
             })
@@ -1777,6 +1794,19 @@ impl Shell for HeadlessShell {
         field: Option<TextPurpose>,
     ) -> Result<(), ShellError> {
         self.window_mut(window)?.text_input = field;
+        Ok(())
+    }
+
+    /// Records the region, which
+    /// [`input_region`](HeadlessShell::input_region) reads back; there is no
+    /// pointer to route. A passthrough popup records it too, though no
+    /// backend acts on it there.
+    fn set_input_region(
+        &mut self,
+        window: WindowId,
+        region: Option<&[PhysicalRect]>,
+    ) -> Result<(), ShellError> {
+        self.window_mut(window)?.input_region = region.map(<[PhysicalRect]>::to_vec);
         Ok(())
     }
 
@@ -3080,6 +3110,30 @@ mod tests {
         );
         shell.set_visible(window, false).expect("hide window");
         assert!(!shell.window_state(window).expect("state").visible);
+    }
+
+    #[test]
+    fn an_input_region_is_recorded_replaced_and_given_back() {
+        let (mut shell, window) = shell_with_configured_window();
+        assert_eq!(shell.input_region(window).expect("region"), None);
+        let panel = PhysicalRect::new(0, 0, 400, 300).rounded(12);
+        shell
+            .set_input_region(window, Some(&panel))
+            .expect("a region");
+        assert_eq!(
+            shell.input_region(window).expect("region"),
+            Some(panel.as_slice())
+        );
+        shell.set_input_region(window, Some(&[])).expect("nothing");
+        assert_eq!(shell.input_region(window).expect("region"), Some(&[][..]));
+        shell.set_input_region(window, None).expect("whole window");
+        assert_eq!(shell.input_region(window).expect("region"), None);
+        shell.destroy_window(window).expect("destroy");
+        assert!(matches!(
+            shell.set_input_region(window, None),
+            Err(ShellError::InvalidWindow { .. })
+        ));
+        assert!(shell.input_region(window).is_err());
     }
 
     #[test]

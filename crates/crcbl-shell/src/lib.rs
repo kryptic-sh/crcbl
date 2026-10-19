@@ -897,6 +897,54 @@ pub trait Shell: core::fmt::Debug {
         self.window_state(window).map(|_| ())
     }
 
+    /// Limits where `window` takes the pointer to a union of rectangles, so
+    /// the pointer anywhere else goes to whatever is behind the window.
+    ///
+    /// For a transparent window that draws a shape smaller than itself: a
+    /// launcher's rounded panel, whose transparent corners should let a click
+    /// through to the program beneath. A pixel of alpha zero is otherwise the
+    /// window's on every desktop backend; nothing hit-tests by alpha, because
+    /// that would read the frame back from the GPU on every pointer move.
+    ///
+    /// `region` is in the window's **client** device pixels, the units of
+    /// [`set_text_input_area`](Self::set_text_input_area). Empty rectangles
+    /// are ignored, and parts outside the window take nothing; an empty slice
+    /// leaves the window no pointer input at all. `None` gives the whole window
+    /// back, which is where every window starts. Keyboard focus is not
+    /// affected. The rectangles are the caller's layout, so send them again
+    /// after a [`ShellEvent::Resized`] or [`ShellEvent::ScaleFactorChanged`]
+    /// that moves the shape. [`PhysicalRect::rounded`] builds them for a
+    /// rounded rectangle.
+    ///
+    /// **Give the outer bound of what the window draws, antialiased edge
+    /// included.** On Win32 the region is a window region, which also clips
+    /// the window's drawing to it, so a region inside the edge's blend cuts
+    /// the edge off. Elsewhere a tighter region only loses the pointer over
+    /// the edge.
+    ///
+    /// A [`Passthrough`](PopupInput::Passthrough) popup stays passthrough: a
+    /// region given to it is validated and has no effect.
+    ///
+    /// # A provided method
+    ///
+    /// The default validates the handle and does nothing else, which leaves
+    /// the whole window taking the pointer. Wayland, X11 and Win32 override it,
+    /// and [`ShellCaps::INPUT_REGION`] is set only where it is acted on; a
+    /// caller that must have the click-through checks the bit rather than the
+    /// platform.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    fn set_input_region(
+        &mut self,
+        window: WindowId,
+        region: Option<&[PhysicalRect]>,
+    ) -> Result<(), ShellError> {
+        let _ = region;
+        self.window_state(window).map(|_| ())
+    }
+
     /// Tells the input method what text field in `window` is taking typing:
     /// `Some(purpose)` as a field gains the keyboard focus, `None` as it loses
     /// it.

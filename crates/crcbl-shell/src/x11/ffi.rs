@@ -13,8 +13,9 @@
 //!   expected on a Wayland-only one. If either can pre-empt the loader, the
 //!   list is decorative.
 //! * **There are several libraries, not one.** libxcb is always present where
-//!   there is an X server; `libxcb-randr`, `libxcb-xinput` and `libxcb-cursor`
-//!   are separately packaged and a minimal container may have none of them. With `dlopen` a missing
+//!   there is an X server; `libxcb-randr`, `libxcb-xinput`, `libxcb-cursor`
+//!   and `libxcb-shape` are separately packaged and a minimal container may
+//!   have none of them. With `dlopen` a missing
 //!   extension library is a cleared [`ShellCaps`](crate::ShellCaps) bit and a
 //!   log line — see [`Ext`] — where with `DT_NEEDED` it would be a process that
 //!   does not start.
@@ -55,6 +56,7 @@
 //! | `libxcb-xinput.so.0` | XI2 raw motion — unaccelerated aim | [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION) cleared, no mouselook |
 //! | `libxcb-xkb.so.1` | detectable auto-repeat — a repeat with no fake release | the release/press lookahead in [`input`](super::input), which cannot see a pair the socket split |
 //! | `libxcb-cursor.so.0` | themed cursor shapes — the user's XCursor theme, or the core cursor font when there is none | [`CURSOR_SHAPE`](crate::ShellCaps::CURSOR_SHAPE) cleared; a shape is recorded and the root's cursor shows |
+//! | `libxcb-shape.so.0` | a window's SHAPE input region — the pointer outside it goes to the window beneath | [`INPUT_REGION`](crate::ShellCaps::INPUT_REGION) cleared; the whole window keeps the pointer |
 //!
 //! Deliberately absent: `libxcb-xfixes` (pointer barriers are not needed —
 //! `GrabPointer`'s `confine_to` *is* [`PointerMode::Confined`](crate::PointerMode)
@@ -441,6 +443,24 @@ pub struct XkbUseExtensionReply {
     pub server_minor: u16,
     /// Padding.
     pub pad0: [u8; 20],
+}
+
+/// `xcb_shape_query_version_reply_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ShapeQueryVersionReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// Major version the server speaks.
+    pub major_version: u16,
+    /// Minor version the server speaks.
+    pub minor_version: u16,
 }
 
 /// `xcb_xkb_per_client_flags_reply_t`.
@@ -1252,6 +1272,16 @@ pub mod value {
     pub const XKB_MAJOR: u16 = 1;
     /// See [`XKB_MAJOR`].
     pub const XKB_MINOR: u16 = 0;
+    /// `XCB_SHAPE_SO_SET` — the shape becomes exactly what is given.
+    pub const SHAPE_SET: u8 = 0;
+    /// `XCB_SHAPE_SK_INPUT` — the input shape, where the pointer is the
+    /// window's. SHAPE 1.1 added it.
+    pub const SHAPE_INPUT: u8 = 2;
+    /// `XCB_CLIP_ORDERING_UNSORTED` — the server sorts the rectangles itself.
+    pub const CLIP_UNSORTED: u8 = 0;
+    /// `XCB_PIXMAP_NONE`, which as a shape mask's source restores the default
+    /// shape: the whole window.
+    pub const PIXMAP_NONE: u32 = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1309,8 +1339,9 @@ mod prototype {
         GetPropertyReply, GetSelectionOwnerReply, GrabPointerReply, InternAtomReply,
         QueryExtensionReply, QueryPointerReply, RandrCrtcInfoReply, RandrOutputInfoReply,
         RandrOutputPrimaryReply, RandrQueryVersionReply, RandrScreenResourcesReply, Rectangle,
-        Screen, ScreenIterator, Setup, TranslateCoordinatesReply, XiEventMask, XiQueryVersionReply,
-        XkbPerClientFlagsReply, XkbUseExtensionReply, c_char, c_int, c_void,
+        Screen, ScreenIterator, Setup, ShapeQueryVersionReply, TranslateCoordinatesReply,
+        XiEventMask, XiQueryVersionReply, XkbPerClientFlagsReply, XkbUseExtensionReply, c_char,
+        c_int, c_void,
     };
 
     /// `xcb_connection_t *xcb_connect(const char *displayname, int *screenp)`
@@ -1632,6 +1663,38 @@ mod prototype {
     pub type CursorLoadCursor = unsafe extern "C" fn(*mut CursorContext, *const c_char) -> u32;
     /// `void xcb_cursor_context_free(xcb_cursor_context_t *ctx)`
     pub type CursorContextFree = unsafe extern "C" fn(*mut CursorContext);
+
+    /// `xcb_shape_query_version_cookie_t xcb_shape_query_version(
+    /// xcb_connection_t *)`
+    pub type ShapeQueryVersion = unsafe extern "C" fn(*mut Connection) -> Cookie;
+    /// `xcb_shape_query_version_reply_t *xcb_shape_query_version_reply(…)`
+    pub type ShapeQueryVersionReplyFn = unsafe extern "C" fn(
+        *mut Connection,
+        Cookie,
+        *mut *mut GenericError,
+    ) -> *mut ShapeQueryVersionReply;
+    /// `xcb_void_cookie_t xcb_shape_rectangles(xcb_connection_t *,
+    /// xcb_shape_op_t operation, xcb_shape_kind_t destination_kind,
+    /// uint8_t ordering, xcb_window_t destination_window, int16_t x_offset,
+    /// int16_t y_offset, uint32_t rectangles_len,
+    /// const xcb_rectangle_t *rectangles)` — both enums are `uint8_t`.
+    pub type ShapeRectangles = unsafe extern "C" fn(
+        *mut Connection,
+        u8,
+        u8,
+        u8,
+        u32,
+        i16,
+        i16,
+        u32,
+        *const Rectangle,
+    ) -> Cookie;
+    /// `xcb_void_cookie_t xcb_shape_mask(xcb_connection_t *,
+    /// xcb_shape_op_t operation, xcb_shape_kind_t destination_kind,
+    /// xcb_window_t destination_window, int16_t x_offset, int16_t y_offset,
+    /// xcb_pixmap_t source_bitmap)`
+    pub type ShapeMask =
+        unsafe extern "C" fn(*mut Connection, u8, u8, u32, i16, i16, u32) -> Cookie;
 }
 
 /// Every libxcb entry point this backend uses.
@@ -1803,6 +1866,22 @@ impl core::fmt::Debug for CursorLib {
     }
 }
 
+/// libxcb-shape, when it is there. See [`RandrLib`].
+pub struct ShapeLib {
+    /// `xcb_shape_id`; see [`RandrLib::id`].
+    pub id: usize,
+    pub query_version: prototype::ShapeQueryVersion,
+    pub query_version_reply: prototype::ShapeQueryVersionReplyFn,
+    pub rectangles: prototype::ShapeRectangles,
+    pub mask: prototype::ShapeMask,
+}
+
+impl core::fmt::Debug for ShapeLib {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("ShapeLib(libxcb-shape)")
+    }
+}
+
 /// Which optional extension libraries loaded.
 #[derive(Debug)]
 pub struct Ext {
@@ -1816,6 +1895,9 @@ pub struct Ext {
     /// libxcb-cursor, or `None` — then a cursor shape is recorded and not
     /// applied, and [`CURSOR_SHAPE`](crate::ShellCaps::CURSOR_SHAPE) is clear.
     pub cursor: Option<&'static CursorLib>,
+    /// SHAPE, or `None` — then an input region is not applied, and
+    /// [`INPUT_REGION`](crate::ShellCaps::INPUT_REGION) is clear.
+    pub shape: Option<&'static ShapeLib>,
 }
 
 /// The sonames tried, in order.
@@ -1832,12 +1914,15 @@ const XI_SONAMES: [&CStr; 2] = [c"libxcb-xinput.so.0", c"libxcb-xinput.so"];
 const XKB_SONAMES: [&CStr; 2] = [c"libxcb-xkb.so.1", c"libxcb-xkb.so"];
 /// As [`SONAMES`], for libxcb-cursor.
 const CURSOR_SONAMES: [&CStr; 2] = [c"libxcb-cursor.so.0", c"libxcb-cursor.so"];
+/// As [`SONAMES`], for libxcb-shape.
+const SHAPE_SONAMES: [&CStr; 2] = [c"libxcb-shape.so.0", c"libxcb-shape.so"];
 
 static LIB: OnceLock<Result<Lib, String>> = OnceLock::new();
 static RANDR: OnceLock<Option<RandrLib>> = OnceLock::new();
 static XI: OnceLock<Option<XiLib>> = OnceLock::new();
 static XKB: OnceLock<Option<XkbLib>> = OnceLock::new();
 static CURSOR: OnceLock<Option<CursorLib>> = OnceLock::new();
+static SHAPE: OnceLock<Option<ShapeLib>> = OnceLock::new();
 
 /// The `xcb_extension_t*` an [`Ext`] entry holds, as libxcb wants it.
 ///
@@ -1877,6 +1962,7 @@ pub fn load_ext() -> Ext {
         xi: XI.get_or_init(load_xi).as_ref(),
         xkb: XKB.get_or_init(load_xkb).as_ref(),
         cursor: CURSOR.get_or_init(load_cursor).as_ref(),
+        shape: SHAPE.get_or_init(load_shape).as_ref(),
     }
 }
 
@@ -2203,6 +2289,49 @@ fn load_cursor() -> Option<CursorLib> {
     })
 }
 
+fn load_shape() -> Option<ShapeLib> {
+    let handle = open_library(&SHAPE_SONAMES);
+    if handle.is_null() {
+        crcbl_core::log::warn!(
+            "libxcb-shape is not available: an input region is not applied, so \
+             ShellCaps::INPUT_REGION stays clear"
+        );
+        return None;
+    }
+    /// Resolves one symbol or gives up on the whole extension.
+    macro_rules! symbol {
+        ($name:literal, $ty:ty) => {{
+            // SAFETY: `handle` is a live `dlopen` handle and the name is a
+            // NUL-terminated literal.
+            let raw = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
+            if raw.is_null() {
+                crcbl_core::log::warn!("libxcb-shape has no symbol {}; degrading", $name);
+                return None;
+            }
+            // SAFETY: `$ty` is the prototype `xcb/shape.h` declares for this
+            // symbol.
+            unsafe { core::mem::transmute::<*mut c_void, $ty>(raw) }
+        }};
+    }
+    // SAFETY: `xcb_shape_id` is a data symbol — an `xcb_extension_t` global —
+    // so the `dlsym` result is its address and is not transmuted to a function.
+    let id = unsafe { dlsym(handle, c"xcb_shape_id".as_ptr()) } as usize;
+    if id == 0 {
+        crcbl_core::log::warn!("libxcb-shape has no xcb_shape_id; degrading");
+        return None;
+    }
+    Some(ShapeLib {
+        id,
+        query_version: symbol!("xcb_shape_query_version", prototype::ShapeQueryVersion),
+        query_version_reply: symbol!(
+            "xcb_shape_query_version_reply",
+            prototype::ShapeQueryVersionReplyFn
+        ),
+        rectangles: symbol!("xcb_shape_rectangles", prototype::ShapeRectangles),
+        mask: symbol!("xcb_shape_mask", prototype::ShapeMask),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -2304,6 +2433,7 @@ mod tests {
         assert_eq!(size_of::<GetSelectionOwnerReply>(), 12);
         assert_eq!(size_of::<XkbUseExtensionReply>(), 32);
         assert_eq!(size_of::<XkbPerClientFlagsReply>(), 32);
+        assert_eq!(size_of::<ShapeQueryVersionReply>(), 12);
         assert_eq!(size_of::<InternAtomReply>(), 12);
         assert_eq!(size_of::<GrabPointerReply>(), 8);
         assert_eq!(size_of::<QueryExtensionReply>(), 12);

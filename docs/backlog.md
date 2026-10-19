@@ -22,8 +22,8 @@ too, was approved on 2026-10-19 with `unicode-linebreak` and `unicode-bidi`,
 pikr being the caller.
 
 **pikr's remaining gaps, prioritised by the owner on 2026-10-19** (relayed by
-pikr, which is fully on 0.5.0). Order of work, after the slices already in
-flight (AppKit input method, the Win32 popup leave fix):
+pikr, which is fully on 0.5.0). Input region, D3D12 start-up and adapter choice,
+SVG text shaping and the Unicode text work have shipped; what is left:
 
 1. **Input method (S9): the shell half is pikr's need, and it is in.** pikr runs
    its own loop (not `crcbl-app`), already calls `set_text_input`, and is wiring
@@ -33,16 +33,6 @@ flight (AppKit input method, the Win32 popup leave fix):
    `crcbl_app::TextPump` draws no pre-edit at the caret and never calls
    `set_text_input_area`, so the candidate window sits at the window's origin.
    Build both in `crcbl-app` and `crcbl-ui`'s text field after the items below.
-2. **Alpha-0 pointer passthrough on Win32 (S5), decided 2026-10-19: an input
-   region.** A transparent pixel is still the window's for the pointer (see
-   "Behaviour, not a bug" under Win32 transparency), and `HTTRANSPARENT` only
-   passes to windows of the same thread. Build `Shell::set_input_region`: a
-   window region on Win32, `wl_surface.set_input_region` on Wayland, an XShape
-   input region on X11, and on AppKit whatever its non-opaque hit testing needs
-   (a cap where it cannot). Declined: hit testing by pixel alpha, which needs a
-   GPU readback per pointer move.
-3. **Shaping in SVG text.** `crcbl-image`'s SVG text draws one glyph a char from
-   the cmap; move it onto `harfrust`, which the workspace already has.
 
 **Adapter choice, left over from the 2026-10-19 slice** (lazy describe,
 `PowerPreference`, `AdapterPick`, `Instance::display_adapter`; the policy is
@@ -100,6 +90,41 @@ flight (AppKit input method, the Win32 popup leave fix):
   (policy, pikr). pikr's owner decided it warns and draws opaque instead. Add an
   opt-in on `PresenterDesc` to accept opaque when no adapter offers
   `PreMultiplied`, and report which alpha mode it got.
+- **`Shell::set_input_region` (S5): what is unverified, and AppKit.** Built
+  2026-10-20 on Wayland (`wl_surface.set_input_region`, committed at once, in
+  `wayland/region.rs`), X11 (a SHAPE input shape through a `dlopen`ed
+  libxcb-shape, `Conn::apply_input_shape`) and Win32 (a window region,
+  `Win32Shell::apply_input_region`, rebuilt on every size change and in
+  `set_mode` because it is in window coordinates and keeps the frame);
+  `ShellCaps::INPUT_REGION` says where. Declined, 2026-10-19: hit testing by
+  pixel alpha, which needs a GPU readback per pointer move.
+  - **Only CI can verify**, and none of it has run: the desktop tests
+    `win32_e2e::the_pointer_outside_an_input_region_reaches_the_window_beneath`
+    (`WindowFromPoint` as the judge), `wayland_e2e::` and
+    `x11_e2e::the_pointer_outside_an_input_region_leaves_the_window`, and
+    `x11_e2e`'s new `INPUT_REGION` cap assertion (`libxcb-shape0` was added to
+    the job's packages). Their mutants: `SetWindowRgn` skipped in
+    `apply_input_region` (the Win32 test's outside point should go red); the
+    `Resized` arm's rebuild deleted in `win32/shell.rs` (the grown caption
+    should go red); `set_mode`'s rebuild deleted (the caption back from
+    borderless should go red); `wl_surface::commit` deleted in `region.rs` (the
+    Wayland leave should time out); `apply_input_shape` returning early (the X11
+    leave should time out).
+  - **Unverified on Win32:** that a window region clips a DirectComposition
+    window's drawing (documented as clipping, which is the safe direction: a
+    caller gives the outer bound either way), and whether a captioned window
+    given a region keeps DWM's themed frame. The frame band, rebuilt on a size
+    change, is stale during a modal drag-resize, until the mouse is released.
+  - **AppKit: the bit is clear, and the call is validated and ignored.** An
+    `NSWindow` has no input region. Options, untried: toggling
+    `ignoresMouseEvents` from a global pointer monitor as the pointer crosses
+    the shape, which reacts a frame late; or relying on the window server
+    letting a click through a fully transparent pixel of a non-opaque window,
+    which nobody has checked for a `CAMetalLayer` view. Needs a macOS session
+    and a decision.
+  - Behaviour, not a bug: the rectangles are the caller's layout in device
+    pixels, so a window whose scale changes keeps its old region (scaled once,
+    at the call) until the caller sends it again, as the trait docs say.
 - **The Win32 keyboard fixes' CI mutants were not run.** The branch's CI was
   green on 2026-10-19, Wayland Escape and Win32 desktop tests included, but
   these mutants were never run against it: `consumed.report` disabled in
@@ -827,15 +852,16 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      as integers with hand-counted references, which would trade one argued
      marker for unchecked lifetimes.
    - Behaviour, not a bug: a pixel of alpha zero is still the window's for the
-     pointer (DirectComposition is not a layered window), so click-through is
-     `WM_NCHITTEST`'s, as `PopupInput::Passthrough` answers it. Nothing does
-     pixel-alpha hit testing, on purpose. A resize does not stretch stale
-     content: the visual shows the swapchain at its own size, so until
-     `reconfigure_swapchain` a grown window has a transparent band and a shrunk
-     one clips its last frame. `reconfigure_swapchain` refuses a changed
-     `composite_alpha` (`ResizeBuffers` keeps the alpha mode). A second live
-     transparent surface on one window, or a second swapchain on one, is refused
-     by name.
+     pointer (DirectComposition is not a layered window). Click-through to
+     another program is `Shell::set_input_region`'s, a window region;
+     `WM_NCHITTEST`'s `HTTRANSPARENT`, as `PopupInput::Passthrough` answers it,
+     reaches only windows of the same thread. Nothing does pixel-alpha hit
+     testing, on purpose. A resize does not stretch stale content: the visual
+     shows the swapchain at its own size, so until `reconfigure_swapchain` a
+     grown window has a transparent band and a shrunk one clips its last frame.
+     `reconfigure_swapchain` refuses a changed `composite_alpha`
+     (`ResizeBuffers` keeps the alpha mode). A second live transparent surface
+     on one window, or a second swapchain on one, is refused by name.
    - **Verified:** `with_transparency`, `transparent_chrome`, the FFI values,
      `window_composite_alpha`, `alpha_mode`, `swap_chain_desc` and
      `win32_refusal` unit tests, mutation-checked locally. The D3D12 device test

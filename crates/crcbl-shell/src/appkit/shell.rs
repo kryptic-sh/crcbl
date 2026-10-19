@@ -1062,6 +1062,14 @@ impl Shell for AppKitShell {
     /// * [`PANEL_RESERVE`](ShellCaps::PANEL_RESERVE) — **macOS lets nothing
     ///   but the menu bar and the Dock reserve space.** A reserving panel is
     ///   built and overlaps what is behind it.
+    /// * [`INPUT_REGION`](ShellCaps::INPUT_REGION) — **an `NSWindow` has no
+    ///   input region.** A view's `hitTest:` only chooses among the window's
+    ///   own views, so it cannot hand a click to another application, and
+    ///   `ignoresMouseEvents` is all or nothing; toggling it as the pointer
+    ///   crosses the shape would need the pointer watched from outside the
+    ///   window, a frame late. Whether the window server lets a click through a
+    ///   fully transparent pixel of a non-opaque window's Metal layer is
+    ///   unverified, and nothing here relies on it.
     fn caps(&self) -> ShellCaps {
         self.caps
     }

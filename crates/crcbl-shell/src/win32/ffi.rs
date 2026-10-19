@@ -1278,6 +1278,10 @@ pub mod value {
 
     /// `BLACK_BRUSH`.
     pub const BLACK_BRUSH: i32 = 4;
+    /// `RGN_OR` — `CombineRgn` makes the union of its two sources.
+    pub const RGN_OR: i32 = 2;
+    /// `ERROR` — what `CombineRgn` answers when it could not combine.
+    pub const REGION_ERROR: i32 = 0;
     /// `CS_HREDRAW | CS_VREDRAW` — repaint the whole client area on a resize,
     /// so a window being dragged wider does not show stale pixels in the strip
     /// that just appeared.
@@ -1667,9 +1671,8 @@ unsafe extern "system" {
     pub fn GetQueueStatus(flags: u32) -> u32;
     pub fn MonitorFromWindow(hwnd: Handle, flags: u32) -> Handle;
     pub fn MonitorFromPoint(point: Point, flags: u32) -> Handle;
-    // Test-only: where a panel landed, in desktop pixels, read back from the
-    // system rather than from the rectangle this backend computed.
-    #[cfg(test)]
+    // Where the frame is, for building an input region in window coordinates;
+    // also how tests read back where a panel landed.
     pub fn GetWindowRect(hwnd: Handle, rect: *mut Rect) -> Bool32;
     pub fn EnumDisplayMonitors(
         hdc: Handle,
@@ -1737,6 +1740,10 @@ unsafe extern "system" {
     pub fn GetFocus() -> Handle;
     pub fn ClientToScreen(hwnd: Handle, point: *mut Point) -> Bool32;
     pub fn ScreenToClient(hwnd: Handle, point: *mut Point) -> Bool32;
+    // The region is in window coordinates, frame included. On success the
+    // **system** owns it and frees it when the window goes or a later call
+    // replaces it; on failure it stays the caller's. Null removes the region.
+    pub fn SetWindowRgn(hwnd: Handle, region: Handle, redraw: Bool32) -> i32;
     // Which kind of device a `WM_POINTER*` message's pointer id belongs to.
     // Answers only while that pointer is live, which is why it is asked inside
     // the window procedure rather than at translation time.
@@ -1863,11 +1870,18 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-// The `gdi32` surface: one call, for the class background brush.
+// The `gdi32` surface: the class background brush, and the regions a window's
+// input region is built from.
 #[cfg(target_os = "windows")]
 #[link(name = "gdi32")]
 unsafe extern "system" {
     pub fn GetStockObject(object: i32) -> Handle;
+    // Null when the system is out of GDI objects. The far edges are exclusive.
+    pub fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) -> Handle;
+    // Writes the combination into `destination`, which must already exist,
+    // and answers the result's complexity, or `ERROR`.
+    pub fn CombineRgn(destination: Handle, first: Handle, second: Handle, mode: i32) -> i32;
+    pub fn DeleteObject(object: Handle) -> Bool32;
 }
 
 // The `shcore` surface: per-monitor DPI. `GetDpiForMonitor` lives here rather
@@ -2422,6 +2436,9 @@ mod tests {
         assert_eq!(dwm::BORDER_COLOR, 34);
         assert_eq!(dwm::COLOR_DEFAULT, 0xFFFF_FFFF);
         assert_eq!(dwm::COLOR_NONE, 0xFFFF_FFFE);
+        // `wingdi.h`; a wrong mode intersects or subtracts instead.
+        assert_eq!(value::RGN_OR, 2);
+        assert_eq!(value::REGION_ERROR, 0);
     }
 
     /// The conversion from `QueryDisplayConfig`'s rational to millihertz, and

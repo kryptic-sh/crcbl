@@ -29,6 +29,7 @@
 //! | Drag and drop in: XDND version 5, the `accept_drops` gate | complete — [`DRAG_DROP`](ShellCaps::DRAG_DROP), see [`xdnd`] |
 //! | Key repeat synthesis | not needed — the X server does it |
 //! | Themed cursor shapes | complete where libxcb-cursor is installed — [`CURSOR_SHAPE`](ShellCaps::CURSOR_SHAPE), see [`cursor`]; recorded and not applied without it |
+//! | Input region: a SHAPE input shape | complete where libxcb-shape is installed and the server has SHAPE 1.1 — [`INPUT_REGION`](ShellCaps::INPUT_REGION); not applied without them |
 //!
 //! ## What was cut, and why that seam
 //!
@@ -345,6 +346,9 @@ struct Conn {
     randr_event_base: Option<u8>,
     /// XInput's major opcode, or `None`.
     xi_opcode: Option<u8>,
+    /// libxcb-shape, when the server also has SHAPE 1.1's input shapes; see
+    /// [`setup_shape`](Self::setup_shape).
+    shape: Option<&'static ffi::ShapeLib>,
     /// Whether the server agreed to stop faking a `KeyRelease` in front of
     /// every auto-repeat; see
     /// [`setup_detectable_auto_repeat`](Self::setup_detectable_auto_repeat).
@@ -881,10 +885,12 @@ impl X11Shell {
             max_property_bytes: selection::max_property_bytes(max_request_length),
             randr_event_base: None,
             xi_opcode: None,
+            shape: None,
             detectable_auto_repeat: false,
         };
         conn.randr_event_base = conn.setup_randr();
         conn.xi_opcode = conn.setup_xinput2();
+        conn.shape = conn.setup_shape();
         conn.detectable_auto_repeat = conn.setup_detectable_auto_repeat();
 
         // SAFETY: the connection is live; libxkbcommon-x11 round-trips on it
@@ -965,6 +971,8 @@ impl X11Shell {
         // library and a context on this connection; without them `set_cursor`
         // records a shape and applies nothing, and the clear bit says so.
         caps.set(ShellCaps::CURSOR_SHAPE, self.cursors.applies_shapes());
+        // An input shape needs libxcb-shape and a server with SHAPE 1.1.
+        caps.set(ShellCaps::INPUT_REGION, self.conn.shape.is_some());
 
         // Both of these need a window manager, and a window manager is a
         // separate program that may simply not be running — the finding this

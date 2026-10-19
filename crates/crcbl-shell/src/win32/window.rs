@@ -584,6 +584,100 @@ impl Win32Shell {
         }
     }
 
+    /// Gives the window the region
+    /// [`set_input_region`](crate::Shell::set_input_region) asked for, built
+    /// against its frame as it is now, or removes it with `None`.
+    ///
+    /// A window region is what Windows hit-tests against before any window
+    /// procedure is asked, so the pointer outside it goes to whatever window is
+    /// beneath, in any process. It also clips what the window draws, which the
+    /// seam's docs pass on to the caller. The region is in window coordinates
+    /// and keeps the frame (see [`geometry::window_region`]), so it is built
+    /// again whenever the window's size or frame changes.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Backend`] if a region could not be built or the window
+    /// refused it.
+    pub(super) fn apply_input_region(
+        hwnd: Handle,
+        region: Option<&[crate::PhysicalRect]>,
+    ) -> Result<(), ShellError> {
+        let Some(region) = region else {
+            // SAFETY: this shell's own window; a null region removes the one
+            // it has, which the system frees.
+            if unsafe { ffi::SetWindowRgn(hwnd, ptr::null_mut(), 1) } == 0 {
+                return Err(ShellError::Backend(format!(
+                    "SetWindowRgn refused to remove window {hwnd:?}'s input region"
+                )));
+            }
+            return Ok(());
+        };
+        let mut outer = Rect::default();
+        let mut client = Rect::default();
+        let mut origin = ffi::Point { x: 0, y: 0 };
+        // SAFETY: three live, initialised out-parameters the calls write into,
+        // against this shell's own window.
+        let read = unsafe {
+            ffi::GetWindowRect(hwnd, &raw mut outer) != 0
+                && ffi::GetClientRect(hwnd, &raw mut client) != 0
+                && ffi::ClientToScreen(hwnd, &raw mut origin) != 0
+        };
+        if !read {
+            return Err(ShellError::Backend(format!(
+                "could not read window {hwnd:?}'s frame to build its input region"
+            )));
+        }
+        let rects = geometry::window_region(
+            region,
+            ffi::Point {
+                x: origin.x - outer.left,
+                y: origin.y - outer.top,
+            },
+            (client.width(), client.height()),
+            (outer.width(), outer.height()),
+        );
+        // SAFETY: four integers by value; null is the system refusing.
+        let combined = unsafe { ffi::CreateRectRgn(0, 0, 0, 0) };
+        if combined.is_null() {
+            return Err(ShellError::Backend(
+                "CreateRectRgn refused: the process is out of GDI objects".to_string(),
+            ));
+        }
+        for rect in rects {
+            // SAFETY: as above. Each part is combined into the region made
+            // above and freed straight after, on every path.
+            let united = unsafe {
+                let part = ffi::CreateRectRgn(rect.left, rect.top, rect.right, rect.bottom);
+                let united = !part.is_null()
+                    && ffi::CombineRgn(combined, combined, part, value::RGN_OR)
+                        != value::REGION_ERROR;
+                if !part.is_null() {
+                    ffi::DeleteObject(part);
+                }
+                united
+            };
+            if !united {
+                // SAFETY: the region made above, never handed to the window.
+                unsafe { ffi::DeleteObject(combined) };
+                return Err(ShellError::Backend(
+                    "could not build an input region: the process is out of GDI objects"
+                        .to_string(),
+                ));
+            }
+        }
+        // SAFETY: this shell's own window and a live region. On success the
+        // system owns the region; on failure it is still ours and freed here.
+        if unsafe { ffi::SetWindowRgn(hwnd, combined, 1) } == 0 {
+            // SAFETY: as above.
+            unsafe { ffi::DeleteObject(combined) };
+            return Err(ShellError::Backend(format!(
+                "SetWindowRgn refused window {hwnd:?}'s input region"
+            )));
+        }
+        Ok(())
+    }
+
     /// The rectangle a borderless window should cover.
     ///
     /// A named monitor is looked up in the enumeration — so an unplugged one is

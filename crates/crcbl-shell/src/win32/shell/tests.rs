@@ -601,6 +601,19 @@ fn a_named_cursor_shape_is_applied() {
     }
 }
 
+/// `set_input_region` sets a window region, which every Windows has, so the
+/// bit is a constant. Whether the pointer then passes through is
+/// `win32_e2e`'s to show.
+#[test]
+fn an_input_region_is_applied() {
+    for raw_motion in [false, true] {
+        assert!(
+            Win32Shell::latch_caps(raw_motion).contains(ShellCaps::INPUT_REGION),
+            "SetWindowRgn takes the region"
+        );
+    }
+}
+
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_capabilities_are_exactly_what_this_backend_implements() {
@@ -628,6 +641,7 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
         ShellCaps::POPUP_REPOSITION,
         ShellCaps::TRANSPARENT,
         ShellCaps::CURSOR_SHAPE,
+        ShellCaps::INPUT_REGION,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
     }

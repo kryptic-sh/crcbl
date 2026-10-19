@@ -297,6 +297,7 @@ mod desktop {
         fn GetClassNameW(hwnd: Handle, buffer: *mut u16, capacity: i32) -> i32;
         fn ClientToScreen(hwnd: Handle, point: *mut Point) -> i32;
         fn GetWindowTextW(hwnd: Handle, buffer: *mut u16, capacity: i32) -> i32;
+        fn WindowFromPoint(point: Point) -> Handle;
     }
 
     #[link(name = "kernel32")]
@@ -867,6 +868,16 @@ mod desktop {
         // `hwnd` is a window this process created and has not destroyed.
         unsafe { ClientToScreen(hwnd, &raw mut point) };
         point
+    }
+
+    /// The window the system would give the pointer at a desktop point: the
+    /// hit test a click goes through, window regions included, asked without
+    /// moving the pointer.
+    #[must_use]
+    pub fn window_at(point: Point) -> Handle {
+        // SAFETY: a `POINT` by value; the call only reads window-station
+        // state, and answers null where there is no window.
+        unsafe { WindowFromPoint(point) }
     }
 
     /// Where the cursor is, in desktop coordinates.
@@ -2618,6 +2629,127 @@ fn a_passthrough_popup_does_not_disarm_its_parents_pointer_leave() {
             matches!(event, ShellEvent::PointerFocus { window: w, entered: false, .. } if *w == window)
         })
     });
+}
+
+/// The pointer outside an input region goes to the window beneath, which on
+/// Win32 is any process's, and a captioned window keeps its frame, rebuilt
+/// when the window grows.
+///
+/// The judge is `WindowFromPoint`, the system's own hit test, which honours a
+/// window region before any window procedure is asked: a window that still
+/// answered for the excluded half would be the window a click there reached.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn the_pointer_outside_an_input_region_reaches_the_window_beneath() {
+    /// How far the window is grown from outside, so the caption reaches past
+    /// the frame the region was first built against.
+    const GROWTH: i32 = 200;
+
+    let mut session = Session::open();
+    assert!(
+        session.shell.caps().contains(ShellCaps::INPUT_REGION),
+        "a window region is what this backend claims"
+    );
+    let window = session.window("input region");
+    session.foreground(window);
+    let hwnd = session.hwnd(window);
+    let client = desktop::client_rect(hwnd);
+    let (width, height) = (client.width(), client.height());
+    let half = width / 2;
+    let region = [PhysicalRect::new(
+        half,
+        0,
+        u32::try_from(width - half).expect("a client area is not negative"),
+        u32::try_from(height).expect("a client area is not negative"),
+    )];
+    session
+        .shell
+        .set_input_region(window, Some(&region))
+        .expect("set_input_region");
+    session.settle();
+    let at = |x: i32, y: i32| desktop::window_at(desktop::client_to_screen(hwnd, x, y));
+    assert_eq!(at(half + half / 2, height / 2), hwnd, "inside the region");
+    let beneath = at(half / 2, height / 2);
+    assert_ne!(
+        beneath,
+        hwnd,
+        "outside the region the hit test went to {}",
+        desktop::describe(beneath)
+    );
+
+    // The title bar, which is outside the client area and so outside every
+    // rectangle given, is kept.
+    let caption = |hwnd: desktop::Handle, x: i32| {
+        let outer = desktop::window_rect(hwnd);
+        let origin = desktop::client_to_screen(hwnd, 0, 0);
+        desktop::Point {
+            x,
+            y: (outer.top + origin.y) / 2,
+        }
+    };
+    let outer = desktop::window_rect(hwnd);
+    let left_of_caption = caption(hwnd, outer.left + outer.width() / 4);
+    assert_eq!(
+        desktop::window_at(left_of_caption),
+        hwnd,
+        "the caption at {left_of_caption:?} went to {}",
+        desktop::describe(desktop::window_at(left_of_caption))
+    );
+
+    session.take_names();
+    desktop::resize(hwnd, outer.width() + GROWTH, outer.height());
+    session.pump_until("the resize", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::Resized { .. }))
+    });
+    let grown = caption(hwnd, outer.right + GROWTH / 2);
+    assert_eq!(
+        desktop::window_at(grown),
+        hwnd,
+        "the caption the window grew, at {grown:?}, went to {}: the region was not rebuilt \
+         around the new frame",
+        desktop::describe(desktop::window_at(grown))
+    );
+
+    // Borderless and back: the client size returns unchanged, so only the mode
+    // change itself can put the frame back into the region.
+    session
+        .shell
+        .set_mode(window, DisplayMode::Borderless { monitor: None })
+        .expect("set_mode");
+    session.pump_until("the borderless configuration", |session| {
+        session
+            .shell
+            .window_state(window)
+            .is_ok_and(|state| state.mode_request_honoured())
+    });
+    session
+        .shell
+        .set_mode(window, DisplayMode::Windowed)
+        .expect("set_mode");
+    session.pump_until("the windowed configuration", |session| {
+        session
+            .shell
+            .window_state(window)
+            .is_ok_and(|state| state.effective_mode() == Some(DisplayMode::Windowed))
+    });
+    let restored = desktop::window_rect(hwnd);
+    let back = caption(hwnd, restored.left + restored.width() / 4);
+    assert_eq!(
+        desktop::window_at(back),
+        hwnd,
+        "the caption back from borderless, at {back:?}, went to {}: the region was not \
+         rebuilt for the returning frame",
+        desktop::describe(desktop::window_at(back))
+    );
+
+    session
+        .shell
+        .set_input_region(window, None)
+        .expect("the whole window back");
+    assert_eq!(at(half / 2, height / 2), hwnd, "the whole window again");
 }
 
 /// Both thumb buttons, clicked from another process, arrive as the buttons

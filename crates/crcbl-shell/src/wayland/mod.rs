@@ -55,6 +55,9 @@
 //! | --- | --- |
 //! | `zwp_text_input_v3` | [`TextPreedit`](ShellEvent::TextPreedit) and composed [`TextCommit`](ShellEvent::TextCommit), for a window that named a field with [`Shell::set_text_input`] — see [`text_input`] |
 //!
+//! And a window's input region with core `wl_surface.set_input_region` — see
+//! [`region`] and [`Shell::set_input_region`].
+//!
 //! Still deliberately absent: touch, tablet, the *primary*
 //! selection (`wp_primary_selection_v1` — middle-click paste, which the seam
 //! has no vocabulary for) and starting a drag from one of our own windows. That
@@ -173,6 +176,7 @@ mod input;
 mod layer;
 mod popup;
 pub mod protocol;
+mod region;
 mod text_input;
 
 /// The evdev table and libxkbcommon, which are Linux facts rather than Wayland
@@ -2242,6 +2246,8 @@ impl WaylandShell {
         // client declares a region opaque, which this backend never does, so a
         // swapchain with premultiplied alpha is all a transparent window needs.
         caps.insert(ShellCaps::TRANSPARENT);
+        // `wl_surface.set_input_region` is core protocol on every surface.
+        caps.insert(ShellCaps::INPUT_REGION);
         // `xdg_wm_base`, which `open` requires, has had popups from version 1,
         // and moves them from version 3.
         caps.insert(ShellCaps::POPUP);
@@ -3982,6 +3988,16 @@ impl Shell for WaylandShell {
         area: Option<PhysicalRect>,
     ) -> Result<(), ShellError> {
         self.place_text_input(window, area)
+    }
+
+    /// `wl_surface.set_input_region`, committed at once; see [`region`]. A
+    /// passthrough popup keeps the empty region it was made with.
+    fn set_input_region(
+        &mut self,
+        window: WindowId,
+        region: Option<&[PhysicalRect]>,
+    ) -> Result<(), ShellError> {
+        self.apply_input_region(window, region)
     }
 
     fn monitors(&self) -> &[MonitorInfo] {

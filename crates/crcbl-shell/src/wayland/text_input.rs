@@ -154,8 +154,9 @@ fn content_type(purpose: TextPurpose) -> (u32, u32) {
 
 /// `area`, in device pixels at `scale`, as the surface-local logical
 /// rectangle `set_cursor_rectangle` takes, grown outward to whole units so it
-/// still covers the caret.
-fn logical_rect(area: PhysicalRect, scale: f64) -> [i32; 4] {
+/// still covers the caret. An input region's rectangles are converted the
+/// same way, so they still cover what the window draws.
+pub(super) fn logical_rect(area: PhysicalRect, scale: f64) -> [i32; 4] {
     let scale = scale.max(f64::MIN_POSITIVE);
     let left = (f64::from(area.x) / scale).floor();
     let top = (f64::from(area.y) / scale).floor();

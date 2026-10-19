@@ -312,6 +312,19 @@ bitflags::bitflags! {
         /// error there would be one every caller had to handle — and hiding
         /// with `None` works everywhere; only the shape goes unseen.
         const CURSOR_SHAPE = 1 << 23;
+
+        /// [`Shell::set_input_region`](crate::Shell::set_input_region) is
+        /// acted on: the pointer outside the region goes to whatever is behind
+        /// the window, another program's window included.
+        ///
+        /// Wayland's `wl_surface.set_input_region`; X11's SHAPE input region,
+        /// where libxcb-shape is installed and the server has SHAPE 1.1; a
+        /// window region on Win32, which also clips what the window draws.
+        /// Clear on AppKit, where an `NSWindow` has no input region, and on the
+        /// web, whose one canvas has nothing behind it to reach. Without it the
+        /// region is accepted and the whole window keeps the pointer, so a
+        /// launcher's transparent corners stay its own.
+        const INPUT_REGION = 1 << 24;
     }
 }
 
