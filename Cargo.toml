@@ -131,6 +131,11 @@ skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
 # with it. Default features are `std` alone, kept explicit beside `skrifa`'s so
 # the two agree on the float backend; `icu` and `libm` stay off.
 harfrust = { version = "0.14.0", default-features = false, features = ["std"] }
+# Unicode text segmentation for `crcbl-ui`'s text, approved by the owner on
+# 2026-10-19: line break opportunities (UAX #14), and extended grapheme
+# clusters and word boundaries (UAX #29).
+unicode-linebreak = "0.1.5"
+unicode-segmentation = "1.13.3"
 # Storage and persistence: serde for settings/save schemas, toml for settings
 # files, dirs for platform-standard config/data paths.
 serde = { version = "1", features = ["derive"] }

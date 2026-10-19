@@ -320,3 +320,51 @@ fn caret_stops_sit_on_cluster_pens() {
     caret_stops(&flags, "\u{2764}\u{1F525}", SIZE, &mut stops);
     assert_eq!(stops, [0.0, SIZE / 2.0, SIZE]);
 }
+
+/// **Soft breaks are UAX #14's**: a line breaks after a hyphen inside a
+/// word, between two ideographs, and never before closing punctuation, even
+/// after a space — the words before it go down with it instead.
+#[test]
+fn lines_break_where_uax_14_allows() {
+    let font = Font::sans();
+    let hyphen = wrap_width(width("well-") + 1.0);
+    assert!(width("well-known") > hyphen, "the word fits whole");
+    let layout = TextLayout::new(font, "well-known", SIZE, LINE, Some(hyphen));
+    assert_lines(&layout, &["well-", "known"], "a hyphen");
+
+    let ideographs = "\u{65E5}\u{672C}\u{8A9E}";
+    let layout = TextLayout::new(font, ideographs, SIZE, LINE, Some(1.0));
+    assert_lines(&layout, &["\u{65E5}", "\u{672C}", "\u{8A9E}"], "ideographs");
+
+    let glued = wrap_width(width("The fox") + 1.0);
+    assert!(width("The fox )") > glued, "the punctuation fits");
+    let layout = TextLayout::new(font, "The fox )", SIZE, LINE, Some(glued));
+    assert_lines(&layout, &["The", "fox )"], "closing punctuation");
+}
+
+/// **Every UAX #14 hard break ends a line**, a carriage return and line
+/// feed together being one, and none of them is drawn.
+#[test]
+fn every_hard_break_ends_a_line() {
+    let font = Font::sans();
+    let layout = TextLayout::new(font, "ab\r\ncd\u{2028}ef\u{B}", SIZE, LINE, None);
+    assert_lines(&layout, &["ab", "cd", "ef", ""], "hard breaks");
+}
+
+/// **A word cut at a soft break inside it is shaped again on each side when
+/// the cut changes its shaping**: two hearts kerned together in one word,
+/// with a soft break between them as two ideograph-class pictographs, are
+/// each a heart's own width once each takes a line.
+#[test]
+fn a_word_cut_inside_is_shaped_again_where_the_cut_matters() {
+    let hearts = fixtures::shaped();
+    let x = |layout: &TextLayout| -> Vec<f32> {
+        layout.glyphs().iter().map(|glyph| glyph.offset.x).collect()
+    };
+    let whole = TextLayout::new(&hearts, "\u{2764}\u{2764}", SIZE, LINE, None);
+    assert_eq!(x(&whole), [0.0, 13.0], "the hearts kern");
+    let cut = TextLayout::new(&hearts, "\u{2764}\u{2764}", SIZE, LINE, Some(20.0));
+    let widths: Vec<f32> = cut.lines().iter().map(|line| line.width).collect();
+    assert_eq!(widths, [16.0, 16.0], "the kerning survived the cut");
+    assert_eq!(x(&cut), [0.0, 0.0]);
+}

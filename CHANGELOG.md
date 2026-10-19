@@ -28,8 +28,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `ScaleFactorChanged`, an early key — were counted and dropped, so a program
   that sized its window and then ran its loop never saw them. A caller that only
   counted passes `&mut |_| events += 1`.
+- **`crcbl_ui::font::shape::ShapedGlyph` has an `unsafe_to_break` field**:
+  `harfrust`'s flag for whether cutting the text where the glyph's cluster
+  starts would shape either side differently, which the line breakers read to
+  cut a word without shaping it again. A `ShapedGlyph` struct literal needs it.
 
 ### Added
+
+- **Lines break at Unicode's line break opportunities (UAX #14)**, through
+  `unicode-linebreak`, in `crcbl_ui::font::layout::TextLayout` and in a tree's
+  spans and paragraphs: after a hyphen, between ideographs and between emoji,
+  and never before closing punctuation, even after a space, so `Bonjour !` keeps
+  its `!`. Every mandatory break ends a line as `\n` did — `\r\n` as one, a lone
+  `\r`, a vertical tab, a form feed, U+0085, U+2028 and U+2029 — and none is
+  drawn. Words are still shaped whole between spaces; a word cut at a break
+  inside it is shaped again on each side only where `harfrust` says the cut
+  changes its shaping. A stretch with no break still overflows a span
+  (`overflow-wrap: normal`) and is cut between clusters in a paragraph
+  (`break-word`).
+- **Clusters are UAX #29's extended grapheme clusters**, through
+  `unicode-segmentation`: `crcbl_ui::font::cluster::{clusters, caret_stops}`, so
+  font fallback, a text input's caret, its Backspace and Delete, a paragraph's
+  cut inside an overlong word and `text-overflow: ellipsis` keep a Hebrew letter
+  with its points, a Devanagari syllable with its spacing marks, a Hangul
+  syllable written in jamo and every emoji sequence whole, where the old rule
+  knew Latin combining marks and a few emoji sequences. Backspace and Delete
+  take a whole cluster in every script.
+- **Word moves and a double-click's word follow UAX #29's word boundaries**
+  (`crcbl_ui::edit::{word_left, word_right, run_at}`), so `can't`, `3.14` and a
+  word with a combining mark in it are one word each.
 
 - **`ShellCaps::CURSOR_SHAPE` is set on X11 when libxcb-cursor is installed**,
   and `set_cursor` with a shape then shows the user's XCursor theme's cursor for
@@ -65,6 +92,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   or a percentage, clamped into `0..=1`, and fades the node with its subtree; it
   is not inherited. A frame with groups records more passes than
   `UiRenderer::MAX_PASSES`, which still bounds a frame without them.
+
+### Changed
+
+- **A zero-width joiner joins only emoji**, as UAX #29 has it: `a`, ZWJ, `b` is
+  two caret stops and two clusters for fallback, where it was one. A combining
+  mark after a space now joins the space, and a paragraph's hyphenated word is
+  shaped whole, so a font's kerning reaches across the hyphen there as it
+  already did in a span.
 
 ### Fixed
 

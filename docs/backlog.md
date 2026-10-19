@@ -17,7 +17,9 @@ open**: what is left ships in later releases.
 approved as a dependency of `crcbl-shell` and goes ahead after the release;
 `ShellCaps::HW_UPSCALE` stays as a documented fact (removing it is now a
 breaking change, so a minor bump); `crcbl-cli` stays unpublished; the `notify`
-watcher and a grapheme crate stay declined until a caller needs them.
+watcher stays declined until a caller needs it. A grapheme crate, declined then
+too, was approved on 2026-10-19 with `unicode-linebreak` and `unicode-bidi`,
+pikr being the caller.
 
 **pikr's remaining gaps, prioritised by the owner on 2026-10-19** (relayed by
 pikr, which is fully on 0.5.0). Order of work, after the slices already in
@@ -68,12 +70,9 @@ flight (AppKit input method, the Win32 popup leave fix):
    GPU readback per pointer move.
 4. **Shaping in SVG text.** `crcbl-image`'s SVG text draws one glyph a char from
    the cmap; move it onto `harfrust`, which the workspace already has.
-5. **Bidi (UAX #9), line breaking (UAX #14) and grapheme clusters (UAX #29):
-   needs the owner's approval of new dependencies**, so it waits. The candidates
-   are `unicode-bidi`, `unicode-linebreak` and `unicode-segmentation` (or
-   ICU4X's `icu_segmenter`, which covers both breaking and clusters but is far
-   larger). A grapheme crate was declined on 2026-10-16 "until a caller needs
-   them"; pikr is that caller now.
+5. **Bidi (UAX #9)**, the half of this item still open: the owner approved
+   `unicode-bidi`, `unicode-linebreak` and `unicode-segmentation` on 2026-10-19,
+   and line breaking (UAX #14) and grapheme clusters (UAX #29) shipped that day.
 
 **Open from 2026-10-19, raised by pikr and lyr, not started:**
 
@@ -1049,26 +1048,24 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      and the heaviest Segoe glyphs at large sizes against `MAX_FILLED_PIXELS`.
    - **Shaping, shipped 2026-10-17.** Parsed text is shaped with `harfrust` 0.14
      in `crates/crcbl-ui/src/font/shape.rs`: `shape` cuts text into clusters by
-     the rule in `font::cluster` (a base and its combining marks from the
-     combining-mark blocks, variation selectors, a ZWJ and the char it joins,
-     skin-tone modifiers, tags, regional-indicator pairs; a space or control
-     char always alone), gives each cluster the first face whose cmap maps all
-     of it (`fallback::cluster_face`; selectors and joiners not counted, VS15
-     and VS16 steering by whether the cluster shaped in a face alone draws a
-     colour glyph, so a ligature-only colour keycap counts (pikr found a theme
-     font that maps the digit and the keycap taking `1️⃣` before Segoe,
-     2026-10-17), then the face mapping the base, then `.notdef`), and shapes
-     each maximal run of one face, left to right, with the surrounding text as
-     context and default ignorables removed. `TextLayout` (`font/layout.rs`)
-     shapes each word and each run of spaces on its own and places it whole, so
-     nothing kerns across a space or a break; the paragraph breaker
-     (`tree/inline.rs`) shapes a word's parts in consecutive runs of one font
-     and size together, breaks an overlong word only before a cluster's first
-     glyph, and shapes the two sides of such a break again apart. Caret stops
-     (`layout::caret_stops`, used by `text_input`'s `measure`) sit on cluster
-     pens, a ligature of several clusters split evenly; `edit::LineEdit` stops
-     only between clusters (Left, Right, Backspace, Delete, clicks, selections,
-     word moves, inserts and outside edits all land on a boundary);
+     the rule in `font::cluster` (UAX #29's extended grapheme clusters since
+     2026-10-19; a home-grown subset before), gives each cluster the first face
+     whose cmap maps all of it (`fallback::cluster_face`; selectors and joiners
+     not counted, VS15 and VS16 steering by whether the cluster shaped in a face
+     alone draws a colour glyph, so a ligature-only colour keycap counts (pikr
+     found a theme font that maps the digit and the keycap taking `1️⃣` before
+     Segoe, 2026-10-17), then the face mapping the base, then `.notdef`), and
+     shapes each maximal run of one face, left to right, with the surrounding
+     text as context and default ignorables removed. `TextLayout`
+     (`font/layout.rs`) shapes each word and each run of spaces on its own and
+     places it whole, so nothing kerns across a space or a break; the paragraph
+     breaker (`tree/inline.rs`) shapes a word's parts in consecutive runs of one
+     font and size together, breaks an overlong word only before a cluster's
+     first glyph, and shapes the two sides of such a break again apart. Caret
+     stops (`layout::caret_stops`, used by `text_input`'s `measure`) sit on
+     cluster pens, a ligature of several clusters split evenly; `edit::LineEdit`
+     stops only between clusters (Left, Right, Backspace, Delete, clicks,
+     selections, word moves, inserts and outside edits all land on a boundary);
      `text-overflow: ellipsis` cuts between clusters. Shaped glyph ids take the
      same `ColorGlyphCache` path a cmap glyph did, so a GSUB-only colour flag
      draws in colour. `font/kern.rs` and `Font::kerning` are deleted: GPOS
@@ -1109,10 +1106,7 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      cmap — moving it onto `harfrust` is the follow-up; **script and language**
      come only from `harfrust`'s `Buffer::guess_segment_properties` per run (no
      language is ever set, so `locl` forms never apply, and a run mixing scripts
-     is shaped in its first strong script); **line breaking** is at spaces only,
-     not UAX #14; the cluster rule is not UAX #29 (a mark outside the
-     combining-mark blocks — Indic vowel signs, Hebrew points — is a caret stop
-     and a break opportunity of its own); **no shaping cache** (every
+     is shaped in its first strong script); **no shaping cache** (every
      `TextLayout`, measurement and caret measurement shapes again, allocating a
      `harfrust::Buffer` per run; not measured); a word whose parts are in runs
      of different fonts or sizes is shaped in pieces with no context between
@@ -1120,8 +1114,48 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      space draws that pair unkerned, by the per-word rule; after an overlong
      word's break, the side kept on the line was fitted by its width shaped
      whole, so a lost kerning adjustment can leave it a fraction of a pixel past
-     the wrap width. Behaviour change worth knowing: a ZWJ between two letters
-     joins them into one cluster, so a caret cannot stop between them.
+     the wrap width.
+   - **Line breaking (UAX #14) and clusters (UAX #29), shipped 2026-10-19**:
+     `font::breaks` (hard breaks and soft breaks through `unicode-linebreak`,
+     kept only at cluster boundaries), `font::cluster` on
+     `unicode-segmentation`, `font/layout/fill.rs` (the span breaker) and
+     `tree/inline.rs` (the paragraph breaker), and `edit`'s word moves on UAX
+     #29 word boundaries. Words are still shaped whole between spaces; a cut
+     inside one re-shapes the two sides only where `harfrust` flags the glyph
+     unsafe to break. Not done or not verified:
+     - **Versions differ**: `unicode-linebreak` 0.1.5 implements Unicode 15.0,
+       `unicode-segmentation` 1.13.3 Unicode 17.0 and `unicode-bidi` 0.3.18
+       Unicode 16.0, so a char added since 15.0 has line-break class XX (treated
+       as AL); 0.1.5 is the newest release `cargo add` found.
+     - **No dictionary breaking**: `unicode-linebreak` resolves SA (Thai, Lao,
+       Khmer, Myanmar) to AL, so a Thai paragraph breaks only at spaces, and an
+       unspaced Thai word overflows a span. ICU4X's `icu_segmenter` has the
+       dictionaries, at a much larger size.
+     - **No hyphenation and no tailoring**: no soft hyphen is drawn as a hyphen
+       at a break (U+00AD is class BA, so a break after it is taken but nothing
+       shows), and no locale tailoring (Japanese strict/loose, Korean
+       spaces-only) exists.
+     - **Only the parsed layouts honour the other hard breaks**: the bitmap
+       font's span path in `tree/emit.rs` and `tree/ellipsis.rs`'s cut still
+       split lines at `\n` alone, so a U+2028 or a lone carriage return in a
+       bitmap span or an ellipsised span is drawn as a char.
+     - **Quadratic in one case**: cutting a word where `harfrust` flags the cut
+       unsafe re-shapes the whole rest of the word, so a long space-less
+       paragraph (CJK) in a font that kerns or ligates across ideographs
+       re-shapes its remainder at every line. Re-shaping only around the cut
+       (`UNSAFE_TO_CONCAT`, as HarfBuzz documents) would bound it. Not measured.
+     - **Not mutation-tested**: the span breaker's check that a cut glyph starts
+       its cluster (`Filler::cut_at`'s `starts`): with the committed font every
+       multi-glyph cluster's later glyphs are zero-width marks, for which
+       cutting before the base or the mark lands at the same width.
+     - **Decided 2026-10-19: Backspace and Delete take a whole cluster** in
+       every script. Some platforms delete an Indic vowel sign or a Hebrew point
+       alone on Backspace; declined, because one rule never leaves half a flag
+       or ZWJ sequence, and no caller has asked.
+     - **Behaviour worth knowing**: a ZWJ joins only emoji now (UAX #29's GB11),
+       so `a`, ZWJ, `b` is two caret stops; a mark after a space joins the
+       space; and a paragraph word with a hyphen is shaped whole, so kerning
+       reaches across the hyphen there as it already did in a span.
    - Coverage gaps, shaping: no real complex-script font (Devanagari, Arabic,
      Thai) is tested, so reordering and joining are trusted to `harfrust`'s own
      conformance suite; no real emoji font is tested in the suite (too large to
@@ -6683,12 +6717,6 @@ in `crcbl_input::list`). Decisions, then what is left.
 `Ui::text_input`, `crcbl_ui::edit` and `crcbl::text_input::TextPump` landed with
 the gaps below.
 
-- **Caret stops are `char`s, not grapheme clusters (decided 2026-09-25: keep
-  `char`).** An `e` plus a combining accent is two stops, and so is an emoji
-  with a modifier. Nothing in `Cargo.lock` segments by UAX #29; the options are
-  adding a segmentation crate such as `unicode-segmentation` (a new dependency)
-  or keeping `char`. **Why:** the fix is a new dependency, which is the owner's
-  to add; revisit with the owner if a game's text shows a split accent.
 - **Pre-edit is not drawn**: the seam carries `ShellEvent::TextPreedit` and
   `Shell::set_text_input_area` (merged 2026-10-06), and the Win32 backend sends
   and honours them, unverified against a real input method (see _No verified IME
@@ -6863,10 +6891,10 @@ pending.
   (CSS would fold it into a space) — closer to `pre`. No `pre`, `pre-wrap`,
   `pre-line` or `break-spaces`. `text-overflow` takes no string value and no
   two-value form.
-- **The cut is at cluster boundaries** (`font::cluster`'s rule, not UAX #29's
-  full grapheme segmentation), so a mark stays with its base and an emoji
-  sequence or flag is kept or dropped whole; a ligature the shaper makes of two
-  clusters can still be cut between them, and then draws as its parts.
+- **A ligature of two clusters can be cut between them**, and then draws as its
+  parts: the cut is at UAX #29 cluster boundaries, so a mark stays with its base
+  and an emoji sequence or flag is kept or dropped whole, but the shaper may
+  join two clusters into one glyph.
 - **Fit is against the unrounded content width** — the width layout measured the
   text under — so the drawn, rounded box can be up to half a pixel narrower than
   the cut line. Integer-width boxes (every test) are exact.

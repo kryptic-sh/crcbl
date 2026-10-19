@@ -47,6 +47,12 @@ pub struct ShapedGlyph {
     /// Where it is drawn from the pen, in pixels: x right and y **down**, as
     /// the screen runs.
     pub offset: Vec2,
+    /// Whether cutting the text where its cluster starts, and shaping the two
+    /// sides apart, could shape either side differently — `harfrust`'s
+    /// unsafe-to-break flag: a kerning pair or a ligature reaching across.
+    /// Never set where the face drawing it changes, since each face's run is
+    /// shaped apart already.
+    pub unsafe_to_break: bool,
 }
 
 /// Appends to `out` the glyphs `range` of `text` shapes into in `font` — and
@@ -115,6 +121,7 @@ fn shape_run(
         return;
     };
     let buffer = run_shaper(shaper, text, range);
+    let first = out.len();
     for (info, position) in buffer.glyph_infos().iter().zip(buffer.glyph_positions()) {
         let mut advance = position.x_advance as f32;
         if position.x_advance != 0 {
@@ -129,7 +136,11 @@ fn shape_run(
                 position.x_offset as f32 * scale,
                 -(position.y_offset as f32) * scale,
             ),
+            unsafe_to_break: info.unsafe_to_break(),
         });
+    }
+    if let Some(glyph) = out.get_mut(first) {
+        glyph.unsafe_to_break = false;
     }
 }
 
@@ -201,6 +212,7 @@ fn nominal(
             cluster: range.start + at,
             advance: face.advance(glyph) * scale,
             offset: Vec2::ZERO,
+            unsafe_to_break: false,
         });
     }
 }

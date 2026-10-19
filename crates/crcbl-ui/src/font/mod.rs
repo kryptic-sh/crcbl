@@ -21,7 +21,8 @@
 //! * [`atlas`] — the glyph atlas: shelf-packed pages, LRU eviction and a
 //!   per-frame rasterisation budget.
 //! * [`cluster`] — the runs of chars that fall back, break and take the
-//!   caret as one.
+//!   caret as one: UAX #29's grapheme clusters.
+//! * `breaks` — where a line must end and where it may: UAX #14.
 //! * [`shape`] — clusters to positioned glyphs through `harfrust`: GSUB and
 //!   GPOS, kerning and marks, ligatures and emoji sequences.
 //! * [`layout`] — shaped words placed and greedily broken into lines.
@@ -81,6 +82,7 @@
 //! right-to-left text is shaped but laid out left to right.
 
 pub mod atlas;
+pub(crate) mod breaks;
 pub mod cluster;
 pub mod color;
 pub mod face;

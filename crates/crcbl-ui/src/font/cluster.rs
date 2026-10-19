@@ -3,28 +3,15 @@
 //!
 //! # The rule
 //!
-//! A cluster is a base char and every char after it that continues it:
-//!
-//! * a **combining mark** from the combining diacritical mark blocks (U+0300
-//!   to U+036F, U+1AB0 to U+1AFF, U+1DC0 to U+1DFF, U+20D0 to U+20FF — which
-//!   holds the keycap, U+20E3 — and U+FE20 to U+FE2F);
-//! * a **variation selector** (U+FE00 to U+FE0F, U+E0100 to U+E01EF);
-//! * a **zero-width joiner**, and the char right after it, which it joins —
-//!   an emoji ZWJ sequence such as `👩‍💻`;
-//! * an **emoji skin-tone modifier** (U+1F3FB to U+1F3FF);
-//! * a **tag** (U+E0020 to U+E007F), which spells a subdivision flag;
-//! * the **second regional indicator** of a pair — a flag — so `🇺🇸🇬🇧` is two
-//!   clusters, not one or four.
-//!
-//! **A space (U+0020), a line break or any other control char is always a
-//! cluster of its own**: nothing continues it and it continues nothing, so a
-//! line breaker that breaks at spaces never breaks inside a cluster.
-//!
-//! This is a small subset of UAX #29's extended grapheme clusters, chosen to
-//! keep emoji sequences and Latin marks whole; it has no Unicode tables. A
-//! mark outside those blocks — Indic vowel signs, Hebrew points, Arabic
-//! harakat — starts a cluster of its own here, although the shaper still
-//! shapes it with its base when one face draws both.
+//! A cluster is an **extended grapheme cluster** of Unicode Standard Annex
+//! #29, as `unicode-segmentation` finds them: a base char and the combining
+//! marks, spacing marks, variation selectors and skin-tone modifiers after
+//! it, an emoji ZWJ sequence such as `👩‍💻`, a flag's pair of regional
+//! indicators — so `🇺🇸🇬🇧` is two clusters, not one or four — a tag
+//! sequence, a Hangul syllable written in jamo, and a carriage return with
+//! the line feed after it. A control char other than that pair is always a
+//! cluster of its own. A space is not: a mark after one continues it, which
+//! is how a lone diacritic is written.
 //!
 //! [`fallback::cluster_face`](super::fallback::cluster_face) picks one face
 //! per cluster, layout never breaks a word inside one, and
@@ -32,65 +19,13 @@
 
 use core::ops::Range;
 
-use super::fallback::ZERO_WIDTH_JOINER;
-
-/// Whether `c` continues the cluster before it whatever that cluster is: a
-/// combining mark, a variation selector, a zero-width joiner, a skin-tone
-/// modifier or a tag. See the module docs.
-fn extends(c: char) -> bool {
-    matches!(
-        c,
-        '\u{0300}'..='\u{036F}'
-            | '\u{1AB0}'..='\u{1AFF}'
-            | '\u{1DC0}'..='\u{1DFF}'
-            | '\u{20D0}'..='\u{20FF}'
-            | '\u{FE20}'..='\u{FE2F}'
-            | '\u{FE00}'..='\u{FE0F}'
-            | '\u{E0100}'..='\u{E01EF}'
-            | ZERO_WIDTH_JOINER
-            | '\u{1F3FB}'..='\u{1F3FF}'
-            | '\u{E0020}'..='\u{E007F}'
-    )
-}
-
-/// Whether `c` is a regional indicator, half of a flag.
-fn is_regional_indicator(c: char) -> bool {
-    matches!(c, '\u{1F1E6}'..='\u{1F1FF}')
-}
-
-/// Whether `c` is always a cluster of its own: a space or a control char.
-fn stands_alone(c: char) -> bool {
-    c == ' ' || c.is_control()
-}
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Every cluster of `text`, in order, as the bytes it spans. See the module
 /// docs for the rule. Empty text has none.
 pub fn clusters(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
-    let mut chars = text.char_indices().peekable();
-    core::iter::from_fn(move || {
-        let (start, base) = chars.next()?;
-        let mut end = start + base.len_utf8();
-        if stands_alone(base) {
-            return Some(start..end);
-        }
-        // A regional indicator still waiting for the second of its pair.
-        let mut open_flag = is_regional_indicator(base);
-        let mut previous = base;
-        while let Some(&(at, c)) = chars.peek() {
-            let continues = !stands_alone(c)
-                && (previous == ZERO_WIDTH_JOINER
-                    || extends(c)
-                    || (open_flag && is_regional_indicator(c)));
-            if !continues {
-                break;
-            }
-            open_flag = false;
-            previous = c;
-            end = at + c.len_utf8();
-            chars.next();
-        }
-        Some(start..end)
-    })
+    text.grapheme_indices(true)
+        .map(|(start, cluster)| start..start + cluster.len())
 }
 
 /// The `char` positions in `text` a caret may stop at: where each cluster
@@ -115,45 +50,77 @@ mod tests {
         clusters(text).map(|range| &text[range]).collect()
     }
 
-    /// **Each continuation joins its base, and nothing else does**: marks,
-    /// selectors, ZWJ sequences, skin tones, keycaps, tag flags and
-    /// regional-indicator pairs, beside plain chars each their own.
+    /// `text` written as UAX #29's test files write a case: each char's
+    /// code point in hex, `×` between two chars of one cluster and `÷` at
+    /// every boundary, the text's ends included.
+    fn notation(text: &str) -> String {
+        let mut out = String::from("÷");
+        for cluster in cut(text) {
+            let points: Vec<String> = cluster
+                .chars()
+                .map(|c| format!("{:04X}", c as u32))
+                .collect();
+            out.push(' ');
+            out.push_str(&points.join(" × "));
+            out.push_str(" ÷");
+        }
+        out
+    }
+
+    /// **The cut is UAX #29's**: cases from Unicode 17.0's
+    /// `GraphemeBreakTest.txt` (checked against `unicode-segmentation`
+    /// 1.13.3's transcription of it), each with the rule that decides it.
+    #[test]
+    fn the_cut_matches_the_grapheme_break_tests() {
+        let cases = [
+            // GB3: a carriage return and a line feed are one cluster.
+            ("\u{D}\u{A}", "÷ 000D × 000A ÷"),
+            // GB4: any other control stands alone.
+            ("\u{0}\u{903}", "÷ 0000 ÷ 0903 ÷"),
+            // GB6: Hangul L before V.
+            ("\u{1100}\u{1160}", "÷ 1100 × 1160 ÷"),
+            // GB9: an extending mark continues even a space.
+            ("\u{20}\u{308}\u{20}", "÷ 0020 × 0308 ÷ 0020 ÷"),
+            // GB9a and GB9b: a spacing mark continues what is before it, and
+            // a prepended mark joins what is after it.
+            ("\u{1F1E6}\u{903}", "÷ 1F1E6 × 0903 ÷"),
+            ("\u{6DD}\u{1F1E6}", "÷ 06DD × 1F1E6 ÷"),
+            // GB11: a joiner joins two pictographs, and nothing else.
+            ("\u{1F6D1}\u{200D}\u{1F6D1}", "÷ 1F6D1 × 200D × 1F6D1 ÷"),
+            ("\u{61}\u{200D}\u{1F6D1}", "÷ 0061 × 200D ÷ 1F6D1 ÷"),
+            // GB12 and GB13: regional indicators pair up from the left.
+            (
+                "\u{61}\u{1F1E6}\u{1F1E7}\u{1F1E8}\u{62}",
+                "÷ 0061 ÷ 1F1E6 × 1F1E7 ÷ 1F1E8 ÷ 0062 ÷",
+            ),
+        ];
+        for (text, want) in cases {
+            assert_eq!(notation(text), want, "{text:?}");
+        }
+    }
+
+    /// **The sequences a caret must not split are one cluster each**: a
+    /// mark, a selector, a ZWJ family, a skin tone, a keycap and a tag flag,
+    /// beside plain chars each their own.
     #[test]
     fn the_cluster_rule_keeps_sequences_whole() {
         assert_eq!(cut("abc"), ["a", "b", "c"]);
         assert_eq!(cut("e\u{301}x"), ["e\u{301}", "x"]);
         assert_eq!(cut("q\u{301}\u{328}"), ["q\u{301}\u{328}"]);
         assert_eq!(cut("\u{2764}\u{FE0F}a"), ["\u{2764}\u{FE0F}", "a"]);
-        // Woman, ZWJ, laptop: one.
-        assert_eq!(
-            cut("\u{1F469}\u{200D}\u{1F4BB}!"),
-            ["\u{1F469}\u{200D}\u{1F4BB}", "!"]
-        );
+        // Man, woman, girl and boy, joined: one.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        assert_eq!(cut(&format!("{family}!")), [family, "!"]);
         // A thumbs-up with a skin tone, and a keycap.
         assert_eq!(cut("\u{1F44D}\u{1F3FD}"), ["\u{1F44D}\u{1F3FD}"]);
         assert_eq!(cut("1\u{FE0F}\u{20E3}2"), ["1\u{FE0F}\u{20E3}", "2"]);
         // England's flag: a black flag and its tags.
         let england = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
         assert_eq!(cut(england), [england]);
-        // Regional indicators pair up, left to right.
-        let (us, gb) = ("\u{1F1FA}\u{1F1F8}", "\u{1F1EC}\u{1F1E7}");
-        assert_eq!(cut(&format!("{us}{gb}")), [us, gb]);
-        assert_eq!(
-            cut("\u{1F1FA}\u{1F1F8}\u{1F1EC}"),
-            [us, "\u{1F1EC}"],
-            "an odd one out is alone"
-        );
+        // A Hebrew letter with its points, and Arabic with its harakat.
+        assert_eq!(cut("\u{5E9}\u{5C1}\u{5B8}"), ["\u{5E9}\u{5C1}\u{5B8}"]);
+        assert_eq!(cut("\u{628}\u{650}\u{633}"), ["\u{628}\u{650}", "\u{633}"]);
         assert_eq!(cut(""), Vec::<&str>::new());
-    }
-
-    /// **A space or a control char is always alone**: a mark after one does
-    /// not join it, and a joiner before one does not reach it.
-    #[test]
-    fn spaces_and_controls_stand_alone() {
-        assert_eq!(cut("a \u{301}"), ["a", " ", "\u{301}"]);
-        assert_eq!(cut("a\u{200D} b"), ["a\u{200D}", " ", "b"]);
-        assert_eq!(cut("a\u{200D}\nb"), ["a\u{200D}", "\n", "b"]);
-        assert_eq!(cut("\u{301}a"), ["\u{301}", "a"], "a leading mark is alone");
     }
 
     /// **Caret stops are cluster starts in chars**, with the end.

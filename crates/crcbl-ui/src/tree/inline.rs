@@ -5,20 +5,16 @@
 //!
 //! [`crate::font::layout`]'s rules, carried across runs and added to:
 //!
-//! * **A run boundary is not a break.** Words are what lies between spaces,
-//!   whichever runs they are in, so `un` in one run and `known` in the next is
-//!   one word that never breaks between them.
-//! * **Explicit newlines end a line, always**, and **soft breaks are at spaces
-//!   and after a hyphen** (`-`, which stays at the end of its line, with
-//!   anything that continues its cluster). The spaces a line breaks at belong
-//!   to no line, and spaces a line ends with before a newline or the end of
-//!   the text are not measured; spaces anywhere else take their advance.
-//! * **A word wider than the wrap width is broken between clusters**, at the
-//!   last one that fits and never before the first — CSS's
-//!   `overflow-wrap: break-word`, so a long link in a notification wraps
-//!   rather than overflowing — and **never inside a cluster**
-//!   ([`crate::font::cluster`]). It does not change the min-content width,
-//!   which is the widest word unbroken, as `break-word` specifies.
+//! * **A run boundary is not a break.** Soft breaks are found in the runs'
+//!   texts joined, and words are the runs between spaces whichever runs they
+//!   are in, so `un` in one run and `known` in the next is one word that
+//!   never breaks between them.
+//! * **A stretch with no soft break wider than the wrap width is broken
+//!   between clusters**, at the last one that fits and never before the
+//!   first — CSS's `overflow-wrap: break-word`, so a long link in a
+//!   notification wraps rather than overflowing — and **never inside a
+//!   cluster** ([`crate::font::cluster`]). It does not change the min-content
+//!   width, which is the widest stretch unbroken, as `break-word` specifies.
 //! * **The wrap width is whole pixels**, by [`wrap_width`], for the reason
 //!   the font module gives.
 //!
@@ -29,10 +25,12 @@
 //! parsed font at one size are shaped together, so kerning and ligatures
 //! reach across such a run boundary, and parts that differ in either are
 //! shaped apart. Nothing is shaped across a space, so nothing kerns across a
-//! break. A word broken between clusters has its two sides shaped again
-//! apart, so nothing kerns across that break either; the side left on the
-//! line was chosen by the width it had shaped whole, so losing a kerning
-//! adjustment can leave it a fraction of a pixel past the wrap width.
+//! break at one. A word cut inside — at a soft break or between clusters —
+//! has its two sides shaped again apart where `harfrust` says the cut
+//! changes the shaping, so nothing kerns across that cut either; the side
+//! left on the line was chosen by the width it had shaped whole, so losing a
+//! kerning adjustment can leave it a fraction of a pixel past the wrap
+//! width.
 //!
 //! A cluster in a parsed font is drawn by the face
 //! [`cluster_face`](crate::font::fallback::cluster_face) picks from the
@@ -56,7 +54,7 @@ use glam::Vec2;
 
 use crate::font::layout::{PositionedGlyph, TextAlign, wrap_width};
 use crate::font::shape::{ShapedGlyph, shape};
-use crate::font::{Font, FontId, GlyphId, cluster};
+use crate::font::{Font, FontId, GlyphId, breaks, cluster};
 use crate::text::{ASCENDER, FontAtlas, LINE_HEIGHT};
 
 /// What one run is drawn in.
@@ -148,6 +146,11 @@ pub(crate) struct InlineGlyph {
     pub drawn: bool,
     /// Whether a word may be broken before it: the first glyph of a cluster.
     pub breakable: bool,
+    /// Whether a soft break falls before it.
+    pub soft: bool,
+    /// Whether cutting before it changes the shaping of either side, as
+    /// [`ShapedGlyph::unsafe_to_break`] says; never in the bitmap font.
+    pub unsafe_to_break: bool,
     /// Its pen position from the paragraph's left.
     pub x: f32,
     pub advance: f32,
@@ -196,51 +199,87 @@ pub(crate) struct InlineLayout {
 /// A word's part in one run: the run and its bytes in that run's text.
 type Segment = (usize, Range<usize>);
 
-/// One piece of the stream between break opportunities.
+/// One piece of the stream, in order.
 enum Token {
-    /// A word's parts, in order, ending at a space, a newline, a hyphen's
-    /// cluster or the end of the text.
+    /// A word's parts, in order: a run of anything but spaces, which may hold
+    /// soft breaks of its own.
     Word(Vec<Segment>),
     Space(Segment),
+    /// A hard break, in this run.
     Newline(usize),
 }
 
-/// The paragraph's runs as words, spaces and newlines, in order, cut at
-/// cluster boundaries.
-fn tokens(runs: &[InlineRun<'_>]) -> Vec<Token> {
-    let mut tokens = Vec::new();
-    let mut word: Vec<Segment> = Vec::new();
-    for (run, input) in runs.iter().enumerate() {
-        for bytes in cluster::clusters(input.text) {
-            match input.text[bytes.start..].chars().next() {
-                Some(c @ (' ' | '\n')) => {
-                    if !word.is_empty() {
-                        tokens.push(Token::Word(core::mem::take(&mut word)));
-                    }
-                    tokens.push(if c == ' ' {
-                        Token::Space((run, bytes))
-                    } else {
-                        Token::Newline(run)
-                    });
-                }
-                first => {
-                    match word.last_mut() {
-                        Some((last, range)) if *last == run && range.end == bytes.start => {
-                            range.end = bytes.end;
-                        }
-                        _ => word.push((run, bytes)),
-                    }
-                    if first == Some('-') {
-                        tokens.push(Token::Word(core::mem::take(&mut word)));
-                    }
-                }
+/// What glyphs are pushed from: the paragraph's runs, the bitmap font a
+/// bitmap run advances by, and the soft breaks.
+struct Source<'s, 'r> {
+    runs: &'s [InlineRun<'r>],
+    atlas: &'s FontAtlas,
+    /// Every soft break, as the run it is in and the byte of that run's text
+    /// it falls before, in order.
+    soft: Vec<(usize, usize)>,
+}
+
+/// A word token placed in the layout: its glyphs and its parts.
+struct PlacedWord {
+    glyphs: Range<usize>,
+    parts: Vec<Segment>,
+}
+
+/// The paragraph's runs as words, spaces and hard breaks, in order, and its
+/// soft breaks. Breaks are found by [`crate::font::breaks`] in the runs'
+/// texts joined, so a run boundary is never a break of its own.
+fn tokens(runs: &[InlineRun<'_>]) -> (Vec<Token>, Vec<(usize, usize)>) {
+    let mut joined = String::new();
+    // Where each run's text starts in `joined`.
+    let mut starts = Vec::with_capacity(runs.len());
+    for run in runs {
+        starts.push(joined.len());
+        joined.push_str(run.text);
+    }
+    // The run holding `joined`'s byte `at`.
+    let run_at = |at: usize| starts.partition_point(|&start| start <= at) - 1;
+    // The parts of `joined`'s bytes `range` in each run they reach into.
+    let parts = |range: Range<usize>| -> Vec<Segment> {
+        let mut parts = Vec::new();
+        for (run, &start) in starts.iter().enumerate() {
+            let end = start + runs[run].text.len();
+            let (from, to) = (range.start.max(start), range.end.min(end));
+            if from < to {
+                parts.push((run, from - start..to - start));
             }
         }
+        parts
+    };
+    let (mut tokens, mut soft) = (Vec::new(), Vec::new());
+    let mut paragraphs = breaks::paragraphs(&joined).peekable();
+    while let Some(paragraph) = paragraphs.next() {
+        let text = &joined[paragraph.clone()];
+        let at = paragraph.start;
+        for byte in breaks::soft_breaks(text) {
+            let run = run_at(at + byte);
+            soft.push((run, at + byte - starts[run]));
+        }
+        let mut chars = text.char_indices().peekable();
+        while let Some((start, c)) = chars.next() {
+            if c == ' ' {
+                tokens.extend(
+                    parts(at + start..at + start + 1)
+                        .into_iter()
+                        .map(Token::Space),
+                );
+                continue;
+            }
+            let mut end = start + c.len_utf8();
+            while let Some((next, c)) = chars.next_if(|&(_, c)| c != ' ') {
+                end = next + c.len_utf8();
+            }
+            tokens.push(Token::Word(parts(at + start..at + end)));
+        }
+        if paragraphs.peek().is_some() {
+            tokens.push(Token::Newline(run_at(paragraph.end)));
+        }
     }
-    if !word.is_empty() {
-        tokens.push(Token::Word(word));
-    }
-    tokens
+    (tokens, soft)
 }
 
 /// `segments` cut at byte `byte` of run `run`: what lies before it, and what
@@ -267,7 +306,6 @@ struct Line {
     /// The end of its last word: what it holds once its trailing spaces go.
     end: usize,
     pen: f32,
-    has_word: bool,
 }
 
 impl Line {
@@ -276,7 +314,6 @@ impl Line {
             first,
             end: first,
             pen: 0.0,
-            has_word: false,
         }
     }
 }
@@ -294,13 +331,16 @@ impl InlineLayout {
             Wrap::MinContent => Some(0.0),
             Wrap::Width(width) => Some(wrap_width(width)),
         };
-        // Only a definite width breaks inside a word.
-        let word_limit = limit.filter(|_| matches!(wrap, Wrap::Width(_)));
+        // Only a definite width breaks a word between clusters.
+        let break_words = matches!(wrap, Wrap::Width(_));
+        let (tokens, soft) = tokens(runs);
+        let source = Source { runs, atlas, soft };
         // Each finished line's glyphs and the run its metrics fall back to.
         let mut finished: Vec<(Range<usize>, usize)> = Vec::new();
+        let mut words: Vec<PlacedWord> = Vec::new();
         let mut line = Line::new(0);
         let mut last_run = 0;
-        for token in tokens(runs) {
+        for token in tokens {
             match token {
                 Token::Newline(run) => {
                     finished.push((line.first..line.end, run));
@@ -310,47 +350,36 @@ impl InlineLayout {
                 Token::Space(segment) => {
                     last_run = segment.0;
                     let start = layout.glyphs.len();
-                    layout.push(runs, atlas, core::slice::from_ref(&segment), false);
+                    layout.push(&source, core::slice::from_ref(&segment), false);
                     line.pen = layout.place_from(line.pen, start);
                 }
-                Token::Word(segments) => {
-                    if let Some(&(run, _)) = segments.last() {
+                Token::Word(parts) => {
+                    if let Some(&(run, _)) = parts.last() {
                         last_run = run;
                     }
                     let start = layout.glyphs.len();
-                    layout.push(runs, atlas, &segments, true);
+                    layout.push(&source, &parts, true);
+                    words.push(PlacedWord {
+                        glyphs: start..layout.glyphs.len(),
+                        parts,
+                    });
                     let mut right = layout.place_from(line.pen, start);
-                    if line.has_word && limit.is_some_and(|limit| right > limit) {
-                        finished.push((line.first..line.end, last_run));
-                        line = Line::new(start);
-                        right = layout.place_from(0.0, start);
-                    }
-                    // A word alone too wide for the line is broken between
-                    // clusters, at the last that fits, until what is left
-                    // fits, each side shaped again on its own.
-                    let mut word_start = start;
-                    let mut rest = segments;
-                    while let Some(limit) = word_limit
+                    // Cut the line until what is left of it fits.
+                    while let Some(limit) = limit
                         && right > limit
-                        && let Some(fits) = layout.break_before(word_start, limit)
+                        && let Some(cut) = layout.cut_at(line.first, limit, break_words)
                     {
-                        let pen = layout.glyphs[word_start].x;
-                        let at = layout.glyphs[fits];
-                        let (before, after) = split(&rest, at.run, at.start);
-                        layout.glyphs.truncate(word_start);
-                        layout.push(runs, atlas, &before, true);
-                        let fits = layout.glyphs.len();
-                        layout.place_from(pen, word_start);
-                        finished.push((line.first..fits, last_run));
-                        layout.push(runs, atlas, &after, true);
-                        line = Line::new(fits);
-                        word_start = fits;
-                        rest = after;
-                        right = layout.place_from(0.0, fits);
+                        let cut = layout.split_word(&source, &mut words, cut);
+                        let kept = layout.glyphs[line.first..cut]
+                            .iter()
+                            .rposition(|glyph| glyph.drawn)
+                            .map_or(line.first, |last| line.first + last + 1);
+                        finished.push((line.first..kept, last_run));
+                        line = Line::new(cut);
+                        right = layout.place_from(0.0, cut);
                     }
                     line.pen = right;
                     line.end = layout.glyphs.len();
-                    line.has_word = true;
                 }
             }
         }
@@ -359,39 +388,108 @@ impl InlineLayout {
         layout
     }
 
-    /// Where a word whose glyphs start at `word_start` breaks to fit `limit`:
-    /// before the last cluster whose glyphs before it all fit, and never
-    /// before the first cluster; `None` when the word is one cluster.
-    fn break_before(&self, word_start: usize, limit: f32) -> Option<usize> {
-        let mut breaks =
-            (word_start + 1..self.glyphs.len()).filter(|&at| self.glyphs[at].breakable);
-        let first = breaks.next()?;
+    /// Where the line whose glyphs start at `first` is cut to fit `limit`:
+    /// before the glyph at its last soft break whose drawn glyphs before it
+    /// fit; else, when `break_words`, between two clusters of the line's
+    /// first unbreakable stretch, at the last whose glyphs before it fit and
+    /// never before its first cluster; else at its first soft break, the
+    /// stretch before it overflowing. Never before the line's first drawn
+    /// glyph; `None` when nothing can be cut.
+    fn cut_at(&self, first: usize, limit: f32, break_words: bool) -> Option<usize> {
+        let (mut fitting, mut first_soft) = (None, None);
+        // The right edge of the last drawn glyph before the one looked at.
+        let mut before: Option<f32> = None;
+        for (at, glyph) in self.glyphs.iter().enumerate().skip(first) {
+            if glyph.soft
+                && let Some(right) = before
+            {
+                first_soft.get_or_insert(at);
+                if right <= limit {
+                    fitting = Some(at);
+                }
+            }
+            if glyph.drawn {
+                before = Some(glyph.x + glyph.advance);
+            }
+        }
+        if fitting.is_some() || !break_words {
+            return fitting.or(first_soft);
+        }
+        let end = first_soft.unwrap_or(self.glyphs.len());
+        let mut breaks = (first + 1..end).filter(|&at| {
+            let (glyph, before) = (&self.glyphs[at], &self.glyphs[at - 1]);
+            glyph.breakable && glyph.drawn && before.drawn
+        });
+        let Some(earliest) = breaks.next() else {
+            return first_soft;
+        };
         let fits = |at: usize| {
             let before = &self.glyphs[at - 1];
             before.x + before.advance <= limit
         };
-        if !fits(first) {
-            return Some(first);
+        if !fits(earliest) {
+            return Some(earliest);
         }
-        Some(breaks.take_while(|&at| fits(at)).last().unwrap_or(first))
+        Some(breaks.take_while(|&at| fits(at)).last().unwrap_or(earliest))
+    }
+
+    /// Readies a cut before glyph `cut`: when it falls inside a word where
+    /// `harfrust` says cutting changes the shaping, that word's two sides
+    /// are shaped again apart, the side before it placed where the word was.
+    /// Returns the glyph the cut now falls before.
+    fn split_word(
+        &mut self,
+        source: &Source<'_, '_>,
+        words: &mut Vec<PlacedWord>,
+        cut: usize,
+    ) -> usize {
+        let index = words.partition_point(|word| word.glyphs.start <= cut) - 1;
+        let word = &words[index];
+        if cut == word.glyphs.start || !self.glyphs[cut].unsafe_to_break {
+            return cut;
+        }
+        let at = self.glyphs[cut];
+        let (before, after) = split(&word.parts, at.run, at.start);
+        let (start, old_end) = (word.glyphs.start, word.glyphs.end);
+        let pen = self.glyphs[start].x;
+        let rest = self.glyphs.split_off(old_end);
+        self.glyphs.truncate(start);
+        self.push(source, &before, true);
+        let middle = self.glyphs.len();
+        self.push(source, &after, true);
+        let end = self.glyphs.len();
+        self.glyphs.extend(rest);
+        self.place_from(pen, start);
+        for later in &mut words[index + 1..] {
+            later.glyphs = later.glyphs.start + end - old_end..later.glyphs.end + end - old_end;
+        }
+        words.splice(
+            index..=index,
+            [
+                PlacedWord {
+                    glyphs: start..middle,
+                    parts: before,
+                },
+                PlacedWord {
+                    glyphs: middle..end,
+                    parts: after,
+                },
+            ],
+        );
+        middle
     }
 
     /// Appends the glyphs `segments` shape into, unplaced, drawn or — for a
     /// space — not. See the module docs for which parts are shaped together.
-    fn push(
-        &mut self,
-        runs: &[InlineRun<'_>],
-        atlas: &FontAtlas,
-        segments: &[Segment],
-        drawn: bool,
-    ) {
+    fn push(&mut self, source: &Source<'_, '_>, segments: &[Segment], drawn: bool) {
+        let runs = source.runs;
         let mut at = 0;
         while at < segments.len() {
             let (run, bytes) = &segments[at];
             let input = &runs[*run];
             let RunFont::Parsed(font) = input.font else {
                 if let RunFont::Bitmap(scale) = input.font {
-                    self.push_bitmap(input, *run, bytes.clone(), scale, atlas, drawn);
+                    self.push_bitmap(source, *run, bytes.clone(), scale, drawn);
                 }
                 at += 1;
                 continue;
@@ -401,7 +499,13 @@ impl InlineLayout {
                 .iter()
                 .take_while(|(run, _)| runs[*run].shaping_key() == key)
                 .count();
-            self.push_shaped(runs, font, input.size, &segments[at..at + together], drawn);
+            self.push_shaped(
+                source,
+                font,
+                input.size,
+                &segments[at..at + together],
+                drawn,
+            );
             at += together;
         }
     }
@@ -410,12 +514,13 @@ impl InlineLayout {
     /// together.
     fn push_shaped(
         &mut self,
-        runs: &[InlineRun<'_>],
+        source: &Source<'_, '_>,
         font: &Font,
         size: f32,
         segments: &[Segment],
         drawn: bool,
     ) {
+        let runs = source.runs;
         let mut shaped: Vec<ShapedGlyph> = Vec::new();
         // Where each segment starts in the text shaped, when that is the
         // segments joined; one segment is shaped in its run's own text.
@@ -430,6 +535,16 @@ impl InlineLayout {
             }
             shape(font, size, &joined, 0..joined.len(), &mut shaped);
         }
+        // Where each cluster of the segments starts, as its run and byte: a
+        // glyph that starts a cluster the shaper split, such as a flag's
+        // second regional indicator, is no place to break.
+        let cluster_starts: Vec<(usize, usize)> = segments
+            .iter()
+            .flat_map(|(run, bytes)| {
+                cluster::clusters(&runs[*run].text[bytes.clone()])
+                    .map(move |cluster| (*run, bytes.start + cluster.start))
+            })
+            .collect();
         // A byte of the text shaped, as its run, its byte in that run's text,
         // and the end of the segment it is in.
         let locate = |byte: usize| {
@@ -451,7 +566,8 @@ impl InlineLayout {
                 Some((next_run, next_start, _)) if next_run == run => next_start,
                 _ => segment_end,
             };
-            let breakable = index == 0 || shaped[index - 1].cluster != glyph.cluster;
+            let breakable = (index == 0 || shaped[index - 1].cluster != glyph.cluster)
+                && cluster_starts.binary_search(&(run, start)).is_ok();
             self.glyphs.push(InlineGlyph {
                 run,
                 start,
@@ -460,6 +576,8 @@ impl InlineLayout {
                 face: glyph.face,
                 drawn,
                 breakable,
+                soft: breakable && source.soft.binary_search(&(run, start)).is_ok(),
+                unsafe_to_break: glyph.unsafe_to_break,
                 x: 0.0,
                 advance: glyph.advance,
                 shift: glyph.offset,
@@ -467,16 +585,16 @@ impl InlineLayout {
         }
     }
 
-    /// Appends `bytes` of the bitmap run `input`, one glyph a char.
+    /// Appends `bytes` of the bitmap run `run`, one glyph a char.
     fn push_bitmap(
         &mut self,
-        input: &InlineRun<'_>,
+        source: &Source<'_, '_>,
         run: usize,
         bytes: Range<usize>,
         scale: f32,
-        atlas: &FontAtlas,
         drawn: bool,
     ) {
+        let input = &source.runs[run];
         for cluster in cluster::clusters(&input.text[bytes.clone()]) {
             let cluster = bytes.start + cluster.start..bytes.start + cluster.end;
             for (at, c) in input.text[cluster.clone()].char_indices() {
@@ -489,8 +607,10 @@ impl InlineLayout {
                     face: 0,
                     drawn: drawn && c != ' ',
                     breakable: at == 0,
+                    soft: at == 0 && source.soft.binary_search(&(run, start)).is_ok(),
+                    unsafe_to_break: false,
                     x: 0.0,
-                    advance: atlas.glyph(c).advance * scale,
+                    advance: source.atlas.glyph(c).advance * scale,
                     shift: Vec2::ZERO,
                 });
             }
@@ -674,6 +794,70 @@ mod tests {
             .map(|(text, _)| text)
             .collect();
         assert_eq!(texts, ["h", "h\u{301}", "h\u{301}"]);
+    }
+
+    /// **A word too wide is never broken inside a UAX #29 cluster the shaper
+    /// split**: `harfrust` gives an Arabic number sign (U+0600, a prepended
+    /// mark) a cluster of its own, apart from the digit it joins, and the
+    /// word still breaks only between the two clusters UAX #29 finds.
+    #[test]
+    fn an_overlong_word_never_breaks_inside_a_cluster_the_shaper_split() {
+        let text = "\u{600}1\u{600}2";
+        let runs = [InlineRun::new(
+            text,
+            RunFont::Parsed(Font::sans()),
+            SIZE,
+            20.0,
+        )];
+        let layout = InlineLayout::new(&runs, Wrap::Width(1.0), &FontAtlas::built_in());
+        let starts: Vec<usize> = layout.glyphs.iter().map(|glyph| glyph.start).collect();
+        assert_eq!(
+            starts,
+            [0, 2, 3, 5],
+            "the shaper joined the sign to its digit"
+        );
+        let texts: Vec<String> = lines(&layout, &runs)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
+        assert_eq!(texts, ["\u{600}1", "\u{600}2"]);
+    }
+
+    /// **Soft breaks are UAX #14's across runs**: a word in two runs breaks
+    /// after its hyphen, and closing punctuation after a space never starts
+    /// a line, so the word before it goes down with it; at min-content every
+    /// soft break is taken, between ideographs too.
+    #[test]
+    fn soft_breaks_follow_uax_14_across_runs() {
+        let font = Font::sans();
+        let atlas = FontAtlas::built_in();
+        let runs = [
+            InlineRun::new("The well-", RunFont::Parsed(font), SIZE, 20.0),
+            InlineRun::new("known fox )", RunFont::Parsed(font), SIZE, 20.0),
+        ];
+        let texts = |wrap: Wrap| -> Vec<String> {
+            let layout = InlineLayout::new(&runs, wrap, &atlas);
+            lines(&layout, &runs)
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect()
+        };
+        assert_eq!(texts(Wrap::MinContent), ["The", "well-", "known", "fox )"]);
+        let width = |text: &str| -> f32 {
+            let run = [InlineRun::new(text, RunFont::Parsed(font), SIZE, 20.0)];
+            lines(&InlineLayout::new(&run, Wrap::None, &atlas), &run)[0].1
+        };
+        let fox = width("The well-known fox") + 1.0;
+        assert!(width("The well-known fox )") > fox, "the punctuation fits");
+        assert_eq!(texts(Wrap::Width(fox)), ["The well-known", "fox )"]);
+        let ideographs = [InlineRun::new(
+            "\u{65E5}\u{672C}",
+            RunFont::Parsed(font),
+            SIZE,
+            20.0,
+        )];
+        let layout = InlineLayout::new(&ideographs, Wrap::MinContent, &atlas);
+        assert_eq!(layout.lines().len(), 2, "no break between ideographs");
     }
 
     /// **A paragraph draws a mark at the shaper's offset from its pen**, on

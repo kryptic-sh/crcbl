@@ -223,7 +223,7 @@ impl Overflow {
 /// fold a newline into a space.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum WhiteSpace {
-    /// Lines break at spaces to fit the width the span is laid out under.
+    /// Lines break at soft breaks to fit the width the span is laid out under.
     #[default]
     Normal,
     /// Lines break at newlines only, whatever they overflow: min-content is
@@ -519,7 +519,8 @@ pub struct NodeStyle {
     pub line_height: LineHeight,
     /// Where a text span's lines sit across its content box. Inherited.
     pub text_align: TextAlign,
-    /// `white-space`: whether a text span's lines break at spaces. Inherited.
+    /// `white-space`: whether a text span's lines break at soft breaks.
+    /// Inherited.
     pub white_space: WhiteSpace,
     /// `cursor`: the shape the pointer takes over this node, or `None` to hide
     /// it. Inherited. [`Ui::cursor`](super::Ui::cursor) reads it.

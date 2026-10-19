@@ -385,9 +385,9 @@ fn keys_become_edits() {
 
 /// **The caret never stops inside a cluster**: Left and Right pass a ZWJ
 /// sequence, a flag and a mark in one step; Backspace and Delete take each
-/// whole; a click, a selection and a word move inside one go to its edge;
-/// and text typed in front of a mark leaves the caret after the cluster it
-/// joined.
+/// whole; a click and a selection inside one go to its edge; a word move
+/// passes a mark, which UAX #29 never ends a word at; and text typed in
+/// front of a mark leaves the caret after the cluster it joined.
 #[test]
 fn the_caret_never_stops_inside_a_cluster() {
     // a, woman-ZWJ-laptop (three chars), the US flag (two), q and its accent.
@@ -426,7 +426,7 @@ fn the_caret_never_stops_inside_a_cluster() {
     assert_eq!(edit.selection(), 0..8);
     let mut words = line("|q\u{301}b c");
     words.apply(&mv(Motion::WordRight));
-    assert_eq!(words.caret(), 2, "a word move stops after the accent");
+    assert_eq!(words.caret(), 3, "a word move stopped at the accent");
 
     let mut typed = line("|\u{301}x");
     assert!(typed.insert("e"));

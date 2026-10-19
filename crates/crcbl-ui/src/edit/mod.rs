@@ -11,21 +11,24 @@
 //! # Positions are between clusters, counted in `char`s
 //!
 //! The caret and the anchor are counted in **`char`s**, never bytes, and
-//! stand only **between clusters** — [`crate::font::cluster`]'s rule, which
-//! keeps a base and its combining marks, an emoji ZWJ sequence, a skin-tone
-//! modifier, a keycap and a flag's regional-indicator pair together. So an
-//! `e` followed by U+0301 COMBINING ACUTE ACCENT is one caret stop, one
-//! Backspace after it takes the `e` and its accent together, and an emoji
-//! built with a zero-width joiner takes one press. A position that lands
-//! inside a cluster — a click, a word move, an outside edit, text typed in
-//! front of a mark — moves to the cluster's edge: back to its start, except
-//! that a move or a selection reaching rightwards, and the caret after an
-//! insert, go on to its end. The rule is not UAX #29's full grapheme
-//! segmentation, which needs Unicode tables nothing in the dependency tree
-//! carries for this crate: a mark outside the combining-mark blocks the rule
-//! names is a stop of its own. Nothing is ever cut inside a scalar: every
-//! byte offset is derived from a `char` count at the moment the `String` is
-//! cut.
+//! stand only **between clusters** — [`crate::font::cluster`]'s, UAX #29's
+//! extended grapheme clusters, which keep a base and its marks, an emoji ZWJ
+//! sequence, a skin-tone modifier, a keycap and a flag's regional-indicator
+//! pair together. So an `e` followed by U+0301 COMBINING ACUTE ACCENT is one
+//! caret stop, and an emoji built with zero-width joiners takes one press. A
+//! position that lands inside a cluster — a click, a word move, an outside
+//! edit, text typed in front of a mark — moves to the cluster's edge: back to
+//! its start, except that a move or a selection reaching rightwards, and the
+//! caret after an insert, go on to its end. Nothing is ever cut inside a
+//! scalar: every byte offset is derived from a `char` count at the moment the
+//! `String` is cut.
+//!
+//! **Backspace and Delete take a whole cluster**, as macOS, GTK and the
+//! browsers do for emoji and Latin marks: the `e` and its accent go
+//! together. Some platforms let Backspace take a cluster's last code point
+//! alone in scripts that type marks one key each — Indic vowel signs, Hebrew
+//! points — and this model does not; deleting by cluster everywhere is the
+//! one rule that never leaves half a flag or half a ZWJ sequence behind.
 //!
 //! # Selection
 //!
@@ -39,12 +42,15 @@
 //!
 //! # Words
 //!
-//! A word is a run of one class of character: alphanumerics and `_`, or any
-//! other character that is not whitespace. Whitespace separates words and a
-//! word move passes over it. A move left ends at the start of the word before
-//! the caret and a move right at the end of the word after it — the macOS
-//! `Option`+arrow and GTK `Ctrl`+arrow convention, rather than Windows', where
-//! a move right ends at the start of the next word.
+//! Words are UAX #29's word boundaries, merged into runs of one class: a run
+//! of words with a letter, a digit or `_` in them, or a run of anything else
+//! that is not whitespace. So `can't`, `3.14` and `foo_bar` are one word
+//! each, a mark never ends its word, and `--` is one run. Whitespace
+//! separates words and a word move passes over it. A move left ends at the
+//! start of the word before the caret and a move right at the end of the word
+//! after it — the macOS `Option`+arrow and GTK `Ctrl`+arrow convention,
+//! rather than Windows', where a move right ends at the start of the next
+//! word.
 //!
 //! # Newlines
 //!
@@ -58,6 +64,7 @@
 mod tests;
 
 use crcbl_core::input::{KeyCode, Modifiers};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::font::cluster;
 
@@ -476,26 +483,34 @@ enum Class {
     Other,
 }
 
-fn class(c: char) -> Class {
-    if c.is_whitespace() {
-        Class::Space
-    } else if c.is_alphanumeric() || c == '_' {
-        Class::Word
-    } else {
-        Class::Other
+/// The class of each of `chars`, from the UAX #29 word it is in: a word with
+/// a letter, a digit or `_` in it, whitespace, or anything else.
+fn classes(chars: &[char]) -> Vec<Class> {
+    let text: String = chars.iter().collect();
+    let mut classes = Vec::with_capacity(chars.len());
+    for word in text.split_word_bounds() {
+        let class = if word.chars().any(|c| c.is_alphanumeric() || c == '_') {
+            Class::Word
+        } else if word.chars().all(char::is_whitespace) {
+            Class::Space
+        } else {
+            Class::Other
+        };
+        classes.extend(core::iter::repeat_n(class, word.chars().count()));
     }
+    classes
 }
 
 /// The start of the word before position `from` in `chars`.
 #[must_use]
 pub fn word_left(chars: &[char], from: usize) -> usize {
+    let classes = classes(chars);
     let mut at = from.min(chars.len());
-    while at > 0 && class(chars[at - 1]) == Class::Space {
+    while at > 0 && classes[at - 1] == Class::Space {
         at -= 1;
     }
-    if let Some(&c) = at.checked_sub(1).and_then(|before| chars.get(before)) {
-        let run = class(c);
-        while at > 0 && class(chars[at - 1]) == run {
+    if let Some(&run) = at.checked_sub(1).and_then(|before| classes.get(before)) {
+        while at > 0 && classes[at - 1] == run {
             at -= 1;
         }
     }
@@ -505,13 +520,13 @@ pub fn word_left(chars: &[char], from: usize) -> usize {
 /// The end of the word after position `from` in `chars`.
 #[must_use]
 pub fn word_right(chars: &[char], from: usize) -> usize {
+    let classes = classes(chars);
     let mut at = from.min(chars.len());
-    while at < chars.len() && class(chars[at]) == Class::Space {
+    while at < chars.len() && classes[at] == Class::Space {
         at += 1;
     }
-    if let Some(&c) = chars.get(at) {
-        let run = class(c);
-        while at < chars.len() && class(chars[at]) == run {
+    if let Some(&run) = classes.get(at) {
+        while at < chars.len() && classes[at] == run {
             at += 1;
         }
     }
@@ -527,14 +542,15 @@ pub fn run_at(chars: &[char], index: usize) -> core::ops::Range<usize> {
     let Some(last) = chars.len().checked_sub(1) else {
         return 0..0;
     };
+    let classes = classes(chars);
     let index = index.min(last);
-    let run = class(chars[index]);
+    let run = classes[index];
     let mut start = index;
-    while start > 0 && class(chars[start - 1]) == run {
+    while start > 0 && classes[start - 1] == run {
         start -= 1;
     }
     let mut end = index + 1;
-    while end < chars.len() && class(chars[end]) == run {
+    while end < chars.len() && classes[end] == run {
         end += 1;
     }
     start..end

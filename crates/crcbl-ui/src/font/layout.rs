@@ -2,19 +2,25 @@
 //!
 //! # The line breaker's rules
 //!
-//! * **Explicit newlines** end a line, always; an empty string, and an empty
-//!   line between two newlines, is still one line tall.
-//! * **Soft breaks are at spaces** (U+0020) and nowhere else. Words are the
-//!   runs between spaces; a line takes words greedily while the word's right
-//!   edge stays within the wrap width. A space is always a
-//!   [`cluster`] of its own, so no break is ever inside one.
+//! * **Hard breaks** — a newline, and the rest of UAX #14's mandatory
+//!   breaks, which `font::breaks` lists — end a line, always; an
+//!   empty string, and an empty line between two newlines, is still one line
+//!   tall.
+//! * **Soft breaks are UAX #14's**, taken only where a [`cluster`] starts:
+//!   after the spaces following a word, after a hyphen, between two
+//!   ideographs, and never before closing punctuation, even after a space.
+//!   Words are the runs between spaces (U+0020), so a soft break after a
+//!   hyphen or between ideographs falls inside one. A line takes words
+//!   greedily; once its last word's right edge passes the wrap width, it is
+//!   cut at its last soft break whose words before it fit.
 //! * **The spaces a line breaks at belong to no line**: they are not drawn,
 //!   not measured, and the next line starts at the word after them. Spaces a
-//!   line ends with before a newline or the end of the text are not measured
-//!   either. Spaces anywhere else — leading a paragraph, or several between two
-//!   words — take their advance.
-//! * **A word wider than the wrap width is not broken**: it takes a line of its
-//!   own and overflows it, which is CSS's `overflow-wrap: normal`.
+//!   line ends with before a hard break or the end of the text are not
+//!   measured either. Spaces anywhere else — leading a paragraph, or several
+//!   between two words — take their advance.
+//! * **A stretch with no soft break in it is never broken**: wider than the
+//!   wrap width, it takes a line of its own and overflows it, which is CSS's
+//!   `overflow-wrap: normal`.
 //! * **The wrap width is whole pixels**: [`wrap_width`] floors it, so a
 //!   measurement and a later layout at widths that differ by a fraction of a
 //!   pixel — Taffy's unrounded box and the rounded one — break at the same
@@ -25,11 +31,13 @@
 //!
 //! **Each word, and each run of spaces, is shaped on its own** by
 //! [`shape`](super::shape): kerning, marks, ligatures and every other GSUB and
-//! GPOS lookup apply within it and never across a space. A word is placed as
-//! one piece wherever the breaker puts it, so its width is the same on every
-//! line and nothing kerns across a break. A word's glyphs are advanced by the
-//! shaper's advances at their face's scale and drawn at the shaper's offsets
-//! from the pen.
+//! GPOS lookup apply within it and never across a space, so nothing kerns
+//! across a break at a space. A word cut at a soft break inside it keeps its
+//! glyphs on both sides where `harfrust` says the cut changes nothing
+//! ([`ShapedGlyph::unsafe_to_break`]); where it says otherwise, a kerning pair
+//! or a ligature reaching across, each side is shaped again on its own. A
+//! word's glyphs are advanced by the shaper's advances at their face's scale
+//! and drawn at the shaper's offsets from the pen.
 //!
 //! # Fallback faces
 //!
@@ -53,6 +61,8 @@ use glam::Vec2;
 
 use super::shape::{ShapedGlyph, shape};
 use super::{Font, GlyphId, cluster};
+
+mod fill;
 
 /// How close below a whole pixel a width may be and still count as that pixel.
 ///
@@ -134,26 +144,6 @@ pub struct FaceRun<'a> {
     pub text: Range<usize>,
 }
 
-/// The line being filled.
-struct Line {
-    first: usize,
-    pen: f32,
-    /// The right edge of its last word.
-    width: f32,
-    has_word: bool,
-}
-
-impl Line {
-    const fn new(first: usize) -> Self {
-        Self {
-            first,
-            pen: 0.0,
-            width: 0.0,
-            has_word: false,
-        }
-    }
-}
-
 /// The pieces `paragraph` is shaped in, in order: each word and each run of
 /// spaces, as its bytes and whether it is spaces. See the module docs.
 fn pieces(paragraph: &str) -> impl Iterator<Item = (Range<usize>, bool)> + '_ {
@@ -171,17 +161,6 @@ fn pieces(paragraph: &str) -> impl Iterator<Item = (Range<usize>, bool)> + '_ {
         }
         Some((start..end, spaces))
     })
-}
-
-/// Places `glyphs` from a pen at `pen`, each at its pen plus its shaper's
-/// offset, and returns the pen after the last.
-fn place(glyphs: &mut [PositionedGlyph], shaped: &[ShapedGlyph], pen: f32) -> f32 {
-    let mut pen = pen;
-    for (positioned, shaped) in glyphs.iter_mut().zip(shaped) {
-        positioned.offset.x = pen + shaped.offset.x;
-        pen += shaped.advance;
-    }
-    pen
 }
 
 /// Each caret stop of `text` — one line, unbroken — in `font` at `size`,
@@ -259,47 +238,7 @@ impl TextLayout {
         };
         // Every glyph as shaped, beside `glyphs`: its advance and offset.
         let mut shaped: Vec<ShapedGlyph> = Vec::with_capacity(text.len());
-        let mut paragraph_start = 0;
-        for paragraph in text.split('\n') {
-            let mut line = Line::new(layout.glyphs.len());
-            for (piece, spaces) in pieces(paragraph) {
-                let word_start = shaped.len();
-                shape(font, size, paragraph, piece, &mut shaped);
-                if spaces {
-                    line.pen += shaped[word_start..]
-                        .iter()
-                        .map(|glyph| glyph.advance)
-                        .sum::<f32>();
-                    shaped.truncate(word_start);
-                    continue;
-                }
-                for glyph in &shaped[word_start..] {
-                    layout.glyphs.push(PositionedGlyph {
-                        glyph: glyph.glyph,
-                        offset: Vec2::ZERO,
-                    });
-                    layout.faces.push(glyph.face);
-                    layout.bytes.push(paragraph_start + glyph.cluster);
-                }
-                let word = word_start..shaped.len();
-                let mut right = place(
-                    &mut layout.glyphs[word.clone()],
-                    &shaped[word.clone()],
-                    line.pen,
-                );
-                if line.has_word && wrap.is_some_and(|wrap| right > wrap) {
-                    layout.finish_line(&line, word_start);
-                    line = Line::new(word_start);
-                    right = place(&mut layout.glyphs[word.clone()], &shaped[word], 0.0);
-                }
-                line.pen = right;
-                line.width = right;
-                line.has_word = true;
-            }
-            let end = layout.glyphs.len();
-            layout.finish_line(&line, end);
-            paragraph_start += paragraph.len() + 1;
-        }
+        fill::fill(&mut layout, &mut shaped, font, size, wrap, text);
 
         let ascent = metrics.ascent * scale;
         let descent = metrics.descent * scale;
@@ -311,15 +250,6 @@ impl TextLayout {
             }
         }
         layout
-    }
-
-    fn finish_line(&mut self, line: &Line, end: usize) {
-        self.lines.push(TextLine {
-            glyphs: line.first..end,
-            width: line.width,
-            baseline: 0.0,
-            offset: 0.0,
-        });
     }
 
     /// Moves every line across a box `width` pixels wide as `align` says. A
