@@ -15,6 +15,10 @@
 //! A soft break after spaces falls where a word starts; one after a hyphen,
 //! an ideograph or an emoji falls inside a word, which the line breakers
 //! shape whole and cut only when a line has to break there.
+//!
+//! Public so a program that lays out its own styled spans can break them
+//! where this crate's layouts would: [`paragraphs`] splits text at hard
+//! breaks, and [`soft_breaks`] lists where a line may end inside one.
 
 use core::ops::Range;
 
@@ -36,7 +40,7 @@ fn is_hard_break(c: char) -> bool {
 /// Each paragraph of `text`, in order, as the bytes between its hard breaks,
 /// the breaks left out. See the module docs. Text that ends in a hard break
 /// ends with an empty paragraph, and empty text is one empty paragraph.
-pub(crate) fn paragraphs(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+pub fn paragraphs(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
     let mut chars = text.char_indices().peekable();
     let mut start = Some(0);
     core::iter::from_fn(move || {
@@ -59,7 +63,22 @@ pub(crate) fn paragraphs(text: &str) -> impl Iterator<Item = Range<usize>> + '_ 
 /// Every soft break in `paragraph` — text with no hard break in it — as the
 /// byte it falls before, in order: never its start or its end. See the
 /// module docs.
-pub(crate) fn soft_breaks(paragraph: &str) -> Vec<usize> {
+///
+/// For a caller that measures its own runs — spans of different fonts or
+/// weights wrapped together — and needs only where a line may end: cut a
+/// paragraph from [`paragraphs`] at these bytes and fit the pieces.
+///
+/// ```
+/// use crcbl_ui::font::breaks::{paragraphs, soft_breaks};
+///
+/// let text = "a well-known word\nnext";
+/// let first = paragraphs(text).next().expect("one paragraph at least");
+/// assert_eq!(&text[first.clone()], "a well-known word");
+/// // After each run of spaces, and after the hyphen.
+/// assert_eq!(soft_breaks(&text[first]), [2, 7, 13]);
+/// ```
+#[must_use]
+pub fn soft_breaks(paragraph: &str) -> Vec<usize> {
     let mut starts = cluster::clusters(paragraph)
         .map(|cluster| cluster.start)
         .peekable();

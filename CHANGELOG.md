@@ -21,6 +21,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_ui::font::breaks` is public**: `paragraphs` splits text at its hard
+  breaks and `soft_breaks` lists the UAX #14 opportunities inside one, cut only
+  at cluster starts. A program that measures its own styled spans — bold, italic
+  and plain runs wrapped together — breaks them where this crate's layouts
+  would.
 - **`Shell::request_frame` and `ShellEvent::FrameReady { window }`**, for a loop
   that presents only when the window should draw. A status bar on an output the
   compositor has turned off is never asked for a frame there, and a FIFO present

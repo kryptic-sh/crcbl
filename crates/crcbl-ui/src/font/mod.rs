@@ -85,7 +85,7 @@
 
 pub mod atlas;
 pub(crate) mod bidi;
-pub(crate) mod breaks;
+pub mod breaks;
 pub mod cluster;
 pub mod color;
 pub mod face;
