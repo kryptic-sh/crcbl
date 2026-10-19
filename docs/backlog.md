@@ -134,9 +134,10 @@ if something does, it must not treat them as premultiplied on the way in.
     `region.rs`, `apply_input_shape` returning early). pikr on 0.6.0 set
     `PhysicalRect::rounded` on its transparent window: `GetWindowRgnBox` reports
     a complex region over the whole window and a magnified screenshot shows the
-    desktop outside the corner (no click through it was tried). **Not run:** the
-    mutants deleting the `Resized` arm's rebuild and `set_mode`'s rebuild in
-    `win32/shell.rs`.
+    desktop outside the corner, and `WindowFromPoint` resolves the outermost
+    corner pixel to another process's window while the top edge and the centre
+    resolve to pikr. **Not run:** the mutants deleting the `Resized` arm's
+    rebuild and `set_mode`'s rebuild in `win32/shell.rs`.
   - **Unverified on Win32:** that a window region clips a DirectComposition
     window's drawing (documented as clipping, which is the safe direction: a
     caller gives the outer bound either way), and whether a captioned window
@@ -1397,13 +1398,15 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       creating a driver device per adapter to fill in its caps. Built
       2026-10-19: `Instance::adapters` lists identities without a device and
       `Instance::adapter_caps` probes one adapter on demand, so selection probes
-      in rank order and stops at the first that serves. Same machine model,
-      measured here with a temporary example (release build, a fresh process per
-      run, `open` plus `adapter_caps` plus `create_device` on the RX 7900 XTX):
-      240.9–436.1 ms lazily against 455.7–1035.0 ms with every adapter probed
-      first, six runs each, alternating. Not measured: pikr's first paint on the
-      new seam; the remaining cost is the one driver device for the adapter
-      actually used.
+      in rank order and stops at the first that serves. pikr measured ten warm
+      first paints on 0.6.0 (2026-10-20): 329, 480, 384, 515, 345, 367, 963,
+      2080, 356 and 339 ms, a median of about 376 ms, with other builds running
+      on the machine during the 963 and 2080. Same machine model, measured here
+      with a temporary example (release build, a fresh process per run, `open`
+      plus `adapter_caps` plus `create_device` on the RX 7900 XTX): 240.9–436.1
+      ms lazily against 455.7–1035.0 ms with every adapter probed first, six
+      runs each, alternating. Not measured: pikr's first paint on the new seam;
+      the remaining cost is the one driver device for the adapter actually used.
     - Tried and dropped, still binding: describing adapters on parallel threads
       (no gain; D3D12 serialises device creation), and DRED as the cost (the
       open measured the same without `dred::enable`).
