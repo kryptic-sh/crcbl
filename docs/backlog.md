@@ -33,7 +33,9 @@ AppKit if `CADisplayLink`/occlusion gives a real signal); elsewhere the event
 arrives at the next pump after the request, so one code path works everywhere
 and the clear cap says the pacing is not the compositor's. Declined: a finite
 acquire timeout as the fix, which turns a hang into a busy retry and still
-blocks the loop for the timeout. After opacity groups; M.
+blocks the loop for the timeout. A window destroyed with a frame pending gets no
+`FrameReady`: the request dies with it (the Wayland callback is destroyed with
+the surface), as lyr asked to have settled. After opacity groups; M.
 
 **Decided 2026-10-19: the draw list gets opacity groups, asked by lyr.** lyr's
 theme draws each module box (rounded rect, border and text) at CSS
