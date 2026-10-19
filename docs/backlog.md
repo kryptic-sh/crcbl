@@ -2332,6 +2332,18 @@ snap shipped; what is left was declined:
   thickets keep 60% of speed through a game-local multiplier, and it stays in
   the game until a second caller wants one.
 
+Raised by EW on 2026-10-19, not a request yet:
+
+- **`SpanGrid::nearest_walkable` can snap to a floor the start cannot reach.**
+  It picks the nearest kept floor by 3D distance, so on EW's seed 2 a patrol
+  wedged between a wall and a door's open leaf (5 cm thick) snapped to floor
+  0.75 m away on the leaf's far side, and every route began by walking into the
+  leaf. EW backs a stalled leg off 0.75 m before re-planning (EW `15f9bcf3`).
+  Preferred refinement if it is asked for: consider only candidates reachable
+  from the start through unblocked raw (pre-erosion) cells. Declined in its
+  favour: returning the nearest few candidates, which pushes the same
+  reachability check onto every caller.
+
 EW adopts engine revisions independently. Game acceptance, movement locks, gait
 changes and reachable-arrival scheduling remain in EW. New engine work needs a
 reproduced engine limitation, its caller, required contract and an engine
