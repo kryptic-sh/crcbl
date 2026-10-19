@@ -84,6 +84,12 @@ flight (AppKit input method, the Win32 popup leave fix):
   Fix: hand the events back (a callback, as `Shell::pump` takes), updating the
   callers in `crcbl::engine` and `crates/crcbl/tests/seam_from_outside.rs`.
   Breaking, so it belongs in a minor release.
+- **`HeadlessShell` cannot schedule input after frame N** (a limit, pikr).
+  Everything injected before a run arrives in the first pump, so a scripted run
+  ends before the consumer draws, and layout, present or an out-of-date retry
+  cannot be exercised between keys. Options: an "events due at pump N" queue on
+  `HeadlessShell`, or holding injected events until the next `wait_events`. The
+  first is explicit and keeps `inject` as it is; prefer it.
 - **`Presenter` refuses a transparent window with no premultiplied adapter**
   (policy, pikr). pikr's owner decided it warns and draws opaque instead. Add an
   opt-in on `PresenterDesc` to accept opaque when no adapter offers
