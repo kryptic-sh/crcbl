@@ -37,19 +37,27 @@ flight (AppKit input method, the Win32 popup leave fix):
    ms). `Instance::adapters` lists identities from DXGI without a device, in
    preference order, and caps are probed on demand, stopping at the first
    adapter that serves. Breaking for the HAL seam, so a minor bump. Declined:
-   keeping the every-adapter-caps promise, which is the cost itself. **The
-   preference order, decided 2026-10-19 (pikr's owner asked):** the adapter
-   driving the display the window is on first, so a laptop renders its internal
-   panel on the iGPU and lets the dGPU sleep and an external monitor wired to
-   the dGPU avoids a cross-adapter copy; when that cannot be determined,
-   integrated (low power) before discrete; `CRCBL_ADAPTER` still overrides.
-   Exposed as an `Instance` query for the surface's adapter, which ordering
-   uses. Mechanisms to verify per backend, none checked yet: Win32 the DXGI
-   adapter whose `EnumOutputs` contains `MonitorFromWindow(hwnd)` (then D3D12
-   and Vulkan by LUID); Wayland `zwp_linux_dmabuf_v1` v4 feedback's
-   `main_device` matched to `VkPhysicalDeviceDrmPropertiesEXT`; X11 the DRI3
-   device; macOS `CGDirectDisplayCopyCurrentMetalDevice`. Built together with
-   the lazy describe, since both decide which adapter is probed first.
+   keeping the every-adapter-caps promise, which is the cost itself. **Adapter
+   choice, decided 2026-10-19 by the owner:** the program chooses, by priority
+   or explicitly. A `PowerPreference` (`HighPerformance` or `LowPower`) on the
+   device request, and an explicit adapter pick through the API as well as
+   `CRCBL_ADAPTER`; an explicit pick always wins. Otherwise: a display driven by
+   a **discrete** adapter (a desktop, or a laptop's external monitor wired to
+   the dGPU) uses that adapter whatever the preference, which avoids copying
+   every frame across adapters; a display driven by an **integrated** adapter
+   with a discrete one beside it (a hybrid laptop's panel) follows the
+   preference — `HighPerformance` renders on the dGPU and accepts the copy,
+   `LowPower` stays on the iGPU and lets the dGPU sleep; when the display's
+   adapter cannot be determined, the preference picks discrete or integrated.
+   Defaults: games (`crcbl`'s engine) ask for `HighPerformance`, apps on
+   `crcbl-app`'s `Presenter` (pikr, lyr) for `LowPower`. Which adapter drives a
+   surface's display is an `Instance` query. Mechanisms to verify per backend,
+   none checked yet: Win32 the DXGI adapter whose `EnumOutputs` contains
+   `MonitorFromWindow(hwnd)` (then D3D12 and Vulkan by LUID); Wayland
+   `zwp_linux_dmabuf_v1` v4 feedback's `main_device` matched to
+   `VkPhysicalDeviceDrmPropertiesEXT`; X11 the DRI3 device; macOS
+   `CGDirectDisplayCopyCurrentMetalDevice`. Built together with the lazy
+   describe, since both decide which adapter is probed first.
 3. **Alpha-0 pointer passthrough on Win32 (S5), decided 2026-10-19: an input
    region.** A transparent pixel is still the window's for the pointer (see
    "Behaviour, not a bug" under Win32 transparency), and `HTTRANSPARENT` only
