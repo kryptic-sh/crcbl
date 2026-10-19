@@ -68,17 +68,36 @@ flight (AppKit input method, the Win32 popup leave fix):
   (policy, pikr). pikr's owner decided it warns and draws opaque instead. Add an
   opt-in on `PresenterDesc` to accept opaque when no adapter offers
   `PreMultiplied`, and report which alpha mode it got.
+- **Win32 keyboard fixes and the popup leave test wait on branch
+  `win32-popup-leave`, not on main.** Its commits drop keys the Win32 input
+  method consumes (`VK_PROCESSKEY`, both edges; reported by pikr), dismiss a
+  `PopupInput::Grab` popup on Escape on Win32, Wayland, AppKit and headless
+  through `role::escape_dismisses` (reported by lyr), and name Win32 keys
+  injected with scancode 0 from their virtual key (lyr). Verified on the host
+  only: clippy for Windows, Linux and macOS, `crcbl-shell`'s unit tests, local
+  mutants. **Not run anywhere:** the new Win32 desktop tests and the Wayland e2e
+  test, nor these CI mutants: `consumed.report` disabled in `win32/input.rs`,
+  `self.consumed.clear()` deleted in `win32/shell.rs`, `if dismissed && repeat`
+  in the Win32 key arm, `MAPVK_VK_TO_CHAR` in `layout_scancode`, and
+  `if dismissed && !pressed` in Wayland's `key_event`. Land it after the
+  branch's CI is green.
 - **Win32 popup leave (lyr): not reproduced on CI.** lyr reported that once a
   `Passthrough` popup opens from a panel, the panel never gets
   `PointerFocus { entered: false }`. The e2e test
-  `win32_e2e::a_passthrough_popup_does_not_disarm_its_parents_pointer_leave`
-  (branch `win32-popup-leave`) passed on CI's real desktop **without** a fix,
-  with a normal foreground window as the parent. lyr's parent is a `Panel`
+  `win32_e2e::a_passthrough_popup_does_not_disarm_its_parents_pointer_leave` (on
+  the branch above) passed on CI's real desktop **without** a fix, with a normal
+  foreground window as the parent. lyr's parent is a `Panel`
   (`WS_EX_NOACTIVATE`, topmost, never foreground), so the next step is the same
-  test with a panel parent and no foreground call; if that goes red, the fix is
-  to re-arm `TrackMouseEvent` on every `WM_MOUSEMOVE` rather than only on the
-  derived entry (`proc.rs`, `msg::MOUSE_MOVE`), which is written but not applied
-  because nothing has yet shown it is needed.
+  test with a panel parent and no foreground call; if that goes red, re-arm
+  `TrackMouseEvent` on every `WM_MOUSEMOVE` rather than only on the derived
+  entry (`proc.rs`, `msg::MOUSE_MOVE`).
+- **AppKit input method: mutants not run.** The `appkit_session` additions went
+  red on CI for removing the pre-edit gate in `record_preedit` and the
+  end-of-pre-edit block in `insert_text`. Cancelled unrun: the
+  `allow_input_methods` call in `set_text_input`, the one in `window.rs`, the
+  `composing.report` in `set_text_input`, `first_rect`'s area,
+  `refresh_secure_input` passing `true` for focus, `refresh_secure_input`
+  guarded by `field.is_some()`, and `set_marked_text` ignoring `selected`.
 
 **Decided 2026-10-19: panels can be reconfigured, asked by lyr.** A panel's size
 and margins are fixed at `create_window`, so lyr's notification stack (an
