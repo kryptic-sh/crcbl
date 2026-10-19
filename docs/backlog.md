@@ -6,27 +6,52 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## NEXT: speed up CI (asked by the owner, 2026-10-20)
 
 Main's CI wall time grew from about 41 min (run 39088257372, 2026-10-18) to
-52–71 min (runs 39261359247 to 39301759963, 2026-10-19), while total runner time
-barely moved (222 against 233 runner-minutes, 46 jobs each). Measured from the
-GitHub API:
+52–71 min (runs 39261359247 to 39301759963, 2026-10-19). The Metal job split,
+the dispatch `jobs` input and main-only cache saving landed in
+`ci: split Metal e2e, select dispatch jobs, save main`, whose message has their
+measurements. What is left:
 
-- **Queueing is most of the growth.** In run 39287773047 `mtl e2e (macos-15)`
-  started 25.7 min after the run did and `build + test (macos-latest)` 35 min
-  after, where both started at once on 2026-10-18. Branch CI and mutant runs
-  dispatched beside main compete for the account's few macOS runners. Fix: give
-  `workflow_dispatch` an input naming the jobs to run, so a mutant or a platform
-  check runs one job instead of all 46, and stop dispatching full runs for them.
-- **The critical path is `mtl e2e (macos-15)`, 41–44 min alone.** Two steps are
-  most of it: "Draw a frame through ForwardRenderer on Metal" (19.4 min) and
-  "Draw the lit mesh on Metal" (16.1 min), where the same draws take 5.3 and 6.3
-  min on lavapipe. Likely each step builds its own binary with a different
-  feature set and so recompiles; check the commands, share one build (same
-  features, `--no-run` once), or split the job so the steps run in parallel.
-- **`vk e2e (lavapipe)` grew from 20.9 to 27.6 min** over the same day; the lit
-  mesh, the forward renderer and the viewer's suite are its longest steps. Not
-  yet explained.
-- Every job already uses `Swatinem/rust-cache`; whether the caches hit (keys,
-  size limits, the macOS jobs) is not checked.
+- **Dispatches only get faster if they name their jobs.** `ci.yml` now takes
+  `gh workflow run ci.yml --ref <branch> -f jobs=wayland-e2e,x11-e2e`, and a
+  dispatch without `-f jobs=` still runs everything. Run 39336021406 proved a
+  one-job dispatch runs that job and `dispatch-selection` and skips the rest;
+  run 39336579245 proved a bad name fails the run. Mutant and platform-check
+  dispatches have to start passing it, or main keeps queueing behind them.
+- **The account allows 5 macOS jobs and 20 jobs in all at once** (GitHub Free).
+  A push run now has six macOS jobs — `mtl-hardware-e2e`, `mtl-e2e`,
+  `mtl-e2e-mesh`, the macOS `test-cross-platform` leg and two `build` legs — so
+  one waits for another, and 41 jobs ran in dispatched run 39337376757 against
+  20 slots. Reordering jobs so the longest start first is untried.
+- **The Metal halves are not balanced, measured once.** In run 39337376757
+  `mtl e2e (macos-15)` took 18.9 min and `mtl e2e forward + mesh (macos-15)`
+  28.1, against 40.9–48.9 min for the single job across six main runs. The
+  forward pass took 9.8 min there against 6.4 in run 39287773047, with its build
+  at 17.6 s, so execution got slower; whether two macOS-15 jobs at once contend
+  for something is unknown. Also untried: more nextest threads on the 3-vCPU
+  runner — nobody has measured whether these suites are CPU- or GPU-bound.
+- **`vk e2e (lavapipe)` is the next critical path, and its time is the
+  runner's.** It took 16.1–28.0 min across main runs 39088257372 to 39315179951
+  and in dispatched run 39337376757, with the same suites each time. Between
+  39088257372 (20.9 min) and 39287773047 (27.6 min) every step slowed by about
+  the same third, compilation included (the render suite built in 16.9 s against
+  23.9 s), on the same runner image `20261012.334.1`, in Azure `eastus` against
+  `westus2`. Nothing in the repository explains it. If it stays the critical
+  path, split it the way `mtl-e2e` was: the sample goldens and the viewer's
+  suite took 7.7–10.2 min of it in runs 39088257372, 39287773047
+  and 39337376757.
+- **The `rust-cache` key moves with the runner image's own toolchain.** Its
+  environment hash covers every installed `rustc`, and on 2026-10-19 runners
+  carried 1.99.0 or 1.99.1 beside the pinned 1.98.1, so one scope saved under
+  two keys (`v0-rust-test-Linux-x64-1354b354` for 1.99.0 and `-ba220bad` for
+  1.99.1) and a runner with the other one restored nothing. Of the 5 of 30
+  restores that found no cache in run 39315179951, coverage, wasm32 and the
+  x86_64 Linux build were this split; rustdoc and clippy were evictions (their
+  keys restored in run 39287773047 three to four hours earlier), which main-only
+  saving should stop — unverified until main has run with it for a while. Each
+  miss cost a cold build of a minute or two.
+  `add-rust-environment-hash-key: false` would fix the split and restore stale
+  artifacts after a toolchain bump; uninstalling the image's toolchain first is
+  the other route. Not changed.
 
 ## HIGH PRIORITY: what lyr and pikr still need (2026-10-15)
 
