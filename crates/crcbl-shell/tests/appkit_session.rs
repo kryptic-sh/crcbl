@@ -209,10 +209,10 @@ mod macos {
     use crcbl_shell::{
         ButtonState, ClipboardContent, ClipboardOffer, CursorIcon, DisplayMode, KeyCode, Keysym,
         LogicalPoint, LogicalRect, LogicalSize, MimeType, MonitorId, PanelAnchor, PanelDesc,
-        PanelKeyboard, PanelLayer, PhysicalPoint, PhysicalSize, PointerButton, PointerMode,
-        PopupDesc, PopupInput, PopupPlacement, ReceivedMime, ScrollDelta, Shell, ShellBackend,
-        ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowDesc, WindowId, WindowRole,
-        open_backend, session_support,
+        PanelKeyboard, PanelLayer, PhysicalPoint, PhysicalRect, PhysicalSize, PointerButton,
+        PointerMode, PopupDesc, PopupInput, PopupPlacement, ReceivedMime, ScrollDelta, Shell,
+        ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints, TextPurpose, WindowDesc,
+        WindowId, WindowRole, open_backend, session_support,
     };
 
     /// The window's title, which is **how this session finds its own window**.
@@ -382,6 +382,7 @@ mod macos {
 
         let facts = appkit_agrees(size);
         input(&mut shell, window, size);
+        text_input(&mut shell, window);
         match &activation {
             Ok(active) => {
                 println!(
@@ -591,8 +592,9 @@ mod macos {
             "NSCursor applies every shape: {caps:?}"
         );
         assert!(
-            !caps.contains(ShellCaps::TEXT_IME),
-            "the pre-edit is not sent, so the input method is not wired end to end: {caps:?}"
+            caps.contains(ShellCaps::TEXT_IME),
+            "fields switch the input method, the pre-edit is sent and the candidate window \
+             follows the caret: {caps:?}"
         );
         assert!(
             !caps.contains(ShellCaps::POINTER_CONFINE),
@@ -654,6 +656,229 @@ mod macos {
             shell.set_cursor(window, cursor).expect("set_cursor");
         }
         println!("crcbl appkit session: pointer modes, cursors and the warp all answered");
+    }
+
+    /// The input method's half of the seam: [`Shell::set_text_input`],
+    /// [`Shell::set_text_input_area`] and the pre-edit, judged by AppKit.
+    ///
+    /// # The harness plays the input method
+    ///
+    /// No input method can be driven on a runner, so this calls the view's
+    /// own `NSTextInputClient` methods — `setMarkedText:selectedRange:replacementRange:`,
+    /// `unmarkText`, `insertText:replacementRange:` — the way one does from
+    /// inside `interpretKeyEvents:`, through
+    /// [`session_support::mark_text`] and its neighbours. What that proves is
+    /// everything on this side of the protocol: which windows report a
+    /// pre-edit, with what cursor, how each one ends, what the input context
+    /// is restricted to and where the view says the caret is. What it cannot
+    /// prove is that a real input method gives way to the restriction, which
+    /// `docs/backlog.md` carries.
+    ///
+    /// # Nothing here needs the keyboard but the last check
+    ///
+    /// Each call is synchronous and recorded before it returns, so one pump
+    /// delivers what it caused. Secure event input is held only while the
+    /// window is **key**, so that check asserts whichever state the window is
+    /// in rather than being skipped on a runner that never activates.
+    fn text_input(shell: &mut Box<dyn Shell>, window: WindowId) {
+        let facts = |step: &str| {
+            session_support::text_input_facts(TITLE)
+                .unwrap_or_else(|detail| panic!("crcbl appkit session: {step}: {detail}"))
+        };
+        let mark = |text: &str, cursor: usize| {
+            session_support::mark_text(TITLE, text, cursor).unwrap_or_else(|detail| {
+                panic!("crcbl appkit session: marking {text:?}: {detail}")
+            });
+        };
+        let unmark = || {
+            session_support::unmark_text(TITLE)
+                .unwrap_or_else(|detail| panic!("crcbl appkit session: unmarking: {detail}"));
+        };
+        let pumped = |shell: &mut Box<dyn Shell>| {
+            let mut seen = Vec::new();
+            shell.pump(&mut |event| seen.push(event));
+            seen
+        };
+
+        // --- a window with no field keeps the input method out ---
+        let fresh = facts("a new window");
+        assert!(
+            fresh.roman_only,
+            "a window starts with no field, so its input context is held to the keyboard \
+             layouts and no input method composes in it: {fresh:?}"
+        );
+        // A dead key's accent is marked text too, so it is tracked — the input
+        // method needs the answers to compose it — and not reported.
+        mark("\u{b4}", 1);
+        assert!(facts("an accent marked").has_marked_text);
+        let seen = pumped(shell);
+        assert!(
+            preedits(&seen).is_empty(),
+            "with no field, marked text is the dead key's and no pre-edit is reported, as on \
+             Win32 and Wayland: {:?}",
+            preedits(&seen)
+        );
+        unmark();
+        assert!(!facts("the accent unmarked").has_marked_text);
+        assert!(
+            preedits(&pumped(shell)).is_empty(),
+            "nothing was shown, so nothing ends"
+        );
+
+        // --- an ordinary field lets every input method in ---
+        shell
+            .set_text_input(window, Some(TextPurpose::Normal))
+            .expect("set_text_input");
+        let open = facts("an ordinary field");
+        assert!(
+            open.allowed_input_sources.is_empty() && !open.roman_only,
+            "an ordinary field allows every input source, which is nil: {open:?}"
+        );
+
+        // The pre-edit, with its cursor walked from UTF-16 units to bytes:
+        // three units in is past か (one unit, three bytes) and the surrogate
+        // pair 𠀋 (two units, four bytes), so seven bytes.
+        mark("か𠀋な", 3);
+        assert_eq!(
+            preedits(&pumped(shell)),
+            [("か𠀋な".to_owned(), Some(7))],
+            "the marked text is the pre-edit, and its cursor is a byte offset on a char boundary"
+        );
+        unmark();
+        assert_eq!(
+            preedits(&pumped(shell)),
+            [(String::new(), None)],
+            "unmarkText ends the pre-edit with an empty one"
+        );
+
+        // A commit while text is marked replaces it: the pre-edit ends and
+        // the conversion arrives as a commit.
+        mark("かな", 2);
+        pumped(shell);
+        session_support::commit_text(TITLE, "仮名")
+            .unwrap_or_else(|detail| panic!("crcbl appkit session: committing: {detail}"));
+        let committed = pumped(shell);
+        assert_eq!(
+            preedits(&committed),
+            [(String::new(), None)],
+            "{:?}",
+            names(&committed)
+        );
+        assert!(
+            committed.iter().any(
+                |event| matches!(event, ShellEvent::TextCommit { text, .. } if text == "仮名")
+            ),
+            "the conversion is committed: {:?}",
+            names(&committed)
+        );
+        assert!(!facts("after the commit").has_marked_text);
+
+        // Clearing the field mid-composition ends the pre-edit the consumer
+        // was shown, drops the marked text, and keeps the input method out
+        // again.
+        mark("かな", 2);
+        pumped(shell);
+        shell.set_text_input(window, None).expect("set_text_input");
+        assert_eq!(
+            preedits(&pumped(shell)),
+            [(String::new(), None)],
+            "a field that goes away ends its composition"
+        );
+        let closed = facts("the field cleared");
+        assert!(closed.roman_only && !closed.has_marked_text, "{closed:?}");
+
+        // --- the caret area places the candidate window ---
+        let window_facts = appkit_says("before placing the caret");
+        let [x, y, ..] = window_facts.frame;
+        let height = window_facts.content_points[1];
+        let scale = window_facts.backing_scale;
+        let unplaced = facts("no caret area").first_rect;
+        assert!(
+            near(unplaced, [x, y, 0.0, 0.0]),
+            "with no area the candidate window goes to the window's own origin, {:?}, and the \
+             view said {unplaced:?}",
+            [x, y]
+        );
+        // A caret line 24 pixels tall whose top is 60 pixels down: the view's
+        // rectangle has its origin at the line's *bottom* edge, Y up, in points.
+        let area = PhysicalRect::new(40, 60, 200, 24);
+        shell
+            .set_text_input_area(window, Some(area))
+            .expect("set_text_input_area");
+        let placed = facts("a caret area").first_rect;
+        let want = [
+            x + 40.0 / scale,
+            y + height - (60.0 + 24.0) / scale,
+            200.0 / scale,
+            24.0 / scale,
+        ];
+        assert!(
+            near(placed, want),
+            "firstRectForCharacterRange: answers the caret area in screen points: asked for \
+             {area:?} in a {height}-point view at {scale}x on a window at {:?}, wanted {want:?} \
+             and the view said {placed:?}",
+            [x, y]
+        );
+        shell
+            .set_text_input_area(window, None)
+            .expect("set_text_input_area");
+        assert!(
+            near(facts("the caret area handed back").first_rect, unplaced),
+            "None hands placement back"
+        );
+
+        // --- a password field holds secure input while the window is key ---
+        if fresh.secure_input {
+            println!(
+                "crcbl appkit session: secure input was already held when this ran, by \
+                 something that is not this shell, so whether this shell takes and gives it \
+                 back cannot be read off the session and is not asserted"
+            );
+        } else {
+            shell
+                .set_text_input(window, Some(TextPurpose::Password))
+                .expect("set_text_input");
+            let focused = shell.window_state(window).expect("state").focused;
+            let guarded = facts("a password field");
+            assert!(
+                guarded.roman_only,
+                "a password keeps input methods out: {guarded:?}"
+            );
+            assert_eq!(
+                guarded.secure_input, focused,
+                "secure input is held exactly while the window with the password field has the \
+                 keyboard (focused: {focused}): {guarded:?}"
+            );
+            shell.set_text_input(window, None).expect("set_text_input");
+            assert!(
+                !facts("the password field cleared").secure_input,
+                "clearing the field gives secure input back, or no other process on the machine \
+                 can read the keyboard"
+            );
+            println!(
+                "crcbl appkit session: a password field {} secure input with the window {}",
+                if focused { "held" } else { "did not hold" },
+                if focused { "key" } else { "not key" }
+            );
+        }
+        println!("crcbl appkit session: fields, the pre-edit and the caret area all answered");
+    }
+
+    /// Every pre-edit in `events`, as its text and cursor.
+    fn preedits(events: &[ShellEvent]) -> Vec<(String, Option<usize>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::TextPreedit { text, cursor, .. } => Some((text.clone(), *cursor)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether two `[x, y, width, height]` rectangles agree to well within a
+    /// backing pixel.
+    fn near(a: [f64; 4], b: [f64; 4]) -> bool {
+        a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-6)
     }
 
     /// The warp, judged by where the **window system** says the pointer ended

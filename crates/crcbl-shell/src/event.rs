@@ -351,9 +351,7 @@ pub enum ShellEvent {
     /// within one pump carries no meaning.
     ///
     /// Sent where [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME) is set.
-    /// A backend without it never sends this; where an input method's commits
-    /// still reach it (AppKit today), the platform's own composition window
-    /// shows the pre-edit instead.
+    /// A backend without it never sends this.
     /// [`Shell::set_text_input_area`](crate::Shell::set_text_input_area) is how a
     /// field tells the input method where to put that window and its
     /// candidate list.

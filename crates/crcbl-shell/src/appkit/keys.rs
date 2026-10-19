@@ -40,11 +40,21 @@
 //! documented half cannot do it: it says *a* Shift is held, not which one. The
 //! device-dependent bits — [`ffi::modifier`](super::ffi::modifier) — carry one
 //! bit per physical key, and [`modifier_is_down`] is the reconstruction.
+//!
+//! # The input method's decisions, without the input method
+//!
+//! Which fields an input method may compose in ([`field_composes`]), when
+//! secure event input is held ([`wants_secure_input`]) and kept balanced
+//! ([`SecureInput`]), and what a marked string's selection becomes on the seam
+//! ([`marked_preedit`]) are all functions of a few values, so they are here and
+//! tested without a Mac. [`view`](super::view) and
+//! [`set_text_input`](crate::Shell::set_text_input) apply them.
 
 use crcbl_core::KeyCode;
 use crcbl_core::input::{Keysym, Modifiers};
 
-use super::ffi::{NSUInteger, modifier};
+use super::ffi::{NSRange, NSUInteger, modifier};
+use crate::TextPurpose;
 
 /// The engine key an Apple virtual key code names, layout-independently.
 ///
@@ -318,6 +328,102 @@ pub const fn modifier_is_down(key: KeyCode, flags: NSUInteger) -> Option<bool> {
     Some(flags & bit != 0)
 }
 
+/// Whether a window's field lets every input method compose in it, which is
+/// [`Shell::set_text_input`](crate::Shell::set_text_input)'s question here.
+///
+/// Only an ordinary field does. With no field, and in a password or a PIN,
+/// the view's input context is held to the Roman input sources — keyboard
+/// layouts, so dead keys still compose — and no pre-edit is reported: the
+/// Win32 backend draws the same line, keeping the input method out of a window
+/// with no field and of a sensitive one as a Windows password box does.
+#[must_use]
+pub const fn field_composes(field: Option<TextPurpose>) -> bool {
+    match field {
+        Some(purpose) => !purpose.is_sensitive(),
+        None => false,
+    }
+}
+
+/// Whether a window wants secure event input: it has the keyboard, and its
+/// field is [sensitive](TextPurpose::is_sensitive).
+///
+/// The keyboard half is what makes the guard local to the field. Secure event
+/// input stops every other process from reading keystrokes — a keylogger, but
+/// also a global hotkey or an accessibility tool — so holding it while some
+/// other application has the keyboard would take that from the user for as
+/// long as the password field stayed set.
+#[must_use]
+pub const fn wants_secure_input(focused: bool, field: Option<TextPurpose>) -> bool {
+    focused
+        && match field {
+            Some(purpose) => purpose.is_sensitive(),
+            None => false,
+        }
+}
+
+/// Keeps `EnableSecureEventInput` and `DisableSecureEventInput` paired.
+///
+/// The two are **counted** across the whole login session: secure input stays
+/// on while any enable is unmatched, so one disable too few leaves every other
+/// application on the machine unable to see a keystroke after this process has
+/// stopped asking, and one too many cancels an enable a different caller made.
+/// The shape of the fix is [`pointer::Visibility`](super::pointer::Visibility)'s
+/// for `+[NSCursor hide]`: record what this shell holds and answer each request
+/// with the call actually owed, which is zero whenever the state already
+/// matches and never more than one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SecureInput {
+    /// Whether this shell currently holds one enable.
+    held: bool,
+}
+
+/// What [`SecureInput::want`] says to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Secure {
+    /// Nothing: secure input is already in the state that was asked for.
+    Nothing,
+    /// One `EnableSecureEventInput`.
+    Enable,
+    /// One `DisableSecureEventInput`, releasing the enable this shell holds.
+    Disable,
+}
+
+impl SecureInput {
+    /// The call owed to reach `secure`, and the state updated as if it was
+    /// made.
+    ///
+    /// Idempotent by construction: asking twice for the same thing owes one
+    /// call and then none.
+    pub const fn want(&mut self, secure: bool) -> Secure {
+        if secure == self.held {
+            return Secure::Nothing;
+        }
+        self.held = secure;
+        if secure {
+            Secure::Enable
+        } else {
+            Secure::Disable
+        }
+    }
+}
+
+/// A `setMarkedText:selectedRange:replacementRange:` pre-edit as the seam's
+/// text and cursor.
+///
+/// `selected` is in the string's UTF-16 code units, counted from its start,
+/// and its location is the cursor: an input method selects a clause it is
+/// converting and puts an empty selection where it is typing.
+/// [`crate::preedit::preedit`] walks that index across to a byte offset on a
+/// `char` boundary, clamped to the end — the same walk the Win32 backend makes
+/// of `GCS_CURSORPOS`. [`NSRange::NOT_FOUND`] is an input method that did not
+/// say, and reads as no cursor rather than as one clamped to the end.
+#[must_use]
+pub fn marked_preedit(text: &str, selected: NSRange) -> (String, Option<usize>) {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let cursor = (selected.location != NSRange::NOT_FOUND).then_some(selected.location);
+    crate::preedit::preedit(&units, cursor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +588,88 @@ mod tests {
         for text in ['a', ' ', 'é', '🎮', '日'] {
             assert!(is_text(text), "{text:?}");
         }
+    }
+
+    #[test]
+    fn a_marked_text_cursor_is_counted_in_code_units_and_reported_in_bytes() {
+        // か and な are one code unit and three bytes each; 𠀋 (U+2000B) is
+        // outside the basic plane, so two code units and four bytes.
+        let text = "か𠀋な";
+        let at = |location| marked_preedit(text, NSRange::new(location, 0)).1;
+        assert_eq!(at(0), Some(0));
+        assert_eq!(at(1), Some(3), "after か");
+        assert_eq!(at(3), Some(7), "after the surrogate pair, not inside it");
+        assert_eq!(at(4), Some(10), "at the end");
+        // Between the pair's halves is no `char` boundary at all; the cursor
+        // goes before the pair rather than splitting it.
+        assert_eq!(at(2), Some(3));
+        // Past the end clamps to the end rather than inventing an offset.
+        assert_eq!(at(5), Some(10));
+        assert_eq!(at(NSRange::NOT_FOUND - 1), Some(10));
+        // The selection's length is a clause being converted; the cursor is
+        // where it starts.
+        assert_eq!(
+            marked_preedit(text, NSRange::new(1, 2)),
+            (text.to_owned(), Some(3))
+        );
+        // An input method that did not say has no cursor, not one at the end.
+        assert_eq!(marked_preedit(text, NSRange::NONE), (text.to_owned(), None));
+        // Marked text emptied is the pre-edit ending, which has no cursor.
+        assert_eq!(
+            marked_preedit("", NSRange::new(0, 0)),
+            (String::new(), None)
+        );
+    }
+
+    #[test]
+    fn only_an_ordinary_field_composes_and_only_a_focused_sensitive_one_is_secure() {
+        assert!(!field_composes(None), "a window with no field keeps it out");
+        assert!(field_composes(Some(TextPurpose::Normal)));
+        assert!(!field_composes(Some(TextPurpose::Password)));
+        assert!(!field_composes(Some(TextPurpose::Pin)));
+
+        for focused in [false, true] {
+            assert!(!wants_secure_input(focused, None));
+            assert!(!wants_secure_input(focused, Some(TextPurpose::Normal)));
+            assert_eq!(
+                wants_secure_input(focused, Some(TextPurpose::Password)),
+                focused
+            );
+            assert_eq!(wants_secure_input(focused, Some(TextPurpose::Pin)), focused);
+        }
+    }
+
+    #[test]
+    fn secure_input_is_enabled_once_and_disabled_once() {
+        // `EnableSecureEventInput` is counted session-wide, so an extra enable
+        // keeps every other application from reading the keyboard after this
+        // one stops asking, and an extra disable cancels somebody else's.
+        let mut secure = SecureInput::default();
+        assert_eq!(secure.want(false), Secure::Nothing, "nothing to release");
+        assert_eq!(secure.want(true), Secure::Enable);
+        assert_eq!(secure.want(true), Secure::Nothing, "already held");
+        assert_eq!(secure.want(false), Secure::Disable);
+        assert_eq!(secure.want(false), Secure::Nothing, "already released");
+        assert_eq!(secure.want(true), Secure::Enable);
+        assert_eq!(SecureInput::default(), SecureInput { held: false });
+
+        // Any order of asks keeps the count this shell contributes at zero or
+        // one, and asking for off last always brings it back to zero.
+        let asks = [
+            true, true, false, true, false, false, true, true, true, false,
+        ];
+        let mut secure = SecureInput::default();
+        let mut count = 0_i32;
+        for &ask in &asks {
+            match secure.want(ask) {
+                Secure::Enable => count += 1,
+                Secure::Disable => count -= 1,
+                Secure::Nothing => {}
+            }
+            assert_eq!(count, i32::from(ask), "after asking for {ask}");
+        }
+        secure.want(true);
+        assert_eq!(secure.want(false), Secure::Disable);
     }
 
     #[test]

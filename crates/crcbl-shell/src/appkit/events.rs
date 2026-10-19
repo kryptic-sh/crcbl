@@ -178,6 +178,19 @@ pub enum RawEvent {
         seconds: f64,
     },
 
+    /// The input method's marked text changed, in a window whose field lets
+    /// it compose. **The pre-edit is on [`Shared`](super::app::Shared)**, for
+    /// the reason [`TextCommitted`](Self::TextCommitted) gives; an empty one
+    /// is the composition ending.
+    Preedit {
+        /// `NSWindow *` as an integer, which is also what the payload is
+        /// matched by.
+        window: usize,
+        /// The timestamp of the key event being interpreted, as for
+        /// [`TextCommitted`](Self::TextCommitted).
+        seconds: f64,
+    },
+
     /// `mouseMoved:` or one of the three `*MouseDragged:` methods.
     PointerMotion {
         /// `NSWindow *` as an integer.
@@ -281,6 +294,7 @@ impl RawEvent {
             | Self::Key { window, .. }
             | Self::FlagsChanged { window, .. }
             | Self::TextCommitted { window, .. }
+            | Self::Preedit { window, .. }
             | Self::PointerMotion { window, .. }
             | Self::PointerFocus { window, .. }
             | Self::Button { window, .. }
@@ -523,6 +537,14 @@ mod tests {
                 window: A,
                 seconds: 1.200,
             },
+            RawEvent::Preedit {
+                window: A,
+                seconds: 1.200,
+            },
+            RawEvent::Preedit {
+                window: A,
+                seconds: 1.200,
+            },
         ];
         for sample in samples {
             enqueue(&mut queue, sample);
@@ -607,6 +629,15 @@ mod tests {
             Some(B),
             "a commit's marker has to name its window, because that is what the \
              text is matched by"
+        );
+        assert_eq!(
+            RawEvent::Preedit {
+                window: B,
+                seconds: 0.0
+            }
+            .window(),
+            Some(B),
+            "so does a pre-edit's"
         );
         assert_eq!(
             RawEvent::PointerFocus {

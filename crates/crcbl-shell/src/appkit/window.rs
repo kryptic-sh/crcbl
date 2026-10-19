@@ -752,6 +752,11 @@ impl AppKitShell {
             // Enter, exit and cursor updates, none of which any other mechanism
             // produces.
             view::add_tracking_area(view);
+            // The input method stays out until a text field asks for it, as
+            // `Shell::set_text_input` says of every window: keyboard layouts
+            // only, so typing and dead keys still commit and a candidate list
+            // never opens over a game's keys.
+            view::allow_input_methods(view, false);
             // And the drop gate, which is the same shape: **AppKit sends no
             // dragging message at all to a view that has not registered**, so
             // `accept_drops` being off is enforced by the system rather than by

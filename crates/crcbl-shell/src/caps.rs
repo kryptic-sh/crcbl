@@ -139,10 +139,9 @@ bitflags::bitflags! {
         /// Whether the user runs an input method is not the shell's to know;
         /// the bit says one would reach the engine.
         ///
-        /// Wayland sets it when the compositor offers `text-input-v3`, and
-        /// Win32 through `imm32`. Clear on X11, which has no XIM, IBus or
-        /// Fcitx client; on AppKit, which does not send the pre-edit yet; and
-        /// on the web. Dead keys and Compose sequences are
+        /// Wayland sets it when the compositor offers `text-input-v3`, Win32
+        /// through `imm32`, and AppKit through `NSTextInputClient`. Clear on
+        /// X11, which has no XIM, IBus or Fcitx client, and on the web. Dead keys and Compose sequences are
         /// [`TEXT_COMPOSE`](Self::TEXT_COMPOSE), which a backend can have
         /// without this.
         const TEXT_IME = 1 << 6;

@@ -47,20 +47,30 @@ use core::ffi::{CStr, c_char};
 
 use crate::{CursorIcon, MimeType};
 
-use super::ffi::{self, Id, NSSize, NSUInteger, Pool, Sel, style};
+use super::ffi::{self, Id, NSRange, NSRect, NSSize, NSUInteger, Pool, Sel, style};
 use super::pasteboard;
 use super::pointer;
 use super::view;
 
-// The one runtime entry point this module needs that the backend itself has no
-// use for: the *name* of an object's class. Everything else here goes through
-// [`ffi`]; this is declared beside its only caller rather than added to that
-// table, which is deliberately audited by use.
+// The two entry points this module needs that the backend itself has no use
+// for: the *name* of an object's class, and whether secure event input is on.
+// Everything else here goes through [`ffi`]; these are declared beside their
+// only callers rather than added to that table, which is deliberately audited
+// by use.
 #[link(name = "objc")]
 unsafe extern "C" {
     /// The class name of an object, as a NUL-terminated C string owned by the
     /// runtime.
     fn object_getClassName(object: Id) -> *const c_char;
+}
+
+// Carbon, for the reason `ffi` links it there: HIToolbox is reached through
+// its umbrella.
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    /// Whether any process in the login session holds secure event input.
+    /// `Boolean` is an `unsigned char`.
+    fn IsSecureEventInputEnabled() -> u8;
 }
 
 /// Every cursor shape this backend names exists in this AppKit, and answers a
@@ -192,20 +202,30 @@ pub fn dragged_types_register_on_a_view() -> Result<(), String> {
 /// `view` must be a live `NSView`, on the main thread, with an autorelease pool
 /// in scope.
 unsafe fn registered_types(view: Id) -> Vec<String> {
-    // SAFETY: an accessor returning an autoreleased array, which may be nil.
-    let types = unsafe { ffi::msg(view, ffi::sel(c"registeredDraggedTypes")) };
-    if types.is_null() {
+    // SAFETY: an accessor returning an autoreleased array, which may be nil;
+    // every element is an `NSString` a registration put there.
+    unsafe { strings_of(ffi::msg(view, ffi::sel(c"registeredDraggedTypes"))) }
+}
+
+/// An `NSArray` of `NSString`s as strings, and nil as none.
+///
+/// # Safety
+///
+/// `array` must be a live `NSArray` whose every element is an `NSString`, or
+/// nil, on the main thread with an autorelease pool in scope.
+unsafe fn strings_of(array: Id) -> Vec<String> {
+    if array.is_null() {
         return Vec::new();
     }
     // SAFETY: a live `NSArray`.
-    let count = unsafe { ffi::msg_usize(types, ffi::sel(c"count")) };
+    let count = unsafe { ffi::msg_usize(array, ffi::sel(c"count")) };
     let mut names = Vec::with_capacity(count);
     for index in 0..count {
         // SAFETY: `index` is in range for an array of `count` objects, each of
-        // which is an `NSString` a registration put there.
+        // which is an `NSString` by the caller's obligation.
         let name = unsafe {
             let send: unsafe extern "C" fn(Id, Sel, NSUInteger) -> Id = ffi::msg_send();
-            let string = send(types, ffi::sel(c"objectAtIndex:"), index);
+            let string = send(array, ffi::sel(c"objectAtIndex:"), index);
             ffi::string_from_nsstring(string)
         };
         if let Some(name) = name {
@@ -830,4 +850,186 @@ unsafe fn class_name(object: Id) -> String {
     unsafe { CStr::from_ptr(name) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// What an input method sees of this process's window titled `title`: its
+/// content view's input context, the view's marked text, where the view says
+/// the caret is, and whether secure event input is on.
+///
+/// The readback for [`Shell::set_text_input`](crate::Shell::set_text_input)
+/// and [`set_text_input_area`](crate::Shell::set_text_input_area), which have
+/// no seam readback of their own. Like [`WindowFacts`], none of it needs the
+/// keyboard.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextInputFacts {
+    /// `-[NSTextInputContext allowedInputSourceLocales]` on the content view's
+    /// input context, empty for nil — which is "every input source".
+    pub allowed_input_sources: Vec<String>,
+    /// Whether that list is `NSAllRomanInputSourcesLocaleIdentifier` alone:
+    /// keyboard layouts only, which is how a window keeps an input method out.
+    pub roman_only: bool,
+    /// `-[CrcblView hasMarkedText]`.
+    pub has_marked_text: bool,
+    /// `-[CrcblView firstRectForCharacterRange:actualRange:]` for an empty
+    /// range at the start, as `[x, y, width, height]` in AppKit screen points,
+    /// Y up.
+    pub first_rect: [f64; 4],
+    /// `IsSecureEventInputEnabled()`. **Session-wide**: true while any
+    /// process holds it, so it says this shell holds it only where nothing
+    /// else does.
+    pub secure_input: bool,
+}
+
+/// [`TextInputFacts`] for this process's window titled `title`.
+///
+/// # Errors
+///
+/// A string naming what was missing, on the same terms as [`window_facts`].
+pub fn text_input_facts(title: &str) -> Result<TextInputFacts, String> {
+    let _pool = Pool::push();
+    // SAFETY: the main thread, with the pool above in scope.
+    let view = unsafe { content_view_titled(title) }?;
+    // SAFETY: a live `CrcblView`; `inputContext` answers its context or nil.
+    let context = unsafe { ffi::msg(view, ffi::sel(c"inputContext")) };
+    if context.is_null() {
+        return Err(format!(
+            "the content view of {title:?} has no input context"
+        ));
+    }
+    // SAFETY: a live `NSTextInputContext`, whose locales are an array of
+    // strings or nil; AppKit's constant is a live `NSString`.
+    let (allowed_input_sources, roman) = unsafe {
+        (
+            strings_of(ffi::msg(context, ffi::sel(c"allowedInputSourceLocales"))),
+            ffi::string_from_nsstring(ffi::NSAllRomanInputSourcesLocaleIdentifier),
+        )
+    };
+    let roman_only = roman.is_some_and(|roman| allowed_input_sources == [roman]);
+    // SAFETY: `hasMarkedText` is the view's own method answering `BOOL`, and
+    // `firstRectForCharacterRange:actualRange:` takes a range and a nullable
+    // out-pointer and answers an `NSRect` — the one shape that needs the
+    // struct-return trampoline on x86_64.
+    let (has_marked_text, first_rect) = unsafe {
+        let first: unsafe extern "C" fn(Id, Sel, NSRange, *mut NSRange) -> NSRect =
+            ffi::msg_send_stret();
+        (
+            ffi::msg_bool(view, ffi::sel(c"hasMarkedText")),
+            first(
+                view,
+                ffi::sel(c"firstRectForCharacterRange:actualRange:"),
+                NSRange::new(0, 0),
+                core::ptr::null_mut(),
+            ),
+        )
+    };
+    // SAFETY: takes nothing and answers a `Boolean`.
+    let secure_input = unsafe { IsSecureEventInputEnabled() } != 0;
+    Ok(TextInputFacts {
+        allowed_input_sources,
+        roman_only,
+        has_marked_text,
+        first_rect: [
+            first_rect.origin.x,
+            first_rect.origin.y,
+            first_rect.size.width,
+            first_rect.size.height,
+        ],
+        secure_input,
+    })
+}
+
+/// Sends `setMarkedText:selectedRange:replacementRange:` to the content view
+/// of this process's window titled `title`, the way an input method does from
+/// inside `interpretKeyEvents:`: `text` marked, with an empty selection at
+/// `cursor` UTF-16 units in.
+///
+/// **This is the input method's half, played by the harness.** A real input
+/// method cannot be driven on a runner, so what this proves is everything on
+/// this side of the protocol — what the view does with the call — and nothing
+/// about whether an input method makes it.
+///
+/// # Errors
+///
+/// A string naming what was missing, on the same terms as [`window_facts`].
+pub fn mark_text(title: &str, text: &str, cursor: usize) -> Result<(), String> {
+    let _pool = Pool::push();
+    // SAFETY: the main thread, with the pool above in scope.
+    let view = unsafe { content_view_titled(title) }?;
+    // SAFETY: an autoreleased string, valid for the pool above.
+    let string = unsafe { ffi::nsstring(text) }.ok_or("the marked text has a NUL in it")?;
+    // SAFETY: the view's own method, with the signature it was installed with.
+    unsafe {
+        let send: unsafe extern "C" fn(Id, Sel, Id, NSRange, NSRange) = ffi::msg_send();
+        send(
+            view,
+            ffi::sel(c"setMarkedText:selectedRange:replacementRange:"),
+            string,
+            NSRange::new(cursor, 0),
+            NSRange::NONE,
+        );
+    }
+    Ok(())
+}
+
+/// Sends `unmarkText` to the content view of this process's window titled
+/// `title`: the input method's composition is over. See [`mark_text`].
+///
+/// # Errors
+///
+/// A string naming what was missing, on the same terms as [`window_facts`].
+pub fn unmark_text(title: &str) -> Result<(), String> {
+    let _pool = Pool::push();
+    // SAFETY: the main thread, with the pool above in scope.
+    let view = unsafe { content_view_titled(title) }?;
+    // SAFETY: the view's own method, taking nothing.
+    unsafe { ffi::msg_void(view, ffi::sel(c"unmarkText")) };
+    Ok(())
+}
+
+/// Sends `insertText:replacementRange:` to the content view of this process's
+/// window titled `title`: the input method commits `text`, replacing whatever
+/// it had marked. See [`mark_text`].
+///
+/// # Errors
+///
+/// A string naming what was missing, on the same terms as [`window_facts`].
+pub fn commit_text(title: &str, text: &str) -> Result<(), String> {
+    let _pool = Pool::push();
+    // SAFETY: the main thread, with the pool above in scope.
+    let view = unsafe { content_view_titled(title) }?;
+    // SAFETY: an autoreleased string, valid for the pool above.
+    let string = unsafe { ffi::nsstring(text) }.ok_or("the committed text has a NUL in it")?;
+    // SAFETY: the view's own method, with the signature it was installed with.
+    unsafe {
+        let send: unsafe extern "C" fn(Id, Sel, Id, NSRange) = ffi::msg_send();
+        send(
+            view,
+            ffi::sel(c"insertText:replacementRange:"),
+            string,
+            NSRange::NONE,
+        );
+    }
+    Ok(())
+}
+
+/// The content view of this process's window titled `title`.
+///
+/// # Errors
+///
+/// As [`window_titled`], or a window with no content view.
+///
+/// # Safety
+///
+/// The main thread, with an autorelease pool in scope; the view is valid until
+/// that pool drains.
+unsafe fn content_view_titled(title: &str) -> Result<Id, String> {
+    let app = shared_application()?;
+    // SAFETY: the caller's obligations, forwarded.
+    let window = unsafe { window_titled(app, title) }?;
+    // SAFETY: a live `NSWindow`; `contentView` answers the view it owns.
+    let view = unsafe { ffi::msg(window, ffi::sel(c"contentView")) };
+    if view.is_null() {
+        return Err(format!("the window titled {title:?} has no content view"));
+    }
+    Ok(view)
 }

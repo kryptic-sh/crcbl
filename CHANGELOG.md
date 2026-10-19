@@ -26,6 +26,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   The transfer function itself is public as
   `crcbl_core::srgb::{decode, encode}`, which `crcbl-ui` and `crcbl-frame`'s mip
   generation now share.
+- **AppKit sets `ShellCaps::TEXT_IME`**: `set_text_input` now switches the input
+  method, so a window with no field, or with a password or PIN field, keeps its
+  input context to the keyboard layouts (typing and dead keys still commit) and
+  an ordinary field lets every input method compose. A password or PIN field
+  holds secure event input while its window has the keyboard, so no other
+  process can read what is typed into it, and gives it back when the field is
+  cleared, the window loses the keyboard or closes, or the shell is dropped.
+  Marked text arrives as `TextPreedit` with its cursor as a byte offset, ending
+  with an empty one, and `set_text_input_area` places the candidate window at
+  the caret through `firstRectForCharacterRange:`.
 
 ### Fixed
 

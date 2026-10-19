@@ -52,7 +52,7 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use crate::{ShellBackend, ShellError};
+use crate::{PhysicalRect, ShellBackend, ShellError, TextPurpose};
 
 use super::events::{RawEvent, enqueue};
 use super::ffi::{self, Class, Id, Imp, ObjcBool, Pool, Sel, YES, value};
@@ -95,13 +95,31 @@ pub(super) struct Shared {
     /// with the moment the input method got round to it. This is the keystroke's
     /// own timestamp, which is what the seam asks for.
     keying: Cell<f64>,
-    /// How many UTF-16 units of pre-edit text the input method is holding.
+    /// How many UTF-16 units of pre-edit text the input method is holding in
+    /// each window's view. A window with no entry holds none.
     ///
-    /// Not surfaced — this backend does not send
-    /// [`TextPreedit`](crate::ShellEvent::TextPreedit) yet — but `hasMarkedText` and
-    /// `markedRange` are required reading for an input method to compose at all,
-    /// and both are answers about this number.
-    marked: Cell<usize>,
+    /// `hasMarkedText` and `markedRange` are required reading for an input
+    /// method to compose at all, and both are answers about this number — in
+    /// every window, including one whose field reports no pre-edit, because a
+    /// dead key composes through marked text too.
+    marked: RefCell<Vec<(usize, usize)>>,
+    /// Pre-edits the input method set, waiting for their
+    /// [`Preedit`](RawEvent::Preedit) markers: the text and the cursor as a
+    /// byte offset, already converted. The same arrangement as
+    /// [`text`](Self::text).
+    preedits: RefCell<Vec<(usize, String, Option<usize>)>>,
+    /// The field each window last named with
+    /// [`set_text_input`](crate::Shell::set_text_input). A window with no entry
+    /// has none, which is how every window starts.
+    ///
+    /// Here rather than on the shell's window record because the view reads it
+    /// from inside a callback, to decide whether a pre-edit is reported.
+    fields: RefCell<Vec<(usize, TextPurpose)>>,
+    /// The area each window last gave
+    /// [`set_text_input_area`](crate::Shell::set_text_input_area), in its
+    /// client pixels, which `firstRectForCharacterRange:actualRange:` answers
+    /// from. A window with no entry has handed placement back.
+    areas: RefCell<Vec<(usize, PhysicalRect)>>,
     /// The `NSCursor` each window last asked for, as an integer.
     ///
     /// Read by `cursorUpdate:`, which is the only moment a cursor shape can be
@@ -168,14 +186,74 @@ impl Shared {
         self.keying.set(seconds);
     }
 
-    /// How much pre-edit text the input method is holding.
-    pub(super) fn marked(&self) -> usize {
-        self.marked.get()
+    /// How much pre-edit text the input method is holding in `window`.
+    pub(super) fn marked(&self, window: usize) -> usize {
+        self.marked
+            .borrow()
+            .iter()
+            .find(|(owner, _)| *owner == window)
+            .map_or(0, |(_, units)| *units)
     }
 
-    /// Records how much pre-edit text the input method is holding.
-    pub(super) fn set_marked(&self, units: usize) {
-        self.marked.set(units);
+    /// Records how much pre-edit text the input method is holding in
+    /// `window`.
+    pub(super) fn set_marked(&self, window: usize, units: usize) {
+        set_entry(
+            &mut self.marked.borrow_mut(),
+            window,
+            (units > 0).then_some(units),
+        );
+    }
+
+    /// How much pre-edit text the input method was holding in `window`,
+    /// leaving none: the composition ended.
+    pub(super) fn take_marked(&self, window: usize) -> usize {
+        let units = self.marked(window);
+        self.set_marked(window, 0);
+        units
+    }
+
+    /// Queues a pre-edit for `window`, already converted to the seam's text
+    /// and byte cursor.
+    pub(super) fn push_preedit(&self, window: usize, text: String, cursor: Option<usize>) {
+        self.preedits.borrow_mut().push((window, text, cursor));
+    }
+
+    /// Takes the oldest pre-edit queued for `window`.
+    pub(super) fn take_preedit(&self, window: usize) -> Option<(String, Option<usize>)> {
+        let mut queued = self.preedits.borrow_mut();
+        let index = queued.iter().position(|(owner, ..)| *owner == window)?;
+        let (_, text, cursor) = queued.remove(index);
+        Some((text, cursor))
+    }
+
+    /// The field `window` last named, if it names one now.
+    pub(super) fn field_of(&self, window: usize) -> Option<TextPurpose> {
+        self.fields
+            .borrow()
+            .iter()
+            .find(|(owner, _)| *owner == window)
+            .map(|(_, purpose)| *purpose)
+    }
+
+    /// Records the field `window` names, or that it names none.
+    pub(super) fn set_field(&self, window: usize, field: Option<TextPurpose>) {
+        set_entry(&mut self.fields.borrow_mut(), window, field);
+    }
+
+    /// The area `window` last gave for its caret, if it has not handed
+    /// placement back.
+    pub(super) fn area_of(&self, window: usize) -> Option<PhysicalRect> {
+        self.areas
+            .borrow()
+            .iter()
+            .find(|(owner, _)| *owner == window)
+            .map(|(_, area)| *area)
+    }
+
+    /// Records the area `window` gave for its caret, or that it gave none.
+    pub(super) fn set_area(&self, window: usize, area: Option<PhysicalRect>) {
+        set_entry(&mut self.areas.borrow_mut(), window, area);
     }
 
     /// The `NSCursor` a window wants, if it has asked for one.
@@ -214,6 +292,26 @@ impl Shared {
         self.cursors
             .borrow_mut()
             .retain(|(owner, _)| *owner != window);
+        self.preedits
+            .borrow_mut()
+            .retain(|(owner, ..)| *owner != window);
+        self.fields
+            .borrow_mut()
+            .retain(|(owner, _)| *owner != window);
+        self.marked
+            .borrow_mut()
+            .retain(|(owner, _)| *owner != window);
+        self.areas
+            .borrow_mut()
+            .retain(|(owner, _)| *owner != window);
+    }
+}
+
+/// Replaces `window`'s entry with `value`, adds one, or removes it for `None`.
+fn set_entry<T>(entries: &mut Vec<(usize, T)>, window: usize, value: Option<T>) {
+    entries.retain(|(owner, _)| *owner != window);
+    if let Some(value) = value {
+        entries.push((window, value));
     }
 }
 

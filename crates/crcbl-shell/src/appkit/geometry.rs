@@ -194,6 +194,29 @@ pub fn usable_scale(backing: f64) -> f64 {
     }
 }
 
+/// A [`set_text_input_area`](crate::Shell::set_text_input_area) rectangle as
+/// the rectangle in AppKit's window space that `convertRectToScreen:` takes,
+/// which is what `firstRectForCharacterRange:actualRange:` answers once
+/// converted.
+///
+/// `area` is in the window's client pixels with Y **down** from the content's
+/// top-left; `height` is the content view's height in points and `scale` its
+/// `backingScaleFactor`. So this divides by the scale and reflects about the
+/// view — the rectangle form of
+/// [`pointer::warp_source`](super::pointer::warp_source) — and the reflection
+/// moves the origin from the area's top edge to its **bottom** one, because an
+/// `NSRect`'s origin is its bottom-left. An input method opens its candidate
+/// list below that rectangle, so getting the corner wrong puts the list over
+/// the text it was meant to sit under.
+#[must_use]
+pub fn text_area(area: PhysicalRect, height: f64, scale: f64) -> NSRect {
+    let scale = usable_scale(scale);
+    let width = f64::from(area.width) / scale;
+    let tall = f64::from(area.height) / scale;
+    let top = f64::from(area.y) / scale;
+    NSRect::new(f64::from(area.x) / scale, height - top - tall, width, tall)
+}
+
 /// The `NSWindowStyleMask` for a display mode.
 ///
 /// # Borderless is a style mask, not a mode the system has
@@ -463,6 +486,35 @@ mod tests {
 
     /// A 1920×1080 primary display, which puts the flip at 1080.
     const PRIMARY: NSRect = NSRect::new(0.0, 0.0, 1920.0, 1080.0);
+
+    #[test]
+    fn a_text_area_is_scaled_to_points_and_reflected_to_its_bottom_edge() {
+        // A 480-point-tall view at 2×: 960 pixels. The caret line is 30 pixels
+        // tall with its top 100 pixels down, so in points it is 15 tall with
+        // its top 50 down — and its *bottom* edge, which is the origin AppKit
+        // wants, is 480 - 50 - 15 = 415 up from the view's bottom.
+        let area = PhysicalRect::new(40, 100, 300, 30);
+        assert_eq!(
+            text_area(area, 480.0, 2.0),
+            NSRect::new(20.0, 415.0, 150.0, 15.0)
+        );
+        // At 1× the pixels are the points and only the reflection remains.
+        assert_eq!(
+            text_area(area, 480.0, 1.0),
+            NSRect::new(40.0, 350.0, 300.0, 30.0)
+        );
+        // The area's top-left corner is where a warp to it would land, so the
+        // two conversions out of the view's pixels agree.
+        let corner = super::super::pointer::warp_source(
+            crate::PhysicalPoint::new(f64::from(area.x), f64::from(area.y)),
+            480.0,
+            2.0,
+        );
+        let rect = text_area(area, 480.0, 2.0);
+        assert_eq!((rect.origin.x, rect.max_y()), (corner.x, corner.y));
+        // A nonsensical scale is 1×, for the reason `usable_scale` gives.
+        assert_eq!(text_area(area, 480.0, 0.0), text_area(area, 480.0, 1.0));
+    }
 
     #[test]
     fn the_primary_display_is_the_same_rectangle_in_both_spaces() {

@@ -62,16 +62,55 @@
 //!
 //! `interpretKeyEvents:` is the documented path, and it requires
 //! `-[NSResponder inputContext]` to be non-nil, which requires the responder to
-//! **conform to `NSTextInputClient`** — eleven methods, all of them required.
-//! They are implemented below. What is deliberately not implemented is
-//! *displaying* the pre-edit: this backend does not send
-//! [`TextPreedit`](crate::ShellEvent::TextPreedit) yet, so marked text is
-//! tracked because an input method cannot compose without the answers and is
-//! never surfaced. `firstRectForCharacterRange:` answers with the window's own
-//! origin rather than a caret the seam does not model, so a candidate window
-//! appears at the bottom-left of the window rather than under the text. That is
-//! why this backend sets [`TEXT_COMPOSE`](crate::ShellCaps::TEXT_COMPOSE) and
-//! not [`TEXT_IME`](crate::ShellCaps::TEXT_IME).
+//! **conform to `NSTextInputClient`**, every method of which is required. They
+//! are implemented below. Marked text is sent as
+//! [`TextPreedit`](crate::ShellEvent::TextPreedit) for a window whose field
+//! composes, and `firstRectForCharacterRange:` answers the area
+//! [`set_text_input_area`](crate::Shell::set_text_input_area) last gave, so the
+//! candidate window opens under the caret. With
+//! [`TEXT_COMPOSE`](crate::ShellCaps::TEXT_COMPOSE), that is why this backend
+//! sets [`TEXT_IME`](crate::ShellCaps::TEXT_IME).
+//!
+//! # Decision: a field restricts the input context, it does not bypass it
+//!
+//! [`set_text_input`](crate::Shell::set_text_input) says that with no field
+//! taking typing the input method keeps out of the way and keys reach the
+//! window as keys, while plain typing and dead keys still commit — which is
+//! what Win32 and Wayland do, since a dead key is the keyboard layout's and not
+//! an input method's. There are two ways to get that here, and only one keeps
+//! the second half:
+//!
+//! * **Skipping `interpretKeyEvents:`** when no field is set, as some engines
+//!   do, takes the input context out entirely — and the dead-key state lives in
+//!   the input context, so `⌥e` then `e` would stop composing in every window
+//!   that had not named a field, and plain text would need a second path out
+//!   of `-[NSEvent characters]` that the decision above exists to avoid.
+//! * **Restricting the context to the Roman input sources** —
+//!   `allowedInputSourceLocales` set to
+//!   [`NSAllRomanInputSourcesLocaleIdentifier`](ffi::NSAllRomanInputSourcesLocaleIdentifier)
+//!   alone — keeps every key on the one path and only changes what may answer
+//!   it: keyboard layouts may, so typing and dead keys commit as before, and an
+//!   input method may not, so a Japanese one in its native mode gives way to a
+//!   layout while the window is key instead of turning WASD into a candidate
+//!   list. It is the documented lever for restricting a context to Roman
+//!   input.
+//!
+//! So every key goes through `interpretKeyEvents:`, and
+//! [`allow_input_methods`] is the switch: off for a new window, on for an
+//! ordinary field, off again for none and for a password or a PIN, as Win32
+//! keeps its input context off for both. A dead key composes through marked
+//! text in all of them; only a window whose field composes reports it as a
+//! pre-edit, so a window with no field, or a sensitive one, sees a dead key
+//! the way Win32 and Wayland show one — as the commit and nothing before it.
+//! **Whether an input method that is already active gives way the moment the
+//! restriction is set, rather than at the next activation of the context, is
+//! unverified**: no session test runs a real input method.
+//!
+//! Secure event input for a sensitive field is the shell's, not the view's:
+//! it is session-wide and keyed on which window has the keyboard, so it is
+//! recomputed wherever focus changes, beside the pointer freeze and the cursor
+//! hide. See [`set_text_input`](crate::Shell::set_text_input) on
+//! [`AppKitShell`](super::AppKitShell).
 //!
 //! `doCommandBySelector:` is overridden to do **nothing**, which is not laziness:
 //! the default implementation beeps at every command it does not recognize, so a
@@ -88,6 +127,7 @@ use crcbl_core::input::ButtonState;
 use super::app;
 use super::events::RawEvent;
 use super::ffi::{self, Class, Id, Imp, NSPoint, NSRange, NSRect, NSUInteger, ObjcBool, Sel, YES};
+use super::geometry;
 use super::keys;
 use super::pasteboard;
 
@@ -679,7 +719,8 @@ unsafe extern "C" fn perform_drag_operation(view: Id, _cmd: Sel, sender: Id) -> 
 
 /// `insertText:replacementRange:` — **the only place text exists.**
 ///
-/// Called by the input method, from inside `interpretKeyEvents:`. The string is
+/// Called by the input method, from inside `interpretKeyEvents:`. A commit
+/// while text is marked replaces it, so the pre-edit ends first. The string is
 /// filtered for control characters, because the input method really does commit
 /// `\r` for Return and `\t` for Tab, and
 /// [`TextCommit`](crate::ShellEvent::TextCommit) means *text* — the same filter
@@ -691,6 +732,14 @@ unsafe extern "C" fn perform_drag_operation(view: Id, _cmd: Sel, sender: Id) -> 
 ///
 /// Called only by the input method, on an instance of the class built below.
 unsafe extern "C" fn insert_text(view: Id, _cmd: Sel, string: Id, _replacement: NSRange) {
+    // A commit replaces whatever was marked, so the pre-edit ends here, ahead
+    // of the commit — and only if there was one, so plain typing, which
+    // commits with nothing marked, records nothing extra per keystroke.
+    // SAFETY: a live view.
+    if unsafe { end_marked(view) } {
+        // SAFETY: a live view.
+        unsafe { record_preedit(view, String::new(), None) };
+    }
     // SAFETY: the input method passes an `NSString` or an `NSAttributedString`,
     // and the pool `pump` holds is in scope.
     let Some(text) = (unsafe { plain_string(string) }) else {
@@ -737,10 +786,15 @@ unsafe extern "C" fn do_command_by_selector(_view: Id, _cmd: Sel, _selector: Sel
 
 /// `setMarkedText:selectedRange:replacementRange:` — the pre-edit string.
 ///
-/// Recorded as a *length* and never shown: this backend does not send
-/// [`TextPreedit`](crate::ShellEvent::TextPreedit) yet, and
-/// an input method cannot compose at all without something answering
-/// `hasMarkedText` and `markedRange` consistently.
+/// Its length is always recorded, because an input method cannot compose at
+/// all without something answering `hasMarkedText` and `markedRange`
+/// consistently — and that includes a dead key, whose accent is marked text
+/// until the next key. It is *reported* as a
+/// [`TextPreedit`](crate::ShellEvent::TextPreedit) only for a window whose
+/// field composes; see [`record_preedit`] and the [module docs](self). An
+/// empty string is the composition deleted back to nothing, which ends the
+/// pre-edit. The selection is the input method's cursor, in UTF-16 units of
+/// this string, and [`keys::marked_preedit`] converts it.
 ///
 /// # Safety
 ///
@@ -749,23 +803,101 @@ unsafe extern "C" fn set_marked_text(
     view: Id,
     _cmd: Sel,
     string: Id,
-    _selected: NSRange,
+    selected: NSRange,
     _replacement: NSRange,
 ) {
     // SAFETY: the input method passes an `NSString` or `NSAttributedString`.
-    let units = unsafe { plain_string(string) }.map_or(0, |text| text.encode_utf16().count());
+    let text = unsafe { plain_string(string) }.unwrap_or_default();
+    let units = text.encode_utf16().count();
     // SAFETY: a live view.
-    unsafe { app::with_shared(delegate_of(view), |shared| shared.set_marked(units)) };
+    let window = unsafe { window_of(view) } as usize;
+    // SAFETY: as above.
+    unsafe { app::with_shared(delegate_of(view), |s| s.set_marked(window, units)) };
+    let (text, cursor) = keys::marked_preedit(&text, selected);
+    // SAFETY: a live view.
+    unsafe { record_preedit(view, text, cursor) };
 }
 
-/// `unmarkText` — the input method gave up on the composition.
+/// `unmarkText` — the composition is over: committed as it stands, or given
+/// up on. Either way the pre-edit ends.
 ///
 /// # Safety
 ///
 /// Called only by the input method, on an instance of the class built below.
 unsafe extern "C" fn unmark_text(view: Id, _cmd: Sel) {
     // SAFETY: a live view.
-    unsafe { app::with_shared(delegate_of(view), |shared| shared.set_marked(0)) };
+    if unsafe { end_marked(view) } {
+        // SAFETY: a live view.
+        unsafe { record_preedit(view, String::new(), None) };
+    }
+}
+
+/// Forgets the marked text this view's window held, answering whether it held
+/// any — which is whether a pre-edit may have been reported that now has to
+/// end.
+///
+/// # Safety
+///
+/// `view` must be a live `NSView`.
+unsafe fn end_marked(view: Id) -> bool {
+    // SAFETY: a live view.
+    let window = unsafe { window_of(view) } as usize;
+    // SAFETY: as above.
+    let was = unsafe { app::with_shared(delegate_of(view), |s| s.take_marked(window)) };
+    was.unwrap_or(0) > 0
+}
+
+/// How much text this view's window holds marked.
+///
+/// # Safety
+///
+/// `view` must be a live `NSView`.
+unsafe fn marked_of(view: Id) -> usize {
+    // SAFETY: a live view.
+    let window = unsafe { window_of(view) } as usize;
+    // SAFETY: as above.
+    unsafe { app::with_shared(delegate_of(view), |s| s.marked(window)) }.unwrap_or(0)
+}
+
+/// Records a pre-edit against the shell that owns this view's window — if
+/// that window's field composes.
+///
+/// The gate is read here, at the moment the input method speaks, rather than
+/// when the pump translates: a window with no field, or a sensitive one, still
+/// composes dead keys through marked text, and what it composes is never
+/// queued. The payload goes on [`Shared`](super::app::Shared) **before** the
+/// marker, for the reason [`perform_drag_operation`] gives. Ending a pre-edit
+/// nobody was shown is filtered later, by the shell's
+/// [`Composing`](crate::preedit::Composing), as on Win32.
+///
+/// # Safety
+///
+/// `view` must be a live `NSView`.
+unsafe fn record_preedit(view: Id, text: String, cursor: Option<usize>) {
+    // SAFETY: a live view.
+    let window = unsafe { window_of(view) };
+    if window.is_null() {
+        return;
+    }
+    // SAFETY: as above.
+    let delegate = unsafe { delegate_of(view) };
+    let stamp = app::with_shared(delegate, |shared| {
+        if !keys::field_composes(shared.field_of(window as usize)) {
+            return None;
+        }
+        shared.push_preedit(window as usize, text, cursor);
+        // The keystroke's own timestamp, as `insertText:` uses.
+        Some(shared.keying())
+    })
+    .flatten();
+    let Some(seconds) = stamp else { return };
+    app::record(
+        delegate,
+        RawEvent::Preedit {
+            window: window as usize,
+            seconds,
+        },
+    );
 }
 
 /// `hasMarkedText`.
@@ -775,8 +907,7 @@ unsafe extern "C" fn unmark_text(view: Id, _cmd: Sel) {
 /// Called only by the input method, on an instance of the class built below.
 unsafe extern "C" fn has_marked_text(view: Id, _cmd: Sel) -> ObjcBool {
     // SAFETY: a live view.
-    let marked = unsafe { app::with_shared(delegate_of(view), super::app::Shared::marked) };
-    if marked.unwrap_or(0) > 0 {
+    if unsafe { marked_of(view) } > 0 {
         YES
     } else {
         ffi::NO
@@ -790,8 +921,7 @@ unsafe extern "C" fn has_marked_text(view: Id, _cmd: Sel) -> ObjcBool {
 /// Called only by the input method, on an instance of the class built below.
 unsafe extern "C" fn marked_range(view: Id, _cmd: Sel) -> NSRange {
     // SAFETY: a live view.
-    let marked = unsafe { app::with_shared(delegate_of(view), super::app::Shared::marked) };
-    match marked.unwrap_or(0) {
+    match unsafe { marked_of(view) } {
         0 => NSRange::NONE,
         units => NSRange::new(0, units),
     }
@@ -847,12 +977,19 @@ unsafe extern "C" fn valid_attributes(_view: Id, _cmd: Sel) -> Id {
 
 /// `firstRectForCharacterRange:actualRange:` — where the candidate window goes.
 ///
-/// The window's own origin in screen coordinates, because **the seam does not
-/// model a caret**: nothing above this crate has told it where text is being
-/// typed. A Japanese candidate list therefore appears at the bottom-left of the
-/// window rather than under the cursor. That is a real limitation and it is
-/// stated rather than hidden; closing it needs a seam that can say "the caret is
-/// here", which is a decision above this crate.
+/// The area [`set_text_input_area`](crate::Shell::set_text_input_area) last
+/// gave for this window, in AppKit screen coordinates: points, Y up from the
+/// bottom-left of the primary display. [`geometry::text_area`] takes it from
+/// the window's client pixels to the view's points, and the window converts
+/// that to the screen — the view is the content view, at the window's origin,
+/// which [`warp_pointer`](crate::Shell::warp_pointer) relies on too. Every
+/// range is answered with the same rectangle, because the seam names a caret
+/// and not a document to measure characters in; `actualRange` is left alone,
+/// which the protocol allows.
+///
+/// With no area given — or one handed back with `None` — it is the window's
+/// own origin, and the candidate list opens at the bottom-left of the window:
+/// the one place this backend can name without a caret.
 ///
 /// # Safety
 ///
@@ -868,16 +1005,24 @@ unsafe extern "C" fn first_rect(
     if window.is_null() {
         return NSRect::default();
     }
+    // SAFETY: as above.
+    let area = unsafe { app::with_shared(delegate_of(view), |s| s.area_of(window as usize)) };
+    let local = match area.flatten() {
+        // SAFETY: `bounds` and `backingScaleFactor` are accessors of the live
+        // view and its live window, answering an `NSRect` and a `CGFloat`.
+        Some(area) => unsafe {
+            let bounds = ffi::msg_rect(view, ffi::sel(c"bounds"));
+            let scale = ffi::msg_f64(window, ffi::sel(c"backingScaleFactor"));
+            geometry::text_area(area, bounds.size.height, scale)
+        },
+        None => NSRect::new(0.0, 0.0, 0.0, 0.0),
+    };
     // SAFETY: `convertRectToScreen:` takes and returns an `NSRect`, which is 32
     // bytes and therefore the one shape that needs the struct-return
     // trampoline on x86_64.
     unsafe {
         let convert: unsafe extern "C" fn(Id, Sel, NSRect) -> NSRect = ffi::msg_send_stret();
-        convert(
-            window,
-            ffi::sel(c"convertRectToScreen:"),
-            NSRect::new(0.0, 0.0, 0.0, 0.0),
-        )
+        convert(window, ffi::sel(c"convertRectToScreen:"), local)
     }
 }
 
@@ -1305,6 +1450,83 @@ pub(super) unsafe fn register_dragged_types(view: Id) {
         let types = ffi::msg1(class, ffi::sel(c"arrayWithObject:"), kind);
         ffi::msg1_void(view, ffi::sel(c"registerForDraggedTypes:"), types);
     }
+}
+
+/// The view's `NSTextInputContext`, or null.
+///
+/// Non-nil because the class conforms to `NSTextInputClient` — see
+/// [`install`] — and kept by the view once made, so the restriction
+/// [`allow_input_methods`] sets on it lasts as long as the view.
+///
+/// # Safety
+///
+/// `view` must be a live `NSView`, on the main thread.
+unsafe fn input_context(view: Id) -> Id {
+    // SAFETY: an `NSResponder` accessor answering the view's own context.
+    unsafe { ffi::msg(view, ffi::sel(c"inputContext")) }
+}
+
+/// Lets every input method compose in this view, or only the keyboard layouts
+/// — the switch the [module docs](self) argue for.
+///
+/// Off, `allowedInputSourceLocales` is
+/// [`NSAllRomanInputSourcesLocaleIdentifier`](ffi::NSAllRomanInputSourcesLocaleIdentifier)
+/// alone, and whatever an input method was composing is discarded first, so
+/// a composition cannot outlive the field that started it. On, it is nil,
+/// which is the documented "every input source".
+///
+/// # Safety
+///
+/// `view` must be a live `NSView` of the class built here, on the main thread,
+/// with an autorelease pool in scope.
+pub(super) unsafe fn allow_input_methods(view: Id, allowed: bool) {
+    // SAFETY: the caller's obligations, forwarded.
+    let context = unsafe { input_context(view) };
+    if context.is_null() {
+        crcbl_core::log::warn!(
+            "this view has no input context, so its input method cannot be switched for a text \
+             field"
+        );
+        return;
+    }
+    let locales = if allowed {
+        ptr::null_mut()
+    } else {
+        let Some(class) = ffi::class(c"NSArray") else {
+            return;
+        };
+        // SAFETY: `discardMarkedText` takes nothing, and on a context with
+        // nothing marked does nothing. `arrayWithObject:` answers an
+        // autoreleased array holding AppKit's own constant string, valid for
+        // the caller's pool.
+        unsafe {
+            ffi::msg_void(context, ffi::sel(c"discardMarkedText"));
+            ffi::msg1(
+                class,
+                ffi::sel(c"arrayWithObject:"),
+                ffi::NSAllRomanInputSourcesLocaleIdentifier,
+            )
+        }
+    };
+    // SAFETY: the setter copies the array it is given, and nil is documented.
+    unsafe { ffi::msg1_void(context, ffi::sel(c"setAllowedInputSourceLocales:"), locales) };
+}
+
+/// Tells the input method that the caret area moved, so it asks
+/// `firstRectForCharacterRange:actualRange:` again rather than leaving its
+/// windows where the last answer put them.
+///
+/// # Safety
+///
+/// `view` must be a live `NSView` of the class built here, on the main thread.
+pub(super) unsafe fn invalidate_caret(view: Id) {
+    // SAFETY: the caller's obligations, forwarded.
+    let context = unsafe { input_context(view) };
+    if context.is_null() {
+        return;
+    }
+    // SAFETY: an `NSTextInputContext` method taking nothing.
+    unsafe { ffi::msg_void(context, ffi::sel(c"invalidateCharacterCoordinates")) };
 }
 
 /// What can be checked about this class without a window.

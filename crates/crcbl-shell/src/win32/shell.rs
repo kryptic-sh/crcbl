@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use crcbl_core::{EventTime, Pool, SurfaceTarget};
 
+use crate::preedit::Composing;
 use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
     LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PhysicalSize,
@@ -24,7 +25,7 @@ use super::ffi::{self, Handle, Msg, WindowPlacement, value};
 use super::geometry;
 use super::input;
 use super::input::Contact;
-use super::keys::{self, Composing, Utf16};
+use super::keys::Utf16;
 use super::panel::Panel;
 use super::pointer::{RawMotion, Visibility};
 use super::proc::{self, Shared};
@@ -601,7 +602,7 @@ impl Win32Shell {
     /// dead keys, AltGr and an input method's commit all arrive. This loop did
     /// not call it, so `WM_CHAR` was never generated for a real keystroke: the
     /// `Char` branch of the window procedure, the surrogate reassembly in
-    /// [`keys`] and every
+    /// [`keys`](super::keys) and every
     /// [`TextCommit`](ShellEvent::TextCommit) were unreachable from a keyboard,
     /// and typing into a Crucible window on Windows produced no text at all.
     ///
@@ -1014,7 +1015,7 @@ impl Win32Shell {
                         continue;
                     };
                     let Some(window) = window else { continue };
-                    let (text, cursor) = keys::preedit(&preedit.units, preedit.cursor);
+                    let (text, cursor) = crate::preedit::preedit(&preedit.units, preedit.cursor);
                     if !self.composing.report(window, &text) {
                         continue;
                     }

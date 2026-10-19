@@ -56,9 +56,8 @@
 //!
 //! A [`ShellEvent::TextCommit`] is an [`Edit::Insert`], so an input method's
 //! committed text lands like typing. **Pre-edit is not drawn**: the shell reports
-//! a composition in progress as [`ShellEvent::TextPreedit`] (the Win32 backend
-//! does; the AppKit backend records how much marked text an input method holds
-//! and surfaces none of it), and this field does not yet underline it at the
+//! a composition in progress as [`ShellEvent::TextPreedit`] (the Win32, Wayland
+//! and AppKit backends do), and this field does not yet underline it at the
 //! caret or call `Shell::set_text_input_area`. **The input method follows the
 //! field**: [`TextPump::engage`] turns it on while the tree is editing and off
 //! otherwise, which is what lets a Wayland input method compose at all (see

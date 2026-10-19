@@ -17,11 +17,11 @@
 //! machine without libwayland is an ordinary machine.
 //!
 //! **That premise does not hold here either.** AppKit, Foundation, QuartzCore,
-//! CoreGraphics and `libobjc` are the operating system: a macOS that lacks them
-//! is not a macOS this engine failed to support, it is one that cannot run a
-//! process. There is nothing for a runtime probe to discover, and
-//! `dlopen`ing five system frameworks would buy exactly one thing — a fallible
-//! code path with no failure. macOS has a single backend, so nothing falls
+//! CoreGraphics, Carbon and `libobjc` are the operating system: a macOS that
+//! lacks them is not a macOS this engine failed to support, it is one that
+//! cannot run a process. There is nothing for a runtime probe to discover, and
+//! `dlopen`ing system frameworks would buy exactly one thing — a fallible code
+//! path with no failure. macOS has a single backend, so nothing falls
 //! through to anything and the registry consequence that forces the Linux
 //! answer is absent.
 //!
@@ -549,6 +549,32 @@ mod sys {
         /// Posted when a display is attached, detached, or reconfigured. The
         /// name [`app`](crate::appkit::app) registers an observer for.
         pub static NSApplicationDidChangeScreenParametersNotification: Id;
+
+        /// The `allowedInputSourceLocales` entry that stands for every Roman
+        /// input source — the keyboard layouts, and no input method. An array
+        /// of this one entry is the documented way to restrict an input
+        /// context to Roman input. Read through the symbol rather than spelled
+        /// out, unlike the pasteboard types: its value is an AppKit detail,
+        /// not a contract with other applications.
+        pub static NSAllRomanInputSourcesLocaleIdentifier: Id;
+    }
+
+    // Carbon: secure event input, which has no AppKit or Foundation form.
+    // `EnableSecureEventInput` and `DisableSecureEventInput` live in
+    // HIToolbox, a sub-framework of Carbon, and an umbrella's sub-frameworks
+    // are linked through the umbrella: Apple documents linking the umbrella,
+    // not its parts. Neither is deprecated, and a password field is the use
+    // they are documented for.
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        /// Stops other processes reading keystrokes, until a matching
+        /// [`DisableSecureEventInput`]. **Counted** across the login session;
+        /// see [`SecureInput`](crate::appkit::keys::SecureInput). Returns an
+        /// `OSStatus`; `noErr` is zero.
+        pub fn EnableSecureEventInput() -> i32;
+
+        /// Gives back one [`EnableSecureEventInput`]. Returns an `OSStatus`.
+        pub fn DisableSecureEventInput() -> i32;
     }
 
     // QuartzCore: `CAMetalLayer`, which is the whole of
@@ -632,9 +658,10 @@ mod sys {
 pub use sys::{
     CACurrentMediaTime, CGAssociateMouseAndMouseCursorPosition, CGDisplayCopyDisplayMode,
     CGDisplayModeGetRefreshRate, CGDisplayModeRelease, CGMainDisplayID, CGWarpMouseCursorPosition,
-    CGWindowLevelForKey, NSApplicationDidChangeScreenParametersNotification, NSDefaultRunLoopMode,
-    class_addMethod, class_addProtocol, objc_allocateClassPair, objc_getProtocol,
-    objc_registerClassPair,
+    CGWindowLevelForKey, DisableSecureEventInput, EnableSecureEventInput,
+    NSAllRomanInputSourcesLocaleIdentifier, NSApplicationDidChangeScreenParametersNotification,
+    NSDefaultRunLoopMode, class_addMethod, class_addProtocol, objc_allocateClassPair,
+    objc_getProtocol, objc_registerClassPair,
 };
 
 /// The three declarations that exist for the macOS test suite alone.

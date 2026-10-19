@@ -278,6 +278,9 @@ pub mod window;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) mod keysym;
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+pub(crate) mod preedit;
+
 #[cfg(desktop_unix)]
 pub(crate) mod linux;
 
@@ -878,10 +881,10 @@ pub trait Shell: core::fmt::Debug {
     /// anything to do here — Win32's IMM and TSF, a Wayland compositor's
     /// `text-input-v3` cursor rectangle, AppKit's `firstRectForCharacterRange:`.
     /// The default validates the handle and does nothing else, which is exactly
-    /// right for the rest. Win32 and Wayland override it; AppKit takes the
-    /// default and leaves its input method to place itself. Wayland sends the
-    /// area only while [`set_text_input`](Self::set_text_input) names a field,
-    /// since `text-input-v3` has nowhere to put it otherwise.
+    /// right for the rest. Win32, Wayland and AppKit override it. Wayland
+    /// sends the area only while [`set_text_input`](Self::set_text_input)
+    /// names a field, since `text-input-v3` has nowhere to put it otherwise;
+    /// AppKit answers `firstRectForCharacterRange:` with it whenever asked.
     ///
     /// # Errors
     ///
@@ -917,8 +920,10 @@ pub trait Shell: core::fmt::Debug {
     /// it with `text-input-v3`'s `enable`, `set_content_type` and `disable`;
     /// Win32 associates the window's input context only for a
     /// [`Normal`](TextPurpose::Normal) field, keeping it off for a password or
-    /// a PIN as a Windows password box does. AppKit takes the default, and its
-    /// input methods compose in every window whatever this says.
+    /// a PIN as a Windows password box does. AppKit draws the same line by
+    /// holding the view's input context to the keyboard layouts for no field
+    /// and for a sensitive one, and also holds secure event input while a
+    /// password or PIN field's window has the keyboard.
     /// [`ShellCaps::TEXT_IME`] is set only where this is acted on.
     ///
     /// # Errors

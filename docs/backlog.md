@@ -137,14 +137,6 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      loader drawing XCursor images into cursor buffers on Wayland, which
      disagrees with the user's theme when either side changes and is a second
      presentation path inside the shell.
-   - S9 input method on AppKit: `set_text_input` and `set_text_input_area` are
-     the trait's no-op defaults, so fields do not switch the input method, no
-     secure input (`EnableSecureEventInput`) guards a `Password` or `Pin` field,
-     `setMarkedText:` sends no `TextPreedit`, and `firstRectForCharacterRange:`
-     places no candidate window. S each. AppKit reports `ShellCaps::TEXT_IME`
-     clear until this lands, so it is no longer silent; set the bit in
-     `appkit::caps` (and flip the `appkit_session` and unit-test assertions) in
-     the same change.
    - S9 an X11 input-method client (XIM, or IBus and Fcitx over D-Bus), L, so
      X11 can set `ShellCaps::TEXT_IME`. Until then it is clear there.
    - S17 a `PopupInput::Grab` popup on AppKit is made key the way an exclusive
@@ -161,10 +153,10 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      Wayland sets `TEXT_COMPOSE` from libxkbcommon and `TEXT_IME` only when
      `zwp_text_input_manager_v3` bound (the latch runs after the registry round
      trip in `open`); X11 `TEXT_COMPOSE` only; Win32 both (`imm32` pre-edit is
-     written but unverified, see "Implemented, untested"); AppKit `TEXT_COMPOSE`
-     only; web neither; headless both (`ShellCaps::DESKTOP` is every bit).
-     Alternative declined: one bit cleared on X11 and AppKit, which hides
-     compose there.
+     written but unverified, see "Implemented, untested"); AppKit both (since
+     2026-10-19; also unverified against a real input method); web neither;
+     headless both (`ShellCaps::DESKTOP` is every bit). Alternative declined:
+     one bit cleared on X11 and AppKit, which hides compose there.
    - **Decided 2026-10-17: `PanelKeyboard::Exclusive` holds the keyboard only
      where `ShellCaps::PANEL_EXCLUSIVE_KEYBOARD` says so**, which is Wayland's
      layer-shell (the compositor enforces it on the `Top` and `Overlay` layers).
@@ -210,11 +202,16 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    Hyprland (a CI job of its own, M to L); S7 monitor hot-plug on X11 (Xvfb and
    `xrandr --setmonitor`), Win32 and AppKit; S9 X11 compose through a real
    server, Win32 pre-edit (`win32-ime-e2e` is not enabled by
-   `run-win32-e2e.ps1`), AppKit dead keys; S3 popup repositioning on Wayland
-   (CI's sway offers `xdg_wm_base` below 3); S21 a panel at a fractional scale;
-   S16 Vulkan presenting premultiplied on sway; S22 a colour glyph in a GPU
-   golden; S18 FreeBSD beyond `check (freebsd)`'s clippy, in a VM job; S13 any
-   start-up timing at all.
+   `run-win32-e2e.ps1`), AppKit dead keys, and AppKit's input method against a
+   real one — whether one in its native mode gives way to the Roman-only
+   restriction `appkit::view::allow_input_methods` sets for a window with no
+   field or a sensitive one, the pre-edit an input method sends, and where its
+   candidate window opens (`appkit_session`'s `text_input` plays the input
+   method itself, through the view's `NSTextInputClient` methods); S3 popup
+   repositioning on Wayland (CI's sway offers `xdg_wm_base` below 3); S21 a
+   panel at a fractional scale; S16 Vulkan presenting premultiplied on sway; S22
+   a colour glyph in a GPU golden; S18 FreeBSD beyond `check (freebsd)`'s
+   clippy, in a VM job; S13 any start-up timing at all.
 5. **Genuinely impossible, and refused:** D3D12 off Windows, Metal off Apple, a
    software Metal adapter, AppKit reserving screen space (only the menu bar and
    the Dock do). Vulkan on macOS is refused today and could go through MoltenVK
@@ -356,20 +353,19 @@ seam.** `Shell::set_text_input(window, Option<TextPurpose>)` replaced
 new purpose fails to compile in every backend's mapping rather than reading as
 ordinary text). Wayland sends `password` or `pin` with `hidden_text` and
 `sensitive_data`; Win32 keeps the input context off for a password or PIN, as a
-Windows password box does; AppKit takes the default (no secure input yet).
-crcbl-ui's masked text input reports `TextPurpose::Password` through
-`Ui::text_editing_purpose`, which the engine's `TextPump::engage` passes on.
-Verified: unit tests for the Wayland mapping (against the protocol XML's
+Windows password box does; AppKit took the default then, and has acted on it
+since 2026-10-19. crcbl-ui's masked text input reports `TextPurpose::Password`
+through `Ui::text_editing_purpose`, which the engine's `TextPump::engage` passes
+on. Verified: unit tests for the Wayland mapping (against the protocol XML's
 numbers, run in WSL), the UI's purpose and the pump's change detection, each
 failed by a hand mutant; the sway suite's
 `a_password_field_tells_the_input_method_to_keep_nothing` and the Win32 desktop
 test `a_window_has_no_input_context_until_a_field_asks_for_one` run only in CI.
 Decided, per the standing instruction: one call naming the field rather than a
 second `set_text_input_purpose`, because two calls can disagree about order and
-a field's purpose is part of turning it on. Not done: AppKit's secure input for
-a password field, and content types beyond these three. **S12's order for lyr's
-M6** (notification markup): paragraphs whose runs wrap together, then bold,
-italic, underline and a link's hit area.
+a field's purpose is part of turning it on. Not done: content types beyond these
+three. **S12's order for lyr's M6** (notification markup): paragraphs whose runs
+wrap together, then bold, italic, underline and a link's hit area.
 
 The requirements are rows S1–S27 of the joint table in
 `lyr/docs/plan/03-surfaces-and-input.md` (lyr commit f44f1b8). That table
@@ -1130,10 +1126,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      when a field asks, checked by
      `a_window_has_no_input_context_until_a_field_asks_for_one` on CI's real
      desktop; the Japanese IME test that would show a composition after the ask
-     is behind `win32-ime-e2e`, which CI does not run. AppKit still takes the
-     default, so its input method composes in every window. A game's own text
-     entry (what reaches `HostedGame::text_event`) has no way to ask for the
-     input method through the engine yet.
+     is behind `win32-ime-e2e`, which CI does not run. AppKit holds a window's
+     input context to the keyboard layouts until an ordinary field asks
+     (2026-10-19). A game's own text entry (what reaches
+     `HostedGame::text_event`) has no way to ask for the input method through
+     the engine yet.
    - S20, checked 2026-10-15. There already: hover and click as pseudo-classes
      and responses, `Shell::set_cursor` with `CursorIcon`, `ShellEvent::Wheel`
      keeping detents (`ScrollDelta::Lines`) apart from pixels, and
@@ -6628,9 +6625,10 @@ the gaps below.
   and honours them, unverified against a real input method (see _No verified IME
   pre-edit_ under Win32 below). `crcbl::text_input` does neither yet: drawing
   the pre-edit underlined at the caret, and telling the shell the caret's
-  rectangle, are the field's half. AppKit still records only the marked text's
-  length (`appkit/view.rs`). Wayland sends both through `text-input-v3`, but
-  only for a window that has named a field with `Shell::set_text_input`, which
+  rectangle, are the field's half. AppKit sends the pre-edit and places its
+  candidate window at the area too (`appkit/view.rs`), unverified against a real
+  input method. Wayland sends both through `text-input-v3`, but only for a
+  window that has named a field with `Shell::set_text_input`, which
   `crcbl::text_input::TextPump::engage` does each frame the field changes.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
@@ -28713,14 +28711,15 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   `Shell::set_text_input_area` on the seam, and the Win32 half —
   `WM_IME_COMPOSITION` read into a pre-edit (`input::composition`),
   `WM_IME_ENDCOMPOSITION` as an empty one, one end per composition
-  (`keys::Composing`), and `ImmSetCompositionWindow` / `ImmSetCandidateWindow`
-  at the caret area (`input::place_ime`), restated at every
-  `WM_IME_STARTCOMPOSITION`. Verified: unit tests for the UTF-16 cursor
-  conversion (`keys::preedit`), the `GCS_*` test (`keys::composition_changed`),
-  the end de-duplication, the area conversion (`geometry::rect_from`), the
-  payload queues in `proc::Shared`, and the `COMPOSITIONFORM` / `CANDIDATEFORM`
-  layouts; clippy and rustdoc on the Windows, Linux, macOS and wasm targets.
-  **Not verified: anything an input method does with it.**
+  (`preedit::Composing`, shared with AppKit since 2026-10-19), and
+  `ImmSetCompositionWindow` / `ImmSetCandidateWindow` at the caret area
+  (`input::place_ime`), restated at every `WM_IME_STARTCOMPOSITION`. Verified:
+  unit tests for the UTF-16 cursor conversion (`preedit::preedit`), the `GCS_*`
+  test (`keys::composition_changed`), the end de-duplication, the area
+  conversion (`geometry::rect_from`), the payload queues in `proc::Shared`, and
+  the `COMPOSITIONFORM` / `CANDIDATEFORM` layouts; clippy and rustdoc on the
+  Windows, Linux, macOS and wasm targets. **Not verified: anything an input
+  method does with it.**
 
   **Owed: the real-IME e2e test.**
   `an_input_method_composition_is_a_pre_edit_and_its_result_a_commit` in

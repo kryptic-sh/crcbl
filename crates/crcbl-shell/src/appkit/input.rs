@@ -214,6 +214,28 @@ impl AppKitShell {
                 self.queue_event(ShellEvent::TextCommit { window, time, text });
             }
 
+            RawEvent::Preedit {
+                window: key,
+                seconds,
+            } => {
+                // Claimed by this marker, for the reason the commit's string
+                // is; and reported only when the consumer is owed it, which an
+                // end with nothing shown before it is not.
+                let Some((text, cursor)) = self.shared_preedit(key) else {
+                    return;
+                };
+                if !self.composing.report(window, &text) {
+                    return;
+                }
+                let time = self.event_time(seconds);
+                self.queue_event(ShellEvent::TextPreedit {
+                    window,
+                    time,
+                    text,
+                    cursor,
+                });
+            }
+
             RawEvent::PointerMotion {
                 location,
                 dx,

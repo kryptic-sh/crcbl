@@ -8,11 +8,12 @@ use std::rc::Rc;
 
 use crcbl_core::{Pool, SurfaceTarget};
 
+use crate::preedit::Composing;
 use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
-    LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PointerMode, ReceivedMime, Shell,
-    ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowConfiguration,
-    WindowDesc, WindowId, WindowState,
+    LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PointerMode,
+    ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
+    TextPurpose, WindowConfiguration, WindowDesc, WindowId, WindowState,
 };
 
 use super::TimeBase;
@@ -21,6 +22,7 @@ use super::events::RawEvent;
 use super::ffi::{self, Id, NSRect, Pool as AutoreleasePool, Sel, value};
 use super::geometry;
 use super::input;
+use super::keys::{self, Secure, SecureInput};
 use super::monitors::{self, Screen};
 use super::panel::Panel;
 use super::pasteboard;
@@ -206,6 +208,11 @@ pub struct AppKitShell {
     /// Whether a drain took a ring's event since the last wait, which ends
     /// that wait at once — see [`wait`](Self::wait).
     woken: bool,
+    /// The windows showing a pre-edit, so each composition ends once.
+    pub(super) composing: Composing,
+    /// The `EnableSecureEventInput` this shell holds, kept balanced. See
+    /// [`refresh_secure_input`](Self::refresh_secure_input).
+    secure_input: SecureInput,
     caps: ShellCaps,
 }
 
@@ -261,6 +268,8 @@ impl AppKitShell {
             pointer_frozen: false,
             wake: None,
             woken: false,
+            composing: Composing::default(),
+            secure_input: SecureInput::default(),
             caps: super::caps(),
         };
         // SAFETY: the main thread, with a pool in scope.
@@ -309,6 +318,13 @@ impl AppKitShell {
     /// cannot live in a [`Copy`] enum.
     pub(super) fn shared_text(&self, window: usize) -> Option<String> {
         self.shared.take_text(window)
+    }
+
+    /// Claims the oldest pre-edit the input method set for a window, as text
+    /// and a byte cursor — the pre-edit counterpart of
+    /// [`shared_text`](Self::shared_text).
+    pub(super) fn shared_preedit(&self, window: usize) -> Option<(String, Option<usize>)> {
+        self.shared.take_preedit(window)
     }
 
     /// Records the `NSCursor` a window wants, for `cursorUpdate:` to apply.
@@ -468,6 +484,52 @@ impl AppKitShell {
         crcbl_core::log::debug!("presentation: {wanted:#x} accepted");
     }
 
+    /// Holds secure event input while the window with the keyboard has a
+    /// password or PIN field, and gives it back otherwise.
+    ///
+    /// Desktop-wide state again, with the presentation options' answer: derived
+    /// from every window, written only when it changes, and handed back on the
+    /// way out. Called wherever either input changes — a field set or cleared,
+    /// the keyboard moving, a window going — so no exit path can leave the
+    /// enable behind. [`keys::SecureInput`] is what keeps the session-wide
+    /// count paired, and [`keys::wants_secure_input`] the rule.
+    pub(super) fn refresh_secure_input(&mut self) {
+        let wanted = self.windows.iter().any(|(_, state)| {
+            keys::wants_secure_input(state.focused, self.shared.field_of(state.key))
+        });
+        Self::apply_secure_input(&mut self.secure_input, wanted);
+    }
+
+    /// Makes the call `secure` owes `wanted`, if any.
+    ///
+    /// A failed enable is not held: the system's count did not move, so a
+    /// later disable would cancel somebody else's. The state is put back, the
+    /// way [`refresh_pointer_capture`](Self::refresh_pointer_capture) puts its
+    /// own back, and the failure is said out loud.
+    fn apply_secure_input(secure: &mut SecureInput, wanted: bool) {
+        let status = match secure.want(wanted) {
+            Secure::Nothing => return,
+            // SAFETY: takes nothing and returns an `OSStatus`; nothing of ours
+            // is read.
+            Secure::Enable => unsafe { ffi::EnableSecureEventInput() },
+            // SAFETY: as above.
+            Secure::Disable => unsafe { ffi::DisableSecureEventInput() },
+        };
+        if status != 0 {
+            crcbl_core::log::warn!(
+                "{} returned OSStatus {status}",
+                if wanted {
+                    "EnableSecureEventInput"
+                } else {
+                    "DisableSecureEventInput"
+                }
+            );
+            if wanted {
+                secure.want(false);
+            }
+        }
+    }
+
     /// Recomputes a window's configuration from AppKit and queues it if it
     /// changed.
     ///
@@ -546,6 +608,7 @@ impl AppKitShell {
                     // notice. See `input`.
                     self.refresh_pointer_capture();
                     self.refresh_cursor_visibility();
+                    self.refresh_secure_input();
                     self.queue.push_back(ShellEvent::Focus {
                         window: handle,
                         focused,
@@ -573,6 +636,7 @@ impl AppKitShell {
                     let Some(handle) = handle else { continue };
                     if let Some(removed) = self.windows.remove(handle.cast()) {
                         self.shared.forget(removed.key);
+                        self.composing.forget(handle);
                         // SAFETY: the window is closing itself, so only this
                         // shell's own references are released here.
                         unsafe { release_window(removed.window, removed.layer, false) };
@@ -582,6 +646,7 @@ impl AppKitShell {
                         self.refresh_presentation();
                         self.refresh_pointer_capture();
                         self.refresh_cursor_visibility();
+                        self.refresh_secure_input();
                     }
                 }
                 RawEvent::ScreensChanged => {
@@ -599,6 +664,7 @@ impl AppKitShell {
                 RawEvent::Key { .. }
                 | RawEvent::FlagsChanged { .. }
                 | RawEvent::TextCommitted { .. }
+                | RawEvent::Preedit { .. }
                 | RawEvent::PointerMotion { .. }
                 | RawEvent::PointerFocus { .. }
                 | RawEvent::Button { .. }
@@ -932,6 +998,15 @@ impl Shell for AppKitShell {
     ///   `NSTextInputClient` and every key event goes through
     ///   `interpretKeyEvents:`, so a dead key composes in the input context
     ///   and its result arrives as a commit, as does an input method's.
+    /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — for a window that named an
+    ///   ordinary field with [`set_text_input`](Shell::set_text_input), marked
+    ///   text arrives as [`TextPreedit`](crate::ShellEvent::TextPreedit) and
+    ///   `firstRectForCharacterRange:` answers the area
+    ///   [`set_text_input_area`](Shell::set_text_input_area) gave, so the
+    ///   candidate window opens at the caret; with no field, or a password or
+    ///   a PIN, the input context is held to the keyboard layouts. The
+    ///   restriction is the documented lever and unverified against a real
+    ///   input method; see [`view`](super::view).
     /// * [`CLIPBOARD`](ShellCaps::CLIPBOARD) — `NSPasteboard`, both directions,
     ///   with `public.utf8-plain-text` beside the engine's own format so a copy
     ///   reaches TextEdit and an engine-to-engine copy is lossless. The bytes
@@ -987,15 +1062,6 @@ impl Shell for AppKitShell {
     /// * [`PANEL_RESERVE`](ShellCaps::PANEL_RESERVE) — **macOS lets nothing
     ///   but the menu bar and the Dock reserve space.** A reserving panel is
     ///   built and overlaps what is behind it.
-    /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — the input method's commits do
-    ///   arrive, but the rest of what the bit promises does not: marked text
-    ///   is tracked (an input method cannot compose without the answers) and
-    ///   never sent as [`TextPreedit`](crate::ShellEvent::TextPreedit),
-    ///   [`set_text_input`](Shell::set_text_input) and
-    ///   [`set_text_input_area`](Shell::set_text_input_area) are the trait's
-    ///   no-op defaults, and the candidate window is placed at the window's
-    ///   origin. A gap in this backend, not in the platform. See
-    ///   [`view`](super::view).
     fn caps(&self) -> ShellCaps {
         self.caps
     }
@@ -1164,6 +1230,7 @@ impl Shell for AppKitShell {
             .remove(handle.cast())
             .ok_or_else(|| ShellError::invalid_window(handle))?;
         self.shared.forget(removed.key);
+        self.composing.forget(handle);
         // The pool entry is gone **before** the AppKit call, deliberately:
         // `close` posts `windowWillClose:` synchronously, and the
         // `RawEvent::Closed` that would produce must not find a live window and
@@ -1181,6 +1248,9 @@ impl Shell for AppKitShell {
         // back. Same argument as `refresh_presentation` above it.
         self.refresh_pointer_capture();
         self.refresh_cursor_visibility();
+        // And secure event input, which a password field in the window left
+        // held: session-wide, so nothing else would give it back either.
+        self.refresh_secure_input();
         Ok(())
     }
 
@@ -1817,6 +1887,68 @@ impl Shell for AppKitShell {
         });
         Ok(request)
     }
+
+    /// Recorded for `firstRectForCharacterRange:actualRange:` to answer from,
+    /// and the input method told to ask again, so a candidate window already
+    /// open follows the caret. See [`view`](super::view).
+    fn set_text_input_area(
+        &mut self,
+        window: WindowId,
+        area: Option<PhysicalRect>,
+    ) -> Result<(), ShellError> {
+        let _pool = AutoreleasePool::push();
+        let state = self.window(window)?;
+        let (key, view) = (state.key, state.view);
+        self.shared.set_area(key, area);
+        // SAFETY: the live content view of a live window of this shell, on the
+        // main thread.
+        unsafe { super::view::invalidate_caret(view) };
+        Ok(())
+    }
+
+    /// Every input method allowed in the view for an ordinary field, and only
+    /// the keyboard layouts otherwise — with no field, as every window starts,
+    /// and for a password or a PIN, as Win32 keeps its input context off for
+    /// both. Typing and dead keys commit either way; see [`view`](super::view)
+    /// for why the context is restricted rather than bypassed.
+    ///
+    /// A field that stops composing ends any pre-edit the consumer was shown,
+    /// with an empty [`TextPreedit`](ShellEvent::TextPreedit), and drops what
+    /// the input method had marked. A password or PIN field also holds secure
+    /// event input while its window has the keyboard, so no other process can
+    /// read what is typed into it; [`refresh_secure_input`](Self::refresh_secure_input)
+    /// keeps that paired across every way out.
+    fn set_text_input(
+        &mut self,
+        window: WindowId,
+        field: Option<TextPurpose>,
+    ) -> Result<(), ShellError> {
+        let _pool = AutoreleasePool::push();
+        let state = self.window(window)?;
+        let (key, view) = (state.key, state.view);
+        let composes = keys::field_composes(field);
+        // **Before the input context is touched**: discarding marked text can
+        // call back into `unmarkText`, and the pre-edit that ends there must
+        // find the field already gone rather than queue one more.
+        self.shared.set_field(key, field);
+        // SAFETY: the live content view of a live window of this shell, on the
+        // main thread, with the pool above in scope.
+        unsafe { super::view::allow_input_methods(view, composes) };
+        if !composes {
+            self.shared.take_marked(key);
+            if self.composing.report(window, "") {
+                let time = self.event_time(input::now_seconds());
+                self.queue_event(ShellEvent::TextPreedit {
+                    window,
+                    time,
+                    text: String::new(),
+                    cursor: None,
+                });
+            }
+        }
+        self.refresh_secure_input();
+        Ok(())
+    }
 }
 
 impl Drop for AppKitShell {
@@ -1833,13 +1965,14 @@ impl Drop for AppKitShell {
     /// for exactly this reason, and swapping the two declarations would undo
     /// this argument without touching a line of code inside this function.
     ///
-    /// Three pieces of **desktop-wide** state are handed back first, for the
-    /// reason the Win32 backend gives about its cursor clip: a shell dropped by
-    /// a host application that keeps running would otherwise leave that
-    /// application with no menu bar, no visible cursor, and a mouse disconnected
-    /// from the pointer for every process on the machine. The last of those
-    /// survives the process — nothing but a login would put it back — which is
-    /// why it is released here rather than left to the window teardown below.
+    /// The **desktop-wide** state is handed back first, for the reason the
+    /// Win32 backend gives about its cursor clip: a shell dropped by a host
+    /// application that keeps running would otherwise leave that application
+    /// with no menu bar, no visible cursor, a mouse disconnected from the
+    /// pointer for every process on the machine, and secure event input held
+    /// so that no other process can read the keyboard. The mouse survives the
+    /// process — nothing but a login would put it back — which is why it is
+    /// released here rather than left to the window teardown below.
     fn drop(&mut self) {
         let _pool = AutoreleasePool::push();
         if self.pointer_frozen {
@@ -1848,6 +1981,7 @@ impl Drop for AppKitShell {
             self.pointer_frozen = false;
         }
         Self::show_cursor(self.visibility.want(false));
+        Self::apply_secure_input(&mut self.secure_input, false);
         if self.presentation != value::PRESENTATION_DEFAULT {
             // SAFETY: the live singleton; `PRESENTATION_DEFAULT` is always a
             // legal combination.
