@@ -6931,7 +6931,18 @@ impl OffscreenSetup {
         // Not `.first()`: the first enumerated adapter is not a device that
         // works on every machine, and a frame drawn on one nobody named is not
         // evidence. See [`crate::adapter`] for the measurement that moved this.
-        let adapter = crate::adapter::select(crate::adapter::pin().as_deref(), &adapters)?;
+        // A screenshot is a game's frame, so it ranks as the engine does.
+        let choice = crate::adapter::choose(
+            &adapters,
+            crate::adapter::pin().as_deref(),
+            None,
+            crate::adapter::PowerPreference::HighPerformance,
+            None,
+        )?;
+        let adapter = *choice
+            .candidates()
+            .first()
+            .ok_or(OffscreenError::Unusable("no adapter"))?;
 
         let caps = instance
             .surface_caps(surface, adapter.id)

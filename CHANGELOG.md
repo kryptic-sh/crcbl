@@ -41,6 +41,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the paragraph's direction, so left-to-right text sits where it did, and an
   exhaustive match on `TextAlign` needs the two arms.
 
+- **`crcbl_app::present::PresenterDesc` and `crcbl::engine::GpuContextDesc` have
+  `power_preference` and `adapter_pick` fields**, for the adapter choice below,
+  so a struct literal without `..Default::default()` needs them.
+
 ### Added
 
 - **Lines break at Unicode's line break opportunities (UAX #14)**, through
@@ -120,6 +124,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   mark after a space now joins the space, and a paragraph's hyphenated word is
   shaped whole, so a font's kerning reaches across the hyphen there as it
   already did in a span.
+- **A program chooses its adapter by power preference or by name.**
+  `crcbl_app::adapter::PowerPreference` (`HighPerformance` or `LowPower`) ranks
+  discrete against integrated GPUs when nothing names an adapter, and
+  `AdapterPick` (`Class` or `Name`) names one explicitly; a pick is never fallen
+  back from, and `CRCBL_ADAPTER` still wins over it. `adapter::choose` and
+  `adapter::rank` are the policy itself, as pure functions over the enumeration,
+  the preference, the pick and the adapter driving the window's display.
+
+### Changed
+
+- **The default adapter is ranked rather than taken in enumeration order.**
+  `Presenter` (apps) defaults to `PowerPreference::LowPower`, so on a machine
+  with an integrated and a discrete GPU and nothing else deciding, an app opens
+  the integrated one; `GpuContext` and `crcbl screenshot` (games) rank for
+  `HighPerformance`. Software rasterisers stay last under both.
 
 ### Fixed
 

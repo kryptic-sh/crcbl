@@ -134,6 +134,7 @@ use crate::settings::VideoSettings;
 
 #[cfg(doc)]
 use crate::adapter::ADAPTER_ENV_VAR;
+use crate::adapter::{AdapterPick, PowerPreference};
 use crate::backend::GpuBackend;
 
 pub mod confirm;
@@ -553,6 +554,14 @@ pub struct GpuContextDesc<'a> {
     /// makes the layer free for every sample and every `crcbl new` scaffold —
     /// none of them names this field.
     pub settings: SettingsSource<'a>,
+    /// Which kind of adapter to rank first when nothing names one;
+    /// [`PowerPreference::HighPerformance`] by default, because a program on
+    /// this crate is a game. [`crate::adapter::rank`] says how the display the
+    /// window is on can overrule it.
+    pub power_preference: PowerPreference,
+    /// The adapter the game names itself, or `None` to rank them.
+    /// [`ADAPTER_ENV_VAR`] wins over it.
+    pub adapter_pick: Option<AdapterPick<'a>>,
 }
 
 impl Default for GpuContextDesc<'_> {
@@ -604,6 +613,8 @@ impl Default for GpuContextDesc<'_> {
                 | Features::DRAW_INDEX,
             pacing: Pacing::default(),
             settings: SettingsSource::default(),
+            power_preference: PowerPreference::HighPerformance,
+            adapter_pick: None,
         }
     }
 }
@@ -1047,6 +1058,8 @@ impl GpuContextDesc<'_> {
             label: self.label,
             backend: self.backend,
             adapter_pin: pin,
+            adapter_pick: self.adapter_pick,
+            power_preference: self.power_preference,
             required_features: self.required_features,
             optional_features: self.optional_features,
             pacing: self.settings.pacing(self.label, self.pacing),
@@ -1093,14 +1106,16 @@ impl GpuContext {
     ///
     /// # Which adapter
     ///
-    /// [`crate::adapter::select`] decides, as it does for every other device
-    /// this crate opens. With [`ADAPTER_ENV_VAR`] unset, every adapter is
-    /// walked in enumeration order and the first that can present to the
-    /// window is taken — a GPU that cannot present is stepped past. Set, only
-    /// the adapter it names is tried, and one that cannot present fails the
-    /// open with [`GpuError::AdapterPin`] rather than falling back to an adapter
-    /// nobody named. The start-up log line says which adapter was taken and
-    /// which of the two chose it. [`open_offscreen`](Self::open_offscreen) and
+    /// [`crate::adapter::choose`] decides. With [`ADAPTER_ENV_VAR`] and
+    /// [`GpuContextDesc::adapter_pick`] unset, every adapter is walked in
+    /// [`crate::adapter::rank`]'s order for
+    /// [`GpuContextDesc::power_preference`] and the first that can present to
+    /// the window is taken — a GPU that cannot present is stepped past. With
+    /// either set, only the adapter it names is tried, and one that cannot
+    /// present fails the open with [`GpuError::AdapterPin`] rather than
+    /// falling back to an adapter nobody named. The start-up log line says
+    /// which adapter was taken and what chose it.
+    /// [`open_offscreen`](Self::open_offscreen) and
     /// [`request_open`](Self::request_open) choose the same way.
     ///
     /// # Errors

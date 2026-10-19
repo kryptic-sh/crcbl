@@ -90,7 +90,7 @@ use crcbl_hal::{
 use crcbl_hal::{Device, Instance};
 use crcbl_shell::{Shell, WindowId};
 
-use crate::adapter::{ADAPTER_ENV_VAR, PinMiss};
+use crate::adapter::{ADAPTER_ENV_VAR, AdapterPick, Choice, PinMiss, PowerPreference};
 use crate::backend::{GpuBackend, PendingInstance};
 
 // ---------------------------------------------------------------------------
@@ -524,6 +524,14 @@ pub struct PresenterDesc<'a> {
     /// `crcbl_app::adapter::pin().as_deref()` here. See [`Presenter::request_open`]
     /// for what a pin does to the walk.
     pub adapter_pin: Option<&'a str>,
+    /// The adapter the program names itself, or `None` to let
+    /// [`power_preference`](Self::power_preference) and the display rank them.
+    /// [`adapter_pin`](Self::adapter_pin) wins over it.
+    pub adapter_pick: Option<AdapterPick<'a>>,
+    /// Which kind of adapter to rank first when nothing names one;
+    /// [`PowerPreference::LowPower`] by default, because a program on this
+    /// crate is an app. See [`crate::adapter::rank`].
+    pub power_preference: PowerPreference,
     /// Features the device must have. A device without them is an error.
     pub required_features: Features,
     /// Features to enable if present. Absent ones are simply not enabled — ask
@@ -551,6 +559,8 @@ impl Default for PresenterDesc<'_> {
             label: "crcbl",
             backend: None,
             adapter_pin: None,
+            adapter_pick: None,
+            power_preference: PowerPreference::LowPower,
             required_features: Features::empty(),
             // `PRESENT_FEEDBACK` is asked for here because `acquire` already
             // calls `wait_until_presented` every frame: a device that has the
@@ -683,6 +693,34 @@ pub struct PendingPresenter {
     /// [`PresenterDesc::adapter_pin`], owned because the open outlives the
     /// desc it came from.
     adapter_pin: Option<String>,
+    /// [`PresenterDesc::adapter_pick`], owned for the same reason.
+    adapter_pick: Option<OwnedPick>,
+    /// [`PresenterDesc::power_preference`].
+    power_preference: PowerPreference,
+}
+
+/// An [`AdapterPick`] that owns its name, for a [`PendingPresenter`] that
+/// outlives the desc the pick was borrowed from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OwnedPick {
+    Class(crcbl_hal::DeviceType),
+    Name(String),
+}
+
+impl OwnedPick {
+    fn new(pick: AdapterPick<'_>) -> Self {
+        match pick {
+            AdapterPick::Class(class) => Self::Class(class),
+            AdapterPick::Name(name) => Self::Name(name.to_owned()),
+        }
+    }
+
+    fn borrow(&self) -> AdapterPick<'_> {
+        match self {
+            Self::Class(class) => AdapterPick::Class(*class),
+            Self::Name(name) => AdapterPick::Name(name),
+        }
+    }
 }
 
 impl PendingPresenter {
@@ -709,6 +747,8 @@ impl PendingPresenter {
             pacing: desc.pacing,
             frames_in_flight: desc.frames_in_flight,
             adapter_pin: desc.adapter_pin.map(str::to_owned),
+            adapter_pick: desc.adapter_pick.map(OwnedPick::new),
+            power_preference: desc.power_preference,
         })
     }
 
@@ -794,28 +834,6 @@ impl PendingPresenter {
     }
 }
 
-/// The adapters [`Presenter::start_device`] may walk, in the order it walks
-/// them.
-///
-/// Unpinned, that is every adapter in enumeration order, so the walk can step
-/// past a GPU that cannot present to the window. Pinned, it is the one adapter
-/// [`crate::adapter::select`] names and nothing else: a pin that fell through to
-/// the next adapter would be a run on a device nobody asked for, which is the
-/// outcome [`crate::adapter`] exists to refuse.
-///
-/// # Errors
-///
-/// [`PinMiss`] when the pin names no adapter here.
-fn adapter_candidates<'a>(
-    pin: Option<&str>,
-    adapters: &'a [crcbl_hal::AdapterInfo],
-) -> Result<&'a [crcbl_hal::AdapterInfo], PinMiss> {
-    match pin {
-        None => Ok(adapters),
-        Some(_) => crate::adapter::select(pin, adapters).map(core::slice::from_ref),
-    }
-}
-
 /// The backend instance `desc` asks for, not yet open.
 fn request_instance(desc: &PresenterDesc<'_>) -> Result<PendingInstance, PresentError> {
     Ok(match desc.backend {
@@ -891,14 +909,15 @@ impl Presenter {
     ///
     /// # Which adapter
     ///
-    /// [`crate::adapter::select`] decides. With
-    /// [`PresenterDesc::adapter_pin`] unset, every adapter is walked in
-    /// enumeration order and the first that can present to the window is
-    /// taken — a GPU that cannot present is stepped past. Set, only the adapter
-    /// it names is tried, and one that cannot present fails the open with
-    /// [`PresentError::AdapterPin`] rather than falling back to an adapter
-    /// nobody named. The start-up log line says which adapter was taken and
-    /// which of the two chose it.
+    /// [`crate::adapter::choose`] decides. With neither
+    /// [`PresenterDesc::adapter_pin`] nor [`PresenterDesc::adapter_pick`] set,
+    /// every adapter is walked in [`crate::adapter::rank`]'s order for
+    /// [`PresenterDesc::power_preference`] and the first that can present to
+    /// the window is taken — a GPU that cannot present is stepped past. With
+    /// either set, only the adapter it names is tried, and one that cannot
+    /// present fails the open with [`PresentError::AdapterPin`] rather than
+    /// falling back to an adapter nobody named. The start-up log line says
+    /// which adapter was taken and what chose it.
     ///
     /// # Errors
     ///
@@ -1006,7 +1025,9 @@ impl Presenter {
         // Resolved before the surface exists, so a pin that names nothing here
         // leaves nothing to tear down.
         let pin = open.adapter_pin.as_deref();
-        let candidates = adapter_candidates(pin, &adapters)?;
+        let pick = open.adapter_pick.as_ref().map(OwnedPick::borrow);
+        let choice = crate::adapter::choose(&adapters, pin, pick, open.power_preference, None)?;
+        let candidates = choice.candidates();
 
         // SAFETY: `target` was produced by the caller's shell for a window that
         // must still be live — `request_open` documents that obligation — so
@@ -1034,7 +1055,7 @@ impl Presenter {
         let mut chosen = None;
         let mut last_error = None;
         let mut alpha_refused = false;
-        for adapter in candidates {
+        for &adapter in candidates {
             match instance.surface_caps(surface, adapter.id) {
                 Ok(caps) if caps.preferred_format().is_some() => {
                     let Some(alpha) = composite_alpha_for(transparent, &caps.composite_alpha)
@@ -1066,36 +1087,52 @@ impl Presenter {
         }
         let Some((adapter, caps, composite_alpha)) = chosen else {
             instance.destroy_surface(surface);
-            return Err(StartRefusal::Failed(match (pin, candidates, last_error) {
-                (Some(pin), [pinned], error) => {
+            let named = match (&choice, pin, pick) {
+                (Choice::Pinned(named), Some(pin), _) => Some((
+                    *named,
+                    format!("{ADAPTER_ENV_VAR}={}", pin.trim()),
+                    format!("unset {ADAPTER_ENV_VAR} to walk every adapter"),
+                )),
+                (Choice::Picked(named), _, Some(pick)) => Some((
+                    *named,
+                    format!("the program's pick {pick:?}"),
+                    "pick none to walk every adapter".to_owned(),
+                )),
+                _ => None,
+            };
+            return Err(StartRefusal::Failed(match (named, last_error) {
+                (Some((named, who, remedy)), error) => {
                     let reason = match error {
                         Some(error) => error.to_string(),
                         None if alpha_refused => NO_PREMULTIPLIED_ALPHA.to_owned(),
                         None => "it offers no usable surface format".to_owned(),
                     };
                     PresentError::AdapterPin(PinMiss::new(format!(
-                        "{ADAPTER_ENV_VAR}={pin} chose adapter {id} {name:?} type={kind:?}, and it \
-                         cannot present to this window: {reason}. No other adapter is tried, \
-                         because that would be a run on a device nobody named; unset \
-                         {ADAPTER_ENV_VAR} to walk every adapter.",
-                        pin = pin.trim(),
-                        id = pinned.id.0,
-                        name = pinned.name,
-                        kind = pinned.device_type,
+                        "{who} chose adapter {id} {name:?} type={kind:?}, and it cannot present \
+                         to this window: {reason}. No other adapter is tried, because that \
+                         would be a run on a device nobody named; {remedy}.",
+                        id = named.id.0,
+                        name = named.name,
+                        kind = named.device_type,
                     )))
                 }
                 // Before an adapter that could not see the surface at all: one
                 // that could, and lacked only the alpha, is the closer miss.
                 _ if alpha_refused => PresentError::Unusable(NO_PREMULTIPLIED_ALPHA),
-                (_, _, Some(error)) => error.into(),
-                (_, _, None) => PresentError::Unusable("no adapter can present to this window"),
+                (_, Some(error)) => error.into(),
+                (_, None) => PresentError::Unusable("no adapter can present to this window"),
             }));
         };
-        let why = match pin {
-            Some(pin) => format!("pinned by {ADAPTER_ENV_VAR}={}", pin.trim()),
-            None => format!(
-                "the first of {} enumerated that can present, {ADAPTER_ENV_VAR} unset",
-                adapters.len()
+        let why = match (&choice, pin, pick) {
+            (Choice::Pinned(_), Some(pin), _) => {
+                format!("pinned by {ADAPTER_ENV_VAR}={}", pin.trim())
+            }
+            (Choice::Picked(_), _, Some(pick)) => format!("picked by the program, {pick:?}"),
+            _ => format!(
+                "the first of {} enumerated that can present, ranked for {:?}, \
+                 {ADAPTER_ENV_VAR} unset",
+                adapters.len(),
+                open.power_preference
             ),
         };
         log::info!(

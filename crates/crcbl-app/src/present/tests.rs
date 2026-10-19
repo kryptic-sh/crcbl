@@ -644,13 +644,13 @@ fn fake_adapter(index: u32, device_type: crcbl_hal::DeviceType) -> crcbl_hal::Ad
     }
 }
 
-/// **A pin narrows the walk to the adapter it names; no pin keeps the
-/// enumeration's order.**
+/// **A pin narrows the walk to the adapter it names; no pin walks every
+/// adapter.**
 ///
 /// The shape is the one `CRCBL_ADAPTER=cpu` met on the D3D12 desktop: the
 /// GPU enumerates first and WARP is appended last, so a walk that ignored
 /// the pin opened the GPU and said nothing about it. The unpinned half is
-/// the other promise — every adapter, in the order the backend gave, because
+/// the other promise — every adapter, ranked rather than narrowed, because
 /// that is what lets the surface-aware walk step past a GPU that cannot
 /// present.
 #[test]
@@ -663,8 +663,15 @@ fn a_pin_narrows_the_adapter_walk_to_the_class_it_names() {
         fake_adapter(2, DeviceType::Cpu),
     ];
     let ids = |pin| {
-        adapter_candidates(pin, &adapters)
-            .map(|walk| walk.iter().map(|info| info.id).collect::<Vec<_>>())
+        crate::adapter::choose(&adapters, pin, None, PowerPreference::HighPerformance, None).map(
+            |choice| {
+                choice
+                    .candidates()
+                    .iter()
+                    .map(|info| info.id)
+                    .collect::<Vec<_>>()
+            },
+        )
     };
 
     assert_eq!(ids(Some("cpu")), Ok(vec![AdapterId(2)]));
@@ -673,7 +680,7 @@ fn a_pin_narrows_the_adapter_walk_to_the_class_it_names() {
     assert_eq!(
         ids(None),
         Ok(vec![AdapterId(0), AdapterId(1), AdapterId(2)]),
-        "unpinned, the walk is today's: every adapter, first enumerated first"
+        "unpinned, the walk is every adapter, ranked for the preference"
     );
     let miss = ids(Some("virtual")).expect_err("there is no virtual adapter to name");
     assert!(miss.to_string().contains("no Virtual adapter"), "{miss}");
@@ -878,6 +885,93 @@ fn the_context_opens_on_the_adapter_the_pin_names() {
         gpu.destroy()
             .expect("teardown is in the seam's stated order");
     }
+}
+
+/// Starts a presenter on a desktop's enumeration — a discrete GPU, then an
+/// integrated one — with `desc`'s adapter fields, and hands back the adapter
+/// it opened on or what it refused with.
+fn open_on_desktop(
+    desc: &PresenterDesc<'_>,
+    refuse: Option<crcbl_hal::AdapterId>,
+) -> Result<crcbl_hal::AdapterId, PresentError> {
+    use crcbl_hal::DeviceType;
+    use crcbl_hal::null::{NullInstance, Recorder};
+
+    let (shell, window) = shell();
+    let target = shell
+        .surface_target(window)
+        .expect("the headless window is still alive");
+    let mut pending = PendingPresenter::new(OpenStage::Done, target, (320, 240), desc)
+        .expect("the default ring is at least one frame deep");
+    let recorder = Recorder::new();
+    if let Some(adapter) = refuse {
+        recorder.refuse_surface_on(adapter);
+    }
+    let instance = ClassedInstance {
+        inner: NullInstance::gpu_driven()
+            .with_adapters(2)
+            .with_recorder(recorder),
+        classes: vec![DeviceType::Discrete, DeviceType::Integrated],
+    };
+    pending.stage = Presenter::start_device(Box::new(instance), &pending)?;
+    let mut gpu = finish_open(pending);
+    let opened = gpu.adapter().expect("the presenter's own adapter").id;
+    gpu.drain().expect("nothing was submitted");
+    gpu.destroy()
+        .expect("teardown is in the seam's stated order");
+    Ok(opened)
+}
+
+/// **The power preference reaches the walk**: an app's presenter opens the
+/// integrated GPU by default, and one asking for `HighPerformance` the
+/// discrete one, on the same enumeration with no display to say otherwise.
+#[test]
+fn the_presenter_ranks_adapters_by_its_power_preference() {
+    use crcbl_hal::AdapterId;
+
+    assert_eq!(
+        open_on_desktop(&PresenterDesc::default(), None).ok(),
+        Some(AdapterId(1)),
+        "a presenter defaults to LowPower"
+    );
+    let fast = PresenterDesc {
+        power_preference: PowerPreference::HighPerformance,
+        ..PresenterDesc::default()
+    };
+    assert_eq!(open_on_desktop(&fast, None).ok(), Some(AdapterId(0)));
+    // Ranked, so an adapter that cannot present is still stepped past.
+    assert_eq!(
+        open_on_desktop(&fast, Some(AdapterId(0))).ok(),
+        Some(AdapterId(1))
+    );
+}
+
+/// **A program's pick opens the adapter it names and nothing else**: a
+/// picked adapter that cannot present is refused naming the pick, not walked
+/// past, and the variable's pin still wins over a pick.
+#[test]
+fn a_program_pick_opens_its_adapter_or_refuses() {
+    use crcbl_hal::{AdapterId, DeviceType};
+
+    let pick = PresenterDesc {
+        adapter_pick: Some(AdapterPick::Class(DeviceType::Discrete)),
+        ..PresenterDesc::default()
+    };
+    assert_eq!(open_on_desktop(&pick, None).ok(), Some(AdapterId(0)));
+
+    let refused = open_on_desktop(&pick, Some(AdapterId(0))).expect_err("only the pick is tried");
+    let PresentError::AdapterPin(why) = &refused else {
+        panic!("the pick is what failed, not the backend: {refused}");
+    };
+    let why = why.to_string();
+    assert!(why.contains("the program's pick"), "{why}");
+    assert!(why.contains("cannot present"), "{why}");
+
+    let pinned = PresenterDesc {
+        adapter_pin: Some("integrated"),
+        ..pick
+    };
+    assert_eq!(open_on_desktop(&pinned, None).ok(), Some(AdapterId(1)));
 }
 
 // ---- composite alpha ---------------------------------------------------------
