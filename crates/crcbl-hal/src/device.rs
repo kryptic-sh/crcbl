@@ -1,7 +1,8 @@
 //! The two central traits: [`Instance`] and [`Device`].
 //!
 //! ```text
-//! Instance ──adapters()──▶ [AdapterInfo]      (caps known before a device exists)
+//! Instance ──adapters()──▶ [AdapterInfo]      (who each adapter is; no device opened)
+//!    ├──adapter_caps(AdapterId)──▶ DeviceCaps     (what one can do; probed once, on demand)
 //!    │
 //!    ├──create_surface(SurfaceTarget)──▶ SurfaceHandle
 //!    └──request_device(DeviceDesc)─────▶ Box<dyn PendingDevice>
@@ -293,9 +294,36 @@ pub trait Instance: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// Which backend this is. For logs and bug reports — never for behaviour.
     fn backend(&self) -> BackendKind;
 
-    /// Every adapter this backend can see, with its capabilities already
-    /// filled in so selection logic never has to open a device to reject one.
+    /// Every adapter this backend can see: who each one is, not what it can
+    /// do.
+    ///
+    /// **Opens no device.** Its capabilities are
+    /// [`adapter_caps`](Instance::adapter_caps)'s to answer, one adapter at a
+    /// time, because D3D12 has no capability query short of creating a driver
+    /// device. Selection ranks this list, then probes in that order and stops
+    /// at the first adapter that serves.
+    ///
+    /// An adapter here is not yet known to open: one the driver lists and
+    /// will not open (a display-only adapter, say) is in the list and fails
+    /// [`adapter_caps`](Instance::adapter_caps).
     fn adapters(&self) -> Vec<AdapterInfo>;
+
+    /// What `adapter` can do, asked of the driver the first time and
+    /// remembered.
+    ///
+    /// The cost is the backend's: Vulkan, Metal and WebGPU read it off the
+    /// enumeration they already did, and D3D12 creates a device on the adapter
+    /// to ask — the device a following
+    /// [`request_device`](Instance::request_device) on that adapter is then
+    /// handed, so the probe is not paid twice.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::NoSuchAdapter`] for an id [`adapters`](Instance::adapters)
+    /// did not list, or [`HalError::Backend`] when the driver will not open
+    /// the adapter at all — the answer that sends selection on to the next
+    /// one.
+    fn adapter_caps(&self, adapter: AdapterId) -> Result<DeviceCaps, HalError>;
 
     /// Creates a presentation surface from a shell's native window handles.
     ///

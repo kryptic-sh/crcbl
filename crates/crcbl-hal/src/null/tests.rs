@@ -45,7 +45,12 @@ fn open(instance: &dyn Instance) -> Box<dyn Device> {
 fn the_two_presets_select_the_documented_paths() {
     let a = NullInstance::gpu_driven();
     let b = NullInstance::portable();
-    let (a_caps, b_caps) = (a.adapters()[0].caps, b.adapters()[0].caps);
+    let (a_caps, b_caps) = (
+        a.adapter_caps(crate::AdapterId(0))
+            .expect("the adapter describes itself"),
+        b.adapter_caps(crate::AdapterId(0))
+            .expect("the adapter describes itself"),
+    );
     assert_eq!(a_caps.binding_model(), BindingModel::Bindless);
     assert_eq!(a_caps.geometry_path(), GeometryPath::IndirectCount);
     assert_eq!(b_caps.binding_model(), BindingModel::ArrayPages);
@@ -56,7 +61,9 @@ fn the_two_presets_select_the_documented_paths() {
     assert_eq!(b_caps.lighting_path(), LightingPath::Rasterised);
     assert_eq!(a.backend(), BackendKind::Null);
 
-    let caps = b.adapters()[0].caps;
+    let caps = b
+        .adapter_caps(crate::AdapterId(0))
+        .expect("the adapter describes itself");
     for absent in [
         Features::DESCRIPTOR_INDEXING,
         Features::BUFFER_DEVICE_ADDRESS,
@@ -566,7 +573,9 @@ fn push_constants_and_bindless_fail_loudly_on_the_portable_preset() {
 /// model a device that has the capability and another model a device that does
 /// not — the two sides of topic 39's rule.
 fn mesh_fixture(extra: Features) -> (Box<dyn Device>, ShaderModuleHandle, PipelineLayoutHandle) {
-    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    let mut caps = NullInstance::gpu_driven()
+        .adapter_caps(crate::AdapterId(0))
+        .expect("the adapter describes itself");
     caps.features |= extra;
     let instance = NullInstance::new(caps);
     let device = instance
@@ -657,7 +666,9 @@ fn a_device_without_mesh_shader_refuses_a_mesh_pipeline() {
 /// different orders and either refusal is correct.
 #[test]
 fn a_query_set_of_no_queries_is_refused_as_a_bad_descriptor() {
-    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    let mut caps = NullInstance::gpu_driven()
+        .adapter_caps(crate::AdapterId(0))
+        .expect("the adapter describes itself");
     caps.features |= Features::TIMESTAMP_QUERY;
     let instance = NullInstance::new(caps);
     let device = instance
@@ -822,7 +833,9 @@ fn a_view_of_mips_or_layers_the_image_lacks_is_refused() {
 /// its own.
 #[test]
 fn a_device_without_compute_refuses_a_compute_pipeline() {
-    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    let mut caps = NullInstance::gpu_driven()
+        .adapter_caps(crate::AdapterId(0))
+        .expect("the adapter describes itself");
     caps.features.remove(Features::COMPUTE);
     let instance = NullInstance::new(caps);
     // `DeviceDesc::for_adapter` requires `COMPUTE` outright — it is one of the
@@ -1073,7 +1086,9 @@ fn the_guaranteed_stages_are_unaffected_on_every_device() {
 /// show the first would report the move as a missing draw.
 #[test]
 fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
-    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    let mut caps = NullInstance::gpu_driven()
+        .adapter_caps(crate::AdapterId(0))
+        .expect("the adapter describes itself");
     caps.features |= Features::MESH_SHADER | Features::TASK_SHADER;
     let instance = NullInstance::new(caps);
     let recorder = instance.recorder();
@@ -1200,7 +1215,9 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
 /// records every violation rather than stopping at the first.
 #[test]
 fn a_mesh_dispatch_outside_a_render_pass_is_refused() {
-    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    let mut caps = NullInstance::gpu_driven()
+        .adapter_caps(crate::AdapterId(0))
+        .expect("the adapter describes itself");
     caps.features |= Features::MESH_SHADER;
     let instance = NullInstance::new(caps);
     let device = instance
@@ -1603,6 +1620,42 @@ fn a_present_wait_is_answered_not_refused_and_still_checks_its_swapchain() {
         "{error}"
     );
     instance.destroy_surface(surface);
+}
+
+/// **Every listed adapter answers its caps, and an id past the list is named
+/// as the one that is not there.**
+#[test]
+fn every_listed_adapter_answers_its_caps_and_no_other_does() {
+    let instance = NullInstance::portable().with_adapters(2);
+    for adapter in instance.adapters() {
+        assert_eq!(
+            instance.adapter_caps(adapter.id).ok(),
+            Some(
+                NullInstance::portable()
+                    .adapter_caps(AdapterId(0))
+                    .expect("listed")
+            ),
+            "{adapter:?}"
+        );
+    }
+    assert!(matches!(
+        instance.adapter_caps(AdapterId(2)),
+        Err(HalError::NoSuchAdapter(2))
+    ));
+
+    let recorder = Recorder::new();
+    let refusing = NullInstance::portable()
+        .with_adapters(2)
+        .with_recorder(recorder.clone());
+    recorder.refuse_device_on(AdapterId(0));
+    assert!(matches!(
+        refusing.adapter_caps(AdapterId(0)),
+        Err(HalError::Backend(_))
+    ));
+    assert!(
+        refusing.adapter_caps(AdapterId(1)).is_ok(),
+        "only the adapter named refuses"
+    );
 }
 
 /// **An instance can report a list of adapters, and every id in it works.**

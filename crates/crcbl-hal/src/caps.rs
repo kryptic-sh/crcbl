@@ -111,7 +111,13 @@ pub enum DeviceType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AdapterId(pub u32);
 
-/// What an adapter says about itself, before a device exists.
+/// Who an adapter is, as enumeration lists it, with no device opened.
+///
+/// What it can *do* is a separate question,
+/// [`Instance::adapter_caps`](crate::Instance::adapter_caps), because on D3D12
+/// answering it means creating a driver device — a fifth of a second per
+/// adapter — and a program that will open one adapter should not pay that for
+/// every adapter it could have opened.
 ///
 /// Cloneable and owned: adapter enumeration happens once at startup, so the two
 /// `String`s are not worth avoiding, and the alternative (borrowing from the
@@ -142,9 +148,6 @@ pub struct AdapterInfo {
     /// name and PCI ids, never a LUID. Packed as the high half above the low
     /// half, which is a Windows `LUID` read as a little-endian `u64`.
     pub luid: Option<u64>,
-    /// Everything this adapter can do. Available *before* device creation so
-    /// selection logic can reject an adapter without paying for a device.
-    pub caps: DeviceCaps,
 }
 
 bitflags::bitflags! {

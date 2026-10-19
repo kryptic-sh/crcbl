@@ -79,9 +79,11 @@
 //!     Box::new(NullInstance::portable().with_recorder(recorder.clone()));
 //!
 //! let adapter = instance.adapters()[0].clone();
-//! assert_eq!(adapter.caps.binding_model(), BindingModel::ArrayPages);
-//! assert_eq!(adapter.caps.geometry_path(), GeometryPath::IndirectPerBatch);
+//! let caps = instance.adapter_caps(adapter.id)?;
+//! assert_eq!(caps.binding_model(), BindingModel::ArrayPages);
+//! assert_eq!(caps.geometry_path(), GeometryPath::IndirectPerBatch);
 //! assert_eq!(recorder.total_live_objects(), 0);
+//! # Ok::<(), crcbl_hal::HalError>(())
 //! ```
 
 mod record;
@@ -396,9 +398,23 @@ impl Instance for NullInstance {
                 driver: format!("crcbl-hal {}", env!("CARGO_PKG_VERSION")),
                 backend: BackendKind::Null,
                 luid: None,
-                caps: self.caps,
             })
             .collect()
+    }
+
+    /// This instance's caps, the same for every adapter it lists, unless
+    /// [`Recorder::refuse_device_on`] says the adapter will not open.
+    fn adapter_caps(&self, adapter: AdapterId) -> Result<DeviceCaps, HalError> {
+        if adapter.0 >= self.adapter_count {
+            return Err(HalError::NoSuchAdapter(adapter.0));
+        }
+        if self.recorder.refuses_device(adapter) {
+            return Err(HalError::Backend(format!(
+                "the driver will not open adapter {}",
+                adapter.0
+            )));
+        }
+        Ok(self.caps)
     }
 
     unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {

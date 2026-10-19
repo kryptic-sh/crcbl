@@ -81,7 +81,9 @@ struct Frame {
 fn setup(instance: &dyn Instance) -> Frame {
     let adapters: Vec<AdapterInfo> = instance.adapters();
     assert_eq!(adapters.len(), 1);
-    let caps: DeviceCaps = adapters[0].caps;
+    let caps: DeviceCaps = instance
+        .adapter_caps(adapters[0].id)
+        .expect("a listed adapter describes itself");
     let geometry: GeometryPath = caps.geometry_path();
 
     // Ask only for what the adapter has; everything else degrades.

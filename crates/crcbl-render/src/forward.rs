@@ -14872,7 +14872,10 @@ mod tests {
             let instance = preset.with_recorder(recorder.clone());
             let adapter = instance.adapters().remove(0);
             assert_eq!(
-                adapter.caps.geometry_path(),
+                instance
+                    .adapter_caps(adapter.id)
+                    .expect("the null backend describes its adapter")
+                    .geometry_path(),
                 path,
                 "the preset must select the path this arm is about"
             );
@@ -15519,7 +15522,10 @@ mod tests {
         let instance = NullInstance::new(caps).with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         assert_eq!(
-            adapter.caps.geometry_path(),
+            instance
+                .adapter_caps(adapter.id)
+                .expect("the null backend describes its adapter")
+                .geometry_path(),
             GeometryPath::MeshShader,
             "a device with mesh shaders selects them, which is the case this is about"
         );
@@ -15964,7 +15970,10 @@ mod tests {
         let instance = NullInstance::new(caps).with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         assert_eq!(
-            adapter.caps.geometry_path(),
+            instance
+                .adapter_caps(adapter.id)
+                .expect("the null backend describes its adapter")
+                .geometry_path(),
             GeometryPath::MeshShader,
             "a device with mesh shaders selects them, which is the case this is about"
         );

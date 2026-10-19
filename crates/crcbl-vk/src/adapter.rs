@@ -37,6 +37,10 @@ use crate::present_timing;
 pub(crate) struct AdapterRecord {
     pub(crate) physical: vk::PhysicalDevice,
     pub(crate) info: AdapterInfo,
+    /// What [`Instance::adapter_caps`](crcbl_hal::Instance::adapter_caps)
+    /// answers. Read during enumeration, because Vulkan answers it from the
+    /// physical device without opening anything.
+    pub(crate) caps: DeviceCaps,
     pub(crate) families: QueueFamilies,
     /// The three Vulkan 1.3 features this backend cannot work without. Reported
     /// separately from [`Features`] because the seam has no vocabulary for
@@ -45,7 +49,7 @@ pub(crate) struct AdapterRecord {
     /// `VkPhysicalDeviceLimits::timestampPeriod`, or `0.0` on a device without
     /// [`Features::TIMESTAMP_QUERY`]. See [`timestamp_period_of`].
     ///
-    /// Not in [`AdapterInfo::caps`] because the seam has no field for it: a
+    /// Not in [`caps`](Self::caps) because the seam has no field for it: a
     /// tick period is Vulkan's and D3D12's way of describing a timestamp and
     /// neither Metal nor WebGPU has one, so it stays inside this backend and
     /// [`crate::device`] spends it converting a read to nanoseconds.
@@ -843,8 +847,8 @@ fn describe(
             // and Mesa on Linux leaves it unset.
             luid: (id_props.device_luid_valid == vk::TRUE)
                 .then(|| u64::from_le_bytes(id_props.device_luid)),
-            caps: DeviceCaps { features, limits },
         },
+        caps: DeviceCaps { features, limits },
         families,
         core_1_3,
         timestamp_period_ns: timestamp_period_of(&properties.limits, features),

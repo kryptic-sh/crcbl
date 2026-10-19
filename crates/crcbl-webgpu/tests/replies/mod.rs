@@ -81,8 +81,8 @@ fn every_limit() -> Limits {
 /// [`BackendKind::WebGpu`] because the field never crosses the wire: the decoder
 /// names the crate that decoded, so this is the only value a round trip can
 /// produce.
-fn every_adapter_field() -> AdapterInfo {
-    AdapterInfo {
+fn every_adapter_field() -> (AdapterInfo, DeviceCaps) {
+    let info = AdapterInfo {
         id: AdapterId(3),
         name: "Apple M2 — ✱".into(),
         vendor_id: 0,
@@ -91,11 +91,12 @@ fn every_adapter_field() -> AdapterInfo {
         driver: String::new(),
         backend: BackendKind::WebGpu,
         luid: None,
-        caps: DeviceCaps {
-            features: WEBGPU_REACHABLE,
-            limits: every_limit(),
-        },
-    }
+    };
+    let caps = DeviceCaps {
+        features: WEBGPU_REACHABLE,
+        limits: every_limit(),
+    };
+    (info, caps)
 }
 
 /// A payload big enough to force a writer past its initial buffer, with a value
@@ -125,12 +126,10 @@ fn growth_payload() -> Vec<u8> {
 ///   still looks plausible.
 pub fn every_reply() -> Vec<(u64, Reply)> {
     vec![
-        (
-            9,
-            Reply::Adapter {
-                info: every_adapter_field(),
-            },
-        ),
+        {
+            let (info, caps) = every_adapter_field();
+            (9, Reply::Adapter { info, caps })
+        },
         // The other end of the same shape, and **not a browser's answer**: a
         // name the adapter declined to give, alongside the four fields WebGPU
         // can never fill carrying real values. The decoder must not know that a
@@ -148,10 +147,10 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
                     driver: "radv 25.1.4".into(),
                     backend: BackendKind::WebGpu,
                     luid: None,
-                    caps: DeviceCaps {
-                        features: Features::empty(),
-                        limits: Limits::minimum(),
-                    },
+                },
+                caps: DeviceCaps {
+                    features: Features::empty(),
+                    limits: Limits::minimum(),
                 },
             },
         ),
@@ -504,7 +503,7 @@ const DEVICE_GRANTED: Features = Features::COMPUTE
 /// un-extended.
 pub fn encode_reply(replies: &mut ReplyWriter, sequence: u64, reply: &Reply) {
     match reply {
-        Reply::Adapter { info } => replies.adapter(sequence, info),
+        Reply::Adapter { info, caps } => replies.adapter(sequence, info, caps),
         Reply::NoAdapter { reason } => replies.no_adapter(sequence, reason),
         Reply::Device { caps } => replies.device(sequence, caps),
         Reply::DeviceFailed {

@@ -708,7 +708,7 @@ impl VkDevice {
                 record.core_1_3.missing()
             )));
         }
-        let missing = record.info.caps.missing(desc.required_features);
+        let missing = record.caps.missing(desc.required_features);
         if !missing.is_empty() {
             return Err(HalError::UnsupportedFeatures { missing });
         }
@@ -750,7 +750,6 @@ impl VkDevice {
         // `vkCreateDevice`; enabling one nobody asked for is a cost with no
         // caller.
         let granted = record
-            .info
             .caps
             .features
             .intersection(desc.required_features.union(desc.optional_features))
@@ -1032,7 +1031,7 @@ impl VkDevice {
                 // whose `create_sampler` answered `Unsupported` above 1.0. See
                 // `crate::adapter::gate_limits_on_features`.
                 limits: {
-                    let mut limits = record.info.caps.limits;
+                    let mut limits = record.caps.limits;
                     crate::adapter::gate_limits_on_features(&mut limits, granted);
                     limits
                 },

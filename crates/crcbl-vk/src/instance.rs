@@ -7,8 +7,8 @@ use ash::{ext, khr, vk};
 
 use crcbl_core::{Pool, SurfaceTarget};
 use crcbl_hal::{
-    AdapterId, AdapterInfo, BackendKind, CompositeAlpha, Device, DeviceDesc, DeviceRequestState,
-    Format, HalError, Instance, PresentMode, SurfaceCaps, SurfaceHandle,
+    AdapterId, AdapterInfo, BackendKind, CompositeAlpha, Device, DeviceCaps, DeviceDesc,
+    DeviceRequestState, Format, HalError, Instance, PresentMode, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::adapter::{self, AdapterRecord};
@@ -760,9 +760,9 @@ impl VkInstance {
                 record.info.name,
                 record.info.device_type,
                 record.info.driver,
-                record.info.caps.geometry_path(),
-                record.info.caps.binding_model(),
-                record.info.caps.lighting_path()
+                record.caps.geometry_path(),
+                record.caps.binding_model(),
+                record.caps.lighting_path()
             );
         }
 
@@ -843,6 +843,11 @@ impl Instance for VkInstance {
             .iter()
             .map(|record| record.info.clone())
             .collect()
+    }
+
+    /// Read during enumeration, so this opens nothing.
+    fn adapter_caps(&self, adapter: AdapterId) -> Result<DeviceCaps, HalError> {
+        self.record(adapter).map(|record| record.caps)
     }
 
     unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {

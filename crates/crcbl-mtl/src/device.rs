@@ -886,7 +886,7 @@ impl MetalDevice {
         // `optional_features` is satisfied by construction, which is exactly
         // what `DeviceDesc::optional_features` documents ("check `Device::caps`
         // afterwards to find out").
-        let caps = record.info.caps;
+        let caps = record.caps;
         let id = next_owner_id();
         // Before anything can be sampled, so the window a timestamp is scaled
         // against is the whole life of the device.
@@ -5481,8 +5481,11 @@ using namespace metal;\n\
         let device = instance
             .open_device(&device_desc(adapters[0].id))
             .expect("a Metal device opens with no required features");
-        assert_eq!(device.caps().features, adapters[0].caps.features);
-        assert_eq!(device.caps().limits, adapters[0].caps.limits);
+        let offered = instance
+            .adapter_caps(adapters[0].id)
+            .expect("a listed adapter describes itself");
+        assert_eq!(device.caps().features, offered.features);
+        assert_eq!(device.caps().limits, offered.limits);
     }
 
     /// A buffer of every memory location creates and destroys, and a destroyed

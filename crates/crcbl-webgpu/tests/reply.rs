@@ -39,10 +39,14 @@ fn adapter_info() -> AdapterInfo {
         driver: String::new(),
         backend: BackendKind::WebGpu,
         luid: None,
-        caps: DeviceCaps {
-            features: Features::COMPUTE,
-            limits: Limits::minimum(),
-        },
+    }
+}
+
+/// The caps [`adapter_info`] arrives with.
+fn adapter_caps() -> DeviceCaps {
+    DeviceCaps {
+        features: Features::COMPUTE,
+        limits: Limits::minimum(),
     }
 }
 
@@ -288,7 +292,7 @@ fn a_handle_field_that_cannot_be_absent_refuses_zero_bits() {
 #[test]
 fn an_adapter_name_that_is_not_utf8_is_refused_rather_than_replaced_with_question_marks() {
     let mut replies = ReplyWriter::new();
-    replies.adapter(3, &adapter_info());
+    replies.adapter(3, &adapter_info(), &adapter_caps());
     let mut bytes = replies.bytes().to_vec();
     // The name's two bytes sit immediately before `vendor_id`, `device_id` and
     // the device-type code.
@@ -304,59 +308,63 @@ fn an_adapter_name_that_is_not_utf8_is_refused_rather_than_replaced_with_questio
 
 // ── The adapter record ────────────────────────────────────────────────────────
 
-/// **Every field of [`AdapterInfo`] survives, `backend` excepted.**
+/// **Every field of [`AdapterInfo`] and its caps survives, `backend` and
+/// `luid` excepted.**
 ///
 /// The corpus covers this too, but only for the two adapters it holds; this
 /// walks each field on its own so a writer that dropped one — or wrote two in
 /// the wrong order — names the field rather than showing a byte offset.
 #[test]
 fn each_adapter_field_survives_a_round_trip_on_its_own() {
-    let base = AdapterInfo {
-        id: AdapterId(1),
-        name: "base".into(),
-        vendor_id: 2,
-        device_id: 3,
-        device_type: DeviceType::Cpu,
-        driver: "d".into(),
-        backend: BackendKind::WebGpu,
-        luid: None,
-        caps: DeviceCaps {
+    let base = (
+        AdapterInfo {
+            id: AdapterId(1),
+            name: "base".into(),
+            vendor_id: 2,
+            device_id: 3,
+            device_type: DeviceType::Cpu,
+            driver: "d".into(),
+            backend: BackendKind::WebGpu,
+            luid: None,
+        },
+        DeviceCaps {
             features: Features::COMPUTE,
             limits: Limits::minimum(),
         },
-    };
+    );
 
-    let mutations: Vec<(&str, Mutate<AdapterInfo>)> = vec![
-        ("id", |info| info.id = AdapterId(9)),
-        ("name", |info| info.name = "Apple M2 — ✱".into()),
-        ("name empty", |info| info.name = String::new()),
-        ("vendor_id", |info| info.vendor_id = 0x1002),
-        ("device_id", |info| info.device_id = 0x744C),
-        ("device_type", |info| {
+    let mutations: Vec<(&str, Mutate<(AdapterInfo, DeviceCaps)>)> = vec![
+        ("id", |(info, _)| info.id = AdapterId(9)),
+        ("name", |(info, _)| info.name = "Apple M2 — ✱".into()),
+        ("name empty", |(info, _)| info.name = String::new()),
+        ("vendor_id", |(info, _)| info.vendor_id = 0x1002),
+        ("device_id", |(info, _)| info.device_id = 0x744C),
+        ("device_type", |(info, _)| {
             info.device_type = DeviceType::Integrated;
         }),
-        ("driver", |info| info.driver = "radv 25.1.4".into()),
-        ("driver empty", |info| info.driver = String::new()),
-        ("features", |info| {
-            info.caps.features = Features::TIMESTAMP_QUERY | Features::DEPTH_CLAMP;
+        ("driver", |(info, _)| info.driver = "radv 25.1.4".into()),
+        ("driver empty", |(info, _)| info.driver = String::new()),
+        ("features", |(_, caps)| {
+            caps.features = Features::TIMESTAMP_QUERY | Features::DEPTH_CLAMP;
         }),
-        ("features empty", |info| {
-            info.caps.features = Features::empty();
+        ("features empty", |(_, caps)| {
+            caps.features = Features::empty();
         }),
-        ("features all", |info| info.caps.features = Features::all()),
-        ("limits", |info| info.caps.limits = Limits::desktop()),
+        ("features all", |(_, caps)| caps.features = Features::all()),
+        ("limits", |(_, caps)| caps.limits = Limits::desktop()),
     ];
 
     for (what, mutate) in mutations {
-        let mut info = base.clone();
-        mutate(&mut info);
-        assert_ne!(info, base, "{what} did not change anything");
+        let mut adapter = base.clone();
+        mutate(&mut adapter);
+        assert_ne!(adapter, base, "{what} did not change anything");
 
+        let (info, caps) = adapter;
         let mut replies = ReplyWriter::new();
-        replies.adapter(7, &info);
+        replies.adapter(7, &info, &caps);
         assert_eq!(
             decode_replies(replies.bytes()),
-            Ok(vec![(7, Reply::Adapter { info })]),
+            Ok(vec![(7, Reply::Adapter { info, caps })]),
             "{what}"
         );
     }
@@ -427,18 +435,16 @@ fn each_limits_field_survives_a_round_trip_on_its_own() {
         mutate(&mut limits);
         assert_ne!(limits, base, "{what} did not change anything");
 
-        let info = AdapterInfo {
-            caps: DeviceCaps {
-                features: Features::empty(),
-                limits,
-            },
-            ..adapter_info()
+        let info = adapter_info();
+        let caps = DeviceCaps {
+            features: Features::empty(),
+            limits,
         };
         let mut replies = ReplyWriter::new();
-        replies.adapter(1, &info);
+        replies.adapter(1, &info, &caps);
         assert_eq!(
             decode_replies(replies.bytes()),
-            Ok(vec![(1, Reply::Adapter { info })]),
+            Ok(vec![(1, Reply::Adapter { info, caps })]),
             "{what}"
         );
     }
@@ -454,9 +460,9 @@ fn the_backend_field_is_the_decoders_own_rather_than_something_the_wire_carried(
     info.backend = BackendKind::Vulkan;
 
     let mut replies = ReplyWriter::new();
-    replies.adapter(0, &info);
+    replies.adapter(0, &info, &adapter_caps());
     let decoded = decode_replies(replies.bytes()).expect("a buffer this crate wrote decodes");
-    let [(_, Reply::Adapter { info: back })] = decoded.as_slice() else {
+    let [(_, Reply::Adapter { info: back, .. })] = decoded.as_slice() else {
         panic!("one adapter reply, and it is an adapter reply");
     };
     assert_eq!(back.backend, BackendKind::WebGpu);
@@ -471,7 +477,7 @@ fn the_backend_field_is_the_decoders_own_rather_than_something_the_wire_carried(
 #[test]
 fn a_feature_bit_no_flag_claims_is_refused_rather_than_dropped() {
     let mut replies = ReplyWriter::new();
-    replies.adapter(4, &adapter_info());
+    replies.adapter(4, &adapter_info(), &adapter_caps());
     let mut bytes = replies.bytes().to_vec();
 
     // The feature word follows the device-type code and the empty driver's
@@ -491,10 +497,10 @@ fn a_feature_bit_no_flag_claims_is_refused_rather_than_dropped() {
     // about the unclaimed bit rather than about the word being large.
     bytes[at..at + 8].copy_from_slice(&Features::all().bits().to_le_bytes());
     let decoded = decode_replies(&bytes).expect("every claimed bit decodes");
-    let [(_, Reply::Adapter { info })] = decoded.as_slice() else {
+    let [(_, Reply::Adapter { caps, .. })] = decoded.as_slice() else {
         panic!("one adapter reply");
     };
-    assert_eq!(info.caps.features, Features::all());
+    assert_eq!(caps.features, Features::all());
 }
 
 /// A device-type code no variant claims is an error, not `Other`.
@@ -505,7 +511,7 @@ fn a_feature_bit_no_flag_claims_is_refused_rather_than_dropped() {
 #[test]
 fn a_device_type_code_no_variant_claims_is_refused_rather_than_read_as_other() {
     let mut replies = ReplyWriter::new();
-    replies.adapter(5, &adapter_info());
+    replies.adapter(5, &adapter_info(), &adapter_caps());
     let mut bytes = replies.bytes().to_vec();
     let at = device_type_offset("ok");
     assert_eq!(
@@ -551,13 +557,7 @@ fn a_device_reply_carries_the_capabilities_it_was_given_and_is_not_an_adapter() 
     // The same capabilities inside an adapter record are a different reply, and
     // must not be decodable as this one.
     let mut adapter = ReplyWriter::new();
-    adapter.adapter(
-        12,
-        &AdapterInfo {
-            caps,
-            ..adapter_info()
-        },
-    );
+    adapter.adapter(12, &adapter_info(), &caps);
     assert_ne!(adapter.bytes(), replies.bytes());
 }
 
@@ -1018,7 +1018,7 @@ fn a_reader_that_has_failed_stays_failed_rather_than_resyncing_mid_body() {
 #[test]
 fn clearing_a_writer_leaves_a_header_and_nothing_else() {
     let mut replies = ReplyWriter::new();
-    replies.adapter(3, &adapter_info());
+    replies.adapter(3, &adapter_info(), &adapter_caps());
     assert!(replies.bytes().len() > tag::REPLY_HEADER_BYTES);
 
     replies.clear();

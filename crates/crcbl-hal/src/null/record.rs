@@ -836,6 +836,9 @@ pub(super) struct State {
     /// Adapters whose `surface_caps` refuses every surface, permanently. See
     /// [`Recorder::refuse_surface_on`].
     pub(super) refused_adapters: std::collections::BTreeSet<AdapterId>,
+    /// Adapters whose `adapter_caps` fails, as a driver that will not open
+    /// them. See [`Recorder::refuse_device_on`].
+    pub(super) unopenable_adapters: std::collections::BTreeSet<AdapterId>,
     /// Composite-alpha modes a surface offers on each adapter named here. See
     /// [`Recorder::offer_composite_alpha_on`].
     pub(super) composite_alpha: std::collections::BTreeMap<AdapterId, Vec<CompositeAlpha>>,
@@ -862,6 +865,7 @@ impl State {
             clamped_extent: None,
             present_wait_timeouts: 0,
             refused_adapters: std::collections::BTreeSet::new(),
+            unopenable_adapters: std::collections::BTreeSet::new(),
             composite_alpha: std::collections::BTreeMap::new(),
             lost_device: None,
         }
@@ -1495,6 +1499,25 @@ impl Recorder {
     /// [`refuse_surface_on`](Self::refuse_surface_on).
     pub(super) fn refuses_surface(&self, adapter: AdapterId) -> bool {
         self.lock().refused_adapters.contains(&adapter)
+    }
+
+    /// Makes `adapter_caps` on `adapter` fail from now on, as a driver that
+    /// lists an adapter and will not open it does — the case
+    /// [`Instance::adapters`](crate::Instance::adapters) no longer screens out,
+    /// now that listing opens no device.
+    ///
+    /// Latched, for [`refuse_surface_on`](Self::refuse_surface_on)'s reason:
+    /// an adapter that will not open is a fact about it, not an event. Only
+    /// `adapter_caps` refuses; selection asks it before requesting a device,
+    /// so refusing the request as well would be surface nothing exercises.
+    pub fn refuse_device_on(&self, adapter: AdapterId) {
+        self.lock().unopenable_adapters.insert(adapter);
+    }
+
+    /// Whether `adapter` will not open. The backend's half of
+    /// [`refuse_device_on`](Self::refuse_device_on).
+    pub(super) fn refuses_device(&self, adapter: AdapterId) -> bool {
+        self.lock().unopenable_adapters.contains(&adapter)
     }
 
     /// Makes a surface on `adapter` offer `modes` as its composite alpha, in

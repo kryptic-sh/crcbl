@@ -638,10 +638,6 @@ fn fake_adapter(index: u32, device_type: crcbl_hal::DeviceType) -> crcbl_hal::Ad
         driver: "test".to_owned(),
         backend: crcbl_hal::BackendKind::Null,
         luid: None,
-        caps: crcbl_hal::DeviceCaps {
-            features: Features::empty(),
-            limits: crcbl_hal::Limits::minimum(),
-        },
     }
 }
 
@@ -793,13 +789,30 @@ fn a_pin_that_names_no_adapter_here_refuses_the_open() {
 /// The null backend calls every adapter a [`crcbl_hal::DeviceType::Cpu`],
 /// and it is right to: it has one set of capabilities. A pin is only a
 /// choice on an enumeration that mixes classes, so this relabels the
-/// enumeration, answers `display` for the window's display adapter, and
-/// forwards everything else untouched.
+/// enumeration, answers `display` for the window's display adapter, records
+/// each adapter whose caps are asked for in `probes`, refuses `unopenable`'s
+/// as a driver that will not open it, and forwards everything else
+/// untouched.
 #[derive(Debug)]
 struct ClassedInstance {
     inner: crcbl_hal::null::NullInstance,
     classes: Vec<crcbl_hal::DeviceType>,
     display: Option<crcbl_hal::AdapterId>,
+    probes: std::sync::Arc<std::sync::Mutex<Vec<crcbl_hal::AdapterId>>>,
+    unopenable: Option<crcbl_hal::AdapterId>,
+}
+
+impl ClassedInstance {
+    /// `inner`, relabelled with `classes`, with nothing else injected.
+    fn new(inner: crcbl_hal::null::NullInstance, classes: Vec<crcbl_hal::DeviceType>) -> Self {
+        Self {
+            inner,
+            classes,
+            display: None,
+            probes: std::sync::Arc::default(),
+            unopenable: None,
+        }
+    }
 }
 
 impl Instance for ClassedInstance {
@@ -849,6 +862,20 @@ impl Instance for ClassedInstance {
         Ok(self.display)
     }
 
+    fn adapter_caps(
+        &self,
+        adapter: crcbl_hal::AdapterId,
+    ) -> Result<crcbl_hal::DeviceCaps, HalError> {
+        self.probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(adapter);
+        if self.unopenable == Some(adapter) {
+            return Err(HalError::Backend("this driver will not open it".to_owned()));
+        }
+        self.inner.adapter_caps(adapter)
+    }
+
     fn request_device(
         &self,
         desc: &DeviceDesc<'_>,
@@ -875,11 +902,10 @@ fn the_context_opens_on_the_adapter_the_pin_names() {
         (None, (AdapterId(0), DeviceType::Discrete)),
     ] {
         let (_shell, mut pending) = adapter_walk_request(pin);
-        let instance = ClassedInstance {
-            inner: NullInstance::gpu_driven().with_adapters(2),
-            classes: vec![DeviceType::Discrete, DeviceType::Cpu],
-            display: None,
-        };
+        let instance = ClassedInstance::new(
+            NullInstance::gpu_driven().with_adapters(2),
+            vec![DeviceType::Discrete, DeviceType::Cpu],
+        );
         pending.stage = Presenter::start_device(Box::new(instance), &pending)
             .unwrap_or_else(|error| panic!("{pin:?}: both adapters can present: {error}"));
         let mut gpu = finish_open(pending);
@@ -931,11 +957,13 @@ fn open_on(
         recorder.refuse_surface_on(adapter);
     }
     let instance = ClassedInstance {
-        inner: NullInstance::gpu_driven()
-            .with_adapters(2)
-            .with_recorder(recorder),
-        classes: vec![DeviceType::Discrete, DeviceType::Integrated],
         display,
+        ..ClassedInstance::new(
+            NullInstance::gpu_driven()
+                .with_adapters(2)
+                .with_recorder(recorder),
+            vec![DeviceType::Discrete, DeviceType::Integrated],
+        )
     };
     pending.stage = Presenter::start_device(Box::new(instance), &pending)?;
     let mut gpu = finish_open(pending);
@@ -986,6 +1014,60 @@ fn the_presenter_asks_which_adapter_drives_the_display() {
         open_on(&app, None, Some(AdapterId(1))).ok(),
         Some(AdapterId(1))
     );
+}
+
+/// **Adapters are probed in rank order, and the walk stops at the first
+/// that serves**: listing them probes none, an adapter the driver will not
+/// open is stepped past, and the adapters ranked after the one that opened
+/// are never probed. On D3D12 each probe is a driver device, so a walk that
+/// probed every adapter would be the start-up cost this exists to avoid.
+#[test]
+fn adapters_are_probed_in_rank_order_and_only_until_one_serves() {
+    use crcbl_hal::null::NullInstance;
+    use crcbl_hal::{AdapterId, DeviceType};
+
+    let (shell, window) = shell();
+    let target = shell
+        .surface_target(window)
+        .expect("the headless window is still alive");
+    let mut pending = PendingPresenter::new(
+        OpenStage::Done,
+        target,
+        (320, 240),
+        &PresenterDesc::default(),
+    )
+    .expect("the default ring is at least one frame deep");
+    let instance = ClassedInstance {
+        unopenable: Some(AdapterId(1)),
+        ..ClassedInstance::new(
+            NullInstance::gpu_driven().with_adapters(3),
+            vec![
+                DeviceType::Discrete,
+                DeviceType::Integrated,
+                DeviceType::Cpu,
+            ],
+        )
+    };
+    let probes = std::sync::Arc::clone(&instance.probes);
+    instance.adapters();
+    assert!(
+        probes.lock().expect("not poisoned").is_empty(),
+        "listing adapters probes none"
+    );
+
+    pending.stage = Presenter::start_device(Box::new(instance), &pending)
+        .unwrap_or_else(|error| panic!("the discrete adapter opens: {error}"));
+    let mut gpu = finish_open(pending);
+    assert_eq!(gpu.adapter().map(|info| info.id), Some(AdapterId(0)));
+    // LowPower ranks the integrated adapter first; it will not open, so the
+    // discrete one is next, and the software one is never asked.
+    assert_eq!(
+        *probes.lock().expect("not poisoned"),
+        [AdapterId(1), AdapterId(0)]
+    );
+    gpu.drain().expect("nothing was submitted");
+    gpu.destroy()
+        .expect("teardown is in the seam's stated order");
 }
 
 /// **A program's pick opens the adapter it names and nothing else**: a

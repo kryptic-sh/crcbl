@@ -9786,7 +9786,7 @@ impl Probe {
     /// rather than a failure: [`DeviceDesc::adapter`](crcbl_hal::DeviceDesc)
     /// names an adapter from an enumeration, so there has to have been one.
     fn request_device(&mut self) -> bool {
-        let Some(adapter) = self.granted().map(|info| info.id) else {
+        let Some(adapter) = self.granted().map(|(info, _)| info.id) else {
             return false;
         };
         let Some(channel) = self.channel() else {
@@ -10197,7 +10197,7 @@ impl Probe {
         match &self.state {
             AdapterProbe::Unasked => PROBE_UNASKED,
             AdapterProbe::Waiting { .. } => PROBE_WAITING,
-            AdapterProbe::Granted { info } => {
+            AdapterProbe::Granted { info, .. } => {
                 self.text.clone_from(&info.name);
                 PROBE_GRANTED
             }
@@ -10248,13 +10248,14 @@ impl Probe {
         }
     }
 
-    /// What the granted adapter said about itself, or `None` if none was.
+    /// What the granted adapter said about itself and what it can do, or
+    /// `None` if none was granted.
     ///
     /// The numeric exports read through this rather than each reaching into the
     /// enum, so "not granted" is answered in one place instead of three.
-    const fn granted(&self) -> Option<&crcbl_hal::AdapterInfo> {
+    const fn granted(&self) -> Option<(&crcbl_hal::AdapterInfo, &crcbl_hal::DeviceCaps)> {
         match &self.state {
-            AdapterProbe::Granted { info } => Some(info),
+            AdapterProbe::Granted { info, caps } => Some((info, caps)),
             _ => None,
         }
     }
@@ -13405,9 +13406,9 @@ pub mod shim {
     /// genuinely have no optional features — so it is not a failure code, and
     /// these are only meaningful once [`__crcbl_web_gpu_probe_state`] has
     /// answered [`PROBE_GRANTED`](super::PROBE_GRANTED). Allocates nothing.
-    fn granted_u32(read: impl FnOnce(&crcbl_hal::AdapterInfo) -> u32) -> u32 {
+    fn granted_u32(read: impl FnOnce(&crcbl_hal::DeviceCaps) -> u32) -> u32 {
         PROBE.with(|probe| match probe.try_borrow() {
-            Ok(probe) => probe.granted().map_or(0, read),
+            Ok(probe) => probe.granted().map_or(0, |(_, caps)| read(caps)),
             Err(_) => 0,
         })
     }
@@ -13419,14 +13420,14 @@ pub mod shim {
     /// [`PROBE_GRANTED`](super::PROBE_GRANTED).
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub extern "C" fn __crcbl_web_gpu_probe_features_lo() -> u32 {
-        granted_u32(|info| info.caps.features.bits() as u32)
+        granted_u32(|caps| caps.features.bits() as u32)
     }
 
     /// High 32 bits of the same word, on the same terms. Split because the whole
     /// of this ABI is `(i32, …) -> i32`; see the [module docs](super).
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub extern "C" fn __crcbl_web_gpu_probe_features_hi() -> u32 {
-        granted_u32(|info| (info.caps.features.bits() >> 32) as u32)
+        granted_u32(|caps| (caps.features.bits() >> 32) as u32)
     }
 
     /// The granted adapter's
@@ -13435,7 +13436,7 @@ pub mod shim {
     /// been granted, on the terms [`__crcbl_web_gpu_probe_features_lo`] states.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub extern "C" fn __crcbl_web_gpu_probe_max_image_2d() -> u32 {
-        granted_u32(|info| info.caps.limits.max_image_2d)
+        granted_u32(|caps| caps.limits.max_image_2d)
     }
 
     /// How many scalars [`granted_limits`] flattens
@@ -13521,11 +13522,8 @@ pub mod shim {
             return 0;
         };
         PROBE.with(|probe| match probe.try_borrow() {
-            Ok(probe) => probe.granted().map_or(0, |info| {
-                granted_limits(info.caps.limits)
-                    .get(index)
-                    .copied()
-                    .unwrap_or(0)
+            Ok(probe) => probe.granted().map_or(0, |(_, caps)| {
+                granted_limits(caps.limits).get(index).copied().unwrap_or(0)
             }),
             Err(_) => 0,
         })
@@ -16078,11 +16076,11 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_reply_commit(len), 1);
     }
 
-    /// An adapter with a feature set spanning both halves of the `u64` and a
-    /// `max_image_2d` no default would produce, so the three numeric exports
-    /// cannot pass by reading zero or by swapping their halves.
-    fn granted(name: &str) -> AdapterInfo {
-        AdapterInfo {
+    /// An adapter, and its caps: a feature set spanning both halves of the
+    /// `u64` and a `max_image_2d` no default would produce, so the three
+    /// numeric exports cannot pass by reading zero or by swapping their halves.
+    fn granted(name: &str) -> (AdapterInfo, DeviceCaps) {
+        let info = AdapterInfo {
             id: AdapterId(0),
             name: name.into(),
             vendor_id: 0,
@@ -16091,18 +16089,19 @@ mod tests {
             driver: String::new(),
             backend: BackendKind::WebGpu,
             luid: None,
-            caps: DeviceCaps {
-                // `COMPUTE` is bit 8, `RAY_QUERY` bit 24, `ACCELERATION_STRUCTURE`
-                // bit 26 — all in the low word, which is why the corpus in
-                // `tests/replies` carries the high-word case the enum cannot
-                // reach yet.
-                features: Features::COMPUTE | Features::RAY_QUERY,
-                limits: Limits {
-                    max_image_2d: 16384,
-                    ..Limits::minimum()
-                },
+        };
+        let caps = DeviceCaps {
+            // `COMPUTE` is bit 8, `RAY_QUERY` bit 24, `ACCELERATION_STRUCTURE`
+            // bit 26 — all in the low word, which is why the corpus in
+            // `tests/replies` carries the high-word case the enum cannot reach
+            // yet.
+            features: Features::COMPUTE | Features::RAY_QUERY,
+            limits: Limits {
+                max_image_2d: 16384,
+                ..Limits::minimum()
             },
-        }
+        };
+        (info, caps)
     }
 
     /// The whole exchange through the exports alone, which is what the browser
@@ -16122,7 +16121,7 @@ mod tests {
 
         let info = granted("Cherry MX Blue GPU");
         let mut replies = ReplyWriter::new();
-        replies.adapter(0, &info);
+        replies.adapter(0, &info.0, &info.1);
         deliver(replies.bytes());
 
         assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_GRANTED);
@@ -16144,11 +16143,11 @@ mod tests {
         assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
         let info = granted("capable");
         let mut replies = ReplyWriter::new();
-        replies.adapter(0, &info);
+        replies.adapter(0, &info.0, &info.1);
         deliver(replies.bytes());
         assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_GRANTED);
 
-        let bits = info.caps.features.bits();
+        let bits = info.1.features.bits();
         assert_eq!(
             u64::from(__crcbl_web_gpu_probe_features_lo()),
             bits & 0xFFFF_FFFF
@@ -16156,7 +16155,7 @@ mod tests {
         assert_eq!(u64::from(__crcbl_web_gpu_probe_features_hi()), bits >> 32);
         assert_eq!(
             __crcbl_web_gpu_probe_max_image_2d(),
-            info.caps.limits.max_image_2d
+            info.1.limits.max_image_2d
         );
     }
 
@@ -16197,7 +16196,8 @@ mod tests {
         assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
 
         let mut replies = ReplyWriter::new();
-        replies.adapter(9_999, &granted("an answer to nothing"));
+        let (info, caps) = granted("an answer to nothing");
+        replies.adapter(9_999, &info, &caps);
         deliver(replies.bytes());
 
         assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_UNDECODABLE);
@@ -16217,12 +16217,12 @@ mod tests {
         }
     }
 
-    /// Enumerates, grants `info`, and leaves the probe with an adapter.
-    fn grant(info: &AdapterInfo) {
+    /// Enumerates, grants `adapter`, and leaves the probe with an adapter.
+    fn grant(adapter: &(AdapterInfo, DeviceCaps)) {
         assert_eq!(__crcbl_web_gpu_probe_adapters(), 1);
         assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
         let mut replies = ReplyWriter::new();
-        replies.adapter(0, info);
+        replies.adapter(0, &adapter.0, &adapter.1);
         deliver(replies.bytes());
         assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_GRANTED);
     }
@@ -16287,17 +16287,17 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
 
         assert_ne!(
-            adapter.caps.features,
+            adapter.1.features,
             device_caps().features,
             "the corpus would not notice a copy otherwise"
         );
         assert_ne!(
-            adapter.caps.limits.max_image_2d,
+            adapter.1.limits.max_image_2d,
             device_caps().limits.max_image_2d
         );
         assert_eq!(
             __crcbl_web_gpu_probe_features_lo(),
-            adapter.caps.features.bits() as u32
+            adapter.1.features.bits() as u32
         );
         assert_eq!(
             __crcbl_web_gpu_probe_device_features_lo(),
@@ -16305,7 +16305,7 @@ mod tests {
         );
         assert_eq!(
             __crcbl_web_gpu_probe_max_image_2d(),
-            adapter.caps.limits.max_image_2d
+            adapter.1.limits.max_image_2d
         );
         assert_eq!(
             __crcbl_web_gpu_probe_device_max_image_2d(),
@@ -16368,7 +16368,8 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_adapters(), 1);
         assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
         let mut replies = ReplyWriter::new();
-        replies.adapter(0, &granted("both at once"));
+        let (info, caps) = granted("both at once");
+        replies.adapter(0, &info, &caps);
         deliver(replies.bytes());
         assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_GRANTED);
 
@@ -16380,7 +16381,8 @@ mod tests {
 
         let mut replies = ReplyWriter::new();
         replies.device(1, &device_caps());
-        replies.adapter(2, &granted("answered second"));
+        let (info, caps) = granted("answered second");
+        replies.adapter(2, &info, &caps);
         deliver(replies.bytes());
 
         // The device is asked first, so it is the call that drains. The

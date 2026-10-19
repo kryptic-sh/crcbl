@@ -6939,10 +6939,20 @@ impl OffscreenSetup {
             crate::adapter::PowerPreference::HighPerformance,
             None,
         )?;
-        let adapter = *choice
-            .candidates()
-            .first()
-            .ok_or(OffscreenError::Unusable("no adapter"))?;
+        // Probed in that order, stopping at the first the driver opens:
+        // listing adapters opened none of them, and a listed one may refuse.
+        let mut refusal = None;
+        let opens = choice.candidates().iter().copied().find(|adapter| {
+            instance
+                .adapter_caps(adapter.id)
+                .map_err(|error| refusal = Some(error))
+                .is_ok()
+        });
+        let adapter = match (opens, refusal) {
+            (Some(adapter), _) => adapter,
+            (None, Some(error)) => return Err(OffscreenError::Hal(error)),
+            (None, None) => return Err(OffscreenError::Unusable("no adapter")),
+        };
 
         let caps = instance
             .surface_caps(surface, adapter.id)
@@ -7154,6 +7164,17 @@ impl OffscreenSetup {
     #[must_use]
     pub const fn adapter(&self) -> &crate::hal::AdapterInfo {
         &self.adapter
+    }
+
+    /// What [`Self::adapter`] can do, which may be more than [`Self::caps`]:
+    /// a device reports what it was opened with.
+    ///
+    /// # Errors
+    ///
+    /// What [`Instance::adapter_caps`] reports, which for an adapter a device
+    /// is already open on is nothing a backend in this workspace answers.
+    pub fn adapter_caps(&self) -> Result<crate::hal::DeviceCaps, crate::hal::HalError> {
+        self.instance.adapter_caps(self.adapter.id)
     }
 
     /// What the opened device reported it can do.
@@ -8479,6 +8500,30 @@ mod tests {
         };
         setup.finish().expect("the null device reaches idle");
         assert_eq!(probe, expected);
+    }
+
+    /// **An adapter the driver will not open is stepped past**: listing
+    /// adapters opens none, so the first ranked one may refuse, and the setup
+    /// opens on the next rather than failing.
+    #[test]
+    fn a_probe_steps_past_an_adapter_that_will_not_open() {
+        use crate::hal::AdapterId;
+        use crate::hal::null::{NullInstance, Recorder};
+
+        let recorder = Recorder::new();
+        recorder.refuse_device_on(AdapterId(0));
+        let probe = OffscreenSetup::probe_on(Box::new(
+            NullInstance::gpu_driven()
+                .with_adapters(2)
+                .with_recorder(recorder.clone()),
+        ))
+        .expect("the second adapter opens");
+        assert_eq!(probe.adapter.id, AdapterId(1));
+        assert_eq!(
+            recorder.total_live_objects(),
+            0,
+            "the probe leaked resources"
+        );
     }
 
     /// A device that reports out of band while it is probed fails the probe,

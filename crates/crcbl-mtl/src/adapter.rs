@@ -155,7 +155,9 @@ pub(crate) fn driver_string() -> String {
     )
 }
 
-/// Everything one Metal device says about itself.
+/// Everything one Metal device says about itself: who it is, and what it can
+/// do. Metal answers both off the `MTLDevice` enumeration already handed back,
+/// so nothing is deferred.
 ///
 /// `driver` is passed in rather than recomputed per adapter: it is a property
 /// of the machine, not of the GPU, and asking `NSProcessInfo` once per device
@@ -164,10 +166,14 @@ pub(crate) fn adapter_info(
     index: u32,
     device: &ProtocolObject<dyn MTLDevice>,
     driver: String,
-) -> AdapterInfo {
+) -> (AdapterInfo, DeviceCaps) {
     let name = device.name().to_string();
     let features = features_of(device, &name);
-    AdapterInfo {
+    let caps = DeviceCaps {
+        features,
+        limits: limits_of(device, features),
+    };
+    let info = AdapterInfo {
         id: AdapterId(index),
         name,
         // **Metal exposes no PCI ids, and there is nothing honest to put here.**
@@ -184,11 +190,8 @@ pub(crate) fn adapter_info(
         backend: BackendKind::Metal,
         // `registryID` is an IOKit key, not a LUID; see the ids above.
         luid: None,
-        caps: DeviceCaps {
-            features,
-            limits: limits_of(device, features),
-        },
-    }
+    };
+    (info, caps)
 }
 
 /// Which class of device this is, from what Metal actually reports.

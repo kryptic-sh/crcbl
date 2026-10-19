@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crcbl_core::Pool;
 use crcbl_hal::{
-    AdapterId, AdapterInfo, BackendKind, DeviceDesc, DeviceRequestState, HalError, Instance,
-    PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
+    AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceDesc, DeviceRequestState, HalError,
+    Instance, PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -42,6 +42,8 @@ pub(crate) fn next_owner_id() -> u64 {
 pub(crate) struct AdapterRecord {
     pub(crate) raw: Retained<ProtocolObject<dyn MTLDevice>>,
     pub(crate) info: AdapterInfo,
+    /// What [`Instance::adapter_caps`] answers, read during enumeration.
+    pub(crate) caps: DeviceCaps,
 }
 
 impl core::fmt::Debug for AdapterRecord {
@@ -190,11 +192,15 @@ impl MetalInstance {
         let adapters: Vec<AdapterRecord> = devices
             .iter()
             .enumerate()
-            // `info` is initialised first on purpose: it borrows the device to
-            // read it, and `raw` then moves the same `Retained` in.
-            .map(|(index, device)| AdapterRecord {
-                info: adapter::adapter_info(index as u32, &device, driver.clone()),
-                raw: device,
+            // Described first on purpose: that borrows the device to read it,
+            // and `raw` then moves the same `Retained` in.
+            .map(|(index, device)| {
+                let (info, caps) = adapter::adapter_info(index as u32, &device, driver.clone());
+                AdapterRecord {
+                    info,
+                    caps,
+                    raw: device,
+                }
             })
             .collect();
 
@@ -257,7 +263,7 @@ impl MetalInstance {
         // Everything decidable now is decided now, per `request_device`'s
         // contract, and in the order the seam lists: the adapter first, then
         // the features, then the surface.
-        let missing = record.info.caps.missing(desc.required_features);
+        let missing = record.caps.missing(desc.required_features);
         if !missing.is_empty() {
             return Err(HalError::UnsupportedFeatures { missing });
         }
@@ -285,6 +291,16 @@ impl Instance for MetalInstance {
             .iter()
             .map(|record| record.info.clone())
             .collect()
+    }
+
+    /// Read during enumeration, so this opens nothing.
+    fn adapter_caps(&self, adapter: AdapterId) -> Result<DeviceCaps, HalError> {
+        self.inner
+            .adapters
+            .iter()
+            .find(|record| record.info.id == adapter)
+            .map(|record| record.caps)
+            .ok_or(HalError::NoSuchAdapter(adapter.0))
     }
 
     /// Creates a surface from a `CAMetalLayer`, or from nothing at all for
@@ -473,11 +489,15 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn reported_limits_come_from_metal_and_agree_with_the_features() {
-        let adapters = open().adapters();
+        let instance = open();
+        let adapters = instance.adapters();
         assert!(!adapters.is_empty(), "nothing to check");
         let floor = Limits::minimum();
         for adapter in &adapters {
-            let limits = adapter.caps.limits;
+            let caps = instance
+                .adapter_caps(adapter.id)
+                .expect("a listed adapter describes itself");
+            let limits = caps.limits;
             assert_eq!(
                 limits.max_storage_buffer_range, limits.max_uniform_buffer_range,
                 "both ranges are one maxBufferLength, so a preset leaked in: {adapter:?}"
@@ -498,22 +518,19 @@ pub(crate) mod tests {
                 "maxThreadsPerThreadgroup came back zero: {adapter:?}"
             );
 
-            let bindless = adapter
-                .caps
-                .features
-                .contains(Features::DESCRIPTOR_INDEXING);
+            let bindless = caps.features.contains(Features::DESCRIPTOR_INDEXING);
             assert_eq!(
                 bindless,
                 limits.max_bindless_descriptors > 0,
                 "bindless capacity and the bindless feature disagree: {adapter:?}"
             );
             assert_eq!(
-                adapter.caps.features.contains(Features::PUSH_CONSTANTS),
+                caps.features.contains(Features::PUSH_CONSTANTS),
                 limits.max_push_constant_size > 0,
                 "the push-constant budget and the push-constant feature disagree: {adapter:?}"
             );
             assert_eq!(
-                adapter.caps.features.contains(Features::SAMPLER_ANISOTROPY),
+                caps.features.contains(Features::SAMPLER_ANISOTROPY),
                 limits.max_sampler_anisotropy > 1.0,
                 "the anisotropy cap and the anisotropy feature disagree: {adapter:?}"
             );
@@ -622,11 +639,11 @@ pub(crate) mod tests {
         // task share the hardware/OS gate; otherwise indirect count remains the
         // strongest reported geometry path, including on Paravirtual devices.
         let mesh_stages = Features::MESH_SHADER | Features::TASK_SHADER;
-        assert_eq!(
-            caps.features & mesh_stages,
-            adapters[0].caps.features & mesh_stages
-        );
-        let mesh = adapters[0].caps.supports(Features::MESH_SHADER);
+        let offered = instance
+            .adapter_caps(adapters[0].id)
+            .expect("a listed adapter describes itself");
+        assert_eq!(caps.features & mesh_stages, offered.features & mesh_stages);
+        let mesh = offered.supports(Features::MESH_SHADER);
         assert_eq!(caps.supports(Features::TASK_SHADER), mesh);
         for (capability, feature) in [
             (crcbl_hal::Capability::MeshShading, Features::MESH_SHADER),

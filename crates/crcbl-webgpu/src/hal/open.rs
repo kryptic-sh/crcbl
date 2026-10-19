@@ -131,12 +131,20 @@ impl Future for WebGpuInstanceOpen {
                         .to_string(),
                 )));
             }
-            (AdapterProbe::Granted { info }, SurfaceCapsProbe::Answered { caps }) => {
-                (info, Ok(caps.clone()))
-            }
-            (AdapterProbe::Granted { info }, SurfaceCapsProbe::Refused { reason, .. }) => {
-                (info, Err(reason.clone()))
-            }
+            (
+                AdapterProbe::Granted {
+                    info,
+                    caps: adapter_caps,
+                },
+                SurfaceCapsProbe::Answered { caps },
+            ) => ((info, adapter_caps), Ok(caps.clone())),
+            (
+                AdapterProbe::Granted {
+                    info,
+                    caps: adapter_caps,
+                },
+                SurfaceCapsProbe::Refused { reason, .. },
+            ) => ((info, adapter_caps), Err(reason.clone())),
             _ => {
                 // The rAF loop re-polls next frame; wake so a generic executor
                 // does too, rather than parking on a future the browser's event
@@ -147,7 +155,7 @@ impl Future for WebGpuInstanceOpen {
         };
         Poll::Ready(Ok(WebGpuInstance::new(
             this.channel.clone(),
-            vec![info.clone()],
+            vec![(info.0.clone(), *info.1)],
             this.pool.clone(),
             canvas,
         )))

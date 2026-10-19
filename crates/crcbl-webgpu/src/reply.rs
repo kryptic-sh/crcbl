@@ -118,16 +118,16 @@
 //!
 //! # What an adapter reply carries, and what the browser cannot tell it
 //!
-//! [`Reply::Adapter`] is the whole of [`AdapterInfo`]
-//! bar one field, in declaration order with
-//! [`caps`](crcbl_hal::AdapterInfo::caps) expanded in place: `id`, `name`,
-//! `vendor_id`, `device_id`, `device_type`, `driver`, then
+//! [`Reply::Adapter`] is the whole of [`AdapterInfo`] bar two fields, in
+//! declaration order, followed by the adapter's [`DeviceCaps`] expanded in
+//! place: `id`, `name`, `vendor_id`, `device_id`, `device_type`, `driver`, then
 //! [`DeviceCaps::features`](crcbl_hal::DeviceCaps::features) as a `u64` of
 //! [`Features::bits`](crcbl_hal::Features::bits) and every field of
 //! [`Limits`], also in declaration order. Stating the *rule*
 //! rather than a list is deliberate: two hand-written codecs agreeing on
-//! "declaration order, `backend` omitted" is one fact to check, where a copied
-//! list is nineteen.
+//! "declaration order, `backend` and `luid` omitted" is one fact to check,
+//! where a copied list is nineteen. A browser exposes no adapter LUID, so the
+//! decoder writes `None` for it.
 //!
 //! **[`backend`](crcbl_hal::AdapterInfo::backend) is the field that is not on
 //! the wire.** It is not a fact about the adapter — it says which crate
@@ -216,16 +216,16 @@ impl ByteWriter {
         self.put_limits(&caps.limits);
     }
 
-    /// [`AdapterInfo`] in declaration order, `backend` omitted and `caps`
-    /// expanded — see the [module docs](self).
-    fn put_adapter_info(&mut self, info: &AdapterInfo) {
+    /// [`AdapterInfo`] in declaration order, `backend` and `luid` omitted,
+    /// then `caps` expanded — see the [module docs](self).
+    fn put_adapter_info(&mut self, info: &AdapterInfo, caps: &DeviceCaps) {
         self.put_u32(info.id.0);
         self.put_bytes(info.name.as_bytes());
         self.put_u32(info.vendor_id);
         self.put_u32(info.device_id);
         self.put_u8(tag::device_type_code(info.device_type));
         self.put_bytes(info.driver.as_bytes());
-        self.put_device_caps(&info.caps);
+        self.put_device_caps(caps);
     }
 
     /// A counted list of enum codes: the count, then one byte per element.
@@ -319,7 +319,7 @@ impl ByteReader<'_> {
     ///
     /// [`AdapterInfo::backend`] is not read because it is not written: it names
     /// the crate that decoded, which is this one.
-    fn read_adapter_info(&mut self) -> Result<AdapterInfo, DecodeError> {
+    fn read_adapter_info(&mut self) -> Result<(AdapterInfo, DeviceCaps), DecodeError> {
         let id = AdapterId(self.read_u32()?);
         let name = self.read_string("Adapter::name")?;
         let vendor_id = self.read_u32()?;
@@ -331,7 +331,7 @@ impl ByteReader<'_> {
                 code: device_type_code.into(),
             })?;
         let driver = self.read_string("Adapter::driver")?;
-        Ok(AdapterInfo {
+        let info = AdapterInfo {
             id,
             name,
             vendor_id,
@@ -341,8 +341,8 @@ impl ByteReader<'_> {
             backend: BackendKind::WebGpu,
             // Not on the wire: a browser exposes no adapter LUID.
             luid: None,
-            caps: self.read_device_caps()?,
-        })
+        };
+        Ok((info, self.read_device_caps()?))
     }
 
     /// The counterpart of [`ByteWriter::put_enum_list`], bounded by
@@ -505,7 +505,7 @@ fn message_field(message: &str) -> std::borrow::Cow<'_, str> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
     /// One entry of an adapter enumeration: the whole of
-    /// [`AdapterInfo`].
+    /// [`AdapterInfo`], and the adapter's [`DeviceCaps`].
     ///
     /// Everything a caller needs to pick an adapter without paying for a device
     /// — the id it passes back in a [`DeviceDesc`](crcbl_hal::DeviceDesc), the
@@ -520,6 +520,11 @@ pub enum Reply {
     Adapter {
         /// What the browser said about the adapter it granted.
         info: AdapterInfo,
+        /// What that adapter can do. Carried here because a browser's
+        /// enumeration already answered it, so
+        /// [`Instance::adapter_caps`](crcbl_hal::Instance::adapter_caps) costs
+        /// nothing.
+        caps: DeviceCaps,
     },
     /// The enumeration found nothing, with the reason the browser gave.
     ///
@@ -829,9 +834,9 @@ impl ReplyWriter {
     /// [`BackendKind::WebGpu`], whatever was
     /// passed here — see the [module docs](self) for why that field belongs to
     /// the decoder.
-    pub fn adapter(&mut self, sequence: u64, info: &AdapterInfo) {
+    pub fn adapter(&mut self, sequence: u64, info: &AdapterInfo, caps: &DeviceCaps) {
         self.open(tag::ADAPTER_REPLY_TAG, sequence);
-        self.bytes.put_adapter_info(info);
+        self.bytes.put_adapter_info(info, caps);
     }
 
     /// [`Reply::NoAdapter`].
@@ -1022,9 +1027,10 @@ impl<'a> ReplyReader<'a> {
         let opcode = r.read_u8()?;
         let sequence = r.read_u64()?;
         let reply = match opcode {
-            tag::ADAPTER_REPLY_TAG => Reply::Adapter {
-                info: r.read_adapter_info()?,
-            },
+            tag::ADAPTER_REPLY_TAG => {
+                let (info, caps) = r.read_adapter_info()?;
+                Reply::Adapter { info, caps }
+            }
             tag::NO_ADAPTER_REPLY_TAG => Reply::NoAdapter {
                 reason: r.read_string("NoAdapter::reason")?,
             },

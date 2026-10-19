@@ -6088,13 +6088,16 @@ fn draw_scene_and_match_its_golden_measuring(
     // hypothetical: `Features::MESH_SHADER` is not part of `GPU_DRIVEN`, so
     // until `OffscreenSetup::OPTIONAL_FEATURES` named it, an adapter reporting
     // mesh shaders drew this frame through `IndirectCount` and nothing said so.
+    let offered = setup
+        .adapter_caps()
+        .expect("the adapter the device opened on describes itself");
     assert_eq!(
         caps.geometry_path(),
-        adapter.caps.geometry_path(),
+        offered.geometry_path(),
         "adapter {} offers {:?} and the device opened on {:?} — a selector's flag \
          was not asked for, so the frame took a lesser tail than this machine can run",
         adapter.name,
-        adapter.caps.geometry_path(),
+        offered.geometry_path(),
         caps.geometry_path(),
     );
     if let Some(path) = setup.geometry_path() {

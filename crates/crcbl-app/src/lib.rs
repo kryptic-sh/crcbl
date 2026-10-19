@@ -5,18 +5,19 @@
 //! crcbl_shell::open() ──▶ window::open_window ──▶ window::wait_for_configure
 //!                                                         │ extent
 //!                                                         ▼
-//!   present::Presenter: backend::request_open ──▶ adapter::select
+//!   present::Presenter: backend::request_open ──▶ adapter::choose
 //!                       ──▶ device + swapchain ──▶ acquire / submit_and_present
 //!
 //! ShellEvent ──▶ text_input::TextPump ──▶ crcbl_ui's TextInput
 //! ```
 //!
 //! [`backend`] walks the GPU backends this target has and falls through past
-//! one that cannot open, [`adapter`] reads the `CRCBL_ADAPTER` pin that says
-//! which device inside it, [`window`] opens a window and waits for its first
-//! size, [`present`] opens a device and a swapchain on that window and paces
-//! frames into it, and [`text_input`] joins the shell's key, commit and
-//! clipboard events to `crcbl-ui`'s text input. A program that draws only a
+//! one that cannot open, [`adapter`] decides which device inside it — the
+//! `CRCBL_ADAPTER` pin, the program's pick, or a ranking by power preference
+//! — [`window`] opens a window and waits for its first size, [`present`]
+//! opens a device and a swapchain on that window and paces frames into it,
+//! and [`text_input`] joins the shell's key, commit and clipboard events to
+//! `crcbl-ui`'s text input. A program that draws only a
 //! UI — a status bar, a launcher — depends on this crate, `crcbl-ui` and
 //! `crcbl-frame`, opens a [`present::Presenter`] where a game opens the
 //! engine's `GpuContext`, and links no audio, physics, networking or ECS.

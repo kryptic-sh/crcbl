@@ -1,13 +1,13 @@
 //! The Direct3D 12 [`Instance`] implementation — adapter enumeration, the WARP
 //! question, device creation, and the refusals that still name themselves.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crcbl_core::Pool;
 use crcbl_hal::{
-    AdapterId, AdapterInfo, BackendKind, DeviceDesc, DeviceRequestState, HalError, Instance,
-    PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
+    AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceDesc, DeviceRequestState, HalError,
+    Instance, PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
 };
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
@@ -49,22 +49,26 @@ pub(crate) fn next_owner_id() -> u64 {
 // with the reason attached. See `crate::command`'s `NO_DISPATCH_MESH`; the
 // buffer fill's own refusal went when the seam's valued fill did.
 
-/// One enumerated adapter: what the seam was told about it, the raw D3D12
-/// answers that were told from, and the DXGI interface it was read through.
+/// One enumerated adapter: who it is, the DXGI interface it was read through,
+/// and — once something asked — what it can do.
 ///
-/// DX1 kept only the first two and dropped the `IDXGIAdapter1`, because nothing
-/// needed it. [`Instance::request_device`] needs it — `D3D12CreateDevice` takes
-/// an `IDXGIAdapter1` and there is no way to name an adapter without one — so it
+/// DX1 kept no `IDXGIAdapter1`, because nothing needed it.
+/// [`Instance::request_device`] needs it — `D3D12CreateDevice` takes an
+/// `IDXGIAdapter1` and there is no way to name an adapter without one — so it
 /// is kept now that there is a caller. `crcbl-mtl` made and reversed exactly
 /// this call about its `MTLDevice` objects.
 #[derive(Debug)]
 pub(crate) struct AdapterRecord {
     pub(crate) info: AdapterInfo,
-    pub(crate) raw: RawCaps,
     pub(crate) adapter: IDXGIAdapter1,
-    /// The device enumeration opened to describe this adapter, held until any
-    /// device is opened on this instance and then released, every adapter's
-    /// at once.
+    /// The descriptor `info` was read from, kept for [`adapter::probe`].
+    pub(crate) desc: DXGI_ADAPTER_DESC1,
+    /// [`adapter::probe`]'s answer, or why D3D12 would not open the adapter,
+    /// asked the first time anything needs the caps and never again.
+    described: OnceLock<Result<Described, String>>,
+    /// The device [`describe`](Self::describe) opened to ask, held until a
+    /// device is opened on this instance and then released, every adapter's at
+    /// once.
     ///
     /// Held because D3D12 keeps one device per adapter and feature level while
     /// one is alive, and hands that same device to the next
@@ -77,7 +81,80 @@ pub(crate) struct AdapterRecord {
     pub(crate) probe: Mutex<Option<ID3D12Device>>,
 }
 
+/// What one adapter can do, and the raw D3D12 answers that was told from.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Described {
+    pub(crate) caps: DeviceCaps,
+    pub(crate) raw: RawCaps,
+}
+
 impl AdapterRecord {
+    /// What this adapter can do, asked of a D3D12 device the first time and
+    /// remembered.
+    ///
+    /// `hold` says whether to keep the device that answered for the next
+    /// open (see [`probe`](Self::probe)); false once a device is open on this
+    /// instance, when nothing will release it.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::Backend`] naming why D3D12 will not open the adapter.
+    pub(crate) fn describe(&self, hold: bool) -> Result<&Described, HalError> {
+        self.described
+            .get_or_init(|| {
+                let (caps, raw, device) = adapter::probe(&self.adapter, &self.desc)?;
+                if hold {
+                    *self
+                        .probe
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(device);
+                }
+                let described = Described { caps, raw };
+                // The measurement, emitted by the backend itself rather than
+                // only by its tests: an application with a logger installed
+                // gets the line without anyone running a test suite. Once per
+                // adapter probed, which is one adapter in a start-up that
+                // found its device first time.
+                crcbl_core::log::info!("{}", self.report_with(&described));
+                Ok(described)
+            })
+            .as_ref()
+            .map_err(|why| HalError::Backend(why.clone()))
+    }
+
+    /// [`describe`](Self::describe) for a test, which has nothing to do with
+    /// an adapter that will not open but fail.
+    #[cfg(test)]
+    pub(crate) fn described(&self) -> &Described {
+        self.describe(true)
+            .unwrap_or_else(|error| panic!("{}: {error}", self.info.name))
+    }
+
+    /// One line for the log: who this adapter is, and what it can do where
+    /// that has been asked already. Never asks — a log line that opened a
+    /// device would be the cost lazy description exists to avoid.
+    pub(crate) fn report(&self) -> String {
+        match self.described.get() {
+            Some(Ok(described)) => self.report_with(described),
+            Some(Err(why)) => format!("{} ({why})", self.identity()),
+            None => format!("{} (not probed)", self.identity()),
+        }
+    }
+
+    /// Who this adapter is, on one line.
+    fn identity(&self) -> String {
+        format!(
+            "crcbl-dx12 adapter {id} \"{name}\" luid={luid:#018x} type={kind:?} \
+             vendor={vendor:#06x} device={device:#06x} driver=\"{driver}\"",
+            id = self.info.id.0,
+            luid = adapter::luid_of(&self.desc),
+            name = self.info.name,
+            kind = self.info.device_type,
+            vendor = self.info.vendor_id,
+            device = self.info.device_id,
+            driver = self.info.driver,
+        )
+    }
     /// One line carrying everything this slice was written to measure.
     ///
     /// `docs/backlog.md`'s "Does WARP clear the GPU-driven set?" is answered by
@@ -89,37 +166,23 @@ impl AdapterRecord {
     /// Every test that can fail on an adapter carries this string in its
     /// message, so a red run publishes the measurement whether or not a green
     /// one was asked to print it.
-    pub(crate) fn report(&self) -> String {
+    fn report_with(&self, described: &Described) -> String {
+        let (raw, caps) = (&described.raw, &described.caps);
         format!(
-            "crcbl-dx12 adapter {id} \"{name}\" luid={luid:#018x} type={kind:?} \
-             vendor={vendor:#06x} device={device:#06x} ResourceBindingTier={tier} \
-             HighestShaderModel={model} sm66-dynamic-resources={dynamic} \
-             block-compression={bc} geometry={geometry:?} binding={binding:?} \
-             lighting={lighting:?} features={features:?} \
-             driver=\"{driver}\"",
-            id = self.info.id.0,
-            luid = self.raw.luid,
-            name = self.info.name,
-            kind = self.info.device_type,
-            vendor = self.info.vendor_id,
-            device = self.info.device_id,
-            tier = self.raw.binding_tier.0,
-            model = adapter::shader_model_name(self.raw.shader_model),
-            dynamic = if self.raw.dynamic_resources() {
-                "yes"
-            } else {
-                "no"
-            },
-            bc = if self.raw.block_compression {
-                "yes"
-            } else {
-                "no"
-            },
-            geometry = self.info.caps.geometry_path(),
-            binding = self.info.caps.binding_model(),
-            lighting = self.info.caps.lighting_path(),
-            features = self.info.caps.features,
-            driver = self.info.driver,
+            "{identity} ResourceBindingTier={tier} HighestShaderModel={model} \
+             sm66-dynamic-resources={dynamic} block-compression={bc} UMA={uma} \
+             geometry={geometry:?} binding={binding:?} lighting={lighting:?} \
+             features={features:?}",
+            identity = self.identity(),
+            tier = raw.binding_tier.0,
+            model = adapter::shader_model_name(raw.shader_model),
+            dynamic = if raw.dynamic_resources() { "yes" } else { "no" },
+            bc = if raw.block_compression { "yes" } else { "no" },
+            uma = if raw.unified_memory { "yes" } else { "no" },
+            geometry = caps.geometry_path(),
+            binding = caps.binding_model(),
+            lighting = caps.lighting_path(),
+            features = caps.features,
         )
     }
 }
@@ -235,6 +298,9 @@ pub(crate) struct InstanceInner {
     /// create at all. It decides both what [`Instance::surface_caps`] offers
     /// and what flags every swapchain carries.
     pub(crate) allow_tearing: bool,
+    /// Set by the first device opened here, after which a probe is not held:
+    /// the release that would let it go has already happened.
+    pub(crate) opened: AtomicBool,
     surfaces: Mutex<Pool<SurfaceEntry>>,
 }
 
@@ -287,10 +353,10 @@ impl InstanceInner {
     }
 }
 
-/// Every D3D12 adapter on the machine, described before any of them is opened.
+/// Every D3D12 adapter on the machine, listed before any of them is opened.
 ///
-/// Holds owned [`AdapterInfo`], the raw D3D12 answers behind it, and the DXGI
-/// factory and adapters — behind an [`Arc`] shared with every `Dx12Device`
+/// Holds owned [`AdapterInfo`], the raw D3D12 answers behind each adapter once
+/// it has been probed, and the DXGI factory and adapters — behind an [`Arc`] shared with every `Dx12Device`
 /// opened from it. See `InstanceInner` for the lifetime obligation that shape
 /// discharges, and the crate docs for why none of it needs an `unsafe` marker.
 #[derive(Debug)]
@@ -299,12 +365,18 @@ pub struct Dx12Instance {
 }
 
 impl Dx12Instance {
-    /// Enumerates every D3D12 adapter, filling in each one's capabilities.
+    /// Enumerates every D3D12 adapter, opening none of them.
     ///
-    /// `None` when DXGI will not start or when no adapter it lists can be opened
-    /// as a D3D12 device at all — the case a backend registry falls through on,
-    /// and the same shape `crcbl_mtl::MetalInstance::open` uses for it. On a
-    /// stock Windows this does not happen: WARP ships with the OS.
+    /// Each adapter's capabilities are probed the first time
+    /// [`Instance::adapter_caps`] or a device request asks, which is what keeps
+    /// this call to DXGI queries: creating a device per adapter to describe it
+    /// cost about a fifth of a second each on the machines measured.
+    ///
+    /// `None` when DXGI will not start or lists no adapter at all — the case a
+    /// backend registry falls through on, and the same shape
+    /// `crcbl_mtl::MetalInstance::open` uses for it. On a stock Windows this
+    /// does not happen: WARP ships with the OS. An adapter D3D12 will not open
+    /// is listed and refuses at its probe.
     ///
     /// # WARP is asked for by name, and the ordinary enumeration skips software
     ///
@@ -345,9 +417,9 @@ impl Dx12Instance {
     #[must_use]
     pub fn open() -> Option<Self> {
         // **Before anything else opens a device.** The D3D12 debug layer is
-        // chosen per device at creation, and `candidates` below opens one per
-        // adapter to describe it — so a layer turned on after this line would
-        // validate nothing this instance enumerated. See [`crate::debug`],
+        // chosen per device at creation, and every probe and device this
+        // instance makes comes after this line — so a layer turned on later
+        // would validate nothing this instance opened. See [`crate::debug`],
         // which also says why its messages are pulled out of the info queue
         // rather than left for a debugger nobody has attached.
         debug::enable_debug_layer();
@@ -382,38 +454,28 @@ impl Dx12Instance {
                 }
             };
 
-        let mut adapters: Vec<AdapterRecord> = Vec::new();
-        // The id is the position in *this* vector, so it advances only when an
-        // adapter is actually kept. Counting the DXGI index instead would leave
-        // a hole wherever `describe` answered `None`, and every id after it
-        // would name the wrong adapter.
-        let mut next_id = 0u32;
-        for (raw_adapter, desc) in candidates(&factory) {
-            let Some((info, raw, probe)) =
-                adapter::describe(AdapterId(next_id), &raw_adapter, &desc)
-            else {
-                continue;
-            };
-            let record = AdapterRecord {
-                info,
-                raw,
-                adapter: raw_adapter,
-                probe: Mutex::new(Some(probe)),
-            };
-            // The measurement, emitted by the backend itself rather than only by
-            // its tests: an application with a logger installed gets the line
-            // that answers `docs/backlog.md`'s question without anyone running a
-            // test suite, and `info` is the level adapter enumeration belongs at
-            // — this runs once per process and produces one line per adapter.
-            crcbl_core::log::info!("{}", record.report());
-            adapters.push(record);
-            next_id += 1;
-        }
+        // **No device is created here.** Each adapter is identified from what
+        // DXGI says of it, and probed only when something asks for its caps —
+        // see `crate::adapter`.
+        let adapters: Vec<AdapterRecord> = candidates(&factory)
+            .into_iter()
+            .zip(0u32..)
+            .map(|((raw_adapter, desc), index)| {
+                let info = adapter::identify(AdapterId(index), &raw_adapter, &desc);
+                let record = AdapterRecord {
+                    info,
+                    adapter: raw_adapter,
+                    desc,
+                    described: OnceLock::new(),
+                    probe: Mutex::new(None),
+                };
+                crcbl_core::log::info!("{}", record.report());
+                record
+            })
+            .collect();
 
         if adapters.is_empty() {
-            crcbl_core::log::warn!(
-                "crcbl-dx12: DXGI lists no adapter D3D12 will open, not even WARP"
-            );
+            crcbl_core::log::warn!("crcbl-dx12: DXGI lists no adapter, not even WARP");
             return None;
         }
         let allow_tearing = probe_tearing(&factory);
@@ -424,12 +486,13 @@ impl Dx12Instance {
                 adapters,
                 owner: Owner::new(next_owner_id()),
                 allow_tearing,
+                opened: AtomicBool::new(false),
                 surfaces: Mutex::new(Pool::new()),
             }),
         })
     }
 
-    /// The enumerated records, raw D3D12 answers included.
+    /// The enumerated records, raw D3D12 answers included once probed.
     ///
     /// [`Instance::adapters`] hands back [`AdapterInfo`] alone, which is all the
     /// seam has vocabulary for. This crate's tests need the numbers underneath
@@ -465,7 +528,8 @@ impl Dx12Instance {
         else {
             return Err(HalError::NoSuchAdapter(desc.adapter.0));
         };
-        let missing = record.info.caps.missing(desc.required_features);
+        let caps = self.describe(record)?.caps;
+        let missing = caps.missing(desc.required_features);
         if !missing.is_empty() {
             return Err(HalError::UnsupportedFeatures { missing });
         }
@@ -480,14 +544,19 @@ impl Dx12Instance {
             // `InvalidHandle`, another instance's is `ForeignObject`.
             self.inner.surface_hwnd(surface)?;
         }
-        Dx12Device::open(Arc::clone(&self.inner), record, desc)
+        Dx12Device::open(Arc::clone(&self.inner), record, caps, desc)
+    }
+
+    /// [`AdapterRecord::describe`], holding the probe until the first open.
+    fn describe<'a>(&self, record: &'a AdapterRecord) -> Result<&'a Described, HalError> {
+        record.describe(!self.inner.opened.load(Ordering::Acquire))
     }
 }
 
-/// Every adapter worth describing: DXGI's hardware list, then WARP by name.
+/// Every adapter worth listing: DXGI's hardware list, then WARP by name.
 ///
 /// The descriptor is fetched here rather than inside
-/// [`adapter::describe`] because both passes need it — the first to decide
+/// [`adapter::identify`] because both passes need it — the first to decide
 /// whether an adapter is the software one, the second to name the adapter — and
 /// asking DXGI twice for a struct it already filled in would be the same
 /// question with two chances to disagree.
@@ -695,6 +764,18 @@ impl Instance for Dx12Instance {
             .iter()
             .map(|record| record.info.clone())
             .collect()
+    }
+
+    /// Creates a device on the adapter to ask, the first time; see
+    /// `crate::adapter`.
+    fn adapter_caps(&self, adapter: AdapterId) -> Result<DeviceCaps, HalError> {
+        let record = self
+            .inner
+            .adapters
+            .iter()
+            .find(|record| record.info.id == adapter)
+            .ok_or(HalError::NoSuchAdapter(adapter.0))?;
+        self.describe(record).map(|described| described.caps)
     }
 
     /// Records the window a swapchain will be created on.
@@ -1032,37 +1113,82 @@ pub(crate) mod tests {
             .join("\n")
     }
 
-    /// Every adapter's probe device is held from enumeration until a device
-    /// is opened, and every adapter's is released then, the chosen one's
-    /// included. Red when the probe is dropped during enumeration again (the
-    /// open pays for a second driver device creation) or kept after the open
-    /// (an adapter nobody chose is held awake).
+    /// **Enumeration creates no device; asking for one adapter's caps probes
+    /// that adapter alone; the first open releases its probe.**
+    ///
+    /// Observed through the records themselves: whether each was described,
+    /// and whether each holds a probe device. Red when enumeration describes
+    /// eagerly again (every record described before anything asked), when a
+    /// caps query describes more than the adapter asked about, when the probe
+    /// is dropped at the query (the open pays for a second driver device), or
+    /// when one is kept or taken after the open (an adapter nobody chose held
+    /// awake).
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
-    fn enumeration_holds_each_probe_device_until_the_first_open() {
+    fn adapters_are_probed_only_when_asked_and_released_at_the_first_open() {
         let instance = open();
-        let held = |instance: &Dx12Instance| -> Vec<bool> {
+        let state = |instance: &Dx12Instance| -> Vec<(bool, bool)> {
             instance
                 .records()
                 .iter()
                 .map(|record| {
-                    record
+                    let held = record
                         .probe
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .is_some()
+                        .is_some();
+                    (record.described.get().is_some(), held)
                 })
                 .collect()
         };
-        let before = held(&instance);
-        assert!(!before.is_empty(), "no adapter to hold a probe for");
-        assert!(before.iter().all(|&held| held), "{before:?}");
+        let listed = state(&instance);
+        assert!(!listed.is_empty(), "no adapter to probe");
+        assert!(
+            listed.iter().all(|&probed| probed == (false, false)),
+            "enumeration opened a device: {listed:?}"
+        );
+
+        let pinned = pinned_adapter(&instance);
+        let index = pinned.0 as usize;
+        instance
+            .adapter_caps(pinned)
+            .unwrap_or_else(|error| panic!("{error}\n{}", report_all(&instance)));
+        let asked = state(&instance);
+        for (at, &probed) in asked.iter().enumerate() {
+            let want = if at == index {
+                (true, true)
+            } else {
+                (false, false)
+            };
+            assert_eq!(
+                probed, want,
+                "adapter {at} after asking about {index}: {asked:?}"
+            );
+        }
 
         let device = instance
-            .open_device(&desc(pinned_adapter(&instance)))
+            .open_device(&desc(pinned))
             .unwrap_or_else(|error| panic!("{error}\n{}", report_all(&instance)));
-        let after = held(&instance);
-        assert!(after.iter().all(|&held| !held), "{after:?}");
+        let opened = state(&instance);
+        assert!(
+            opened.iter().all(|&(_, held)| !held),
+            "a probe outlived the open: {opened:?}"
+        );
+
+        // After an open nothing would release a probe, so none is taken.
+        if let Some(other) = instance
+            .adapters()
+            .iter()
+            .map(|info| info.id)
+            .find(|&id| id != pinned)
+        {
+            let _ = instance.adapter_caps(other);
+            let after = state(&instance);
+            assert!(
+                after.iter().all(|&(_, held)| !held),
+                "a probe was taken after the open: {after:?}"
+            );
+        }
         drop(device);
     }
 
@@ -1110,10 +1236,10 @@ pub(crate) mod tests {
     /// `request_device` resolves it by search — so a mismatch would make every
     /// id past the gap name the wrong adapter.
     ///
-    /// This is the check that goes red if the id counter is ever advanced for an
-    /// adapter `describe` rejected, which is the easy version of this bug: DXGI
-    /// lists display-only and too-old adapters that D3D12 refuses to open, and
-    /// on the machine that has one every id after it would be off by one.
+    /// Every adapter DXGI lists is kept, display-only and too-old ones D3D12
+    /// refuses to open included — they refuse at their probe — so an id is
+    /// never advanced past a gap; this goes red if enumeration starts skipping
+    /// adapters again without renumbering.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn adapter_ids_are_their_positions_in_the_dxgi_enumeration() {
@@ -1146,8 +1272,8 @@ pub(crate) mod tests {
         assert!(!instance.records().is_empty(), "nothing to check");
         let floor = Limits::minimum();
         for record in instance.records() {
-            let limits = record.info.caps.limits;
-            let features = record.info.caps.features;
+            let limits = record.described().caps.limits;
+            let features = record.described().caps.features;
             let line = record.report();
             assert!(
                 limits.optimal_buffer_copy_offset_alignment
@@ -1212,13 +1338,13 @@ pub(crate) mod tests {
         assert!(!instance.records().is_empty(), "nothing to check");
         for record in instance.records() {
             let line = record.report();
-            let claimed = record
-                .info
+            let described = record.described();
+            let claimed = described
                 .caps
                 .features
                 .contains(Features::DESCRIPTOR_INDEXING);
-            let queried = record.raw.binding_tier.0 >= D3D12_RESOURCE_BINDING_TIER_3.0
-                && record.raw.shader_model.0 >= D3D_SHADER_MODEL_6_6.0;
+            let queried = described.raw.binding_tier.0 >= D3D12_RESOURCE_BINDING_TIER_3.0
+                && described.raw.shader_model.0 >= D3D_SHADER_MODEL_6_6.0;
             assert_eq!(
                 claimed, queried,
                 "the reported flag and the queried answers disagree: {line}"
@@ -1271,7 +1397,7 @@ pub(crate) mod tests {
         let mut luids: Vec<u64> = instance
             .records()
             .iter()
-            .map(|record| record.raw.luid)
+            .map(|record| adapter::luid_of(&record.desc))
             .collect();
         let listed = luids.len();
         assert!(listed > 0, "nothing to check:\n{all}");
@@ -1287,7 +1413,7 @@ pub(crate) mod tests {
         let software: Vec<&AdapterRecord> = instance
             .records()
             .iter()
-            .filter(|record| record.raw.software)
+            .filter(|record| adapter::is_software(&record.desc))
             .collect();
         assert_eq!(
             software.len(),
@@ -1318,6 +1444,48 @@ pub(crate) mod tests {
         );
     }
 
+    /// **The class enumeration gives a hardware adapter, with no device, is
+    /// the one its device's `UMA` answer gives.**
+    ///
+    /// `adapter::identify` reads integrated-or-discrete off DXGI's memory
+    /// budgets so that listing adapters opens nothing; D3D12's
+    /// `ARCHITECTURE1::UMA` is the same fact asked through a device. Every
+    /// hardware adapter is probed here and the two held against each other,
+    /// so a rule that drifted from the device's answer — DXCore's
+    /// `IsIntegrated`, which called this workstation's APU discrete, was the
+    /// first candidate — is red on the machine that shows it.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn the_class_read_without_a_device_agrees_with_the_devices_uma_answer() {
+        let instance = open();
+        let mut checked = 0;
+        for record in instance.records() {
+            if record.info.device_type == DeviceType::Cpu {
+                continue;
+            }
+            let Ok(described) = record.describe(true) else {
+                continue;
+            };
+            assert_eq!(
+                record.info.device_type == DeviceType::Integrated,
+                described.raw.unified_memory,
+                "{}",
+                record.report()
+            );
+            checked += 1;
+        }
+        println!("crcbl-dx12: {checked} hardware adapter(s) classed both ways");
+        if checked == 0 {
+            // A runner with no GPU: WARP alone, which is `Cpu` by its ids and
+            // has nothing to agree about. Said, so a green run here is not
+            // read as evidence about hardware.
+            println!(
+                "crcbl-dx12: no hardware adapter to class\n{}",
+                report_all(&instance)
+            );
+        }
+    }
+
     /// **No enumerated adapter is hardware while carrying Microsoft's software
     /// ids.**
     ///
@@ -1332,7 +1500,7 @@ pub(crate) mod tests {
     ///
     /// It is asserted over the **enumerated** adapters rather than over a
     /// constructed descriptor, because that is the half a constructed one cannot
-    /// reach: whether the classification survives `describe`, the enumeration
+    /// reach: whether the classification survives `identify`, the enumeration
     /// filter and the append. `crcbl_dx12::adapter`'s own
     /// `the_software_test_reads_the_known_ids_as_well_as_the_flag` pins the rule
     /// itself, on inputs no machine is obliged to produce.
@@ -1360,7 +1528,7 @@ pub(crate) mod tests {
             matched += 1;
             let line = record.report();
             assert!(
-                record.raw.software,
+                adapter::is_software(&record.desc),
                 "an adapter with Microsoft's software rasteriser ids was described as \
                  hardware: {line}"
             );
@@ -1412,7 +1580,7 @@ pub(crate) mod tests {
 
         for record in instance.records() {
             let line = record.report();
-            let missing = record.info.caps.missing(Features::GPU_DRIVEN);
+            let missing = record.described().caps.missing(Features::GPU_DRIVEN);
             for earned in [
                 Features::BUFFER_DEVICE_ADDRESS,
                 Features::COMPUTE,
@@ -1433,7 +1601,7 @@ pub(crate) mod tests {
                 "a GPU-driven flag with a call behind it went missing: {missing:?} on {line}"
             );
             assert_eq!(
-                record.info.caps.geometry_path(),
+                record.described().caps.geometry_path(),
                 GeometryPath::IndirectCount,
                 "the derived geometry path moved; the crate docs say what selects it: {line}"
             );
@@ -1441,7 +1609,7 @@ pub(crate) mod tests {
             // would cap every indirect-count call at one draw while the backend
             // executes as many as `ExecuteIndirect` is given.
             assert!(
-                record.info.caps.limits.max_draw_indirect_count > 1,
+                record.described().caps.limits.max_draw_indirect_count > 1,
                 "DRAW_INDIRECT_COUNT is reported and the limit is still the floor: {line}"
             );
         }

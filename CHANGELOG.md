@@ -41,6 +41,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the paragraph's direction, so left-to-right text sits where it did, and an
   exhaustive match on `TextAlign` needs the two arms.
 
+- **`crcbl_hal::AdapterInfo` no longer carries `caps`, and `crcbl_hal::Instance`
+  has a required `adapter_caps(AdapterId)`.** `Instance::adapters` now lists who
+  each adapter is without opening a device, and `adapter_caps` answers what one
+  can do, probed the first time and remembered; on D3D12 that probe is a driver
+  device, which the next `request_device` on that adapter is handed. A caller
+  that read `adapters()[n].caps` asks `adapter_caps(id)` instead, and should ask
+  only for the adapter it means to open. `crcbl_webgpu`'s `Reply::Adapter` and
+  `AdapterProbe::Granted` carry the caps beside the `AdapterInfo` and
+  `ReplyWriter::adapter` takes them; the bytes on the wire are unchanged.
 - **`crcbl_hal::Instance` has a required `display_adapter` method and
   `AdapterInfo` a `luid` field**, so a backend outside this workspace implements
   one and a struct literal of `AdapterInfo` names the other.
@@ -142,6 +151,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   adapter's); Wayland, X11, macOS and the browser answer `None`, which leaves
   the preference to decide. `AdapterInfo::luid` carries the adapter's LUID on
   D3D12 and on Vulkan where the driver reports one.
+- **`crcbl_hal::null::Recorder::refuse_device_on`** makes the null backend's
+  `adapter_caps` fail for one adapter, as a driver that lists an adapter and
+  will not open it, so a selection walk stepping past one can be tested.
+- **`crcbl::screenshot::OffscreenSetup::adapter_caps`** says what the adapter a
+  setup opened on can do, beside `caps`, which says what its device was opened
+  with.
 
 ### Changed
 
@@ -150,6 +165,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   with an integrated and a discrete GPU and nothing else deciding, an app opens
   the integrated one; `GpuContext` and `crcbl screenshot` (games) rank for
   `HighPerformance`. Software rasterisers stay last under both.
+- **A D3D12 instance opens without creating a device per adapter**, so start-up
+  pays for one driver device, the adapter actually opened, instead of one per
+  adapter on the machine. Measured on an RX 7900 XTX with an AMD iGPU and WARP
+  beside it, `Dx12Instance::open` through the first device: 240.9–436.1 ms,
+  against 455.7–1035.0 ms with every adapter probed first as before. An adapter
+  D3D12 will not open is now listed, and refuses when its caps are asked for.
+- **D3D12 classes an adapter integrated from DXGI's memory budgets** (no
+  non-local segment group), the fact `D3D12_FEATURE_DATA_ARCHITECTURE1::UMA`
+  reported through a device; an adapter DXGI will not describe is
+  `DeviceType::Other` rather than `Discrete`.
 
 ### Fixed
 

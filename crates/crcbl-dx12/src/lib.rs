@@ -31,9 +31,9 @@
 //! back, a triangle drawn — directly, indexed, indirect and with a GPU-side draw
 //! count — a compute dispatch read back, a window presented to, and a headless
 //! image ring.** `Dx12Instance` lists every D3D12 adapter
-//! with its capabilities filled in, which is the one thing
-//! [`Instance::adapters`](crcbl_hal::Instance::adapters) promises can be
-//! answered before a device exists. `request_device` then opens a real
+//! without opening one, and answers
+//! [`Instance::adapter_caps`](crcbl_hal::Instance::adapter_caps) by creating
+//! a device on the one adapter asked about. `request_device` then opens a real
 //! `ID3D12Device` and a `D3D12_COMMAND_LIST_TYPE_DIRECT` queue, and the device
 //! it hands back creates buffers, images, image views and samplers, writes into
 //! a host-visible buffer, records an `ID3D12GraphicsCommandList`, runs it on the

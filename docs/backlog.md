@@ -33,34 +33,7 @@ flight (AppKit input method, the Win32 popup leave fix):
    `crcbl_app::TextPump` draws no pre-edit at the caret and never calls
    `set_text_input_area`, so the candidate window sits at the window's origin.
    Build both in `crcbl-app` and `crcbl-ui`'s text field after the items below.
-2. **D3D12 start-up (S13), next; decided 2026-10-19: describe adapters lazily.**
-   `Dx12Instance::open` creates one driver device per hardware adapter to list
-   caps (about 0.2 s each; pikr's first paint is 443–617 ms on 0.5.0 against 500
-   ms). `Instance::adapters` lists identities from DXGI without a device, in
-   preference order, and caps are probed on demand, stopping at the first
-   adapter that serves. Breaking for the HAL seam, so a minor bump. Declined:
-   keeping the every-adapter-caps promise, which is the cost itself. **Adapter
-   choice, decided 2026-10-19 by the owner:** the program chooses, by priority
-   or explicitly. A `PowerPreference` (`HighPerformance` or `LowPower`) on the
-   device request, and an explicit adapter pick through the API as well as
-   `CRCBL_ADAPTER`; an explicit pick always wins. Otherwise: a display driven by
-   a **discrete** adapter (a desktop, or a laptop's external monitor wired to
-   the dGPU) uses that adapter whatever the preference, which avoids copying
-   every frame across adapters; a display driven by an **integrated** adapter
-   with a discrete one beside it (a hybrid laptop's panel) follows the
-   preference — `HighPerformance` renders on the dGPU and accepts the copy,
-   `LowPower` stays on the iGPU and lets the dGPU sleep; when the display's
-   adapter cannot be determined, the preference picks discrete or integrated.
-   Defaults: games (`crcbl`'s engine) ask for `HighPerformance`, apps on
-   `crcbl-app`'s `Presenter` (pikr, lyr) for `LowPower`. Which adapter drives a
-   surface's display is an `Instance` query. Mechanisms to verify per backend,
-   none checked yet: Win32 the DXGI adapter whose `EnumOutputs` contains
-   `MonitorFromWindow(hwnd)` (then D3D12 and Vulkan by LUID); Wayland
-   `zwp_linux_dmabuf_v1` v4 feedback's `main_device` matched to
-   `VkPhysicalDeviceDrmPropertiesEXT`; X11 the DRI3 device; macOS
-   `CGDirectDisplayCopyCurrentMetalDevice`. Built together with the lazy
-   describe, since both decide which adapter is probed first.
-3. **Alpha-0 pointer passthrough on Win32 (S5), decided 2026-10-19: an input
+2. **Alpha-0 pointer passthrough on Win32 (S5), decided 2026-10-19: an input
    region.** A transparent pixel is still the window's for the pointer (see
    "Behaviour, not a bug" under Win32 transparency), and `HTTRANSPARENT` only
    passes to windows of the same thread. Build `Shell::set_input_region`: a
@@ -68,8 +41,58 @@ flight (AppKit input method, the Win32 popup leave fix):
    input region on X11, and on AppKit whatever its non-opaque hit testing needs
    (a cap where it cannot). Declined: hit testing by pixel alpha, which needs a
    GPU readback per pointer move.
-4. **Shaping in SVG text.** `crcbl-image`'s SVG text draws one glyph a char from
+3. **Shaping in SVG text.** `crcbl-image`'s SVG text draws one glyph a char from
    the cmap; move it onto `harfrust`, which the workspace already has.
+4. **Bidi (UAX #9), line breaking (UAX #14) and grapheme clusters (UAX #29):
+   needs the owner's approval of new dependencies**, so it waits. The candidates
+   are `unicode-bidi`, `unicode-linebreak` and `unicode-segmentation` (or
+   ICU4X's `icu_segmenter`, which covers both breaking and clusters but is far
+   larger). A grapheme crate was declined on 2026-10-16 "until a caller needs
+   them"; pikr is that caller now.
+
+**Adapter choice, left over from the 2026-10-19 slice** (lazy describe,
+`PowerPreference`, `AdapterPick`, `Instance::display_adapter`; the policy is
+`crcbl_app::adapter::choose` and `rank`):
+
+- **`Instance::display_adapter` answers `None` on Wayland, X11 and macOS.**
+  Unknown leaves the preference to decide, so a laptop's external monitor on the
+  dGPU under `LowPower` renders on the iGPU and copies. Mechanisms, none built
+  and none checked against a machine: Wayland, `zwp_linux_dmabuf_v1` version 4
+  `get_surface_feedback` on the window's surface, whose `main_device` (a
+  `dev_t`) matches `VkPhysicalDeviceDrmPropertiesEXT`'s primary or render node
+  (`VK_EXT_physical_device_drm`; neither `crcbl-shell` nor `crcbl-vk` binds
+  either today, and the shell would have to hand the `dev_t` across, since
+  `SurfaceTarget` carries only the two pointers); X11, DRI3 `Open` on the
+  window's screen, `fstat` of the returned fd for its `st_rdev`, matched the
+  same way; macOS, `CGDirectDisplayCopyCurrentMetalDevice` for the window's
+  display, matched to the `MTLDevice` by `registryID`.
+- **Verified on one desktop only**: an RX 7900 XTX driving the monitor, an AMD
+  Raphael iGPU and WARP, Windows 11. There D3D12 and Vulkan both name the RX
+  7900 XTX as the display adapter (the cross-check is
+  `crcbl_app::backend::tests::d3d12_and_vulkan_agree_on_which_adapter_drives_the_display`),
+  and the iGPU drives nothing. Not seen: a hybrid laptop (does DXGI list the
+  panel under the iGPU, and does a MUX switch change it), the iGPU driving the
+  display, and an Intel or NVIDIA adapter under the DXGI memory rule below.
+- **D3D12 classes an adapter integrated when DXGI reports no non-local memory
+  budget** (`QueryVideoMemoryInfo`, `DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL`),
+  which needs no device. Held against the device's
+  `D3D12_FEATURE_DATA_ARCHITECTURE1::UMA` by
+  `the_class_read_without_a_device_agrees_with_the_devices_uma_answer`, on two
+  hardware adapters so far. **Considered and declined: DXCore's
+  `IsIntegrated`**, which answered `false` for the Raphael iGPU whose device
+  reports `UMA`; DXGI's `EnumAdapterByGpuPreference` ordered the two cards the
+  same under every preference too. Both read Windows' hybrid classification, not
+  where an adapter's memory is.
+- **A D3D12 adapter D3D12 will not open is now listed**, and refuses at
+  `adapter_caps` (enumeration no longer creates a device to find out). The
+  ranked walks (`Presenter`, `crcbl screenshot`) step past it; `adapter::select`
+  with no pin still takes the first listed adapter, so a harness run unpinned on
+  a machine whose first DXGI adapter is display-only would fail where it used to
+  skip it. Not seen on any machine here.
+- **The display query reads the outputs of the adapters enumerated at
+  `Dx12Instance::open`**: a monitor plugged in or moved to another adapter
+  afterwards answers `None` or the old adapter until the instance is reopened
+  (`IDXGIFactory1::IsCurrent` would say when). Unverified.
 
 **Open from 2026-10-19, raised by pikr and lyr, not started:**
 
@@ -283,7 +306,8 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    repositioning on Wayland (CI's sway offers `xdg_wm_base` below 3); S21 a
    panel at a fractional scale; S16 Vulkan presenting premultiplied on sway; S22
    a colour glyph in a GPU golden; S18 FreeBSD beyond `check (freebsd)`'s
-   clippy, in a VM job; S13 any start-up timing at all.
+   clippy, in a VM job; S13 cold start to the first presented frame, end to end
+   (the D3D12 instance and first device are measured; see 11).
 5. **Genuinely impossible, and refused:** D3D12 off Windows, Metal off Apple, a
    software Metal adapter, AppKit reserving screen space (only the menu bar and
    the Dock do). Vulkan on macOS is refused today and could go through MoltenVK
@@ -1302,30 +1326,21 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `Stylesheet::parse`, not by rendering it.
 11. **Start-up and failure.**
     - Measure cold start to the first presented frame against 500 ms (S13). pikr
-      measured it on Win32 + D3D12, 2026-10-16, in a release build on an RX 7900
-      XTX with an iGPU and WARP beside it: about 1.1 s from launch to first
-      paint, almost all of it `Dx12Instance::open` with adapter enumeration
-      (about 0.7 s, some 0.3 s per hardware adapter) and device creation (0.23
-      s). Not reproduced here yet. What would cut it: probe adapters in
-      preference order and stop at the first that can present to the surface,
-      instead of creating a device per adapter to list its caps.
-    - pikr measured again on 0.3.0, 2026-10-18, same machine: first paint at
-      0.79 to 0.99 s. `Dx12Instance::open` spends about 306 ms on the RX 7900
-      XTX, 272 ms on the iGPU and 15 ms on WARP, each a `D3D12CreateDevice`
-      inside `adapter::describe` that is dropped again, and `create_device` then
-      spends about 257 ms creating the same adapter's device a second time. Done
-      2026-10-18 for the second creation: each probe's `ID3D12Device` is held in
-      its `AdapterRecord` until the first device is opened, so `create_device`
-      dropped to about 12 ms here (an RX 7900 XTX, an iGPU and WARP), and the
-      whole open to about 0.4 s. What is left is one driver device creation per
-      hardware adapter inside `Dx12Instance::open`, about 0.2 s each here. Tried
-      and dropped: describing the adapters on parallel threads, which saved
-      nothing measurable (the open took the same 0.36 to 0.42 s either way, so
-      D3D12 serialises device creation), and DRED, which is not the cost (the
-      open measured the same without `dred::enable`). The remaining option is a
-      seam change: describe adapters lazily, in preference order, and stop at
-      the first that serves, which breaks `Instance::adapters`' promise that
-      every adapter's caps are known before a device exists. Not decided.
+      measured first paint at 443–617 ms on 0.5.0, Win32 + D3D12, on an RX 7900
+      XTX with an iGPU and WARP beside it, nearly all of it `Dx12Instance::open`
+      creating a driver device per adapter to fill in its caps. Built
+      2026-10-19: `Instance::adapters` lists identities without a device and
+      `Instance::adapter_caps` probes one adapter on demand, so selection probes
+      in rank order and stops at the first that serves. Same machine model,
+      measured here with a temporary example (release build, a fresh process per
+      run, `open` plus `adapter_caps` plus `create_device` on the RX 7900 XTX):
+      240.9–436.1 ms lazily against 455.7–1035.0 ms with every adapter probed
+      first, six runs each, alternating. Not measured: pikr's first paint on the
+      new seam; the remaining cost is the one driver device for the adapter
+      actually used.
+    - Tried and dropped, still binding: describing adapters on parallel threads
+      (no gain; D3D12 serialises device creation), and DRED as the cost (the
+      open measured the same without `dred::enable`).
     - S26, checked 2026-10-15. With no usable GPU, `crcbl::backend::open`
       returns `GpuError::NoBackend` naming every backend it tried and the last
       error, not a panic, and never falls to the Null backend. Windows now falls

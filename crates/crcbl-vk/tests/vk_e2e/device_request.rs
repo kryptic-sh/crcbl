@@ -56,7 +56,10 @@ fn request_device_names_an_unknown_adapter_and_an_absent_feature() {
     // whatever driver this is.
     let adapter = &adapters[0];
     assert!(
-        !adapter.caps.supports(Features::SHADER_DEBUG_PRINTF),
+        !instance
+            .adapter_caps(adapter.id)
+            .expect("a listed adapter describes itself")
+            .supports(Features::SHADER_DEBUG_PRINTF),
         "this backend reports SHADER_DEBUG_PRINTF absent until it works"
     );
     let error = instance
@@ -151,7 +154,11 @@ fn a_device_request_hands_its_device_over_exactly_once() {
 fn a_device_opens_with_whatever_mesh_and_ray_tracing_the_adapter_reports() {
     let instance = instance();
     let adapter = instance.adapters().remove(0);
-    let wanted = adapter.caps.features.intersection(STAGES);
+    let wanted = instance
+        .adapter_caps(adapter.id)
+        .expect("a listed adapter describes itself")
+        .features
+        .intersection(STAGES);
     eprintln!("vk e2e: {} reports {wanted:?}", adapter.name);
 
     let device = instance
@@ -229,7 +236,9 @@ fn the_selected_paths_agree_with_the_reported_features() {
         "open() rejects an adapter-less loader"
     );
     for adapter in adapters {
-        let caps = adapter.caps;
+        let caps = instance
+            .adapter_caps(adapter.id)
+            .expect("a listed adapter describes itself");
         assert_eq!(
             caps.binding_model() == BindingModel::Bindless,
             caps.supports(Features::DESCRIPTOR_INDEXING),
@@ -272,7 +281,7 @@ fn the_selected_paths_agree_with_the_reported_features() {
 /// **A device's limits are narrowed to the features that device was granted,
 /// not the adapter's.**
 ///
-/// `AdapterInfo::caps.limits` is gated on what the adapter *supports*. A device
+/// `Instance::adapter_caps`' limits are gated on what the adapter *supports*. A device
 /// opened from it may be granted less, and until `gate_limits_on_features` ran
 /// twice this backend handed that device the adapter's numbers verbatim: on
 /// radv, a device that asked for nothing reported `max_sampler_anisotropy: 16`

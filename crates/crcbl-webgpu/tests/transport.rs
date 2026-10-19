@@ -87,10 +87,14 @@ fn llvmpipe() -> AdapterInfo {
         driver: String::new(),
         backend: BackendKind::WebGpu,
         luid: None,
-        caps: DeviceCaps {
-            features: Features::COMPUTE,
-            limits: Limits::minimum(),
-        },
+    }
+}
+
+/// What [`llvmpipe`] can do.
+fn llvmpipe_caps() -> DeviceCaps {
+    DeviceCaps {
+        features: Features::COMPUTE,
+        limits: Limits::minimum(),
     }
 }
 
@@ -139,7 +143,7 @@ fn a_reply_reaches_the_engine_and_clears_the_wait_it_answers() {
 
     let mut replies = ReplyWriter::new();
     replies.readback_pending(first, readback());
-    replies.adapter(second, &llvmpipe());
+    replies.adapter(second, &llvmpipe(), &llvmpipe_caps());
     let committed = replies.bytes().len();
     assert_eq!(deliver(&replies), 1);
     assert_eq!(
@@ -157,7 +161,13 @@ fn a_reply_reaches_the_engine_and_clears_the_wait_it_answers() {
                     readback: readback()
                 }
             ),
-            (second, Reply::Adapter { info: llvmpipe() }),
+            (
+                second,
+                Reply::Adapter {
+                    info: llvmpipe(),
+                    caps: llvmpipe_caps()
+                }
+            ),
         ]))
     );
     assert_eq!(channel.waiting_replies(), 0);

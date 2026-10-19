@@ -2721,7 +2721,9 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
 fn nothing_the_forward_renderer_lets_a_mesh_stage_write_is_host_visible() {
     use crcbl_hal::{AdapterId, Features};
 
-    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    let mut caps = NullInstance::gpu_driven()
+        .adapter_caps(crcbl_hal::AdapterId(0))
+        .expect("the adapter describes itself");
     caps.features |= Features::MESH_SHADER | Features::TASK_SHADER;
     let instance = NullInstance::new(caps);
     let recorder = instance.recorder();

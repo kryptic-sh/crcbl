@@ -1065,6 +1065,11 @@ impl Presenter {
         // offers no premultiplied alpha cannot present it as it was made, so
         // the walk goes on to the next one, and only when none can is the
         // open refused (see `composite_alpha_for`).
+        //
+        // **The adapter's caps are asked last, of the one adapter that passed
+        // everything else**, because on D3D12 asking creates a driver device —
+        // the start-up cost lazy description exists to avoid paying for every
+        // adapter. One the driver will not open is "not this one" too.
         let transparent = target.transparent();
         let mut chosen = None;
         let mut last_error = None;
@@ -1083,7 +1088,18 @@ impl Presenter {
                         alpha_refused = true;
                         continue;
                     };
-                    chosen = Some((adapter.clone(), caps, alpha));
+                    let device_caps = match instance.adapter_caps(adapter.id) {
+                        Ok(device_caps) => device_caps,
+                        Err(error) => {
+                            log::debug!(
+                                "hal: adapter {:?} will not open ({error}); trying the next",
+                                adapter.name
+                            );
+                            last_error = Some(error);
+                            continue;
+                        }
+                    };
+                    chosen = Some((adapter.clone(), caps, alpha, device_caps));
                     break;
                 }
                 Ok(_) => log::debug!(
@@ -1099,7 +1115,7 @@ impl Presenter {
                 }
             }
         }
-        let Some((adapter, caps, composite_alpha)) = chosen else {
+        let Some((adapter, caps, composite_alpha, device_caps)) = chosen else {
             instance.destroy_surface(surface);
             let named = match (&choice, pin, pick) {
                 (Choice::Pinned(named), Some(pin), _) => Some((
@@ -1155,9 +1171,9 @@ impl Presenter {
             instance.backend(),
             adapter.name,
             adapter.device_type,
-            adapter.caps.geometry_path(),
-            adapter.caps.binding_model(),
-            adapter.caps.lighting_path()
+            device_caps.geometry_path(),
+            device_caps.binding_model(),
+            device_caps.lighting_path()
         );
 
         if let Some(reported) = caps.current_extent

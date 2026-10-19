@@ -138,15 +138,18 @@ pub(crate) fn instance() -> VkInstance {
             let (major, minor, patch) = instance.loader_version();
             eprintln!("vk e2e: loader {major}.{minor}.{patch}");
             for adapter in instance.adapters() {
+                let caps = instance
+                    .adapter_caps(adapter.id)
+                    .expect("a listed adapter describes itself");
                 eprintln!(
                     "vk e2e: adapter {:?} ({:?}) driver {:?} geometry {:?} binding {:?} \
                      lighting {:?}",
                     adapter.name,
                     adapter.device_type,
                     adapter.driver,
-                    adapter.caps.geometry_path(),
-                    adapter.caps.binding_model(),
-                    adapter.caps.lighting_path()
+                    caps.geometry_path(),
+                    caps.binding_model(),
+                    caps.lighting_path()
                 );
             }
             instance

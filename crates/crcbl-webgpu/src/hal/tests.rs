@@ -44,7 +44,6 @@ fn granted_adapter() -> AdapterInfo {
         driver: String::new(),
         backend: BackendKind::WebGpu,
         luid: None,
-        caps: device_caps(),
     }
 }
 
@@ -112,7 +111,7 @@ fn opened_instance() -> WebGpuInstance {
     let mut open = WebGpuInstanceOpen::start();
     let channel = open.channel();
     feed(&channel, |w| {
-        w.adapter(0, &granted_adapter());
+        w.adapter(0, &granted_adapter(), &device_caps());
         w.surface_caps(1, &browser_canvas_caps());
     });
     match Pin::new(&mut open).poll(&mut noop_context()) {
@@ -178,7 +177,7 @@ fn instance_open_settles_to_an_instance_on_the_browsers_two_replies() {
     // instance exists, so an instance built before the canvas answer arrived
     // would have nothing to answer a canvas query with but a guess.
     let info = granted_adapter();
-    feed(&channel, |w| w.adapter(0, &info));
+    feed(&channel, |w| w.adapter(0, &info, &device_caps()));
     assert!(
         matches!(Pin::new(&mut open).poll(&mut noop_context()), Poll::Pending),
         "an unanswered canvas capability query polls Pending"
@@ -189,6 +188,10 @@ fn instance_open_settles_to_an_instance_on_the_browsers_two_replies() {
         panic!("the second reply must settle the open future");
     };
     assert_eq!(instance.adapters(), vec![info]);
+    assert_eq!(
+        instance.adapter_caps(AdapterId(0)).ok(),
+        Some(device_caps())
+    );
     assert_eq!(instance.backend(), BackendKind::WebGpu);
 }
 
@@ -200,7 +203,7 @@ fn a_refused_canvas_query_opens_the_instance_and_fails_the_canvas_call() {
     let mut open = WebGpuInstanceOpen::start();
     let channel = open.channel();
     feed(&channel, |w| {
-        w.adapter(0, &granted_adapter());
+        w.adapter(0, &granted_adapter(), &device_caps());
         w.surface_caps_failed(
             1,
             "getPreferredCanvasFormat() answered \"rgba16float\"",
@@ -236,7 +239,7 @@ fn a_refused_reply_buffer_fails_the_open_instead_of_hanging_it() {
     let channel = open.channel();
     // Sequences 0 and 1 are the open's two questions; 7 is nobody's.
     feed(&channel, |w| {
-        w.adapter(0, &granted_adapter());
+        w.adapter(0, &granted_adapter(), &device_caps());
         w.surface_caps(7, &browser_canvas_caps());
     });
     let Poll::Ready(Err(HalError::Backend(reason))) = Pin::new(&mut open).poll(&mut noop_context())
@@ -304,7 +307,7 @@ fn canvas_caps_lead_with_the_format_the_browser_prefers() {
     // Sequence 0 is the enumeration and 1 the capability query: `start` encodes
     // them in that order on a fresh channel.
     feed(&channel, |w| {
-        w.adapter(0, &granted_adapter());
+        w.adapter(0, &granted_adapter(), &device_caps());
         w.surface_caps(1, &browser_canvas_caps());
     });
     let Poll::Ready(Ok(instance)) = Pin::new(&mut open).poll(&mut noop_context()) else {
@@ -3418,7 +3421,7 @@ fn a_canvas_with_no_reported_caps_refuses_its_swapchain_with_the_reason() {
     let mut open = WebGpuInstanceOpen::start();
     let channel = open.channel();
     feed(&channel, |w| {
-        w.adapter(0, &granted_adapter());
+        w.adapter(0, &granted_adapter(), &device_caps());
         w.surface_caps_failed(
             1,
             "getPreferredCanvasFormat() answered \"rgba16float\"",

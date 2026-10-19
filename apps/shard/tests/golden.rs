@@ -82,7 +82,7 @@
 
 use std::path::PathBuf;
 
-use crcbl::hal::{AdapterInfo, Features, Format, GeometryPath};
+use crcbl::hal::{AdapterInfo, DeviceCaps, Features, Format, GeometryPath};
 use crcbl::math::Vec3;
 use crcbl::render::{Camera, EffectRequest, ForwardRenderer, OrbitCamera, RenderEffects};
 use crcbl::screenshot::{ForwardScene, OffscreenError, OffscreenSetup};
@@ -180,6 +180,8 @@ struct Frame {
     /// for — see the module docs.
     drew: GeometryPath,
     adapter: AdapterInfo,
+    /// What `adapter` offers, which the device may have been opened below.
+    offered: DeviceCaps,
     /// What the sample's own simulation said the frame should draw — carried
     /// so a claim reads the state the picture was made from rather than
     /// building a second one and hoping the two agree.
@@ -349,6 +351,9 @@ fn draw(turns: i32, path: GeometryPath, lit: bool) -> Frame {
     let backend = setup.backend();
     let caps = setup.caps();
     let adapter = setup.adapter().clone();
+    let offered = setup
+        .adapter_caps()
+        .expect("the adapter the device opened on describes itself");
     // Printed unconditionally and read with `--success-output immediate`: on a
     // green run — the run where the path that drew is worth knowing — nextest
     // captures this and it is otherwise invisible.
@@ -370,13 +375,13 @@ fn draw(turns: i32, path: GeometryPath, lit: bool) -> Frame {
     // frame alone cannot say. Met against the adapter rather than against
     // `path`: an adapter that never had the feature lands lower, and that is
     // the case the caller reports rather than the one that fails here.
-    let granted = asked.intersection(adapter.caps.features);
+    let granted = asked.intersection(offered.features);
     assert_eq!(
         drew,
         GeometryPath::from_features(granted),
         "adapter {} offers {:?}, this run asked for {asked:?}, and the device opened on {drew:?}",
         adapter.name,
-        adapter.caps.features,
+        offered.features,
     );
 
     let format = setup.format();
@@ -402,6 +407,7 @@ fn draw(turns: i32, path: GeometryPath, lit: bool) -> Frame {
         camera,
         drew,
         adapter,
+        offered,
         state,
     }
 }
@@ -510,7 +516,7 @@ fn check(path: GeometryPath, turns: i32, name: &str) {
             "shard golden: {name} cannot be drawn on {path:?} — adapter {:?} offers {:?}, so the \
              device opened on {:?} instead and this bearing is compared by the test that asked \
              for that path",
-            frame.adapter.name, frame.adapter.caps.features, frame.drew,
+            frame.adapter.name, frame.offered.features, frame.drew,
         );
         return;
     }

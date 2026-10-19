@@ -2,8 +2,8 @@
 //!
 //! Everything here is a **read**: each function asks DXGI or D3D12 a question
 //! and turns the answer into [`AdapterInfo`] / [`DeviceCaps`]. The
-//! `ID3D12Device` opened to ask the questions is handed back with the answers,
-//! for the instance to hold until a device is opened; see
+//! `ID3D12Device` [`probe`] opens to ask the questions is handed back with the
+//! answers, for the instance to hold until a device is opened; see
 //! `AdapterRecord::probe` for why.
 //!
 //! # D3D12 has no adapter-level capability query, and that shapes this module
@@ -13,16 +13,17 @@
 //! `vkGetPhysicalDeviceFeatures2`. D3D12 has neither:
 //! `ID3D12Device::CheckFeatureSupport` is the *only* capability query, it lives
 //! on the device, and there is no physical-device object in front of it. So
-//! filling in [`AdapterInfo::caps`] means calling `D3D12CreateDevice` per
-//! adapter, asking, and dropping the device again.
+//! answering [`Instance::adapter_caps`](crcbl_hal::Instance::adapter_caps)
+//! means calling `D3D12CreateDevice` on the adapter and asking — about a fifth
+//! of a second per adapter on the machines measured.
 //!
-//! That is the documented way to do it and it is what the seam's promise costs
-//! here — [`Instance::adapters`](crcbl_hal::Instance::adapters) guarantees caps
-//! are known *before* a device exists, so the alternative is a lie. It is paid
-//! once per process at start-up, and it is also the reason
-//! [`describe`] can answer `None`: an adapter DXGI lists but D3D12 will not open
-//! (a display-only adapter, or a driver too old for the feature level) is one
-//! this backend must not enumerate at all.
+//! That is why the module splits in two. [`identify`] answers who an adapter
+//! is from what DXGI says without a device, for
+//! [`Instance::adapters`](crcbl_hal::Instance::adapters); [`probe`] creates the
+//! device and answers what the adapter can do, once, for the one adapter
+//! selection reaches. It is also the reason [`probe`] can fail: an adapter
+//! DXGI lists but D3D12 will not open (a display-only adapter, or a driver too
+//! old for the feature level) is listed, and refuses there.
 //!
 //! # The rule this module follows
 //!
@@ -64,7 +65,8 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12CreateDevice, ID3D12Device,
 };
 use windows::Win32::Graphics::Dxgi::{
-    DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIAdapter1, IDXGIDevice,
+    DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,
+    DXGI_QUERY_VIDEO_MEMORY_INFO, IDXGIAdapter1, IDXGIAdapter3, IDXGIDevice,
 };
 use windows::core::Interface;
 
@@ -134,23 +136,9 @@ pub(crate) struct RawCaps {
     pub(crate) binding_tier: D3D12_RESOURCE_BINDING_TIER,
     /// `D3D12_FEATURE_DATA_SHADER_MODEL::HighestShaderModel`, probed.
     pub(crate) shader_model: D3D_SHADER_MODEL,
-    /// Whether this adapter is a software rasteriser — which, on a stock
-    /// Windows, means it is WARP. [`is_software`]'s answer, so it is the flag
-    /// **and** the known Microsoft ids rather than the flag alone.
-    pub(crate) software: bool,
     /// `D3D12_FEATURE_DATA_ARCHITECTURE1::UMA`: the GPU shares the CPU's memory
     /// pool.
     pub(crate) unified_memory: bool,
-    /// `DXGI_ADAPTER_DESC1::AdapterLuid`, packed — **the only identity DXGI
-    /// actually guarantees**, locally unique for the lifetime of the system and
-    /// equal for two interfaces onto one adapter.
-    ///
-    /// Kept because name, vendor and device id are *not* an identity: two
-    /// genuinely distinct cards of one model share all three, and the runner
-    /// lists two adapters that share all three and are still two adapters — they
-    /// carry different LUIDs. Enumeration de-duplicates on this, and a test
-    /// asserts no two adapters share one.
-    pub(crate) luid: u64,
     /// Whether every BC format the seam declares can be sampled as a 2D texture
     /// on this adapter, from `D3D12_FEATURE_FORMAT_SUPPORT`.
     ///
@@ -412,8 +400,8 @@ fn name_of(desc: &DXGI_ADAPTER_DESC1) -> String {
 /// One function rather than the test written twice, because it is asked in two
 /// places for two different reasons — `crcbl_dx12::instance` skips software
 /// adapters in the ordinary enumeration so that WARP is listed exactly once, and
-/// [`describe`] records the answer so [`device_type_of`] can reach it — and two
-/// copies of it is precisely where the two would drift.
+/// [`identify`] hands the answer to [`device_type_of`] — and two copies of it
+/// is precisely where the two would drift.
 ///
 /// # The flag alone is wrong, and the runner is the evidence
 ///
@@ -442,37 +430,33 @@ pub(crate) fn is_software(desc: &DXGI_ADAPTER_DESC1) -> bool {
         || (desc.VendorId == MICROSOFT_VENDOR_ID && desc.DeviceId == BASIC_RENDER_DRIVER_DEVICE_ID)
 }
 
-/// Which class of device this is, from what DXGI and D3D12 actually report.
+/// Which class of device this is, from what DXGI reports without a device.
 ///
 /// The order is deliberate: *software or not* settles the question before
-/// *where the memory is* does, because WARP shares the CPU's memory pool and
-/// would otherwise report as integrated.
+/// *integrated or not* does, because WARP shares the CPU's memory pool and
+/// would otherwise read as integrated.
 ///
-/// * [`DeviceType::Cpu`] ← [`is_software`], which is the flag **and** the known
-///   Microsoft software ids, because the flag is clear on the very rasteriser it
-///   is supposed to name. This is WARP, which the seam's own documentation names
-///   as an example of the variant.
-/// * [`DeviceType::Integrated`] ← `D3D12_FEATURE_DATA_ARCHITECTURE1::UMA`. The
-///   real question, rather than the `DedicatedVideoMemory == 0` heuristic that
-///   is usually substituted for it.
-/// * [`DeviceType::Discrete`] otherwise.
+/// * [`DeviceType::Cpu`] ← `software`, [`is_software`]'s answer, which is the
+///   flag **and** the known Microsoft software ids, because the flag is clear
+///   on the very rasteriser it is supposed to name. This is WARP, which the
+///   seam's own documentation names as an example of the variant.
+/// * [`DeviceType::Integrated`] or [`DeviceType::Discrete`] ← `integrated`,
+///   [`shares_cpu_memory`]'s answer. The real question, rather than the
+///   `DedicatedVideoMemory == 0` heuristic usually substituted for it, which an
+///   AMD APU's carved-out memory defeats.
+/// * [`DeviceType::Other`] when DXGI would not say: the backend declining to
+///   classify, which ranks below either rather than guessing.
 ///
 /// [`DeviceType::Virtual`] is never reported, and that is a gap rather than a
 /// decision: **DXGI has no virtualisation query**. A GPU-P adapter under Hyper-V
 /// answers every question above exactly as the host's does, and nothing short of
 /// matching on the adapter's name would separate them.
-///
-/// A device whose `ARCHITECTURE1` query is refused defaults to `UMA` false and so
-/// reports as [`DeviceType::Discrete`]. That is the safe direction of the two:
-/// nothing in the engine treats a discrete GPU as having the CPU's memory, while
-/// the reverse mistake would suggest an upload path that does not exist.
-fn device_type_of(raw: &RawCaps) -> DeviceType {
-    if raw.software {
-        DeviceType::Cpu
-    } else if raw.unified_memory {
-        DeviceType::Integrated
-    } else {
-        DeviceType::Discrete
+fn device_type_of(software: bool, integrated: Option<bool>) -> DeviceType {
+    match (software, integrated) {
+        (true, _) => DeviceType::Cpu,
+        (false, Some(true)) => DeviceType::Integrated,
+        (false, Some(false)) => DeviceType::Discrete,
+        (false, None) => DeviceType::Other,
     }
 }
 
@@ -858,19 +842,56 @@ fn limits_of(features: Features) -> Limits {
     }
 }
 
-/// Everything one D3D12 adapter says about itself, and the device it was asked
-/// through, or `None` if D3D12 will not open it.
-///
-/// The `ID3D12Device` is created at [`D3D_FEATURE_LEVEL_11_0`] — D3D12's floor —
-/// on purpose:
-/// asking for a higher level would silently drop adapters from the enumeration,
-/// and which tier a device can run is decided by [`Features`], never by the
-/// feature level it was opened at.
-pub(crate) fn describe(
+/// Who one D3D12 adapter is, from what DXGI answers without a device.
+pub(crate) fn identify(
     id: AdapterId,
     adapter: &IDXGIAdapter1,
     desc: &DXGI_ADAPTER_DESC1,
-) -> Option<(AdapterInfo, RawCaps, ID3D12Device)> {
+) -> AdapterInfo {
+    AdapterInfo {
+        id,
+        name: name_of(desc),
+        // Unlike Metal, DXGI reports genuine PCI ids, so these are the real
+        // thing rather than the seam's `0` for "unknown". WARP reports
+        // Microsoft's own vendor id here, which is what makes it identifiable in
+        // a log without matching on its name.
+        vendor_id: desc.VendorId,
+        device_id: desc.DeviceId,
+        device_type: device_type_of(is_software(desc), shares_cpu_memory(adapter, desc)),
+        driver: driver_string(adapter),
+        backend: BackendKind::Dx12,
+        luid: Some(luid_of(desc)),
+    }
+}
+
+/// `DXGI_ADAPTER_DESC1::AdapterLuid`, packed as
+/// [`AdapterInfo::luid`](crcbl_hal::AdapterInfo::luid) documents — **the only
+/// identity DXGI actually guarantees**, locally unique for the lifetime of the
+/// system and equal for two interfaces onto one adapter.
+///
+/// Name, vendor and device id are *not* an identity: two genuinely distinct
+/// cards of one model share all three, and the runner lists two adapters that
+/// share all three and are still two adapters — they carry different LUIDs.
+/// Enumeration de-duplicates on this, and a test asserts no two adapters share
+/// one. The two halves are distinct fields in the API, so they are packed here
+/// in a fixed order; nothing reads the parts back, only compares whole values.
+pub(crate) fn luid_of(desc: &DXGI_ADAPTER_DESC1) -> u64 {
+    (u64::from(desc.AdapterLuid.HighPart.cast_unsigned()) << 32)
+        | u64::from(desc.AdapterLuid.LowPart)
+}
+
+/// Everything one D3D12 adapter can do, and the device it was asked through,
+/// or why D3D12 will not open it.
+///
+/// The `ID3D12Device` is created at [`D3D_FEATURE_LEVEL_11_0`] — D3D12's floor —
+/// on purpose:
+/// asking for a higher level would refuse adapters that open at the floor,
+/// and which tier a device can run is decided by [`Features`], never by the
+/// feature level it was opened at.
+pub(crate) fn probe(
+    adapter: &IDXGIAdapter1,
+    desc: &DXGI_ADAPTER_DESC1,
+) -> Result<(DeviceCaps, RawCaps, ID3D12Device), String> {
     let mut device: Option<ID3D12Device> = None;
     // SAFETY: `adapter` is a live `IDXGIAdapter1` this crate owns a reference
     // to, and `device` is a live `Option<ID3D12Device>` the call writes through.
@@ -878,17 +899,21 @@ pub(crate) fn describe(
     // assumed.
     let created = unsafe { D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, &mut device) };
     if let Err(error) = created {
-        crcbl_core::log::debug!(
-            "crcbl-dx12: DXGI lists \"{}\" but D3D12 will not open it: {error}",
+        return Err(format!(
+            "DXGI lists \"{}\" but D3D12 will not open it: {error}",
             name_of(desc)
-        );
-        return None;
+        ));
     }
     // A successful `D3D12CreateDevice` always wrote an interface, so this is not
     // a case anyone expects — but the binding's out-parameter is an `Option` and
     // a `None` here would be a null pointer to call through, so it is read back
     // rather than unwrapped.
-    let device = device?;
+    let device = device.ok_or_else(|| {
+        format!(
+            "D3D12CreateDevice reported success and wrote no device for \"{}\"",
+            name_of(desc)
+        )
+    })?;
 
     // **A refused query degrades to "no", never to a false "yes".**
     // `D3D12_FEATURE_DATA_D3D12_OPTIONS::default()` leaves `ResourceBindingTier`
@@ -913,13 +938,7 @@ pub(crate) fn describe(
     let raw = RawCaps {
         binding_tier: options.ResourceBindingTier,
         shader_model: highest_shader_model(&device),
-        software: is_software(desc),
         unified_memory: architecture.UMA.as_bool(),
-        // The two halves are distinct fields rather than one integer in the
-        // API, so they are packed here in a fixed order; nothing reads the
-        // parts back, only compares whole values.
-        luid: (u64::from(desc.AdapterLuid.HighPart.cast_unsigned()) << 32)
-            | u64::from(desc.AdapterLuid.LowPart),
         block_compression: supports_block_compression(&device),
         // A refused query leaves `RaytracingTier` at `NOT_SUPPORTED`, which is
         // "no" — the direction `options` above fails in, for its reason.
@@ -928,25 +947,57 @@ pub(crate) fn describe(
             .RaytracingTier,
     };
     let features = features_of(&raw);
-    let info = AdapterInfo {
-        id,
-        name: name_of(desc),
-        // Unlike Metal, DXGI reports genuine PCI ids, so these are the real
-        // thing rather than the seam's `0` for "unknown". WARP reports
-        // Microsoft's own vendor id here, which is what makes it identifiable in
-        // a log without matching on its name.
-        vendor_id: desc.VendorId,
-        device_id: desc.DeviceId,
-        device_type: device_type_of(&raw),
-        driver: driver_string(adapter),
-        backend: BackendKind::Dx12,
-        luid: Some(raw.luid),
-        caps: DeviceCaps {
-            features,
-            limits: limits_of(features),
-        },
+    let caps = DeviceCaps {
+        features,
+        limits: limits_of(features),
     };
-    Some((info, raw, device))
+    Ok((caps, raw, device))
+}
+
+/// Whether the adapter shares the CPU's memory, asked of DXGI without a
+/// device, or `None` when DXGI will not say.
+///
+/// `QueryVideoMemoryInfo` reports a budget per memory segment group, and an
+/// adapter whose memory is the CPU's has only the local group: its non-local
+/// budget is zero. That is the same fact `D3D12_FEATURE_DATA_ARCHITECTURE1::UMA`
+/// reports through a device, and `crcbl_dx12::instance`'s tests hold the two
+/// against each other on every adapter they probe.
+///
+/// DXCore's `IsIntegrated` was the first choice and is not the same claim: on
+/// a desktop with an AMD APU beside a discrete card it answered `false` for
+/// the APU, whose D3D12 device reports `UMA`, and DXGI's own power-preference
+/// order put the two cards level as well. Both read the operating system's
+/// hybrid classification, which is about laptops that switch GPUs, not about
+/// where an adapter's memory is.
+fn shares_cpu_memory(adapter: &IDXGIAdapter1, desc: &DXGI_ADAPTER_DESC1) -> Option<bool> {
+    let adapter3 = match adapter.cast::<IDXGIAdapter3>() {
+        Ok(adapter3) => adapter3,
+        Err(error) => {
+            crcbl_core::log::debug!(
+                "crcbl-dx12: no IDXGIAdapter3 for \"{}\", so its memory is not known: {error}",
+                name_of(desc)
+            );
+            return None;
+        }
+    };
+    let mut non_local = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+    // SAFETY: `adapter3` is a live COM interface this crate owns a reference
+    // to, and the pointer names a live local of exactly the type the call
+    // writes, which outlives it. Node zero is the only node the seam models,
+    // as in `probe`.
+    let queried = unsafe {
+        adapter3.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &raw mut non_local)
+    };
+    match queried {
+        Ok(()) => Some(non_local.Budget == 0),
+        Err(error) => {
+            crcbl_core::log::debug!(
+                "crcbl-dx12: DXGI will not report \"{}\"'s memory: {error}",
+                name_of(desc)
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1023,9 +1074,7 @@ mod tests {
         let base = RawCaps {
             binding_tier: D3D12_RESOURCE_BINDING_TIER_3,
             shader_model: D3D_SHADER_MODEL_6_6,
-            software: false,
             unified_memory: false,
-            luid: 0,
             block_compression: true,
             raytracing_tier: D3D12_RAYTRACING_TIER_NOT_SUPPORTED,
         };
@@ -1078,9 +1127,7 @@ mod tests {
         let base = RawCaps {
             binding_tier: D3D12_RESOURCE_BINDING_TIER_3,
             shader_model: D3D_SHADER_MODEL_6_6,
-            software: false,
             unified_memory: false,
-            luid: 0,
             block_compression: true,
             raytracing_tier: D3D12_RAYTRACING_TIER_NOT_SUPPORTED,
         };
@@ -1150,9 +1197,7 @@ mod tests {
             let raw = RawCaps {
                 binding_tier,
                 shader_model,
-                software: false,
                 unified_memory: false,
-                luid: 0,
                 block_compression: true,
                 raytracing_tier: D3D12_RAYTRACING_TIER_NOT_SUPPORTED,
             };
@@ -1200,9 +1245,7 @@ mod tests {
         let raw = RawCaps {
             binding_tier: D3D12_RESOURCE_BINDING_TIER_3,
             shader_model: D3D_SHADER_MODEL_6_9,
-            software: false,
             unified_memory: false,
-            luid: 0,
             block_compression: true,
             raytracing_tier: D3D12_RAYTRACING_TIER_1_1,
         };
@@ -1297,45 +1340,25 @@ mod tests {
         );
     }
 
-    /// A software adapter is the seam's `Cpu`, whatever its memory looks like.
+    /// A software adapter is the seam's `Cpu`, whatever DXGI says of its
+    /// memory, and an adapter DXGI will not classify is `Other`, not a guess.
     ///
-    /// WARP shares the CPU's memory pool, so `UMA` is true for it — a
-    /// classification that tested memory first would call the engine's only
-    /// Windows software rasteriser an integrated GPU, and every "is this a real
-    /// device?" check downstream would believe it.
+    /// WARP shares the CPU's memory pool — a classification that asked about
+    /// integration first could call the engine's only Windows software
+    /// rasteriser an integrated GPU, and every "is this a real device?" check
+    /// downstream would believe it.
     #[test]
-    fn a_software_adapter_outranks_its_memory_architecture() {
-        let warp = RawCaps {
-            binding_tier: D3D12_RESOURCE_BINDING_TIER_3,
-            shader_model: D3D_SHADER_MODEL_6_6,
-            software: true,
-            unified_memory: true,
-            luid: 0,
-            block_compression: true,
-            raytracing_tier: D3D12_RAYTRACING_TIER_NOT_SUPPORTED,
-        };
-        assert_eq!(device_type_of(&warp), DeviceType::Cpu, "{warp:?}");
-
-        let integrated = RawCaps {
-            software: false,
-            ..warp
-        };
-        assert_eq!(
-            device_type_of(&integrated),
-            DeviceType::Integrated,
-            "{integrated:?}"
-        );
-
-        let discrete = RawCaps {
-            unified_memory: false,
-            luid: 0,
-            ..integrated
-        };
-        assert_eq!(
-            device_type_of(&discrete),
-            DeviceType::Discrete,
-            "{discrete:?}"
-        );
+    fn a_software_adapter_outranks_its_integration() {
+        for integrated in [Some(true), Some(false), None] {
+            assert_eq!(
+                device_type_of(true, integrated),
+                DeviceType::Cpu,
+                "{integrated:?}"
+            );
+        }
+        assert_eq!(device_type_of(false, Some(true)), DeviceType::Integrated);
+        assert_eq!(device_type_of(false, Some(false)), DeviceType::Discrete);
+        assert_eq!(device_type_of(false, None), DeviceType::Other);
     }
 
     /// The prefix every line the mesh probe prints carries, so one `grep` over a
@@ -1491,7 +1514,7 @@ mod tests {
              driver={:?}",
             record.info.name,
             record.info.device_type,
-            record.raw.software,
+            is_software(&record.desc),
             record.info.vendor_id,
             record.info.device_id,
             record.info.driver,

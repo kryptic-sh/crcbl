@@ -1651,6 +1651,7 @@ impl Dx12Device {
     pub(crate) fn open(
         instance: Arc<InstanceInner>,
         record: &AdapterRecord,
+        caps: DeviceCaps,
         desc: &DeviceDesc<'_>,
     ) -> Result<Self, HalError> {
         let mut device: Option<ID3D12Device> = None;
@@ -1665,7 +1666,7 @@ impl Dx12Device {
                     record.info.name
                 ))
             })?;
-        // Enumeration already opened this adapter once, so a `None` here is not
+        // The probe already opened this adapter once, so a `None` here is not
         // a case anyone expects — but the binding's out-parameter is an `Option`
         // and a `None` would be a null pointer to call through.
         let raw = device.ok_or_else(|| {
@@ -1674,9 +1675,12 @@ impl Dx12Device {
                 record.info.name
             ))
         })?;
-        // This device holds its adapter's D3D12 device now, so enumeration's
-        // probes can go, the chosen adapter's included; see
-        // `AdapterRecord::probe`.
+        // This device holds its adapter's D3D12 device now, so every probe
+        // can go, the chosen adapter's included, and none is held from here
+        // on; see `AdapterRecord::probe`.
+        instance
+            .opened
+            .store(true, std::sync::atomic::Ordering::Release);
         for record in &instance.adapters {
             record
                 .probe
@@ -1730,8 +1734,6 @@ impl Dx12Device {
         // `open_device` before this call; `optional_features` is satisfied by
         // construction, which is exactly what `DeviceDesc::optional_features`
         // documents ("check `Device::caps` afterwards to find out").
-        //
-        let caps = record.info.caps;
         // **The timestamp clock's rate is a *queue* question**, and
         // `crate::adapter` computes its caps before any device or queue exists.
         // So `Features::TIMESTAMP_QUERY` is reported there, where
@@ -10304,17 +10306,20 @@ pub(crate) mod tests {
             .into_iter()
             .find(|info| info.id == adapter)
             .expect("the pin resolved against this same enumeration");
+        let caps = instance
+            .adapter_caps(info.id)
+            .expect("the pinned adapter opens");
         let device = instance
             .open_device(&device_desc(adapter))
             .expect("a D3D12 device opens with no required features");
-        assert_eq!(device.caps().features, info.caps.features);
+        assert_eq!(device.caps().features, caps.features);
         assert!(
-            info.caps.features.contains(Features::TIMESTAMP_QUERY),
+            caps.features.contains(Features::TIMESTAMP_QUERY),
             "an adapter that stopped reporting timestamps would make every timestamp \
              assertion in this suite vacuous: {:?}",
-            info.caps.features
+            caps.features
         );
-        assert_eq!(device.caps().limits, info.caps.limits);
+        assert_eq!(device.caps().limits, caps.limits);
     }
 
     /// A buffer of every memory location creates and destroys, and a destroyed

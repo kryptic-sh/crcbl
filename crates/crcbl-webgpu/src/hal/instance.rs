@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
-    AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceDesc, Format, HalError, Instance,
-    PendingDevice, PresentMode, SurfaceCaps, SurfaceHandle,
+    AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceCaps, DeviceDesc, Format, HalError,
+    Instance, PendingDevice, PresentMode, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -23,7 +23,9 @@ use super::device::WebGpuPendingDevice;
 #[derive(Debug)]
 pub struct WebGpuInstance {
     channel: SharedChannel,
-    adapters: Vec<AdapterInfo>,
+    /// Each granted adapter, with what it can do: the browser answered both
+    /// in one reply.
+    adapters: Vec<(AdapterInfo, DeviceCaps)>,
     pool: HandlePool,
     /// The surfaces created from [`SurfaceTarget::Offscreen`], so
     /// [`surface_caps`](Instance::surface_caps) can tell a ring of textures from
@@ -125,7 +127,7 @@ impl WebGpuInstance {
     /// since both must already be the browser's answer.
     pub(crate) fn new(
         channel: SharedChannel,
-        adapters: Vec<AdapterInfo>,
+        adapters: Vec<(AdapterInfo, DeviceCaps)>,
         pool: HandlePool,
         canvas: Result<SurfaceCaps, String>,
     ) -> Self {
@@ -163,7 +165,7 @@ impl WebGpuInstance {
         // and is where a required bit it cannot satisfy is refused.
         self.adapters
             .iter()
-            .find(|adapter| adapter.id == desc.adapter)
+            .find(|(adapter, _)| adapter.id == desc.adapter)
             .ok_or(HalError::NoSuchAdapter(desc.adapter.0))?;
 
         let probe = self
@@ -241,7 +243,16 @@ impl Instance for WebGpuInstance {
     }
 
     fn adapters(&self) -> Vec<AdapterInfo> {
-        self.adapters.clone()
+        self.adapters.iter().map(|(info, _)| info.clone()).collect()
+    }
+
+    /// From the enumeration reply, so this asks the browser nothing.
+    fn adapter_caps(&self, adapter: AdapterId) -> Result<DeviceCaps, HalError> {
+        self.adapters
+            .iter()
+            .find(|(info, _)| info.id == adapter)
+            .map(|(_, caps)| *caps)
+            .ok_or(HalError::NoSuchAdapter(adapter.0))
     }
 
     unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {

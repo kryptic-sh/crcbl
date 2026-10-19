@@ -409,7 +409,7 @@ fn listing(adapters: &[AdapterInfo]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_hal::{AdapterId, BackendKind, DeviceCaps, Features, Limits};
+    use crcbl_hal::{AdapterId, BackendKind};
 
     /// One enumerated adapter, with only the two fields [`select`] reads
     /// varying: its position and its class.
@@ -423,10 +423,6 @@ mod tests {
             driver: "test".to_owned(),
             backend: BackendKind::Null,
             luid: None,
-            caps: DeviceCaps {
-                features: Features::empty(),
-                limits: Limits::minimum(),
-            },
         }
     }
 

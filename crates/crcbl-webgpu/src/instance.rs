@@ -40,7 +40,7 @@
 //!
 //! # What this reports is what the *browser* said, not what this crate can do
 //!
-//! The [`DeviceCaps`](crcbl_hal::DeviceCaps) in an answered probe is
+//! The [`DeviceCaps`] in an answered probe is
 //! `web/engine/gpu-replay.js`'s reading of `adapter.features` and
 //! `adapter.limits`. It is not a promise that this backend can execute those
 //! capabilities: this side reads what the browser said, and
@@ -110,10 +110,10 @@
 //!     driver: String::new(),
 //!     backend: BackendKind::WebGpu,
 //!     luid: None,
-//!     caps: DeviceCaps { features: Features::COMPUTE, limits: Limits::minimum() },
 //! };
+//! let caps = DeviceCaps { features: Features::COMPUTE, limits: Limits::minimum() };
 //! let mut replies = ReplyWriter::new();
-//! replies.adapter(sequence, &granted);
+//! replies.adapter(sequence, &granted, &caps);
 //!
 //! // A later frame, where the answer lands.
 //! let mut probe = probe;
@@ -123,7 +123,7 @@
 //! # Ok::<(), crcbl_webgpu::DecodeError>(())
 //! ```
 
-use crcbl_hal::{AdapterInfo, SurfaceCaps};
+use crcbl_hal::{AdapterInfo, DeviceCaps, SurfaceCaps};
 
 use crate::reply::{Reply, SurfaceCapsFailure};
 use crate::web::StreamChannel;
@@ -163,6 +163,8 @@ pub enum AdapterProbe {
         /// more fields are always absent, which
         /// [`reply`](crate::reply) lists.
         info: AdapterInfo,
+        /// What it can do, from the same reply.
+        caps: DeviceCaps,
     },
     /// No adapter is coming.
     ///
@@ -223,7 +225,10 @@ impl AdapterProbe {
             return false;
         };
         *self = match reply {
-            Reply::Adapter { info } => Self::Granted { info: info.clone() },
+            Reply::Adapter { info, caps } => Self::Granted {
+                info: info.clone(),
+                caps: *caps,
+            },
             Reply::NoAdapter { reason } => Self::Refused {
                 reason: reason.clone(),
             },
@@ -259,7 +264,7 @@ impl AdapterProbe {
     #[must_use]
     pub fn adapters(&self) -> Vec<AdapterInfo> {
         match self {
-            Self::Granted { info } => vec![info.clone()],
+            Self::Granted { info, .. } => vec![info.clone()],
             _ => Vec::new(),
         }
     }
@@ -436,10 +441,14 @@ mod tests {
             driver: String::new(),
             backend: BackendKind::WebGpu,
             luid: None,
-            caps: DeviceCaps {
-                features: Features::COMPUTE,
-                limits: Limits::minimum(),
-            },
+        }
+    }
+
+    /// What every [`granted`] adapter can do.
+    fn caps() -> DeviceCaps {
+        DeviceCaps {
+            features: Features::COMPUTE,
+            limits: Limits::minimum(),
         }
     }
 
@@ -468,6 +477,7 @@ mod tests {
             sequence,
             Reply::Adapter {
                 info: llvmpipe.clone(),
+                caps: caps(),
             },
         )]));
         assert!(probe.is_settled());
@@ -498,6 +508,7 @@ mod tests {
             sequence + 1,
             Reply::Adapter {
                 info: granted("someone else's adapter"),
+                caps: caps(),
             },
         )]));
         assert_eq!(probe.sequence(), Some(sequence));
@@ -516,12 +527,14 @@ mod tests {
             sequence,
             Reply::Adapter {
                 info: granted("first"),
+                caps: caps(),
             },
         )]);
         assert!(!probe.absorb(&[(
             sequence,
             Reply::Adapter {
                 info: granted("second"),
+                caps: caps(),
             },
         )]));
         assert_eq!(probe.adapters(), vec![granted("first")]);
@@ -537,14 +550,22 @@ mod tests {
         let mut probe = AdapterProbe::request(&channel).expect("room");
         let sequence = probe.sequence().expect("a fresh request waits");
 
-        let mut info = granted("timestamping");
-        info.caps.features = Features::COMPUTE | Features::TIMESTAMP_QUERY;
-        info.caps.limits.max_image_2d = 16384;
-        assert!(probe.absorb(&[(sequence, Reply::Adapter { info: info.clone() })]));
+        let info = granted("timestamping");
+        let mut sent = caps();
+        sent.features = Features::COMPUTE | Features::TIMESTAMP_QUERY;
+        sent.limits.max_image_2d = 16384;
+        assert!(probe.absorb(&[(
+            sequence,
+            Reply::Adapter {
+                info: info.clone(),
+                caps: sent,
+            }
+        )]));
 
-        let adapters = probe.adapters();
-        assert_eq!(adapters, vec![info]);
-        let caps = adapters[0].caps;
+        assert_eq!(probe.adapters(), vec![info]);
+        let AdapterProbe::Granted { caps, .. } = probe else {
+            panic!("the reply settled the probe as granted: {probe:?}");
+        };
         assert!(caps.supports(Features::TIMESTAMP_QUERY));
         assert_eq!(caps.limits.max_image_2d, 16384);
         // Derived from the features that crossed rather than stored, which is
