@@ -19,6 +19,17 @@ approved as a dependency of `crcbl-shell` and goes ahead after the release;
 breaking change, so a minor bump); `crcbl-cli` stays unpublished; the `notify`
 watcher and a grapheme crate stay declined until a caller needs them.
 
+**Decided 2026-10-19: the draw list gets opacity groups, asked by lyr.** lyr's
+theme draws each module box (rounded rect, border and text) at CSS
+`opacity: 0.8` over a transparent bar; multiplying each command's alpha, which
+lyr ships meanwhile, lets the box's background show through its own text. Build
+`DrawList::push_opacity(f32)` and `pop_opacity()` with CSS semantics: the
+commands between them are drawn into a layer, which is then composited faded, in
+both GPU UI passes (`crcbl-frame`'s `ui_pass` and `crcbl-render`'s) on Vulkan,
+D3D12 and Metal, plus the `opacity` style property (see "What UI rung 4 shipped
+without" below). Declined: per-command alpha as the meaning of a group, which is
+what `opacity` is not. Next after S9 on AppKit; M to L.
+
 **Every backend, the owner's rule from 2026-10-17** (relayed by lyr): every
 feature built for lyr and pikr must work on every backend — Wayland, X11, Win32
 and AppKit, and Vulkan, D3D12 and Metal where it touches the GPU — and where a
@@ -6827,10 +6838,10 @@ scene menu with the gaps below.
 - **Not in the property subset** (re-checked 2026-09-24 against
   `crcbl_ui::style`'s `Property::parse`): `opacity`, because the draw list has
   no group opacity and multiplying each command's alpha is not what `opacity`
-  means where children overlap; `inherit` and `!important` (`initial` and
-  `unset` exist); the `border` and `font` shorthands; `em` and the other
-  relative units. The scope-creep rule applies: each lands when the editor or a
-  sample needs it.
+  means where children overlap (opacity groups are decided, 2026-10-19, under
+  the lyr and pikr section); `inherit` and `!important` (`initial` and `unset`
+  exist); the `border` and `font` shorthands; `em` and the other relative units.
+  The scope-creep rule applies: each lands when the editor or a sample needs it.
 - **The sRGB transfer function now exists twice** — in `crcbl-render`'s mip
   generation and in `crcbl-ui`'s colour parsing — and belongs in one place.
 - **Untested**: trimming the definition cache at its cap, and a stylesheet write
