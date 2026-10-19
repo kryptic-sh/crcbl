@@ -1,15 +1,20 @@
 //! The faces text is drawn in: found through `crcbl-font`, read once per
-//! document, and asked for glyphs through `skrifa`.
+//! document, asked for outlines and metrics through `skrifa`, and handed to
+//! `harfrust` to shape with.
 //!
-//! # Which face draws a character
+//! # Which face draws a cluster
 //!
 //! A text's chain of faces is each family of its `font-family` list that
 //! the system has, in order, then `serif`, the default font of browsers and
-//! of resvg, so that a list naming nothing installed still draws. A
-//! character takes the first face of the chain that maps it, else the first
-//! of the system's fallbacks for the chain's first face ([`FontSource::fallbacks`])
-//! that does, else the chain's first face's `.notdef`. A chain with no face
-//! at all draws nothing and refuses the text.
+//! of resvg, so that a list naming nothing installed still draws. A cluster
+//! (a character and the marks and format characters after it, as
+//! [`shape`](super::shape) cuts them) takes the first face of the chain that
+//! maps every character of it that draws, else the first of the system's
+//! fallbacks for the chain's first face ([`FontSource::fallbacks`]) that
+//! does; failing both, the first face of either that maps its first such
+//! character, else the chain's first face, which draws what it lacks as its
+//! `.notdef`. A cluster of format characters alone takes the chain's first
+//! face. A chain with no face at all draws nothing and refuses the text.
 //!
 //! # Caps
 //!
@@ -22,11 +27,11 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crcbl_font::{FontMatch, FontQuery, FontStyle, SystemFonts};
 use skrifa::instance::{Location, Size};
-use skrifa::metrics::{GlyphMetrics, Metrics};
+use skrifa::metrics::Metrics;
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 
@@ -94,11 +99,18 @@ struct FontKey {
     slant: Slant,
 }
 
+/// One face read: its bytes, a font file of its own, for `skrifa`, and the
+/// same bytes read by `harfrust`.
+struct Face {
+    bytes: Arc<Vec<u8>>,
+    shaper: harfrust::Font,
+}
+
 /// The faces one document has looked up and read.
 #[derive(Default)]
 pub(in crate::svg) struct Faces {
-    /// Each face read, as a font file of its own.
-    faces: Vec<Vec<u8>>,
+    /// Each face read.
+    faces: Vec<Face>,
     /// Each face found, by file and index in it: its index in `faces`, or
     /// `None` for one that could not be read or parsed.
     files: HashMap<(PathBuf, u32), Option<usize>>,
@@ -112,44 +124,68 @@ pub(in crate::svg) struct Faces {
 }
 
 impl Faces {
-    /// The glyph `style`'s text draws `ch` with, or `None` if no face can
-    /// draw that text at all.
+    /// The face `style`'s text draws `cluster` in, as the module docs say;
+    /// `draws` tells the characters that need a glyph from the format
+    /// characters that do not.
     ///
     /// # Errors
     ///
-    /// [`ImageError::Unsupported`] past [`MAX_LOOKUPS`] or [`MAX_FACES`].
-    pub(in crate::svg) fn glyph(
+    /// [`ImageError::Unsupported`] if no face can draw `style`'s text at
+    /// all, or past [`MAX_LOOKUPS`] or [`MAX_FACES`].
+    pub(in crate::svg) fn cluster_face(
         &mut self,
         source: &dyn FontSource,
         style: &TextStyle,
-        ch: char,
-    ) -> Result<Option<Glyph>, ImageError> {
+        cluster: &str,
+        draws: impl Fn(char) -> bool,
+    ) -> Result<usize, ImageError> {
         let (chain, first_query) = self.chain(source, style)?;
         let Some(&first) = chain.first() else {
+            return Err(no_face(style));
+        };
+        let drawn: Vec<char> = cluster.chars().filter(|&ch| draws(ch)).collect();
+        let Some(&lead) = drawn.first() else {
+            return Ok(first);
+        };
+        let query = first_query.as_ref();
+        let maps_all = |faces: &Self, face| drawn.iter().all(|&ch| faces.map(face, ch).is_some());
+        if let Some(face) = self.first_face(source, &chain, query, maps_all)? {
+            return Ok(face);
+        }
+        let maps_lead = |faces: &Self, face| faces.map(face, lead).is_some();
+        Ok(self
+            .first_face(source, &chain, query, maps_lead)?
+            .unwrap_or(first))
+    }
+
+    /// The first face of `chain`, then of the fallbacks for `first_query`,
+    /// that `fits`. The fallbacks are read up to [`MAX_FACES`], where the
+    /// search stops rather than refusing.
+    fn first_face(
+        &mut self,
+        source: &dyn FontSource,
+        chain: &[usize],
+        first_query: Option<&FontQuery>,
+        fits: impl Fn(&Self, usize) -> bool,
+    ) -> Result<Option<usize>, ImageError> {
+        if let Some(&face) = chain.iter().find(|&&face| fits(self, face)) {
+            return Ok(Some(face));
+        }
+        let Some(query) = first_query else {
             return Ok(None);
         };
-        for &face in &chain {
-            if let Some(id) = self.map(face, ch) {
-                return Ok(Some(Glyph { face, id }));
+        for found in self.fallback_list(source, query)? {
+            let key = (found.path.clone(), found.index);
+            if !self.files.contains_key(&key) && self.faces.len() >= MAX_FACES {
+                break;
+            }
+            if let Some(face) = self.read(&found)?
+                && fits(self, face)
+            {
+                return Ok(Some(face));
             }
         }
-        if let Some(query) = first_query {
-            for found in self.fallback_list(source, &query)? {
-                let key = (found.path.clone(), found.index);
-                if !self.files.contains_key(&key) && self.faces.len() >= MAX_FACES {
-                    break;
-                }
-                if let Some(face) = self.read(&found)?
-                    && let Some(id) = self.map(face, ch)
-                {
-                    return Ok(Some(Glyph { face, id }));
-                }
-            }
-        }
-        Ok(Some(Glyph {
-            face: first,
-            id: GlyphId::NOTDEF,
-        }))
+        Ok(None)
     }
 
     /// The faces `style`'s text tries in order, and the query that found the
@@ -257,16 +293,29 @@ impl Faces {
             .read()
             .ok()
             .filter(|bytes| FontRef::new(bytes).is_ok())
-            .map(|bytes| {
-                self.faces.push(bytes);
-                self.faces.len() - 1
+            .and_then(|bytes| {
+                let bytes = Arc::new(bytes);
+                let shared: Arc<dyn AsRef<[u8]> + Send + Sync> = bytes.clone();
+                let shaper = harfrust::Font::new(shared, 0)?;
+                self.faces.push(Face { bytes, shaper });
+                Some(self.faces.len() - 1)
             });
         self.files.insert(key, face);
         Ok(face)
     }
 
     fn font(&self, face: usize) -> Option<FontRef<'_>> {
-        FontRef::new(&self.faces[face]).ok()
+        FontRef::new(&self.faces[face].bytes).ok()
+    }
+
+    /// `face` for `harfrust` to shape at `weight`: its `wght` axis set to
+    /// it, if the face is variable along one, as outlines and metrics are.
+    pub(in crate::svg) fn shaper(&self, face: usize, weight: u16) -> harfrust::Font {
+        self.faces[face]
+            .shaper
+            .instance_builder()
+            .variations([("wght", f32::from(weight))])
+            .build()
     }
 
     /// `ch`'s glyph in `face`, if the face maps it.
@@ -301,17 +350,6 @@ impl Faces {
         }
     }
 
-    /// `glyph`'s advance at `weight`, in font units.
-    pub(in crate::svg) fn advance(&self, glyph: Glyph, weight: u16) -> f64 {
-        let Some(font) = self.font(glyph.face) else {
-            return 0.0;
-        };
-        let location = Self::location(&font, weight);
-        GlyphMetrics::new(&font, Size::unscaled(), &location)
-            .advance_width(glyph.id)
-            .map_or(0.0, f64::from)
-    }
-
     /// Appends `glyph`'s outline at `weight` to `out`, each point of it
     /// mapped by `place` from font units, `y` up, to user space.
     pub(in crate::svg) fn outline(
@@ -341,6 +379,23 @@ impl Faces {
             out.truncate(start);
         }
     }
+}
+
+/// The refusal of text in `style`, none of whose fonts is installed.
+fn no_face(style: &TextStyle) -> ImageError {
+    let families: Vec<String> = style
+        .families
+        .iter()
+        .map(|family| match family {
+            Family::Named(name) => format!("{name:?}"),
+            Family::Generic(generic) => (*generic).to_owned(),
+        })
+        .chain(["serif".to_owned()])
+        .collect();
+    unsupported(format_args!(
+        "text in fonts none of which is installed: {}",
+        families.join(", ")
+    ))
 }
 
 /// An outline drawn into path segments in user space.

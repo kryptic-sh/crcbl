@@ -1133,20 +1133,18 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      ligature lookups by hand through `skrifa::raw` — it would cover ligatures
      only, be wrong for marks, contextual forms and complex scripts, and be a
      second shaping engine to keep right; `rustybuzz` is archived.
-   - Not done, shaping: **SVG text** in `crcbl-image`
-     (`crates/crcbl-image/src/svg/text*`) still draws one glyph a char from the
-     cmap — moving it onto `harfrust` is the follow-up; **script and language**
-     come only from `harfrust`'s `Buffer::guess_segment_properties` per run (no
-     language is ever set, so `locl` forms never apply, and a run mixing scripts
-     is shaped in its first strong script); **no shaping cache** (every
-     `TextLayout`, measurement and caret measurement shapes again, allocating a
-     `harfrust::Buffer` per run; not measured); a word whose parts are in runs
-     of different fonts or sizes is shaped in pieces with no context between
-     them beyond `harfrust`'s pre/post context; a font that kerns against a
-     space draws that pair unkerned, by the per-word rule; after an overlong
-     word's break, the side kept on the line was fitted by its width shaped
-     whole, so a lost kerning adjustment can leave it a fraction of a pixel past
-     the wrap width.
+   - Not done, shaping (SVG text's own gaps are under the SVG renderer's Text
+     entry): **script and language** come only from `harfrust`'s
+     `Buffer::guess_segment_properties` per run (no language is ever set, so
+     `locl` forms never apply, and a run mixing scripts is shaped in its first
+     strong script); **no shaping cache** (every `TextLayout`, measurement and
+     caret measurement shapes again, allocating a `harfrust::Buffer` per run;
+     not measured); a word whose parts are in runs of different fonts or sizes
+     is shaped in pieces with no context between them beyond `harfrust`'s
+     pre/post context; a font that kerns against a space draws that pair
+     unkerned, by the per-word rule; after an overlong word's break, the side
+     kept on the line was fitted by its width shaped whole, so a lost kerning
+     adjustment can leave it a fraction of a pixel past the wrap width.
    - **Line breaking (UAX #14) and clusters (UAX #29), shipped 2026-10-19**:
      `font::breaks` (hard breaks and soft breaks through `unicode-linebreak`,
      kept only at cluster boundaries), `font::cluster` on
@@ -1224,8 +1222,6 @@ Each step lands in the crate the later steps build on, so the seam goes first.
        fragment draws its chars left to right from the fragment's left
        (`emit_paragraph`), though its glyphs are placed in visual order; it has
        no right-to-left glyphs to draw.
-     - **SVG text** in `crcbl-image` has no bidi, as it has no shaping (item 4
-       of pikr's gaps).
      - **No real right-to-left font is tested**: the tests read `.notdef` glyphs
        of Hebrew and Arabic in the committed font, and an override (U+202E) that
        turns Latin right to left glyph for glyph, so Arabic joining, mirroring
@@ -1801,27 +1797,22 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `word-spacing`; fill, stroke and paint servers per span, and transforms
       and group effects on the text element. The XML tree now records where each
       child stands in its parent's text (`Element::child_offsets`), which is
-      what puts a text's characters and spans back in order. **No shaping**: one
-      glyph a character from the first face whose `cmap` maps it, advanced by
-      `hmtx`; GSUB and GPOS (kerning, ligatures, contextual forms, marks,
-      complex scripts) and bidirectional reordering are a later slice of their
-      own. `crcbl-ui` shapes with `harfrust` since 2026-10-17 (see the colour
-      emoji item's shaping entry); SVG text taking the same shaper is that
-      slice. Caps: `render::text::MAX_CHARACTERS` characters drawn per document,
-      `use` instances counted; `text::faces::MAX_LOOKUPS` font lookups and
-      `text::faces::MAX_FACES` faces read per document, a fallback search
-      stopping at the face cap with `.notdef` rather than refusing. Verified by
-      unit tests of the white-space rule, the list assignment, the pen and the
-      chunk anchors worked by hand; whole-file tests through
-      `render::render_with` with Atkinson Hyperlegible and `crcbl-ui`'s heart
-      fixture as the fonts, each layout rule compared with the same glyphs drawn
-      as `<path>` elements whose data the test reads from the font and places by
-      the rule; the property parsers; the refusals; each cap at its edge; the
-      feature-off refusal; and 47 hand mutants of the white-space rule, the list
-      assignment, the pen, the anchors, the gathering of spans, the refusals,
-      glyph placement, the cells, the face chain, the caps, the property parsers
-      and the feature-off path, 46 of them failing a test and one surviving (the
-      `wght` one under Not tested below).
+      what puts a text's characters and spans back in order. Shaping came later
+      (the shaping entry below). Caps: `render::text::MAX_CHARACTERS` characters
+      drawn per document, `use` instances counted; `text::faces::MAX_LOOKUPS`
+      font lookups and `text::faces::MAX_FACES` faces read per document, a
+      fallback search stopping at the face cap with `.notdef` rather than
+      refusing. Verified by unit tests of the white-space rule, the list
+      assignment, the pen and the chunk anchors worked by hand; whole-file tests
+      through `render::render_with` with Atkinson Hyperlegible and `crcbl-ui`'s
+      heart fixture as the fonts, each layout rule compared with the same glyphs
+      drawn as `<path>` elements whose data the test reads from the font and
+      places by the rule; the property parsers; the refusals; each cap at its
+      edge; the feature-off refusal; and 47 hand mutants of the white-space
+      rule, the list assignment, the pen, the anchors, the gathering of spans,
+      the refusals, glyph placement, the cells, the face chain, the caps, the
+      property parsers and the feature-off path, 46 of them failing a test and
+      one surviving (the `wght` one under Not tested below).
     - Decided 2026-10-17, for text: **a text that would draw a character with no
       face to draw it in is refused by name** (`ImageError::Unsupported`), and
       so is every such text in a build without `svg-text`, as anything else this
@@ -1850,20 +1841,75 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       as any unknown attribute is, and so is `lengthAdjust` without
       `textLength`. One `SystemFonts` serves the process; each decode reads the
       faces it uses.
-    - Not done, text: shaping (above); `textPath`, `tref`, `textLength`,
-      `rotate`; vertical writing and `text-orientation`; `baseline-shift`,
-      `dominant-baseline` and `alignment-baseline`; `text-decoration`;
-      `font-variant`, small caps and `text-transform`; `font-stretch` and every
-      variation axis but `wght` (`wdth`, `ital`, `slnt`, `opsz`,
-      `font-variation-settings`); synthetic bold and italic; the `font`
-      shorthand; `white-space` beyond `normal` and `nowrap`; SVG 2's wrapped
-      text (`inline-size`, `shape-inside`); text inside a clip path; colour
-      glyphs (COLR, CBDT, sbix: a face's outline is drawn, or nothing); position
-      lists in `em`; a face cache across decodes. Not tested: a variable face's
-      `wght` (no variable font among the fixtures; a mutant fixing `wght` at 400
-      passes every test); the character count carried into an embedded SVG image
-      and back; decoding with the system's fonts on Windows and macOS (only
-      WSL's fontconfig, through the corpus).
+    - Not done, text: `textPath`, `tref`, `textLength`, `rotate`; vertical
+      writing and `text-orientation`; `baseline-shift`, `dominant-baseline` and
+      `alignment-baseline`; `text-decoration`; `font-variant`, small caps and
+      `text-transform`; `font-stretch` and every variation axis but `wght`
+      (`wdth`, `ital`, `slnt`, `opsz`, `font-variation-settings`); synthetic
+      bold and italic; the `font` shorthand; `white-space` beyond `normal` and
+      `nowrap`; SVG 2's wrapped text (`inline-size`, `shape-inside`); text
+      inside a clip path; colour glyphs (COLR, CBDT, sbix: a face's outline is
+      drawn, or nothing); position lists in `em`; a face cache across decodes.
+      Not tested: a variable face's `wght` (no variable font among the fixtures;
+      a mutant fixing `wght` at 400 passes every test); the character count
+      carried into an embedded SVG image and back; decoding with the system's
+      fonts on Windows and macOS (only WSL's fontconfig, through the corpus).
+    - **Shaping and bidi in SVG text, shipped 2026-10-20** (`svg/text/shape.rs`,
+      `harfrust` and `unicode-bidi` added to `svg-text`): a text splits into
+      chunks at absolute `x`/`y` as before, and each chunk is shaped on its own
+      — a face per cluster (`Faces::cluster_face`: the first face mapping every
+      drawn char of it, then the first mapping its lead char), UAX #9 levels
+      with the chunk as a level-0 paragraph and L1 applied, runs of one level,
+      face and weight shaped by `harfrust` at the face's `wght` instance with
+      the rest of the chunk as context, and the runs put in L2's visual order. A
+      cluster takes its first char's `dx`/`dy` and paint; letter spacing follows
+      a cluster's last glyph. Verified by whole-file tests drawing Atkinson's
+      kerned `AV`, its GPOS mark on `h` with U+0301 and its `ccmp` dotless `i`
+      with U+0307 as `harfrust` shapes them (and unlike a glyph a char), the
+      shaping fixture's heart-fire ligature, its heart-heart kern worked by hand
+      and its keycap ligature drawn in the second family, by cluster rules for
+      spacing, `dx` and `x` inside a cluster, faces chosen past a selector or
+      joiner, and by an override reversing Latin, two faces' runs swapping, a
+      trailing space under L1 and a Hebrew-first chunk staying left to right.
+      Hand mutants, each compiling under `-D warnings`, killed: a right-to-left
+      run shaped left to right, runs not reordered, an auto paragraph level, no
+      L1, selectors or format chars required to map, marks joining across fonts,
+      no cluster continuing, the face chosen by the lead char alone, the mark's
+      y offset flipped or x offset dropped, spacing or `dx` on every glyph, the
+      chunk's `x` taken from the visually first cluster, runs not cut by face,
+      `kern` off and `ccmp` off. Surviving: dropping the pre/post context (no
+      fixture has a contextual lookup across a run boundary), dropping
+      `REMOVE_DEFAULT_IGNORABLES` (equivalent for a face with a space glyph:
+      `harfrust`'s `hide_default_ignorables` then draws each ignorable as the
+      space glyph instead of removing it), and shaping at `wght` 400 whatever
+      the weight (no variable fixture, as for outlines).
+    - Not done, SVG text shaping:
+      - **`direction: rtl` and `unicode-bidi` beyond `normal` are still
+        refused** (recorded as undrawn values in `svg/style/text.rs`). Drawing
+        them needs the chunk's paragraph level from `direction`, `text-anchor`'s
+        `start` and `end` swapped for a right-to-left chunk, and
+        `unicode-bidi`'s `embed`, `isolate`, `bidi-override` and `plaintext`
+        mapped onto explicit levels around each `tspan`, as the Unicode controls
+        (U+202A to U+202E, U+2066 to U+2069) already are.
+      - **Clusters before shaping come from bidi classes**, not UAX #29: a char
+        of class NSM or BN continues the cluster before it, so a spacing mark
+        (an Indic vowel sign, class L) starts its own cluster and may be drawn
+        in a different face from its base, and each emoji of a ZWJ sequence is a
+        cluster of its own, so they can land in different faces and not ligate.
+        `crcbl-ui`'s `font::cluster` has the real rule on
+        `unicode-segmentation`, owner-approved for `crcbl-ui`; adding it to
+        `crcbl-image` is the owner's call.
+      - **No language and no feature control**: `xml:lang`/`lang` are not passed
+        to `harfrust` (no `locl`), and `font-variant-ligatures`,
+        `font-feature-settings` and `font-kerning` are not read; letter spacing
+        does not turn optional ligatures off, which CSS Text recommends.
+      - **Positions inside a cluster are ignored** and a chunk's `x`/`y` place
+        its visually first glyph; with bidi, `dx`/`dy` shift the pen in visual
+        order. Browsers differ among themselves here; not compared with resvg.
+      - Not measured: the corpus (Papirus, breeze) with shaping; its icons' text
+        is Latin, so no change is expected, but CI's `svg corpus` job is the
+        check. Not tested: a real right-to-left or complex-script font (the
+        tests use an override and `.notdef` Hebrew, as `crcbl-ui`'s do).
     - **Corpus after text, measured 2026-10-17** the same way (breeze 5642,
       breeze apps 206; Adwaita 714 of 715, Papirus 6310 of 6319, Papirus apps
       3836 of 3845 and hicolor 1 of 2 unchanged throughout): before, breeze 5586

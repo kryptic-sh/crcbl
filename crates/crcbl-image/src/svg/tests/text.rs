@@ -30,6 +30,15 @@ const HEART_PATH: &str = concat!(
 );
 const HEART: &[u8] = include_bytes!("../../../../crcbl-ui/tests/fixtures/emoji/text.ttf");
 
+/// `crcbl-ui`'s shaping fixture: heart and fire ligate into one glyph,
+/// heart kerns before heart, and the digit one with the combining keycap
+/// ligate into a keycap; its module `font::fixtures` has the script.
+const SHAPED_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../crcbl-ui/tests/fixtures/emoji/shaped.ttf"
+);
+const SHAPED: &[u8] = include_bytes!("../../../../crcbl-ui/tests/fixtures/emoji/shaped.ttf");
+
 fn face(path: impl Into<PathBuf>, family: &str) -> FontMatch {
     FontMatch {
         path: path.into(),
@@ -41,7 +50,8 @@ fn face(path: impl Into<PathBuf>, family: &str) -> FontMatch {
 }
 
 /// `Atkinson` (and `serif`) is Atkinson Hyperlegible, `Heart` the heart
-/// font; with `fallback`, the heart font is every other face's fallback.
+/// font, `Shaped` the shaping fixture; with `fallback`, the heart font is
+/// every other face's fallback.
 struct Fixtures {
     fallback: bool,
 }
@@ -51,6 +61,7 @@ impl FontSource for Fixtures {
         match query.family.as_str() {
             "Atkinson" | "serif" => Some(face(ATKINSON_PATH, "Atkinson")),
             "Heart" => Some(face(HEART_PATH, "Heart")),
+            "Shaped" => Some(face(SHAPED_PATH, "Shaped")),
             _ => None,
         }
     }
@@ -156,8 +167,17 @@ impl OutlinePen for Outline {
 
 /// `ch`'s glyph in `font`, its `.notdef` if the font has none.
 fn outline(font: &[u8], ch: char) -> Outline {
+    let id = FontRef::new(font)
+        .expect("a font")
+        .charmap()
+        .map(ch)
+        .unwrap_or(GlyphId::NOTDEF);
+    glyph_outline(font, id)
+}
+
+/// The glyph `id` of `font`.
+fn glyph_outline(font: &[u8], id: GlyphId) -> Outline {
     let font = FontRef::new(font).expect("a font");
-    let id = font.charmap().map(ch).unwrap_or(GlyphId::NOTDEF);
     let location = LocationRef::default();
     let mut out = Outline {
         commands: Vec::new(),
@@ -647,4 +667,250 @@ fn faces_read_are_capped() {
         matches!(&error, ImageError::Unsupported(why) if why.contains("faces")),
         "{error:?}"
     );
+}
+
+/// `text` shaped straight through `harfrust` in `font`, left to right: each
+/// glyph's id, cluster, x advance, x offset and y offset, in font units.
+fn reference(font: &'static [u8], text: &str) -> Vec<(GlyphId, u32, f64, f64, f64)> {
+    let font = harfrust::Font::new(font, 0).expect("reads");
+    let mut buffer = harfrust::Buffer::new();
+    buffer.push_str(text);
+    buffer.guess_segment_properties();
+    harfrust::shape(
+        &harfrust::ShaperFont::new(&font),
+        &mut buffer,
+        harfrust::ShapeOptions::new(),
+    )
+    .expect("shapes");
+    buffer
+        .glyph_infos()
+        .iter()
+        .zip(buffer.glyph_positions())
+        .map(|(info, at)| {
+            (
+                GlyphId::new(info.glyph_id),
+                info.cluster,
+                f64::from(at.x_advance),
+                f64::from(at.x_offset),
+                f64::from(at.y_offset),
+            )
+        })
+        .collect()
+}
+
+/// `<path>` elements drawing `glyphs` of `font`, as [`reference`] gives
+/// them, from a pen at `(x, y)` at `size`, with `spacing` after each
+/// cluster's last glyph.
+fn shaped_paths(
+    font: &[u8],
+    glyphs: &[(GlyphId, u32, f64, f64, f64)],
+    (x, y): (f64, f64),
+    size: f64,
+    spacing: f64,
+) -> String {
+    let mut pen = x;
+    let mut out = String::new();
+    for (index, &(id, cluster, advance, dx, dy)) in glyphs.iter().enumerate() {
+        let outline = glyph_outline(font, id);
+        let scale = size / outline.units_per_em;
+        out.push_str(&format!(
+            r#"<path d="{}"/>"#,
+            outline.data(pen + dx * scale, y - dy * scale, size)
+        ));
+        pen += advance * scale;
+        if glyphs.get(index + 1).is_none_or(|next| next.1 != cluster) {
+            pen += spacing;
+        }
+    }
+    out
+}
+
+/// Some channel of some pixel more than a rounding step apart.
+fn assert_differs(got: &Rgba8Image, other: &Rgba8Image, what: &str) {
+    assert!(
+        got.pixels()
+            .iter()
+            .zip(other.pixels())
+            .any(|(a, b)| a.abs_diff(*b) > 1),
+        "{what:?} drew the same either way"
+    );
+}
+
+/// `ch`'s glyph in `font`, if it maps it.
+fn mapped(font: &[u8], ch: char) -> Option<GlyphId> {
+    FontRef::new(font).expect("a font").charmap().map(ch)
+}
+
+/// **Kerning, marks and substitutions are the font's**: a kerned pair, a
+/// mark its GPOS attaches above a base, and the dotless `ı` its `ccmp`
+/// puts under a mark above, each drawn as `harfrust` shapes it, which a
+/// glyph a character at `hmtx` advances does not draw.
+#[test]
+fn kerning_marks_and_substitutions_are_the_fonts() {
+    for text in ["AV", "h\u{301}", "i\u{307}"] {
+        let glyphs = reference(ATKINSON, text);
+        let got = draw(&format!(
+            r#"<text x="2" y="24" font-family="Atkinson" font-size="20">{text}</text>"#
+        ));
+        let want = draw(&shaped_paths(ATKINSON, &glyphs, (2.0, 24.0), 20.0, 0.0));
+        assert_same(&got, &want, 1);
+        let mut pen = 2.0;
+        let unshaped: Vec<(&[u8], char, f64, f64, f64)> = text
+            .chars()
+            .map(|ch| {
+                let at = pen;
+                pen += outline(ATKINSON, ch).width(20.0);
+                (ATKINSON, ch, at, 24.0, 20.0)
+            })
+            .collect();
+        assert_differs(&got, &draw(&paths(&unshaped, "")), text);
+    }
+    let pair = reference(ATKINSON, "AV");
+    assert!(
+        pair[0].2 < outline(ATKINSON, 'A').advance,
+        "AV is not kerned"
+    );
+    let mark = reference(ATKINSON, "h\u{301}");
+    assert_eq!((mark.len(), mark[1].1, mark[1].2), (2, 0, 0.0));
+    assert_ne!((mark[1].3, mark[1].4), (0.0, 0.0), "the mark is not moved");
+    assert_eq!(
+        Some(reference(ATKINSON, "i\u{307}")[0].0),
+        mapped(ATKINSON, '\u{131}')
+    );
+}
+
+/// **Positions and spacing go by cluster**: letter spacing follows a
+/// cluster's last glyph, so a mark stays on its base, and a mark's own
+/// `dx` and absolute `x` are ignored, the latter starting no chunk.
+#[test]
+fn positions_and_spacing_go_by_cluster() {
+    let text = "h\u{301}x";
+    let glyphs = reference(ATKINSON, text);
+    let spaced = draw(&format!(
+        r#"<text x="2" y="24" font-family="Atkinson" font-size="12" letter-spacing="2">{text}</text>"#
+    ));
+    let want = draw(&shaped_paths(ATKINSON, &glyphs, (2.0, 24.0), 12.0, 2.0));
+    assert_same(&spaced, &want, 1);
+    let shifted = draw(&format!(
+        r#"<text x="2" y="24" font-family="Atkinson" font-size="12" dx="3">{text}</text>"#
+    ));
+    let want = draw(&shaped_paths(ATKINSON, &glyphs, (5.0, 24.0), 12.0, 0.0));
+    assert_same(&shifted, &want, 1);
+    for positions in [r#"x="2" dx="3 5""#, r#"x="2 20" dx="3""#] {
+        let got = draw(&format!(
+            r#"<text {positions} y="24" font-family="Atkinson" font-size="12">{text}</text>"#
+        ));
+        assert_same(&got, &shifted, 0);
+    }
+}
+
+/// **A ligature draws as one glyph** of two characters, the second's `dx`
+/// ignored, and a pair the fixture kerns by known units is drawn that much
+/// closer.
+#[test]
+fn ligatures_and_kerning_of_the_shaping_fixture() {
+    let ligature = reference(SHAPED, "\u{2764}\u{1F525}");
+    assert_eq!(ligature.len(), 1, "no ligature to test");
+    let got =
+        draw(r#"<text x="2" y="24" font-family="Shaped" font-size="16">&#x2764;&#x1F525;</text>"#);
+    let want = draw(&shaped_paths(SHAPED, &ligature, (2.0, 24.0), 16.0, 0.0));
+    assert_same(&got, &want, 1);
+    let ignored = draw(
+        r#"<text x="2" y="24" dx="0 6" font-family="Shaped" font-size="16">&#x2764;&#x1F525;</text>"#,
+    );
+    assert_same(&ignored, &got, 0);
+    // The fixture's `pos heart heart -3`.
+    let heart = outline(SHAPED, '\u{2764}');
+    let kerned =
+        draw(r#"<text x="2" y="24" font-family="Shaped" font-size="8">&#x2764;&#x2764;</text>"#);
+    let second = 2.0 + (heart.advance - 3.0) * 8.0 / heart.units_per_em;
+    let want = draw(&format!(
+        r#"<path d="{}"/><path d="{}"/>"#,
+        heart.data(2.0, 24.0, 8.0),
+        heart.data(second, 24.0, 8.0)
+    ));
+    assert_same(&kerned, &want, 1);
+}
+
+/// **A cluster takes the first face that draws all of it**: a keycap the
+/// second family ligates is drawn there whole rather than its digit in the
+/// first; a selector or a joiner the first family lacks does not move its
+/// base to the second; and a mark in another font than its base is a
+/// cluster of its own.
+#[test]
+fn clusters_choose_their_faces() {
+    assert!(mapped(ATKINSON, '1').is_some() && mapped(ATKINSON, '\u{20E3}').is_none());
+    let keycap = reference(SHAPED, "1\u{20E3}");
+    assert_eq!(keycap.len(), 1, "no keycap ligature to test");
+    let got = draw(
+        r#"<text x="2" y="24" font-family="Atkinson, Shaped" font-size="16">1&#x20E3;</text>"#,
+    );
+    let want = draw(&shaped_paths(SHAPED, &keycap, (2.0, 24.0), 16.0, 0.0));
+    assert_same(&got, &want, 1);
+    let one = draw(&paths(&[(ATKINSON, '1', 2.0, 24.0, 16.0)], ""));
+    assert_differs(
+        &one,
+        &draw(&paths(&[(SHAPED, '1', 2.0, 24.0, 16.0)], "")),
+        "a one in either face",
+    );
+    for (text, ch) in [("1&#xFE0F;", '\u{FE0F}'), ("1&#x200D;", '\u{200D}')] {
+        assert!(mapped(ATKINSON, ch).is_none() && mapped(SHAPED, ch).is_some());
+        let got = draw(&format!(
+            r#"<text x="2" y="24" font-family="Atkinson, Shaped" font-size="16">{text}</text>"#
+        ));
+        assert_same(&got, &one, 1);
+    }
+    let apart = draw(
+        r#"<text x="2" y="24" font-family="Atkinson" font-size="16">1<tspan font-family="Shaped">&#x20E3;</tspan></text>"#,
+    );
+    assert_same(&apart, &one, 1);
+}
+
+/// **Bidirectional runs are put in visual order within the chunk**: an
+/// override turns Latin right to left, runs of it in two faces swap places,
+/// and a right-to-left letter first stays at the left, a chunk being left
+/// to right as SVG's initial `direction` is.
+#[test]
+fn bidi_runs_reorder_within_the_chunk() {
+    let i = outline(ATKINSON, 'i').width(16.0);
+    let got = draw(
+        r#"<text x="2" y="24" font-family="Atkinson" font-size="16">&#x202E;Hi&#x202C;</text>"#,
+    );
+    let want = draw(&paths(
+        &[
+            (ATKINSON, 'i', 2.0, 24.0, 16.0),
+            (ATKINSON, 'H', 2.0 + i, 24.0, 16.0),
+        ],
+        "",
+    ));
+    assert_same(&got, &want, 1);
+    // A space the override ends the chunk with goes back to the chunk's
+    // level by rule L1, and so to the right.
+    let trailing = draw(
+        r#"<text xml:space="preserve" x="2" y="24" font-family="Atkinson" font-size="16">&#x202E;Hi </text>"#,
+    );
+    assert_same(&trailing, &want, 1);
+    let heart = outline(HEART, '\u{2764}').width(16.0);
+    let got = draw(
+        r#"<text x="2" y="24" font-family="Atkinson" font-size="16">&#x202E;H&#x2764;&#x202C;</text>"#,
+    );
+    let want = draw(&paths(
+        &[
+            (HEART, '\u{2764}', 2.0, 24.0, 16.0),
+            (ATKINSON, 'H', 2.0 + heart, 24.0, 16.0),
+        ],
+        "",
+    ));
+    assert_same(&got, &want, 1);
+    let mut pen = 2.0;
+    let glyphs: Vec<(&[u8], char, f64, f64, f64)> = "\u{5D0} Hi"
+        .chars()
+        .map(|ch| {
+            let at = pen;
+            pen += outline(ATKINSON, ch).width(8.0);
+            (ATKINSON, ch, at, 24.0, 8.0)
+        })
+        .collect();
+    let got = draw(r#"<text x="2" y="24" font-family="Atkinson" font-size="8">&#x5D0; Hi</text>"#);
+    assert_same(&got, &draw(&paths(&glyphs, "")), 1);
 }

@@ -44,8 +44,8 @@
 //! and `feMerge`); `image` elements embedding a PNG, JPEG, WebP or SVG
 //! in a `data:` URL, each raster format when its own feature is built; and
 //! `text` with `tspan`, in the system's fonts when the `svg-text` feature is
-//! built, one glyph a character with no shaping (the `text` module says
-//! what that leaves out). What is refused, among other things: text that
+//! built, shaped by `harfrust` with bidirectional runs in visual order (the
+//! `text` module says how). What is refused, among other things: text that
 //! would draw a character with no font to draw it in (every such text
 //! without `svg-text`), `textPath` and vertical text, an image anywhere but
 //! in the file itself, other filter primitives and filter functions,

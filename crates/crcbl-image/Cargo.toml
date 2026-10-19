@@ -28,10 +28,11 @@ png = ["dep:png"]
 # on as well, and is refused by name when it is not.
 svg = []
 # Text in SVG icons: `<text>` and `<tspan>` drawn in the system's fonts,
-# found through `crcbl-font` and outlined through `skrifa`, one glyph a
-# character (no shaping). Without it, text that would draw a character is
-# refused by name, as anything else the renderer does not draw is.
-svg-text = ["svg", "dep:crcbl-font", "dep:skrifa"]
+# found through `crcbl-font`, shaped by `harfrust` in bidi runs resolved by
+# `unicode-bidi`, and outlined through `skrifa`. Without it, text that would
+# draw a character is refused by name, as anything else the renderer does
+# not draw is.
+svg-text = ["svg", "dep:crcbl-font", "dep:skrifa", "dep:harfrust", "dep:unicode-bidi"]
 # Lossless WebP and its container, decoded by this crate's own code.
 webp = []
 # X PixMaps, XPM 3 and XPM 2, decoded by this crate's own code.
@@ -52,6 +53,10 @@ thiserror = { workspace = true }
 # `crcbl-font` already share.
 crcbl-font = { workspace = true, optional = true }
 skrifa = { workspace = true, optional = true }
+# SVG text's shaping and bidi: the shaper and the UAX #9 levels `crcbl-ui`
+# lays its own text out with.
+harfrust = { workspace = true, optional = true }
+unicode-bidi = { workspace = true, optional = true }
 
 [lints]
 workspace = true

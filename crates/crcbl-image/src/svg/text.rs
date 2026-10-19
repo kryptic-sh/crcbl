@@ -2,16 +2,25 @@
 //! draws once white space is processed, the positions its `x`, `y`, `dx`
 //! and `dy` lists give them, and each chunk placed by its `text-anchor`.
 //!
-//! # No shaping
+//! # Shaping
 //!
-//! Each character is one glyph: the first face that maps it through its
-//! `cmap`, advanced by that face's `hmtx` width (at the `wght` the
-//! `font-weight` asks of a variable face), with letter and word spacing
-//! added. There is no GSUB or GPOS: no ligatures, no kerning, no contextual
-//! forms, no combining marks positioned on their base, and no bidirectional
-//! reordering, so Latin, Greek and Cyrillic set as browsers set them less
-//! their kerning, and scripts that need shaping do not. A character no face
-//! maps draws the first face's `.notdef` glyph, as browsers draw it.
+//! A chunk starts at each character with an absolute `x` or `y`, except a
+//! mark or format character that continues the cluster before it, whose
+//! coordinates are ignored. Each chunk is shaped on its own by `harfrust`
+//! (the submodule `shape`): bidirectional runs resolved and put in visual
+//! order, each cluster in the first face that draws it, with its GSUB and
+//! GPOS — kerning, ligatures, contextual forms, marks on their bases. The
+//! pen then walks the chunk's glyphs from the left, each advanced by its
+//! shaped advance, a cluster's last glyph with letter spacing added, and
+//! word spacing too where the cluster is a space.
+//!
+//! **A cluster takes the positions of its first character**: its `dx` and
+//! `dy` shift the pen before the cluster's first glyph in visual order.
+//! The positions of the other characters of a cluster — a ligature's later
+//! components, a mark on its base, a character shaping removed — are
+//! ignored, as browsers ignore them; a chunk's `x` and `y` place the pen
+//! before its visually first glyph. A character no face maps draws the
+//! `.notdef` glyph of its cluster's face, as browsers draw it.
 //!
 //! # Fonts
 //!
@@ -24,6 +33,8 @@
 
 #[cfg(feature = "svg-text")]
 pub(super) mod faces;
+#[cfg(feature = "svg-text")]
+pub(super) mod shape;
 
 #[cfg(feature = "svg-text")]
 use super::style::Anchor;
@@ -139,9 +150,9 @@ pub(super) fn assign(positions: &mut [Position], axis: Axis, values: &[f64]) {
     }
 }
 
-/// What placing a character needs of it: its positions, how far it advances
-/// the pen (its glyph's width with letter and word spacing added), and the
-/// anchor of the element it is in.
+/// What placing a glyph needs of it: the positions that move the pen before
+/// it, how far it advances the pen (its shaped advance with letter and word
+/// spacing added), and the anchor of the chunk it is in.
 #[cfg(feature = "svg-text")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Advance {
@@ -150,28 +161,29 @@ pub(super) struct Advance {
     pub anchor: Anchor,
 }
 
-/// The origin of each character's glyph in the text's user space.
+/// The pen position of each glyph in the text's user space, `glyphs` being
+/// each chunk's in visual order.
 ///
-/// The pen starts at the origin. A character with an absolute `x` or `y`
-/// moves the pen there and starts a chunk; its `dx` and `dy` then shift the
-/// pen, and its glyph sits at the pen, which its advance moves on. A chunk
-/// is then shifted by its first character's anchor: back by its advances'
+/// The pen starts at the origin. A glyph with an absolute `x` or `y` moves
+/// the pen there and starts a chunk; its `dx` and `dy` then shift the pen,
+/// and the glyph sits at the pen, which its advance moves on. A chunk is
+/// then shifted by its first glyph's anchor: back by its advances'
 /// sum for `end`, by half of it for `middle`, as resvg measures a chunk
 /// (SVG 2 measures from the glyphs placed, `dx` included, which differs only
 /// where a `dx` falls inside a chunk). The pen goes on from where it left
 /// the chunk before that shift.
 #[cfg(feature = "svg-text")]
-pub(super) fn place(characters: &[Advance]) -> Vec<(f64, f64)> {
-    let mut origins = Vec::with_capacity(characters.len());
+pub(super) fn place(glyphs: &[Advance]) -> Vec<(f64, f64)> {
+    let mut origins = Vec::with_capacity(glyphs.len());
     let (mut x, mut y) = (0.0, 0.0);
     let mut chunk_start = 0;
     let mut chunk_advance = 0.0;
-    for (index, character) in characters.iter().enumerate() {
-        let position = character.position;
+    for (index, glyph) in glyphs.iter().enumerate() {
+        let position = glyph.position;
         if index > 0 && (position.x.is_some() || position.y.is_some()) {
             anchor(
                 &mut origins[chunk_start..],
-                characters[chunk_start].anchor,
+                glyphs[chunk_start].anchor,
                 chunk_advance,
             );
             chunk_start = index;
@@ -180,10 +192,10 @@ pub(super) fn place(characters: &[Advance]) -> Vec<(f64, f64)> {
         x = position.x.unwrap_or(x) + position.dx.unwrap_or(0.0);
         y = position.y.unwrap_or(y) + position.dy.unwrap_or(0.0);
         origins.push((x, y));
-        x += character.advance;
-        chunk_advance += character.advance;
+        x += glyph.advance;
+        chunk_advance += glyph.advance;
     }
-    if let Some(first) = characters.get(chunk_start) {
+    if let Some(first) = glyphs.get(chunk_start) {
         anchor(&mut origins[chunk_start..], first.anchor, chunk_advance);
     }
     origins

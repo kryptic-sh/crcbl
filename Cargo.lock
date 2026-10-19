@@ -585,9 +585,11 @@ name = "crcbl-image"
 version = "0.5.0"
 dependencies = [
  "crcbl-font",
+ "harfrust",
  "png",
  "skrifa",
  "thiserror 2.0.21",
+ "unicode-bidi",
 ]
 
 [[package]]

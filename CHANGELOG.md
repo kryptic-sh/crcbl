@@ -170,6 +170,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   non-local segment group), the fact `D3D12_FEATURE_DATA_ARCHITECTURE1::UMA`
   reported through a device; an adapter DXGI will not describe is
   `DeviceType::Other` rather than `Discrete`.
+- **`crcbl_image::svg::decode` shapes `<text>`** (the `svg-text` feature, which
+  now pulls in `harfrust` and `unicode-bidi`): each text chunk is shaped with
+  the font's GSUB and GPOS, so kerning, ligatures, contextual forms, marks on
+  their bases and complex scripts draw as the font means them, where each
+  character was one glyph from the `cmap` at its `hmtx` advance. Right-to-left
+  and mixed text in a chunk is put in visual order (UAX #9, the chunk left to
+  right as `direction: ltr` has it). A face is chosen per cluster — a character
+  with the marks and format characters after it — rather than per character. The
+  `x`, `y`, `dx` and `dy` of a character inside a cluster (a ligature's later
+  component, a mark) are ignored, and letter spacing follows each cluster rather
+  than each character.
 
 ### Fixed
 

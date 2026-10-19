@@ -9,8 +9,8 @@
 //! each element's own font, size, weight, style, anchor and spacing, fill
 //! and stroke with every paint and their properties, and on the `text`
 //! element its transform and group effects. The module [`text`] says how a
-//! line is laid out and how much shaping there is (none), and its
-//! submodule `faces` where the faces come from.
+//! line is laid out and shaped, its submodule `shape` how it is shaped, and
+//! its submodule `faces` where the faces come from.
 //!
 //! # What is refused
 //!
@@ -37,8 +37,10 @@ use crate::ImageError;
 use crate::svg::canvas::Canvas;
 use crate::svg::path::Rect;
 #[cfg(feature = "svg-text")]
-use crate::svg::style::Family;
+use crate::svg::style::TextStyle;
 use crate::svg::style::{Style, length};
+#[cfg(feature = "svg-text")]
+use crate::svg::text::shape;
 use crate::svg::text::{self, Axis, Character, Position};
 use crate::svg::transform::Transform;
 use crate::svg::unsupported;
@@ -279,13 +281,16 @@ fn no_glyphs() -> ImageError {
     unsupported("<text> (crcbl-image is built without its svg-text feature)")
 }
 
-/// One glyph placed: whose it is, which, where its origin is in the text's
-/// user space, and the font units to user units scale it is drawn at.
+/// One glyph placed: whose it is (its cluster's first character's), which,
+/// where the pen is for it in the text's user space, and the font units to
+/// user units scale it is drawn at.
 #[cfg(feature = "svg-text")]
 struct Placed {
     owner: usize,
     glyph: text::faces::Glyph,
     origin: (f64, f64),
+    /// Where it is drawn from the pen, in user units, `y` down.
+    offset: (f64, f64),
     scale: f64,
     weight: u16,
     /// How far it moves the pen, spacing included, in user units.
@@ -294,47 +299,79 @@ struct Placed {
 
 #[cfg(feature = "svg-text")]
 impl Renderer<'_> {
-    /// Each character's glyph, placed.
+    /// Each glyph the text shapes into, placed, chunk by chunk and each
+    /// chunk's in visual order; [`text`] says how.
     fn lay_out(&mut self, content: &Content) -> Result<Vec<Placed>, ImageError> {
-        let mut placed = Vec::with_capacity(content.characters.len());
-        let mut advances = Vec::with_capacity(content.characters.len());
-        for (character, position) in content.characters.iter().zip(&content.positions) {
-            let style = &content.styles[&character.owner].text;
-            let Some(glyph) = self.faces.glyph(self.fonts, style, character.ch)? else {
-                let families: Vec<String> = style
-                    .families
-                    .iter()
-                    .map(|family| match family {
-                        Family::Named(name) => format!("{name:?}"),
-                        Family::Generic(generic) => (*generic).to_owned(),
-                    })
-                    .chain(["serif".to_owned()])
-                    .collect();
-                return Err(unsupported(format_args!(
-                    "text in fonts none of which is installed: {}",
-                    families.join(", ")
-                )));
-            };
-            let metrics = self.faces.metrics(glyph.face, style.weight);
-            let scale = style.size / metrics.units_per_em;
-            let mut advance = self.faces.advance(glyph, style.weight) * scale
-                + style.letter_spacing.resolve(style.size);
-            if character.ch == ' ' {
-                advance += style.word_spacing.resolve(style.size);
+        let count = content.characters.len();
+        let chars: Vec<char> = content.characters.iter().map(|c| c.ch).collect();
+        let styles: Vec<&TextStyle> = content
+            .characters
+            .iter()
+            .map(|character| &content.styles[&character.owner].text)
+            .collect();
+        let mut placed = Vec::with_capacity(count);
+        let mut advances = Vec::with_capacity(count);
+        let mut start = 0;
+        while start < count {
+            let mut end = start + 1;
+            while end < count {
+                let position = content.positions[end];
+                if (position.x.is_some() || position.y.is_some())
+                    && !shape::continues(&chars, &styles, end)
+                {
+                    break;
+                }
+                end += 1;
             }
-            advances.push(text::Advance {
-                position: *position,
-                advance,
-                anchor: style.anchor,
-            });
-            placed.push(Placed {
-                owner: character.owner,
-                glyph,
-                origin: (0.0, 0.0),
-                scale,
-                weight: style.weight,
-                advance,
-            });
+            let shaped = shape::shape_chunk(
+                &mut self.faces,
+                self.fonts,
+                &chars[start..end],
+                &styles[start..end],
+            )?;
+            for (index, glyph) in shaped.iter().enumerate() {
+                let character = start + glyph.cluster;
+                let style = styles[character];
+                let scale = style.size
+                    / self
+                        .faces
+                        .metrics(glyph.glyph.face, style.weight)
+                        .units_per_em;
+                let mut advance = glyph.advance * scale;
+                if shaped
+                    .get(index + 1)
+                    .is_none_or(|next| next.cluster != glyph.cluster)
+                {
+                    advance += style.letter_spacing.resolve(style.size);
+                    if chars[character] == ' ' {
+                        advance += style.word_spacing.resolve(style.size);
+                    }
+                }
+                let mut position = Position::default();
+                if index == 0 || shaped[index - 1].cluster != glyph.cluster {
+                    position.dx = content.positions[character].dx;
+                    position.dy = content.positions[character].dy;
+                }
+                if index == 0 {
+                    position.x = content.positions[start].x;
+                    position.y = content.positions[start].y;
+                }
+                advances.push(text::Advance {
+                    position,
+                    advance,
+                    anchor: styles[start].anchor,
+                });
+                placed.push(Placed {
+                    owner: content.characters[character].owner,
+                    glyph: glyph.glyph,
+                    origin: (0.0, 0.0),
+                    offset: (glyph.offset.0 * scale, -glyph.offset.1 * scale),
+                    scale,
+                    weight: style.weight,
+                    advance,
+                });
+            }
+            start = end;
         }
         for (glyph, origin) in placed.iter_mut().zip(text::place(&advances)) {
             glyph.origin = origin;
@@ -362,7 +399,8 @@ impl Renderer<'_> {
     }
 
     /// Draws each run of glyphs of one element as one path, filled and
-    /// stroked by that element's style, in document order.
+    /// stroked by that element's style, chunk by chunk and each chunk's in
+    /// visual order.
     fn draw_glyphs(
         &mut self,
         content: &Content,
@@ -378,7 +416,11 @@ impl Renderer<'_> {
             }
             let mut segments = Vec::new();
             for glyph in run {
-                let (x, y, scale) = (glyph.origin.0, glyph.origin.1, glyph.scale);
+                let (x, y) = (
+                    glyph.origin.0 + glyph.offset.0,
+                    glyph.origin.1 + glyph.offset.1,
+                );
+                let scale = glyph.scale;
                 self.faces.outline(
                     glyph.glyph,
                     glyph.weight,
