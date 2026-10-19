@@ -1418,10 +1418,10 @@ fn synthetic_keysym(key: KeyCode) -> Keysym {
         KeyCode::BracketLeft => Keysym::from_char('['),
         KeyCode::BracketRight => Keysym::from_char(']'),
         KeyCode::Backquote => Keysym::from_char('`'),
-        // Function keys, modifiers and navigation produce no character; a real
-        // backend reports their named keysyms, which nothing in the engine
-        // reads today.
-        _ => Keysym::NONE,
+        // Function keys, modifiers and navigation produce no character, and
+        // report the named keysym every real backend reports for them, so a
+        // consumer that reads Enter or an arrow from the keysym can be driven.
+        _ => crate::keysym::named_keysym(key).unwrap_or(Keysym::NONE),
     }
 }
 
@@ -2598,7 +2598,10 @@ mod tests {
         assert_eq!(device, VIRTUAL_DEVICE);
         assert!(scancode.0 >= 8, "evdev-shaped scancodes start at 8");
         assert_eq!(synthetic_keysym(KeyCode::Digit7), Keysym::from_char('7'));
-        assert_eq!(synthetic_keysym(KeyCode::F5), Keysym::NONE);
+        assert_eq!(synthetic_keysym(KeyCode::F5), Keysym(0xFFC2));
+        assert_eq!(synthetic_keysym(KeyCode::Enter), Keysym(0xFF0D));
+        assert_eq!(synthetic_keysym(KeyCode::Escape), Keysym(0xFF1B));
+        assert_eq!(synthetic_keysym(KeyCode::ArrowLeft), Keysym(0xFF51));
         assert_eq!(synthetic_keysym(KeyCode::Slash), Keysym::from_char('/'));
 
         shell.key_repeat(window, KeyCode::KeyS).expect("repeat");

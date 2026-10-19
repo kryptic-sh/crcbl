@@ -68,6 +68,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`HeadlessShell::key_press` reports named keys' keysyms.** Enter, Escape,
+  Tab, Backspace, the arrows, the function keys and the modifiers carried
+  `Keysym::NONE`, so a consumer that reads named keys from the keysym — as one
+  driven by synthetic input must — could not be tested through it. They now
+  carry the X11 keysym every real backend reports.
 - **A hidden cursor on X11 can no longer show a black pixel.** The blank cursor
   was built from a pixmap whose contents the protocol leaves undefined, and a
   set bit in it showed the pixel; the pixmap is now cleared first.
