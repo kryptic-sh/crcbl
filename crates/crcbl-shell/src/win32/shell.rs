@@ -25,7 +25,7 @@ use super::ffi::{self, Handle, Msg, WindowPlacement, value};
 use super::geometry;
 use super::input;
 use super::input::Contact;
-use super::keys::Utf16;
+use super::keys::{Consumed, Utf16};
 use super::panel::Panel;
 use super::pointer::{RawMotion, Visibility};
 use super::proc::{self, Shared};
@@ -208,6 +208,9 @@ pub struct Win32Shell {
     /// The windows showing a pre-edit, so an input method that ends a
     /// composition twice over reports it once.
     pub(super) composing: Composing,
+    /// The keys an input method consumed, whose releases are not reported
+    /// either.
+    pub(super) consumed: Consumed,
     /// `ShowCursor`'s reference count, kept balanced.
     pub(super) visibility: Visibility,
     /// The next [`ClipboardRequestId`], which is unique for the session.
@@ -326,6 +329,7 @@ impl Win32Shell {
             }),
             wake: None,
             composing: Composing::default(),
+            consumed: Consumed::default(),
             visibility: Visibility::default(),
             next_request: 1,
             caps: Self::latch_caps(raw_motion),
@@ -928,6 +932,9 @@ impl Win32Shell {
                     let Some(window) = window else { continue };
                     if let Ok(state) = self.window_mut(window) {
                         state.focused = focused;
+                    }
+                    if !focused {
+                        self.consumed.clear();
                     }
                     // The window procedure has already released or re-applied
                     // the *clip*, because one frame of a hostage desktop is one

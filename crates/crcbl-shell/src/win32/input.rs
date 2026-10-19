@@ -587,7 +587,15 @@ impl Win32Shell {
             } => {
                 let time = self.event_time(millis);
                 let key_code = keys::key_code(scancode);
+                // Paired off before the input method's verdict, so the raw
+                // report a consumed key produced is not left for the next one.
                 let device = self.attribution.key(scancode, state, millis);
+                if !self
+                    .consumed
+                    .report(virtual_key, scancode, state.is_pressed())
+                {
+                    return;
+                }
                 self.queue_event(ShellEvent::Key {
                     window,
                     device,

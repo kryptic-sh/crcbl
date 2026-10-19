@@ -153,6 +153,16 @@ pub enum ShellEvent {
     ///
     /// Three views of the same keystroke — see
     /// [`crcbl_core::input`] for why they are all here and what each is for.
+    ///
+    /// **A key the input method consumes while composing is not reported as
+    /// a `Key`** — neither its press nor its release. The Backspace that
+    /// deletes a kana from a [`TextPreedit`](ShellEvent::TextPreedit) and the
+    /// Enter that commits the conversion are the input method's, and a text
+    /// field that also saw them as editing keys would delete a character or
+    /// submit the form. This is what a Wayland compositor already does by not
+    /// sending the key at all; the Win32 backend recognizes the keystrokes its
+    /// input method marks as taken. The AppKit backend cannot yet tell such a
+    /// keystroke apart, and still reports it.
     Key {
         /// Which window had focus.
         window: WindowId,
@@ -349,6 +359,10 @@ pub enum ShellEvent {
     /// The two streams are independent — a field inserts each commit at its
     /// caret and draws the latest pre-edit after it — so their relative order
     /// within one pump carries no meaning.
+    ///
+    /// The keystrokes that edit a composition are the input method's: a key
+    /// it consumes while composing is not reported as a
+    /// [`Key`](ShellEvent::Key).
     ///
     /// Sent where [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME) is set.
     /// A backend without it never sends this.

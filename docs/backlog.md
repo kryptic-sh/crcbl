@@ -190,6 +190,21 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      loader drawing XCursor images into cursor buffers on Wayland, which
      disagrees with the user's theme when either side changes and is a second
      presentation path inside the shell.
+   - S9 AppKit reports a key the input method consumes as a `ShellEvent::Key`,
+     against the contract `ShellEvent::Key` now states (Win32 drops them since
+     2026-10-19). `appkit::view::key_down` records the `RawEvent::Key` before
+     `interpretKeyEvents:`, so a keystroke the input method turns into marked
+     text, or that edits or commits marked text, still reaches the consumer;
+     `key_up` reports every release. Left as is because the verdict is only
+     known after `interpretKeyEvents:` returns while the key must still precede
+     the `TextCommitted` it produced (the order `key_down` documents), and
+     nothing here runs AppKit — the backend only type-checks off a Mac. The
+     shape: hold the key edge until the call returns and record it ahead of any
+     commit recorded during it, drop it when `Shared::marked()` was non-zero
+     before the call or is after it, remember its `keyCode` so `key_up` drops
+     the matching release, and forget those codes when the window resigns key,
+     with a pure helper shared with `win32::keys::Consumed` if the shapes agree.
+     The pre-edit checks in `appkit_session` are where its session test goes. S.
    - S9 an X11 input-method client (XIM, or IBus and Fcitx over D-Bus), L, so
      X11 can set `ShellCaps::TEXT_IME`. Until then it is clear there.
    - S17 a `PopupInput::Grab` popup on AppKit is made key the way an exclusive

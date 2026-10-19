@@ -131,6 +131,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **A hidden cursor on X11 can no longer show a black pixel.** The blank cursor
   was built from a pixmap whose contents the protocol leaves undefined, and a
   set bit in it showed the pixel; the pixmap is now cleared first.
+- **A key the Windows input method consumes is no longer reported as a
+  `ShellEvent::Key`**, on either edge. Windows delivers such a key with the
+  virtual key `VK_PROCESSKEY`, and the backend reported it anyway, so the
+  Backspace or Enter that edited a composition also reached the application as
+  an editing key. The press is now dropped, its release is matched by scan code
+  and dropped whichever virtual key it carries, and a focus loss forgets the
+  pending releases. `ShellEvent::Key` documents the contract.
 
 ## [0.5.0] - 2026-10-18
 

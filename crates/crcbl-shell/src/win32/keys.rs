@@ -380,6 +380,50 @@ pub const fn composition_changed(l_param: isize) -> bool {
     (l_param as u32) & value::GCS_COMP_STR != 0
 }
 
+/// The keys an input method consumed, so neither edge of one is reported.
+///
+/// A key the input method takes while composing reaches the window as a
+/// `WM_KEYDOWN` whose virtual key is `VK_PROCESSKEY` rather than the key's own,
+/// and [`ShellEvent::Key`](crate::ShellEvent::Key) promises that such a key is
+/// not reported: a Backspace that deletes a kana from the composition must not
+/// also delete a character from the field. The *release* is the awkward half —
+/// Windows sends it with the real virtual key as often as with
+/// `VK_PROCESSKEY` — so the press's scan code is remembered and the release is
+/// matched by that instead.
+#[derive(Debug, Default)]
+pub struct Consumed {
+    scancodes: Vec<u32>,
+}
+
+impl Consumed {
+    /// Records one key message, answering whether the consumer is owed it as a
+    /// [`ShellEvent::Key`](crate::ShellEvent::Key).
+    ///
+    /// A press the input method consumed is not, and neither is the release of
+    /// a key whose press was consumed, whatever virtual key the release
+    /// carries. A press it did *not* consume — a repeat after the composition
+    /// ended — is reported, and so is its release, so the consumer never sees
+    /// a key go down that does not come back up.
+    pub fn report(&mut self, virtual_key: u16, scancode: u32, pressed: bool) -> bool {
+        let known = self.scancodes.iter().position(|&code| code == scancode);
+        if pressed && virtual_key == value::VK_PROCESS_KEY {
+            if known.is_none() {
+                self.scancodes.push(scancode);
+            }
+            return false;
+        }
+        let Some(known) = known else { return true };
+        self.scancodes.swap_remove(known);
+        pressed
+    }
+
+    /// Forgets every consumed key: the keyboard went elsewhere, and a release
+    /// that arrives after it came back belongs to a press nobody here saw.
+    pub fn clear(&mut self) {
+        self.scancodes.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +440,51 @@ mod tests {
         assert!(composition_changed(comp_str | GCS_RESULT_STR));
         assert!(!composition_changed(GCS_RESULT_STR));
         assert!(!composition_changed(0));
+    }
+
+    #[test]
+    fn a_key_the_input_method_consumed_is_reported_on_neither_edge() {
+        /// `VK_BACK`.
+        const VK_BACK: u16 = 0x08;
+        /// `VK_RETURN`.
+        const VK_RETURN: u16 = 0x0D;
+        /// `VK_W`.
+        const VK_W: u16 = 0x57;
+        /// `VK_A`.
+        const VK_A: u16 = 0x41;
+        let process = value::VK_PROCESS_KEY;
+        let mut consumed = Consumed::default();
+
+        // Backspace inside a composition: the press says VK_PROCESSKEY and
+        // the release names the real key. Neither is the consumer's.
+        assert!(!consumed.report(process, 0x000E, true));
+        assert!(!consumed.report(process, 0x000E, true), "nor its repeat");
+        assert!(!consumed.report(VK_BACK, 0x000E, false));
+        // Matched once: the next Backspace, outside a composition, is a key.
+        assert!(consumed.report(VK_BACK, 0x000E, true));
+        assert!(consumed.report(VK_BACK, 0x000E, false));
+
+        // Enter committing the conversion, released as VK_PROCESSKEY too.
+        assert!(!consumed.report(process, 0x001C, true));
+        assert!(!consumed.report(process, 0x001C, false));
+        assert!(consumed.report(VK_RETURN, 0x001C, false), "already matched");
+
+        // A key the input method stopped taking mid-hold comes back as a key,
+        // and so does its release.
+        assert!(!consumed.report(process, 0x0011, true));
+        assert!(consumed.report(VK_W, 0x0011, true));
+        assert!(consumed.report(VK_W, 0x0011, false));
+
+        // A release with VK_PROCESSKEY whose press was reported is still a key:
+        // the consumer saw it go down.
+        assert!(consumed.report(VK_W, 0x0011, true));
+        assert!(consumed.report(process, 0x0011, false));
+
+        // A focus loss forgets the consumed press, so a later release of the
+        // same key — pressed elsewhere — is reported rather than eaten.
+        assert!(!consumed.report(process, 0x001E, true));
+        consumed.clear();
+        assert!(consumed.report(VK_A, 0x001E, false));
     }
 
     /// A key message's `lParam` for a scan code, with the flags spelled out.

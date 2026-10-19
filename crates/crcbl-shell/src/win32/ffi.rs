@@ -1548,6 +1548,11 @@ pub mod value {
     pub const VK_CAPITAL: usize = 0x14;
     /// `VK_NUMLOCK`, likewise.
     pub const VK_NUM_LOCK: usize = 0x90;
+    /// `VK_PROCESSKEY` — the virtual key a `WM_KEYDOWN` carries in place of
+    /// the real one when an input method consumed the keystroke. A `u16`
+    /// because it is compared with a key message's `wParam`, not used as an
+    /// index into a keyboard-state snapshot.
+    pub const VK_PROCESS_KEY: u16 = 0xE5;
 
     /// The `WMSZ_*` edge a `WM_SIZING` is being dragged by.
     pub const WMSZ_LEFT: usize = 1;

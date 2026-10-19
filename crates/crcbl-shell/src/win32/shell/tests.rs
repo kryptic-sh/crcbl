@@ -719,6 +719,45 @@ fn a_key_press_carries_its_position_its_symbol_and_its_repeat_flag() {
 
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_key_the_input_method_consumed_reaches_the_consumer_on_neither_edge() {
+    /// `VK_BACK`.
+    const VK_BACK: usize = 0x08;
+    /// `VK_A`.
+    const VK_A: usize = 0x41;
+    let process = usize::from(value::VK_PROCESS_KEY);
+    let mut shell = shell();
+    let window = window(&mut shell);
+    shell.pump(&mut |_| {});
+    let hwnd = hwnd_of(&shell, window);
+
+    // Backspace inside a composition, released under its real virtual key;
+    // then Enter committing it, released as VK_PROCESSKEY as well.
+    send_key(hwnd, msg::KEY_DOWN, process, 0x000E, false, false);
+    send_key(hwnd, msg::KEY_UP, VK_BACK, 0x000E, false, true);
+    send_key(hwnd, msg::KEY_DOWN, process, 0x001C, false, false);
+    send_key(hwnd, msg::KEY_UP, process, 0x001C, false, true);
+    // And a key the input method let through, which is still a key.
+    send_key(hwnd, msg::KEY_DOWN, VK_W, 0x0011, false, false);
+
+    let keys = pump_keys(&mut shell);
+    assert_eq!(keys.len(), 1, "only W is the consumer's: {keys:?}");
+    assert_eq!(keys[0].1, Some(KeyCode::KeyW));
+
+    // A focus loss forgets a consumed press: the release of that key, once
+    // the keyboard is back, belongs to a press made elsewhere and is a key.
+    focus_and_confirm(&mut shell, window, hwnd);
+    send_key(hwnd, msg::KEY_DOWN, process, 0x001E, false, false);
+    send_focus(hwnd, false);
+    shell.pump(&mut |_| {});
+    send_key(hwnd, msg::KEY_UP, VK_A, 0x001E, false, true);
+    let keys = pump_keys(&mut shell);
+    assert_eq!(keys.len(), 1, "the release is reported: {keys:?}");
+    assert_eq!(keys[0].1, Some(KeyCode::KeyA));
+    assert_eq!(keys[0].3, ButtonState::Released);
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn typing_commits_text_and_a_control_key_commits_nothing() {
     let mut shell = shell();
     let window = window(&mut shell);
