@@ -51,7 +51,7 @@
 //! let mut shell = HeadlessShell::new();
 //! let window = open_window(&mut shell, Duration::ZERO, &WindowDesc::default())?;
 //! let mut events = 0;
-//! let (width, height) = wait_for_configure(&mut shell, window, &mut events)?;
+//! let (width, height) = wait_for_configure(&mut shell, window, &mut |_| events += 1)?;
 //! assert!(width > 0 && height > 0);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```

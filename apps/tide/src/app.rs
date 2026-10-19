@@ -247,7 +247,7 @@ pub fn with_shell<S: Shell + ?Sized>(
     let window = open_the_window(shell.as_mut(), &clock_source, options)?;
 
     let mut events = 0;
-    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut |_| events += 1)?;
 
     // Before the GPU opens, because the GPU stages the scene the cell names.
     options.apply();

@@ -1262,7 +1262,7 @@ fn the_join_runs_end_to_end_on_the_null_backend() {
 
     let (mut shell, window) = shell();
     let mut events = 0;
-    let extent = wait_for_configure(&mut shell, window, &mut events).expect("configured");
+    let extent = wait_for_configure(&mut shell, window, &mut |_| events += 1).expect("configured");
 
     let mut gpu = Presenter::open(
         &shell,
@@ -1879,7 +1879,8 @@ fn null_context_with(
 
     let (mut shell, window) = shell();
     let mut shell_events = 0;
-    let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
+    let extent =
+        wait_for_configure(&mut shell, window, &mut |_| shell_events += 1).expect("configured");
 
     let recorder = Recorder::new();
     let pending = Presenter::request_open_on(

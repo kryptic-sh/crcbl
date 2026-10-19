@@ -10891,7 +10891,8 @@ mod tests {
             .create_window(&WindowDesc::default())
             .expect("headless always creates a window");
         let mut events = 0;
-        let extent = wait_for_configure(&mut shell, window, &mut events).expect("configured");
+        let extent =
+            wait_for_configure(&mut shell, window, &mut |_| events += 1).expect("configured");
 
         let mut gpu = GpuContext::open(
             &shell,
@@ -10979,7 +10980,8 @@ mod tests {
 
         let (mut shell, window) = shell();
         let mut shell_events = 0;
-        let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
+        let extent =
+            wait_for_configure(&mut shell, window, &mut |_| shell_events += 1).expect("configured");
 
         let recorder = Recorder::new();
         let presenter = Presenter::request_open_on(

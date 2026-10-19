@@ -104,8 +104,8 @@ fn a_consumer_can_drive_a_whole_frame_by_hand() {
     let (mut shell, window, clock) = windowed();
 
     let mut events = 0;
-    let extent =
-        wait_for_configure(shell.as_mut(), window, &mut events).expect("headless configures");
+    let extent = wait_for_configure(shell.as_mut(), window, &mut |_| events += 1)
+        .expect("headless configures");
     assert!(
         events > 0,
         "the configure arrived as an event, not by magic"
@@ -204,7 +204,7 @@ fn a_resize_observed_through_pending_reaches_the_swapchain() {
     // the event from the window system, and the loop above it is identical.
     let (mut shell, window, clock) = concrete();
     let mut events = 0;
-    let extent = wait_for_configure(&mut shell, window, &mut events).expect("configures");
+    let extent = wait_for_configure(&mut shell, window, &mut |_| events += 1).expect("configures");
     let mut gpu = GpuContext::open(
         &shell,
         window,
@@ -478,8 +478,8 @@ fn settings_file(toml: &str) -> MemoryStorage {
 fn a_frame_opened_with(settings: SettingsSource<'_>) -> (RenderEffects, Vec<String>) {
     let (mut shell, window, _clock) = windowed();
     let mut events = 0;
-    let extent =
-        wait_for_configure(shell.as_mut(), window, &mut events).expect("headless configures");
+    let extent = wait_for_configure(shell.as_mut(), window, &mut |_| events += 1)
+        .expect("headless configures");
 
     let mut gpu = GpuContext::open(
         shell.as_ref(),
@@ -649,8 +649,8 @@ fn the_video_layer_clamps_downward_and_the_order_around_it_holds() {
 
     let (mut shell, window, _clock) = windowed();
     let mut events = 0;
-    let extent =
-        wait_for_configure(shell.as_mut(), window, &mut events).expect("headless configures");
+    let extent = wait_for_configure(shell.as_mut(), window, &mut |_| events += 1)
+        .expect("headless configures");
     let gpu = GpuContext::open(
         shell.as_ref(),
         window,
@@ -734,8 +734,8 @@ fn the_players_antialiasing_tier_replaces_the_resolve_slot() {
 
     let (mut shell, window, _clock) = windowed();
     let mut events = 0;
-    let extent =
-        wait_for_configure(shell.as_mut(), window, &mut events).expect("headless configures");
+    let extent = wait_for_configure(shell.as_mut(), window, &mut |_| events += 1)
+        .expect("headless configures");
     let gpu = GpuContext::open(
         shell.as_ref(),
         window,

@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     let mut events = 0;
-    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut |_| events += 1)?;
 
     let adapter_pin = crcbl_app::adapter::pin();
     let desc = PresenterDesc {

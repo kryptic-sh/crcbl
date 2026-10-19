@@ -665,8 +665,8 @@ mod tests {
         )
         .expect("headless always creates a window");
         let mut events = 0;
-        let extent =
-            wait_for_configure(&mut shell, window, &mut events).expect("headless configures");
+        let extent = wait_for_configure(&mut shell, window, &mut |_| events += 1)
+            .expect("headless configures");
 
         let ctx = GpuContext::open(
             &shell,

@@ -915,7 +915,7 @@ pub fn with_shell<S: Shell + ?Sized>(
     )?;
 
     let mut events = 0;
-    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut |_| events += 1)?;
 
     let gpu = Gpu::open(
         shell.as_ref(),

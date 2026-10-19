@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use crcbl_core::time::{MonotonicTime, TimeSource};
-use crcbl_shell::{Shell, ShellError, WindowId};
+use crcbl_shell::{Shell, ShellError, ShellEvent, WindowId};
 
 /// How long to wait for the window to configure before giving up.
 pub const CONFIGURE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -94,7 +94,15 @@ pub fn log_first_configure(extent: (u32, u32)) {
 /// A swapchain needs a size and an unconfigured window does not have one, so
 /// this is the gate between [`Shell::create_window`] and opening a device on
 /// the window ([`Presenter::request_open`](crate::present::Presenter::request_open)).
-/// Events observed while waiting are added to `events`.
+///
+/// **Every event pumped while waiting goes to `sink`**, as
+/// [`Shell::pump`] hands them over. What arrives before the first size is not
+/// noise to discard: a [`FocusRefused`](crcbl_shell::ShellEvent::FocusRefused)
+/// for a launch the system would not bring forward, a
+/// [`ScaleFactorChanged`](crcbl_shell::ShellEvent::ScaleFactorChanged), a key
+/// typed while the window was mapping. A program that sizes first and then
+/// runs its loop queues them for that loop; one that only wants a count can
+/// count.
 ///
 /// # Errors
 ///
@@ -103,13 +111,13 @@ pub fn log_first_configure(extent: (u32, u32)) {
 pub fn wait_for_configure<S: Shell + ?Sized>(
     shell: &mut S,
     window: WindowId,
-    events: &mut u64,
+    sink: &mut dyn FnMut(ShellEvent),
 ) -> Result<(u32, u32), ConfigureError> {
     let started = MonotonicTime::new();
     loop {
         shell.pump(&mut |event| {
-            *events += 1;
             log::debug!("shell event: {event:?}");
+            sink(event);
         });
         if let Some(size) = shell.window_state(window)?.size() {
             let extent = (size.width, size.height);
@@ -120,5 +128,40 @@ pub fn wait_for_configure<S: Shell + ?Sized>(
             return Err(ConfigureError::TimedOut);
         }
         shell.wait_events(Some(Duration::from_millis(8)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crcbl_shell::{HeadlessShell, WindowDesc};
+
+    /// **What arrives before the first size reaches the caller**, in order,
+    /// rather than being counted and dropped: the refused launch a launcher
+    /// warns about is exactly such an event.
+    #[test]
+    fn events_pumped_before_the_first_size_reach_the_sink() {
+        /// Pumps the configure is held back for, so the wait loops.
+        const DELAY: u32 = 3;
+
+        let mut shell = HeadlessShell::new().with_configure_delay(DELAY);
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("a headless window");
+        shell.inject(ShellEvent::FocusRefused { window });
+        let mut seen = Vec::new();
+        let extent =
+            wait_for_configure(&mut shell, window, &mut |event| seen.push(event)).expect("sized");
+        assert!(extent.0 > 0 && extent.1 > 0, "a size: {extent:?}");
+        assert!(
+            seen.iter().any(
+                |event| matches!(event, ShellEvent::FocusRefused { window: w } if *w == window)
+            ),
+            "the refusal reached the sink: {seen:?}"
+        );
+        assert!(
+            shell.wait_count() > 0,
+            "the configure was held back, so the wait looped"
+        );
     }
 }

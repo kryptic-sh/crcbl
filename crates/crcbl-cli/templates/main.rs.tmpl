@@ -526,7 +526,7 @@ fn start(options: &Common) -> Result<crcbl::engine::Loop<dyn Shell, Game>, Error
     // A window has no size until the window system says so, and a swapchain
     // needs one. This wait is mandatory, not defensive.
     let mut events = 0;
-    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut |_| events += 1)?;
     let gpu = Gpu::open(shell.as_ref(), window, extent, options.gpu())?;
 
     Ok(crcbl::engine::Loop::new(

@@ -531,7 +531,7 @@ pub fn with_shell<S: Shell + ?Sized>(
     )?;
 
     let mut events = 0;
-    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut |_| events += 1)?;
     // The whole document, because a rigged one is a scene, its instances and
     // the rig that pairs them, and the grid extent is derived from it too — see
     // `Gpu::open`.

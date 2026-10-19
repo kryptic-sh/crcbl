@@ -141,7 +141,7 @@ impl<S: Shell + ?Sized> Bare<S> {
         )?;
 
         let mut events = 0;
-        let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+        let extent = wait_for_configure(shell.as_mut(), window, &mut |_| events += 1)?;
         let gpu = GpuContext::open(
             shell.as_ref(),
             window,

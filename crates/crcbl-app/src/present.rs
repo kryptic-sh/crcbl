@@ -53,7 +53,7 @@
 //! let mut shell = HeadlessShell::new();
 //! let window = open_window(&mut shell, Duration::ZERO, &WindowDesc::default())?;
 //! let mut events = 0;
-//! let extent = wait_for_configure(&mut shell, window, &mut events)?;
+//! let extent = wait_for_configure(&mut shell, window, &mut |_| events += 1)?;
 //!
 //! let desc = PresenterDesc {
 //!     label: "launcher",

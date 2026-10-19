@@ -21,6 +21,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   below, so a struct literal of `Triangles`, a `NodeStyle` literal without
   `..NodeStyle::DEFAULT`, or an exhaustive match on `Declaration` needs them.
   The initial opacity, one, draws every existing tree exactly as before.
+- **`crcbl_app::window::wait_for_configure` hands every event it pumps to a
+  sink** (`&mut dyn FnMut(ShellEvent)`, as `Shell::pump` takes) instead of
+  counting them into a `&mut u64`. The events that arrive before the first size
+  — a `FocusRefused` for a launch the system would not bring forward, a
+  `ScaleFactorChanged`, an early key — were counted and dropped, so a program
+  that sized its window and then ran its loop never saw them. A caller that only
+  counted passes `&mut |_| events += 1`.
 
 ### Added
 

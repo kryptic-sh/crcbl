@@ -77,13 +77,6 @@ flight (AppKit input method, the Win32 popup leave fix):
 
 **Open from 2026-10-19, raised by pikr and lyr, not started:**
 
-- **`crcbl_app::window::wait_for_configure` drops every event it pumps** (a bug,
-  pikr). It counts them into `events: &mut u64` and logs them, so a
-  `FocusRefused`, `ScaleFactorChanged` or early `Key` before the first size
-  never reaches the caller's loop; pikr's own `wait_for_size` hit exactly this.
-  Fix: hand the events back (a callback, as `Shell::pump` takes), updating the
-  callers in `crcbl::engine` and `crates/crcbl/tests/seam_from_outside.rs`.
-  Breaking, so it belongs in a minor release.
 - **`HeadlessShell` cannot schedule input after frame N** (a limit, pikr).
   Everything injected before a run arrives in the first pump, so a scripted run
   ends before the consumer draws, and layout, present or an out-of-date retry
