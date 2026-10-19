@@ -19,6 +19,41 @@ approved as a dependency of `crcbl-shell` and goes ahead after the release;
 breaking change, so a minor bump); `crcbl-cli` stays unpublished; the `notify`
 watcher and a grapheme crate stay declined until a caller needs them.
 
+**pikr's remaining gaps, prioritised by the owner on 2026-10-19** (relayed by
+pikr, which is fully on 0.5.0). Order of work, after the slices already in
+flight (opacity groups, AppKit input method, the Win32 popup leave fix):
+
+1. **The text field's pre-edit (S9), next.** The Win32 backend already reports
+   `TextPreedit` and honours `set_text_input_area`, and AppKit does from the
+   in-flight slice, but `crcbl_app::TextPump` draws no pre-edit at the caret and
+   never calls `set_text_input_area`, so a CJK user typing pikr's query sees
+   nothing until the commit and the candidate window sits at the window's
+   origin. Build both in `crcbl-app` and `crcbl-ui`'s text field, on every
+   backend. pikr verifies with the Microsoft IME on its desktop.
+2. **D3D12 start-up (S13), decided 2026-10-19: describe adapters lazily.**
+   `Dx12Instance::open` creates one driver device per hardware adapter to list
+   caps (about 0.2 s each; pikr's first paint is 443–617 ms on 0.5.0 against 500
+   ms). `Instance::adapters` lists identities from DXGI without a device, in
+   preference order, and caps are probed on demand, stopping at the first
+   adapter that serves. Breaking for the HAL seam, so a minor bump. Declined:
+   keeping the every-adapter-caps promise, which is the cost itself.
+3. **Alpha-0 pointer passthrough on Win32 (S5), decided 2026-10-19: an input
+   region.** A transparent pixel is still the window's for the pointer (see
+   "Behaviour, not a bug" under Win32 transparency), and `HTTRANSPARENT` only
+   passes to windows of the same thread. Build `Shell::set_input_region`: a
+   window region on Win32, `wl_surface.set_input_region` on Wayland, an XShape
+   input region on X11, and on AppKit whatever its non-opaque hit testing needs
+   (a cap where it cannot). Declined: hit testing by pixel alpha, which needs a
+   GPU readback per pointer move.
+4. **Shaping in SVG text.** `crcbl-image`'s SVG text draws one glyph a char from
+   the cmap; move it onto `harfrust`, which the workspace already has.
+5. **Bidi (UAX #9), line breaking (UAX #14) and grapheme clusters (UAX #29):
+   needs the owner's approval of new dependencies**, so it waits. The candidates
+   are `unicode-bidi`, `unicode-linebreak` and `unicode-segmentation` (or
+   ICU4X's `icu_segmenter`, which covers both breaking and clusters but is far
+   larger). A grapheme crate was declined on 2026-10-16 "until a caller needs
+   them"; pikr is that caller now.
+
 **Decided 2026-10-19: frame pacing events, asked by lyr.** A bar on an output
 the compositor has turned off (DPMS, through hypridle) gets no
 `wl_surface.frame` callback, and a FIFO present there can block: the Wayland
