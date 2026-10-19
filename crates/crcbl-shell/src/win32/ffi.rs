@@ -1522,6 +1522,10 @@ pub mod value {
     /// `MAPVK_VK_TO_CHAR` — the unshifted character a virtual key produces in
     /// the current layout, with no dead-key side effect.
     pub const MAPVK_VK_TO_CHAR: u32 = 2;
+    /// `MAPVK_VK_TO_VSC_EX` — the scan code a virtual key sits on in the
+    /// current layout, with an `E0` or `E1` prefix in the high byte where the
+    /// call knows one.
+    pub const MAPVK_VK_TO_VSC_EX: u32 = 4;
 
     /// `VK_SHIFT`-adjacent virtual keys, left and right told apart.
     ///

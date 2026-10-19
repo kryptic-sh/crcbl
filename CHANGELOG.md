@@ -144,6 +144,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `reply_close_request` answers as any other, so a menu can answer `Keep` to
   back out of a submenu. The `Key` press is still delivered, before the request,
   and a repeat or a release does not dismiss.
+- **A Win32 key injected with no scan code now has a `key_code`.** SendKeys,
+  remote desktop clients, on-screen keyboards and AutoHotkey send a virtual key
+  with scan code `0`, which reported `key_code: None`. The backend now asks
+  `MapVirtualKeyW(MAPVK_VK_TO_VSC_EX)` for the virtual key's scan code and names
+  the key from that, restoring the `E0` prefix the call leaves off the
+  navigation keys and Num Lock so an arrow is not reported as a keypad digit.
+  `scancode` still reports what the message carried.
 
 ## [0.5.0] - 2026-10-18
 

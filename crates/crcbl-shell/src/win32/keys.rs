@@ -233,6 +233,75 @@ pub const fn key_code(scancode: u32) -> Option<KeyCode> {
     })
 }
 
+/// What `MAPVK_VK_TO_VSC_EX` answers for Pause: its `E1 1D 45` make code's
+/// first two bytes, where a key message carries the bare `0x45`.
+const PAUSE_E1: u32 = 0xE11D;
+/// The scan code a key message carries for Pause; see [`key_code`].
+const PAUSE: u32 = 0x0045;
+
+/// Whether a virtual key names an `E0`-prefixed key that `MAPVK_VK_TO_VSC_EX`
+/// answers **without** the prefix.
+///
+/// The navigation block and Num Lock share their scan code bytes with the
+/// numeric keypad, and the mapping call answers the shared byte: `VK_UP` and
+/// `VK_NUMPAD8` both come back as `0x48`, and `VK_HOME` and `VK_NUMPAD7` as
+/// `0x47`, observed on Windows 11. The virtual key is what tells them apart,
+/// so these are the keys whose prefix the caller puts back: `VK_PRIOR`
+/// through `VK_DOWN`, `VK_INSERT`, `VK_DELETE` and `VK_NUMLOCK`.
+const fn maps_without_its_prefix(virtual_key: u16) -> bool {
+    matches!(virtual_key, 0x21..=0x28 | 0x2D | 0x2E) || virtual_key as usize == value::VK_NUM_LOCK
+}
+
+/// The scan code a key message should have carried, from what
+/// `MAPVK_VK_TO_VSC_EX` answered for its virtual key, in [`scancode`]'s
+/// numbering. The call answers `0` for a key the layout cannot place, which
+/// this keeps a scan code no key is named by, prefixed or not.
+///
+/// `extended` is the message's own `E0` flag, which an injector that sets
+/// `KEYEVENTF_EXTENDEDKEY` without a scan code still sends: it is the only
+/// thing that makes the generic `VK_CONTROL` the right-hand Control.
+#[must_use]
+pub const fn recovered_scancode(virtual_key: u16, extended: bool, mapped: u32) -> u32 {
+    if mapped == PAUSE_E1 {
+        return PAUSE;
+    }
+    if extended || maps_without_its_prefix(virtual_key) {
+        return EXTENDED_PREFIX | mapped;
+    }
+    mapped
+}
+
+/// The engine key for a key message, falling back to its virtual key when the
+/// message carried no scan code at all.
+///
+/// Input injected by virtual key alone — `SendInput` with a zero `wScan`,
+/// which is what SendKeys, remote desktop clients, on-screen keyboards and
+/// AutoHotkey send — arrives with scan code `0`, or `0xE000` with the
+/// extended flag, and [`key_code`] names no key for either. Only then is
+/// `map` asked for the virtual key's scan code (`MAPVK_VK_TO_VSC_EX`, which
+/// is a system call and so the caller's), and the answer goes through the
+/// same table. A scan code that is real but unnamed is left `None`: the key
+/// is still bindable by its scan code, and its virtual key is a layout's
+/// guess, not a position.
+///
+/// The reported [`Scancode`](crcbl_core::input::Scancode) stays the one the
+/// message carried, so a binding made from it matches the next identical
+/// message rather than a scan code the keyboard never sent.
+pub fn key_code_or_recovered(
+    scancode: u32,
+    virtual_key: u16,
+    map: impl FnOnce(u16) -> u32,
+) -> Option<KeyCode> {
+    if let Some(key) = key_code(scancode) {
+        return Some(key);
+    }
+    if scancode & !EXTENDED_PREFIX != 0 {
+        return None;
+    }
+    let extended = scancode & EXTENDED_PREFIX != 0;
+    key_code(recovered_scancode(virtual_key, extended, map(virtual_key)))
+}
+
 /// The keysym for a key whose symbol does not depend on the keyboard layout.
 ///
 /// The table itself lives in [`crate::keysym`], shared with the AppKit
@@ -440,6 +509,68 @@ mod tests {
         assert!(composition_changed(comp_str | GCS_RESULT_STR));
         assert!(!composition_changed(GCS_RESULT_STR));
         assert!(!composition_changed(0));
+    }
+
+    #[test]
+    fn a_message_with_no_scan_code_takes_its_key_from_the_virtual_key() {
+        // What `MAPVK_VK_TO_VSC_EX` answered for each virtual key on
+        // Windows 11 with a US layout, recorded so the fix-ups are tested
+        // against the call's real quirks rather than against its docs.
+        const ANSWERS: [(u16, u32); 12] = [
+            (0x41, 0x001E), // VK_A
+            (0x1B, 0x0001), // VK_ESCAPE
+            (0x26, 0x0048), // VK_UP: the keypad's byte, unprefixed
+            (0x24, 0x0047), // VK_HOME
+            (0x67, 0x0047), // VK_NUMPAD7: the same answer, rightly
+            (0x2E, 0x0053), // VK_DELETE
+            (0x90, 0x0045), // VK_NUMLOCK
+            (0x13, 0xE11D), // VK_PAUSE: E1-prefixed
+            (0xA3, 0xE01D), // VK_RCONTROL: the one side it does prefix
+            (0x11, 0x001D), // VK_CONTROL: generic, so the left one
+            (0x2C, 0x0054), // VK_SNAPSHOT
+            (0xE5, 0x0000), // VK_PROCESSKEY: no key at all
+        ];
+        let map = |virtual_key: u16| {
+            ANSWERS
+                .iter()
+                .find(|(key, _)| *key == virtual_key)
+                .map_or(0, |(_, mapped)| *mapped)
+        };
+        let recover = |extended: bool, virtual_key| {
+            let scancode = if extended { EXTENDED_PREFIX } else { 0 };
+            key_code_or_recovered(scancode, virtual_key, map)
+        };
+        assert_eq!(recover(false, 0x41), Some(KeyCode::KeyA));
+        assert_eq!(recover(false, 0x1B), Some(KeyCode::Escape));
+        assert_eq!(recover(false, 0x26), Some(KeyCode::ArrowUp), "not Numpad8");
+        assert_eq!(recover(false, 0x24), Some(KeyCode::Home), "not Numpad7");
+        assert_eq!(recover(false, 0x67), Some(KeyCode::Numpad7));
+        assert_eq!(recover(false, 0x2E), Some(KeyCode::Delete));
+        assert_eq!(recover(false, 0x90), Some(KeyCode::NumLock), "not Pause");
+        assert_eq!(recover(false, 0x13), Some(KeyCode::Pause));
+        assert_eq!(recover(false, 0xA3), Some(KeyCode::ControlRight));
+        assert_eq!(recover(false, 0x11), Some(KeyCode::ControlLeft));
+        // The message's own extended flag is what makes the generic Control
+        // the right-hand one, and an answer that already has the prefix keeps
+        // it.
+        assert_eq!(recover(true, 0x11), Some(KeyCode::ControlRight));
+        assert_eq!(recover(true, 0xA3), Some(KeyCode::ControlRight));
+        assert_eq!(recover(true, 0x26), Some(KeyCode::ArrowUp));
+        assert_eq!(recover(false, 0x2C), Some(KeyCode::PrintScreen));
+        // A virtual key the layout cannot place is still no key.
+        assert_eq!(recover(false, 0xE5), None);
+        assert_eq!(recover(true, 0xE5), None);
+
+        // A message that carried a scan code is answered by it alone: a named
+        // one wins over its virtual key, and an unnamed one stays unnamed.
+        let untouched = |_| panic!("the virtual key is not asked about");
+        assert_eq!(
+            key_code_or_recovered(0x0011, 0x41, untouched),
+            Some(KeyCode::KeyW),
+            "the position, not the layout's label"
+        );
+        assert_eq!(key_code_or_recovered(0x0059, 0x41, untouched), None);
+        assert_eq!(key_code_or_recovered(0xE022, 0x41, untouched), None);
     }
 
     #[test]

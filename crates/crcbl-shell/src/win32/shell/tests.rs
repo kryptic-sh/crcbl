@@ -719,6 +719,35 @@ fn a_key_press_carries_its_position_its_symbol_and_its_repeat_flag() {
 
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_key_injected_with_no_scan_code_is_named_from_its_virtual_key() {
+    /// `VK_CONTROL`, the generic one a key message carries.
+    const VK_CONTROL: usize = 0x11;
+    /// `VK_ESCAPE`.
+    const VK_ESCAPE: usize = 0x1B;
+    let mut shell = shell();
+    let window = window(&mut shell);
+    shell.pump(&mut |_| {});
+    let hwnd = hwnd_of(&shell, window);
+
+    // What SendKeys, a remote desktop client or AutoHotkey sends: the virtual
+    // key and a zero scan code, with the extended flag where it set one.
+    send_key(hwnd, msg::KEY_DOWN, VK_ESCAPE, 0, false, false);
+    send_key(hwnd, msg::KEY_DOWN, VK_UP, 0, false, false);
+    send_key(hwnd, msg::KEY_DOWN, VK_CONTROL, 0, true, false);
+
+    let keys = pump_keys(&mut shell);
+    assert_eq!(keys.len(), 3, "{keys:?}");
+    assert_eq!(keys[0].1, Some(KeyCode::Escape));
+    assert_eq!(keys[0].0, Scancode(0), "the scan code the message carried");
+    // The real `MapVirtualKeyW` answers the keypad's byte for the arrow; the
+    // virtual key is what puts it back on the navigation block.
+    assert_eq!(keys[1].1, Some(KeyCode::ArrowUp));
+    assert_eq!(keys[2].1, Some(KeyCode::ControlRight));
+    assert_eq!(keys[2].0, Scancode(0xE000));
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_key_the_input_method_consumed_reaches_the_consumer_on_neither_edge() {
     /// `VK_BACK`.
     const VK_BACK: usize = 0x08;

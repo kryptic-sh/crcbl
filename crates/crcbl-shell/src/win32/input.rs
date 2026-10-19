@@ -569,6 +569,15 @@ impl Win32Shell {
         Keysym::from_char(unshifted(character))
     }
 
+    /// The scan code a virtual key sits on in the current layout, as
+    /// `MAPVK_VK_TO_VSC_EX` answers it: `0` for none, and the quirks
+    /// [`keys::recovered_scancode`] corrects left in.
+    fn layout_scancode(virtual_key: u16) -> u32 {
+        // SAFETY: `MapVirtualKeyW` takes two integers by value and reads no
+        // memory of ours.
+        unsafe { ffi::MapVirtualKeyW(u32::from(virtual_key), value::MAPVK_VK_TO_VSC_EX) }
+    }
+
     /// Turns one recorded input message into the events it produced.
     ///
     /// Split from [`translate`](Win32Shell) so the window-lifecycle half of that
@@ -586,7 +595,8 @@ impl Win32Shell {
                 ..
             } => {
                 let time = self.event_time(millis);
-                let key_code = keys::key_code(scancode);
+                let key_code =
+                    keys::key_code_or_recovered(scancode, virtual_key, Self::layout_scancode);
                 // Paired off before the input method's verdict, so the raw
                 // report a consumed key produced is not left for the next one.
                 let device = self.attribution.key(scancode, state, millis);
