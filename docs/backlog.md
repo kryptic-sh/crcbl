@@ -1143,6 +1143,15 @@ Each step lands in the crate the later steps build on, so the seam goes first.
        its cluster (`Filler::cut_at`'s `starts`): with the committed font every
        multi-glyph cluster's later glyphs are zero-width marks, for which
        cutting before the base or the mark lands at the same width.
+     - **Measured only `TextLayout`, on ASCII**: 2,080 chars of Latin text in
+       the committed font at 16 px, best of 30 batches of 20 in a release build
+       on the RX 7900 XTX machine, three runs each interleaved with the base
+       commit's: wrapped at 300 px 1.381, 1.376 and 1.385 ms against 1.370,
+       1.388 and 1.396 ms, one line 1.367, 1.360 and 1.353 ms against 1.398,
+       1.378 and 1.401 ms — after `cluster::clusters` gained its ASCII path and
+       an unwrapped layout stopped finding soft breaks, without which it was 3%
+       to 7% slower. Not measured: paragraphs (`InlineLayout`), caret stops, and
+       non-ASCII text.
      - **Decided 2026-10-19: Backspace and Delete take a whole cluster** in
        every script. Some platforms delete an Indic vowel sign or a Hebrew point
        alone on Backspace; declined, because one rule never leaves half a flag

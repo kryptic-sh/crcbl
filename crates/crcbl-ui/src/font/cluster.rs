@@ -23,9 +23,31 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// Every cluster of `text`, in order, as the bytes it spans. See the module
 /// docs for the rule. Empty text has none.
+///
+/// ASCII is cut without the tables: in it every char is a cluster of its own
+/// but a carriage return and the line feed after it (rules GB3 to GB5 and
+/// GB999), which is what most text a layout measures is.
 pub fn clusters(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
-    text.grapheme_indices(true)
-        .map(|(start, cluster)| start..start + cluster.len())
+    let mut graphemes = (!text.is_ascii()).then(|| text.grapheme_indices(true));
+    let mut at = 0;
+    core::iter::from_fn(move || {
+        if let Some(graphemes) = &mut graphemes {
+            return graphemes
+                .next()
+                .map(|(start, cluster)| start..start + cluster.len());
+        }
+        let start = at;
+        let bytes = text.as_bytes();
+        if start == bytes.len() {
+            return None;
+        }
+        at += if bytes[start..].starts_with(b"\r\n") {
+            2
+        } else {
+            1
+        };
+        Some(start..at)
+    })
 }
 
 /// The `char` positions in `text` a caret may stop at: where each cluster
@@ -97,6 +119,31 @@ mod tests {
         for (text, want) in cases {
             assert_eq!(notation(text), want, "{text:?}");
         }
+    }
+
+    /// **ASCII's cut without the tables is UAX #29's**: every pair of ASCII
+    /// chars, and each with a carriage return and line feed around it, cuts
+    /// as `unicode-segmentation` cuts it.
+    #[test]
+    fn the_ascii_cut_matches_the_tables() {
+        let tables = |text: &str| -> Vec<Range<usize>> {
+            text.grapheme_indices(true)
+                .map(|(start, cluster)| start..start + cluster.len())
+                .collect()
+        };
+        for a in 0..128u8 {
+            for b in 0..128u8 {
+                let pair = String::from_utf8(vec![a, b]).expect("ASCII");
+                for text in [pair.clone(), format!("\r\n{pair}\r\n")] {
+                    assert_eq!(
+                        clusters(&text).collect::<Vec<_>>(),
+                        tables(&text),
+                        "{text:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(cut("a\r\nb"), ["a", "\r\n", "b"]);
     }
 
     /// **The sequences a caret must not split are one cluster each**: a

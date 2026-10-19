@@ -42,7 +42,8 @@ struct Filler<'a> {
     paragraph: &'a str,
     /// Where the paragraph starts in the text.
     start: usize,
-    /// Its soft breaks, as bytes of the paragraph.
+    /// Its soft breaks, as bytes of the paragraph; none unless the layout
+    /// wraps, as only a wrapped layout reads them.
     soft: Vec<usize>,
     /// Its levels, when any runs right to left.
     bidi: Option<Bidi<'a>>,
@@ -73,7 +74,11 @@ pub(super) fn fill(
             wrap,
             paragraph,
             start: bytes.start,
-            soft: breaks::soft_breaks(paragraph),
+            soft: if wrap.is_some() {
+                breaks::soft_breaks(paragraph)
+            } else {
+                Vec::new()
+            },
             bidi: Bidi::new(paragraph),
             line: Vec::new(),
         };
