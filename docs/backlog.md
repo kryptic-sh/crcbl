@@ -2574,7 +2574,10 @@ queued after lyr's `set_panel`:
   start — `nearest_walkable`'s sibling, "walk as far toward X as this grid
   goes".
 - **Stall detection by headway from an anchor**, not a per-tick speed floor,
-  which never fires for an agent jostling against another.
+  which never fires for an agent jostling against another. EW counts headway as
+  getting 0.5 m from the anchor and counts a stall only while the caller says it
+  is walking the route, so waiting at a doorway or holding cover never reads as
+  stuck; the crcbl version takes the same "walking" input.
 
 Raised by EW on 2026-10-19, not a request yet:
 
