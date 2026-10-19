@@ -23,14 +23,15 @@ watcher and a grapheme crate stay declined until a caller needs them.
 pikr, which is fully on 0.5.0). Order of work, after the slices already in
 flight (opacity groups, AppKit input method, the Win32 popup leave fix):
 
-1. **The text field's pre-edit (S9), next.** The Win32 backend already reports
-   `TextPreedit` and honours `set_text_input_area`, and AppKit does from the
-   in-flight slice, but `crcbl_app::TextPump` draws no pre-edit at the caret and
-   never calls `set_text_input_area`, so a CJK user typing pikr's query sees
-   nothing until the commit and the candidate window sits at the window's
-   origin. Build both in `crcbl-app` and `crcbl-ui`'s text field, on every
-   backend. pikr verifies with the Microsoft IME on its desktop.
-2. **D3D12 start-up (S13), decided 2026-10-19: describe adapters lazily.**
+1. **Input method (S9): the shell half is pikr's need, and it is in.** pikr runs
+   its own loop (not `crcbl-app`), already calls `set_text_input`, and is wiring
+   `TextPreedit` and `set_text_input_area` itself against 0.5.0's Win32 backend,
+   which it will verify with the Microsoft IME; AppKit's half is the in-flight
+   slice. Separately, for `crcbl-app`'s own users and not pikr:
+   `crcbl_app::TextPump` draws no pre-edit at the caret and never calls
+   `set_text_input_area`, so the candidate window sits at the window's origin.
+   Build both in `crcbl-app` and `crcbl-ui`'s text field after the items below.
+2. **D3D12 start-up (S13), next; decided 2026-10-19: describe adapters lazily.**
    `Dx12Instance::open` creates one driver device per hardware adapter to list
    caps (about 0.2 s each; pikr's first paint is 443–617 ms on 0.5.0 against 500
    ms). `Instance::adapters` lists identities from DXGI without a device, in
