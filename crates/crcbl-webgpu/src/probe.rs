@@ -16090,6 +16090,7 @@ mod tests {
             device_type: DeviceType::Other,
             driver: String::new(),
             backend: BackendKind::WebGpu,
+            luid: None,
             caps: DeviceCaps {
                 // `COMPUTE` is bit 8, `RAY_QUERY` bit 24, `ACCELERATION_STRUCTURE`
                 // bit 26 — all in the low word, which is why the corpus in

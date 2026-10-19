@@ -940,6 +940,7 @@ pub(crate) fn describe(
         device_type: device_type_of(&raw),
         driver: driver_string(adapter),
         backend: BackendKind::Dx12,
+        luid: Some(raw.luid),
         caps: DeviceCaps {
             features,
             limits: limits_of(features),

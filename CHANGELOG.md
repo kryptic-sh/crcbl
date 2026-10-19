@@ -41,6 +41,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the paragraph's direction, so left-to-right text sits where it did, and an
   exhaustive match on `TextAlign` needs the two arms.
 
+- **`crcbl_hal::Instance` has a required `display_adapter` method and
+  `AdapterInfo` a `luid` field**, so a backend outside this workspace implements
+  one and a struct literal of `AdapterInfo` names the other.
 - **`crcbl_app::present::PresenterDesc` and `crcbl::engine::GpuContextDesc` have
   `power_preference` and `adapter_pick` fields**, for the adapter choice below,
   so a struct literal without `..Default::default()` needs them.
@@ -131,6 +134,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   back from, and `CRCBL_ADAPTER` still wins over it. `adapter::choose` and
   `adapter::rank` are the policy itself, as pure functions over the enumeration,
   the preference, the pick and the adapter driving the window's display.
+- **`Instance::display_adapter` says which adapter drives the display a
+  surface's window is on**, and `Presenter` asks it, so a window on a monitor
+  the discrete GPU drives renders there whatever the preference. Built on Win32
+  for D3D12 (the adapter whose DXGI outputs hold `MonitorFromWindow`'s monitor)
+  and Vulkan (the physical device whose `deviceLUID` is the monitor's GDI
+  adapter's); Wayland, X11, macOS and the browser answer `None`, which leaves
+  the preference to decide. `AdapterInfo::luid` carries the adapter's LUID on
+  D3D12 and on Vulkan where the driver reports one.
 
 ### Changed
 

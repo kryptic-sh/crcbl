@@ -130,8 +130,9 @@ impl InstanceInner {
     /// about what it is.
     ///
     /// [`Instance::request_device`]'s
-    /// [`compatible_surface`](DeviceDesc::compatible_surface) is the only
-    /// caller: on Metal every device can present to every surface (see
+    /// [`compatible_surface`](DeviceDesc::compatible_surface) and
+    /// [`Instance::display_adapter`] are the callers: on Metal every device can
+    /// present to every surface (see
     /// `crcbl_mtl::swapchain`), so the question is purely obligation 3's — is
     /// this handle ours — and the answer is [`lookup`]'s three-way one.
     fn check_surface(&self, surface: SurfaceHandle) -> Result<(), HalError> {
@@ -311,6 +312,14 @@ impl Instance for MetalInstance {
         adapter: AdapterId,
     ) -> Result<SurfaceCaps, HalError> {
         self.surface_caps_impl(surface, adapter)
+    }
+
+    /// Checks the handle and answers `None`: which GPU drives a window's
+    /// display is not asked here yet. `docs/backlog.md` names the call that
+    /// would answer it.
+    fn display_adapter(&self, surface: SurfaceHandle) -> Result<Option<AdapterId>, HalError> {
+        self.inner.check_surface(surface)?;
+        Ok(None)
     }
 
     /// Opens the device *now* and hands it over on the first poll.

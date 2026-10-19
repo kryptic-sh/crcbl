@@ -641,7 +641,13 @@ fn describe(
     surface_caps2: bool,
 ) -> AdapterRecord {
     let mut vulkan_1_2_props = vk::PhysicalDeviceVulkan12Properties::default();
-    let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan_1_2_props);
+    // `VkPhysicalDeviceIDProperties` rather than `Vulkan11Properties`, which
+    // carries the same LUID: this is core since 1.1, where the other needs a
+    // 1.2 device to be chained at all.
+    let mut id_props = vk::PhysicalDeviceIDProperties::default();
+    let mut properties2 = vk::PhysicalDeviceProperties2::default()
+        .push_next(&mut vulkan_1_2_props)
+        .push_next(&mut id_props);
     // SAFETY: `physical` came from this instance, and the chained structs are
     // stack locals that outlive the call.
     unsafe { instance.get_physical_device_properties2(physical, &mut properties2) };
@@ -833,6 +839,10 @@ fn describe(
             device_type: device_type(properties.device_type),
             driver,
             backend: BackendKind::Vulkan,
+            // Valid only where the driver says so: a LUID is a Windows notion,
+            // and Mesa on Linux leaves it unset.
+            luid: (id_props.device_luid_valid == vk::TRUE)
+                .then(|| u64::from_le_bytes(id_props.device_luid)),
             caps: DeviceCaps { features, limits },
         },
         families,

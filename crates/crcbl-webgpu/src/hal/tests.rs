@@ -43,6 +43,7 @@ fn granted_adapter() -> AdapterInfo {
         device_type: DeviceType::Other,
         driver: String::new(),
         backend: BackendKind::WebGpu,
+        luid: None,
         caps: device_caps(),
     }
 }

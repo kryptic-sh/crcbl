@@ -46,6 +46,10 @@ struct SurfaceEntry {
     owner: u64,
     /// Which `SurfaceTarget` variant it came from, for logs.
     platform: &'static str,
+    /// A Win32 window's address, for
+    /// [`Instance::display_adapter`]; zero for every other target, which
+    /// names no `HWND`.
+    hwnd: usize,
     /// Swapchains still configured on it. `vkDestroySurfaceKHR` with a live
     /// swapchain is undefined behaviour in the driver, so the object outlives
     /// the handle by exactly this count.
@@ -112,9 +116,14 @@ impl Surfaces {
 
     /// Resolves a handle against `owner`, per obligation 3.
     fn raw(&self, surface: SurfaceHandle, owner: u64) -> Result<vk::SurfaceKHR, HalError> {
+        self.entry(surface, owner).map(|entry| entry.raw)
+    }
+
+    /// [`raw`](Self::raw)'s lookup, handing back the whole entry.
+    fn entry(&self, surface: SurfaceHandle, owner: u64) -> Result<&SurfaceEntry, HalError> {
         let local = self.local(surface, owner)?;
         match self.live.get(local) {
-            Some(entry) if entry.owner == owner => Ok(entry.raw),
+            Some(entry) if entry.owner == owner => Ok(entry),
             Some(_) => Err(HalError::ForeignObject {
                 kind: "surface",
                 bits: surface.to_bits(),
@@ -843,6 +852,7 @@ impl Instance for VkInstance {
                 what,
             })
         };
+        let mut hwnd = 0;
         let raw = match *target {
             // Transparency changes nothing about the surface on Wayland or X11:
             // the swapchain's composite alpha is the whole of it, chosen from
@@ -890,7 +900,7 @@ impl Instance for VkInstance {
             SurfaceTarget::Offscreen => vk::SurfaceKHR::null(),
             SurfaceTarget::Win32 {
                 hinstance,
-                hwnd,
+                hwnd: window,
                 transparent,
             } => {
                 // Before the extension check, so the answer is the same on a
@@ -904,7 +914,8 @@ impl Instance for VkInstance {
                 };
                 let info = vk::Win32SurfaceCreateInfoKHR::default()
                     .hinstance(hinstance.as_ptr() as vk::HINSTANCE)
-                    .hwnd(hwnd.as_ptr() as vk::HWND);
+                    .hwnd(window.as_ptr() as vk::HWND);
+                hwnd = window.as_ptr() as usize;
                 // SAFETY: as for Wayland — the caller promises `hinstance` is
                 // the module that registered `hwnd`'s class and `hwnd` a live
                 // window, and that both outlive the surface.
@@ -921,6 +932,7 @@ impl Instance for VkInstance {
             raw,
             owner: self.inner.id,
             platform: target.platform_name(),
+            hwnd,
             swapchains: 0,
         });
         crcbl_core::log::debug!(
@@ -1013,6 +1025,30 @@ impl Instance for VkInstance {
                 })?;
 
         Ok(build_surface_caps(&capabilities, &formats, &present_modes))
+    }
+
+    /// The physical device whose `deviceLUID` is the LUID of the adapter
+    /// scanning out the monitor `surface`'s window is on. See
+    /// `crcbl_vk::display` for how that LUID is found, and why only a Win32
+    /// window has one to find.
+    fn display_adapter(&self, surface: SurfaceHandle) -> Result<Option<AdapterId>, HalError> {
+        let hwnd = self.inner.surfaces().entry(surface, self.inner.id)?.hwnd;
+        if hwnd == 0 {
+            return Ok(None);
+        }
+        let Some(luid) = crate::display::display_luid(hwnd) else {
+            return Ok(None);
+        };
+        let found = self
+            .inner
+            .adapters
+            .iter()
+            .find(|record| record.info.luid == Some(luid))
+            .map(|record| record.info.id);
+        crcbl_core::log::debug!(
+            "crcbl-vk: the window's monitor is on LUID {luid:#018x}, adapter {found:?}"
+        );
+        Ok(found)
     }
 
     /// Opens the device *now* and hands it over on the first poll.
@@ -1404,6 +1440,7 @@ mod tests {
             raw: vk::SurfaceKHR::from_raw(raw),
             owner,
             platform: "test",
+            hwnd: 0,
             swapchains: 0,
         })
     }

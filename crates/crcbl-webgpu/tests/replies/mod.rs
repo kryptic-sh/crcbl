@@ -90,6 +90,7 @@ fn every_adapter_field() -> AdapterInfo {
         device_type: DeviceType::Other,
         driver: String::new(),
         backend: BackendKind::WebGpu,
+        luid: None,
         caps: DeviceCaps {
             features: WEBGPU_REACHABLE,
             limits: every_limit(),
@@ -146,6 +147,7 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
                     device_type: DeviceType::Discrete,
                     driver: "radv 25.1.4".into(),
                     backend: BackendKind::WebGpu,
+                    luid: None,
                     caps: DeviceCaps {
                         features: Features::empty(),
                         limits: Limits::minimum(),

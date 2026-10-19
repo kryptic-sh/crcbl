@@ -308,8 +308,9 @@ impl<'a> Choice<'a> {
 ///
 /// `pin` is [`ADAPTER_ENV_VAR`]'s value ([`pin()`] reads it), `pick` the
 /// program's own choice, and `display` the adapter driving the display the
-/// window is on, where the backend can tell. The module docs give the order
-/// they are taken in.
+/// window is on, where the backend can tell
+/// ([`Instance::display_adapter`](crcbl_hal::Instance::display_adapter)). The
+/// module docs give the order they are taken in.
 ///
 /// # Errors
 ///
@@ -421,6 +422,7 @@ mod tests {
             device_type,
             driver: "test".to_owned(),
             backend: BackendKind::Null,
+            luid: None,
             caps: DeviceCaps {
                 features: Features::empty(),
                 limits: Limits::minimum(),

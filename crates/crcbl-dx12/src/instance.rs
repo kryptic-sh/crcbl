@@ -15,6 +15,7 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_ADAPTER_DESC1, DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_NOT_FOUND,
     DXGI_FEATURE_PRESENT_ALLOW_TEARING, IDXGIAdapter1, IDXGIFactory4, IDXGIFactory5,
 };
+use windows::Win32::Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{BOOL, Interface};
 
@@ -636,6 +637,39 @@ fn probe_tearing(factory: &IDXGIFactory4) -> bool {
     allowed.as_bool()
 }
 
+/// Whether one of `raw_adapter`'s outputs is `monitor`.
+///
+/// DXGI lists a display under the adapter that scans it out, so on a hybrid
+/// laptop the panel is the integrated GPU's output and an external monitor
+/// wired to the discrete GPU is the discrete one's.
+fn drives(raw_adapter: &IDXGIAdapter1, monitor: HMONITOR) -> bool {
+    let mut index = 0u32;
+    loop {
+        // SAFETY: `raw_adapter` is a live COM interface this crate owns a
+        // reference to. `EnumOutputs` writes only the interface it returns,
+        // and reports the end of the list as an error code.
+        let output = match unsafe { raw_adapter.EnumOutputs(index) } {
+            Ok(output) => output,
+            Err(error) => {
+                if error.code() != DXGI_ERROR_NOT_FOUND {
+                    crcbl_core::log::debug!("crcbl-dx12: EnumOutputs({index}) failed: {error}");
+                }
+                return false;
+            }
+        };
+        // SAFETY: `output` is the live interface just returned, and `GetDesc`
+        // fills in a `DXGI_OUTPUT_DESC` the binding returns by value.
+        match unsafe { output.GetDesc() } {
+            Ok(desc) if desc.Monitor == monitor => return true,
+            Ok(_) => {}
+            Err(error) => crcbl_core::log::debug!(
+                "crcbl-dx12: output {index} would not describe itself: {error}"
+            ),
+        }
+        index += 1;
+    }
+}
+
 /// One `GetDesc1`, with the failure logged rather than swallowed.
 fn desc_of(raw_adapter: &IDXGIAdapter1) -> Option<DXGI_ADAPTER_DESC1> {
     // SAFETY: `raw_adapter` is a live COM interface this crate owns a reference
@@ -842,6 +876,32 @@ impl Instance for Dx12Instance {
             max_image_count: present::MAX_BUFFERS,
             current_extent: client_extent(hwnd),
         })
+    }
+
+    /// The adapter whose outputs hold the monitor `surface`'s window is on.
+    ///
+    /// `MonitorFromWindow` names the monitor — the one holding most of the
+    /// window, or the nearest one to a window on none — and each adapter's
+    /// `EnumOutputs` is walked for it. An offscreen surface is on no monitor,
+    /// and a monitor no listed adapter scans out (one driven by the Basic
+    /// Display Adapter, or plugged in after this instance enumerated) has no id
+    /// to give; both are `None`.
+    fn display_adapter(&self, surface: SurfaceHandle) -> Result<Option<AdapterId>, HalError> {
+        let Some(hwnd) = self.inner.surface_hwnd(surface)? else {
+            return Ok(None);
+        };
+        // SAFETY: `hwnd` is the window the caller promised in
+        // `create_surface`'s contract is live. The call takes no pointer of
+        // ours and answers a monitor handle, never null with this flag.
+        let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        let found = self
+            .inner
+            .adapters
+            .iter()
+            .find(|record| drives(&record.adapter, monitor))
+            .map(|record| record.info.id);
+        crcbl_core::log::debug!("crcbl-dx12: the window's monitor is on adapter {found:?}");
+        Ok(found)
     }
 
     /// Opens the device *now* and hands it over on the first poll.
@@ -1547,6 +1607,27 @@ pub(crate) mod tests {
     ///
     /// Red when a refusal loses the backend's name, when a permanent refusal
     /// starts naming a slice, and when `Offscreen` stops resolving.
+    /// **An offscreen surface is on no display, and a dead handle is
+    /// refused** rather than answered for. A real window's answer is held
+    /// against Vulkan's in `crcbl-app`'s backend tests, which can open both.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn an_offscreen_surface_has_no_display_adapter_and_a_dead_one_is_refused() {
+        let instance = open();
+        // SAFETY: `Offscreen` names no platform object.
+        let offscreen = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+            .expect("an offscreen surface needs no window");
+        assert!(matches!(instance.display_adapter(offscreen), Ok(None)));
+        instance.destroy_surface(offscreen);
+        assert!(
+            matches!(
+                instance.display_adapter(offscreen),
+                Err(HalError::InvalidHandle { .. })
+            ),
+            "a destroyed surface is not answered for"
+        );
+    }
+
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn every_target_d3d12_cannot_present_to_is_refused_by_name() {

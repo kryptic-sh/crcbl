@@ -404,6 +404,31 @@ pub trait Instance: core::fmt::Debug + crate::threading::HalThreadSafe {
         adapter: AdapterId,
     ) -> Result<SurfaceCaps, HalError>;
 
+    /// The adapter driving the display `surface`'s window is on, where this
+    /// backend can tell; `Ok(None)` where it cannot.
+    ///
+    /// Adapter selection asks so a window on a display a discrete GPU drives
+    /// renders there rather than copying every frame across from another
+    /// adapter; see `crcbl_app::adapter::rank`. **`None` is an answer, not a
+    /// failure**: an offscreen surface is on no display, a display driven by
+    /// an adapter this backend does not list has no id to give, and a backend
+    /// or platform with no way to ask says so this way. A caller ranks by its
+    /// power preference alone then.
+    ///
+    /// | Backend | Platform | How |
+    /// | --- | --- | --- |
+    /// | `crcbl-dx12` | Win32 | the adapter whose `EnumOutputs` holds `MonitorFromWindow` |
+    /// | `crcbl-vk` | Win32 | the adapter whose `deviceLUID` is the monitor's GDI adapter's |
+    /// | `crcbl-vk` | Wayland, X11 | `None`, not built yet |
+    /// | `crcbl-mtl` | macOS | `None`, not built yet |
+    /// | `crcbl-webgpu` | browser | `None`: a page cannot know |
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] for a stale surface, or
+    /// [`HalError::ForeignObject`] for another instance's.
+    fn display_adapter(&self, surface: SurfaceHandle) -> Result<Option<AdapterId>, HalError>;
+
     /// Starts opening a device. The device itself arrives from
     /// [`PendingDevice::poll`].
     ///

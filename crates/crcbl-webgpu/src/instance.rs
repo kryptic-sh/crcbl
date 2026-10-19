@@ -109,6 +109,7 @@
 //!     device_type: DeviceType::Other,
 //!     driver: String::new(),
 //!     backend: BackendKind::WebGpu,
+//!     luid: None,
 //!     caps: DeviceCaps { features: Features::COMPUTE, limits: Limits::minimum() },
 //! };
 //! let mut replies = ReplyWriter::new();
@@ -434,6 +435,7 @@ mod tests {
             device_type: DeviceType::Other,
             driver: String::new(),
             backend: BackendKind::WebGpu,
+            luid: None,
             caps: DeviceCaps {
                 features: Features::COMPUTE,
                 limits: Limits::minimum(),

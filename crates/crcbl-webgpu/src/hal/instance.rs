@@ -323,6 +323,12 @@ impl Instance for WebGpuInstance {
         self.surfaces.caps(surface).map_err(HalError::Backend)
     }
 
+    /// `None`: a page cannot know which GPU drives the monitor its canvas is
+    /// on, and with one adapter granted there is nothing to rank anyway.
+    fn display_adapter(&self, _surface: SurfaceHandle) -> Result<Option<AdapterId>, HalError> {
+        Ok(None)
+    }
+
     fn request_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn PendingDevice>, HalError> {
         self.open_device(desc)
             .map(|pending| Box::new(pending) as Box<dyn PendingDevice>)

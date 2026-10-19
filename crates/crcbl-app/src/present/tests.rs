@@ -637,6 +637,7 @@ fn fake_adapter(index: u32, device_type: crcbl_hal::DeviceType) -> crcbl_hal::Ad
         device_type,
         driver: "test".to_owned(),
         backend: crcbl_hal::BackendKind::Null,
+        luid: None,
         caps: crcbl_hal::DeviceCaps {
             features: Features::empty(),
             limits: crcbl_hal::Limits::minimum(),
@@ -792,11 +793,13 @@ fn a_pin_that_names_no_adapter_here_refuses_the_open() {
 /// The null backend calls every adapter a [`crcbl_hal::DeviceType::Cpu`],
 /// and it is right to: it has one set of capabilities. A pin is only a
 /// choice on an enumeration that mixes classes, so this relabels the
-/// enumeration and forwards everything else untouched.
+/// enumeration, answers `display` for the window's display adapter, and
+/// forwards everything else untouched.
 #[derive(Debug)]
 struct ClassedInstance {
     inner: crcbl_hal::null::NullInstance,
     classes: Vec<crcbl_hal::DeviceType>,
+    display: Option<crcbl_hal::AdapterId>,
 }
 
 impl Instance for ClassedInstance {
@@ -837,6 +840,15 @@ impl Instance for ClassedInstance {
         self.inner.surface_caps(surface, adapter)
     }
 
+    fn display_adapter(
+        &self,
+        surface: SurfaceHandle,
+    ) -> Result<Option<crcbl_hal::AdapterId>, HalError> {
+        // The inner instance still checks the handle.
+        self.inner.display_adapter(surface)?;
+        Ok(self.display)
+    }
+
     fn request_device(
         &self,
         desc: &DeviceDesc<'_>,
@@ -866,6 +878,7 @@ fn the_context_opens_on_the_adapter_the_pin_names() {
         let instance = ClassedInstance {
             inner: NullInstance::gpu_driven().with_adapters(2),
             classes: vec![DeviceType::Discrete, DeviceType::Cpu],
+            display: None,
         };
         pending.stage = Presenter::start_device(Box::new(instance), &pending)
             .unwrap_or_else(|error| panic!("{pin:?}: both adapters can present: {error}"));
@@ -894,6 +907,16 @@ fn open_on_desktop(
     desc: &PresenterDesc<'_>,
     refuse: Option<crcbl_hal::AdapterId>,
 ) -> Result<crcbl_hal::AdapterId, PresentError> {
+    open_on(desc, refuse, None)
+}
+
+/// [`open_on_desktop`], with the backend saying `display` drives the
+/// window's display.
+fn open_on(
+    desc: &PresenterDesc<'_>,
+    refuse: Option<crcbl_hal::AdapterId>,
+    display: Option<crcbl_hal::AdapterId>,
+) -> Result<crcbl_hal::AdapterId, PresentError> {
     use crcbl_hal::DeviceType;
     use crcbl_hal::null::{NullInstance, Recorder};
 
@@ -912,6 +935,7 @@ fn open_on_desktop(
             .with_adapters(2)
             .with_recorder(recorder),
         classes: vec![DeviceType::Discrete, DeviceType::Integrated],
+        display,
     };
     pending.stage = Presenter::start_device(Box::new(instance), &pending)?;
     let mut gpu = finish_open(pending);
@@ -942,6 +966,24 @@ fn the_presenter_ranks_adapters_by_its_power_preference() {
     // Ranked, so an adapter that cannot present is still stepped past.
     assert_eq!(
         open_on_desktop(&fast, Some(AdapterId(0))).ok(),
+        Some(AdapterId(1))
+    );
+}
+
+/// **The display's adapter reaches the walk**: a window on a display the
+/// discrete GPU drives opens it even though the presenter asks for
+/// `LowPower`, and one the integrated GPU drives stays on it.
+#[test]
+fn the_presenter_asks_which_adapter_drives_the_display() {
+    use crcbl_hal::AdapterId;
+
+    let app = PresenterDesc::default();
+    assert_eq!(
+        open_on(&app, None, Some(AdapterId(0))).ok(),
+        Some(AdapterId(0))
+    );
+    assert_eq!(
+        open_on(&app, None, Some(AdapterId(1))).ok(),
         Some(AdapterId(1))
     );
 }

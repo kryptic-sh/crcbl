@@ -339,6 +339,8 @@ impl ByteReader<'_> {
             device_type,
             driver,
             backend: BackendKind::WebGpu,
+            // Not on the wire: a browser exposes no adapter LUID.
+            luid: None,
             caps: self.read_device_caps()?,
         })
     }

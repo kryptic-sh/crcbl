@@ -67,6 +67,13 @@ impl Instance for RefusingSurface {
         self.inner.surface_caps(surface, adapter)
     }
 
+    fn display_adapter(
+        &self,
+        surface: SurfaceHandle,
+    ) -> Result<Option<crcbl_hal::AdapterId>, HalError> {
+        self.inner.display_adapter(surface)
+    }
+
     fn request_device(
         &self,
         desc: &DeviceDesc<'_>,

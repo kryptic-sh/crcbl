@@ -214,6 +214,7 @@ pub(crate) mod command_pools;
 pub(crate) mod conv;
 pub(crate) mod deletion;
 pub(crate) mod device;
+pub(crate) mod display;
 pub(crate) mod instance;
 pub(crate) mod mem;
 pub(crate) mod pipeline;

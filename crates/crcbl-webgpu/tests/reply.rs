@@ -38,6 +38,7 @@ fn adapter_info() -> AdapterInfo {
         device_type: DeviceType::Other,
         driver: String::new(),
         backend: BackendKind::WebGpu,
+        luid: None,
         caps: DeviceCaps {
             features: Features::COMPUTE,
             limits: Limits::minimum(),
@@ -318,6 +319,7 @@ fn each_adapter_field_survives_a_round_trip_on_its_own() {
         device_type: DeviceType::Cpu,
         driver: "d".into(),
         backend: BackendKind::WebGpu,
+        luid: None,
         caps: DeviceCaps {
             features: Features::COMPUTE,
             limits: Limits::minimum(),

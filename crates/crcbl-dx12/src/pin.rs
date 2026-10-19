@@ -135,6 +135,7 @@ mod tests {
             device_type,
             driver: "test".to_owned(),
             backend: BackendKind::Dx12,
+            luid: None,
             caps: DeviceCaps {
                 features: Features::empty(),
                 limits: Limits::minimum(),

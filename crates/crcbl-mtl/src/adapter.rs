@@ -182,6 +182,8 @@ pub(crate) fn adapter_info(
         device_type: device_type_of(device),
         driver,
         backend: BackendKind::Metal,
+        // `registryID` is an IOKit key, not a LUID; see the ids above.
+        luid: None,
         caps: DeviceCaps {
             features,
             limits: limits_of(device, features),

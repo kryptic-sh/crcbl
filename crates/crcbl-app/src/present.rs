@@ -1026,8 +1026,7 @@ impl Presenter {
         // leaves nothing to tear down.
         let pin = open.adapter_pin.as_deref();
         let pick = open.adapter_pick.as_ref().map(OwnedPick::borrow);
-        let choice = crate::adapter::choose(&adapters, pin, pick, open.power_preference, None)?;
-        let candidates = choice.candidates();
+        let mut choice = crate::adapter::choose(&adapters, pin, pick, open.power_preference, None)?;
 
         // SAFETY: `target` was produced by the caller's shell for a window that
         // must still be live — `request_open` documents that obligation — so
@@ -1040,6 +1039,21 @@ impl Presenter {
             Err(error @ HalError::Unsupported { .. }) => return Err(StartRefusal::Surface(error)),
             Err(error) => return Err(error.into()),
         };
+
+        // Ranked again now that there is a surface to ask about: which adapter
+        // drives the window's display can overrule the preference. A backend
+        // that cannot tell, or a query that fails, leaves the preference alone.
+        let display = match instance.display_adapter(surface) {
+            Ok(display) => display,
+            Err(error) => {
+                log::debug!("hal: cannot tell which adapter drives this window's display: {error}");
+                None
+            }
+        };
+        if let Choice::Ranked(ranked) = &mut choice {
+            *ranked = crate::adapter::rank(&adapters, open.power_preference, display);
+        }
+        let candidates = choice.candidates();
 
         // **Adapter selection is surface-aware, and has to be.** P1.1 found a
         // discrete radv GPU that enumerates first, is Tier A, and *cannot
@@ -1129,10 +1143,11 @@ impl Presenter {
             }
             (Choice::Picked(_), _, Some(pick)) => format!("picked by the program, {pick:?}"),
             _ => format!(
-                "the first of {} enumerated that can present, ranked for {:?}, \
-                 {ADAPTER_ENV_VAR} unset",
+                "the first of {} enumerated that can present, ranked for {:?} with the display \
+                 on adapter {}, {ADAPTER_ENV_VAR} unset",
                 adapters.len(),
-                open.power_preference
+                open.power_preference,
+                display.map_or_else(|| "unknown".to_owned(), |id| id.0.to_string()),
             ),
         };
         log::info!(

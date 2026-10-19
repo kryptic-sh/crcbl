@@ -94,6 +94,10 @@ workspace = true
 #   `SetContent`. A window created with `WS_EX_NOREDIRECTIONBITMAP` has no
 #   surface for `CreateSwapChainForHwnd` to present into, so its swapchain is a
 #   composition one bound to a visual; see `crcbl_dx12::composition`.
+# * `Win32_Graphics_Gdi` is `MonitorFromWindow` and the `HMONITOR` it answers,
+#   which `IDXGIOutput::GetDesc`'s `DXGI_OUTPUT_DESC` is gated on as well:
+#   `Instance::display_adapter` matches the monitor a window is on against
+#   each adapter's outputs.
 #
 # A slice that needs more adds it here.
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -105,6 +109,7 @@ windows = { version = "0.62.2", default-features = false, features = [
   "Win32_Graphics_DirectComposition",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_System_Threading",
   "Win32_UI_WindowsAndMessaging",

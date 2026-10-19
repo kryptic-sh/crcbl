@@ -395,6 +395,7 @@ impl Instance for NullInstance {
                 device_type: DeviceType::Cpu,
                 driver: format!("crcbl-hal {}", env!("CARGO_PKG_VERSION")),
                 backend: BackendKind::Null,
+                luid: None,
                 caps: self.caps,
             })
             .collect()
@@ -458,6 +459,12 @@ impl Instance for NullInstance {
             max_image_count: RING_MAX_IMAGES,
             current_extent: None,
         })
+    }
+
+    /// Checks the handle and answers `None`: nothing here drives a display.
+    fn display_adapter(&self, surface: SurfaceHandle) -> Result<Option<AdapterId>, HalError> {
+        self.check_surface(surface)?;
+        Ok(None)
     }
 
     fn request_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn PendingDevice>, HalError> {

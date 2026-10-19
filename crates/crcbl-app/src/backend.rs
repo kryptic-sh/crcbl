@@ -1057,6 +1057,135 @@ mod tests {
         }
     }
 
+    /// **D3D12 and Vulkan agree on which adapter drives a window's display.**
+    ///
+    /// The two backends ask by different mechanisms — `crcbl-dx12` walks each
+    /// adapter's DXGI outputs for the window's monitor, `crcbl-vk` asks the
+    /// kernel graphics stack for the LUID behind the monitor's GDI name — so
+    /// each is the other's check: a wrong answer from either is a LUID the
+    /// other does not name. The window is a real one, made from user32's
+    /// `STATIC` class, because both read the monitor from the `HWND`.
+    ///
+    /// D3D12 answers on every Windows; on a runner whose display is the Basic
+    /// Display Adapter it answers `None`, which is right — that adapter is not
+    /// one D3D12 lists. Vulkan is skipped, loudly, where no loader is
+    /// installed. The answers are printed, so a run on a hybrid laptop says
+    /// which GPU its panel is on.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn d3d12_and_vulkan_agree_on_which_adapter_drives_the_display() {
+        use core::ffi::c_void;
+        use core::ptr::{NonNull, null, null_mut};
+
+        /// `WS_POPUP`.
+        const WS_POPUP: u32 = 0x8000_0000;
+        /// `WS_EX_TOOLWINDOW`, which keeps the window off the taskbar.
+        const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn CreateWindowExW(
+                ex_style: u32,
+                class: *const u16,
+                title: *const u16,
+                style: u32,
+                x: i32,
+                y: i32,
+                width: i32,
+                height: i32,
+                parent: *mut c_void,
+                menu: *mut c_void,
+                instance: *mut c_void,
+                param: *mut c_void,
+            ) -> *mut c_void;
+            fn DestroyWindow(hwnd: *mut c_void) -> i32;
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+        }
+
+        /// The LUID of the adapter `instance` says drives the window's
+        /// display, or `None`.
+        fn display_luid(
+            instance: &dyn crcbl_hal::Instance,
+            target: &crcbl_hal::SurfaceTarget,
+        ) -> Option<u64> {
+            // SAFETY: `target` names the window this test created and destroys
+            // only after this surface is destroyed below, on this thread.
+            let surface = unsafe { instance.create_surface(target) }
+                .unwrap_or_else(|error| panic!("{}: {error}", instance.backend()));
+            let display = instance
+                .display_adapter(surface)
+                .unwrap_or_else(|error| panic!("{}: {error}", instance.backend()));
+            instance.destroy_surface(surface);
+            let adapters = instance.adapters();
+            let adapter = display.map(|id| {
+                adapters
+                    .iter()
+                    .find(|info| info.id == id)
+                    .expect("the display adapter is one the backend lists")
+            });
+            println!(
+                "crcbl: {} says the display is on {:?}",
+                instance.backend(),
+                adapter.map(|info| (&info.name, info.device_type, info.luid))
+            );
+            adapter.map(|info| {
+                assert_ne!(
+                    info.device_type,
+                    crcbl_hal::DeviceType::Cpu,
+                    "a software rasteriser scans nothing out"
+                );
+                info.luid.expect("a Windows adapter has a LUID")
+            })
+        }
+
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let title: Vec<u16> = "crcbl display adapter\0".encode_utf16().collect();
+        // SAFETY: a null name asks for this process's own module, which lives
+        // as long as the process.
+        let module = unsafe { GetModuleHandleW(null()) };
+        // SAFETY: both strings are NUL-terminated UTF-16 that outlive the
+        // call, and `STATIC` is a class user32 registers in every process.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                class.as_ptr(),
+                title.as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                64,
+                64,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+            )
+        };
+        let target = crcbl_hal::SurfaceTarget::Win32 {
+            hinstance: NonNull::new(module).expect("this process has a module"),
+            hwnd: NonNull::new(hwnd).expect("the session has a desktop to make a window on"),
+            transparent: false,
+        };
+
+        let d3d12 = open_backend(GpuBackend::Dx12).expect("D3D12 opens on Windows");
+        let from_d3d12 = display_luid(d3d12.as_ref(), &target);
+        match open_backend(GpuBackend::Vulkan) {
+            Ok(vulkan) => assert_eq!(
+                display_luid(vulkan.as_ref(), &target),
+                from_d3d12,
+                "the two mechanisms disagree about one window"
+            ),
+            Err(error) => println!("crcbl: no Vulkan here to compare with: {error}"),
+        }
+
+        // SAFETY: `hwnd` is the window made above, on this thread, and every
+        // surface on it was destroyed in `display_luid`.
+        unsafe { DestroyWindow(hwnd) };
+    }
+
     /// On a machine with a driver this genuinely opens the platform's backend,
     /// which is correct and not something to assert against; the point is the
     /// failure path's message, which is what a developer with no driver actually

@@ -132,6 +132,16 @@ pub struct AdapterInfo {
     pub driver: String,
     /// Which backend enumerated it.
     pub backend: BackendKind,
+    /// The adapter's locally unique id, where the backend has one: DXGI's
+    /// `AdapterLuid`, or Vulkan's `deviceLUID` when the driver says it is
+    /// valid. `None` elsewhere.
+    ///
+    /// Unique among the adapters of one machine until it reboots, and the same
+    /// adapter reports the same value through D3D12 and Vulkan, which is what
+    /// makes it the key that joins the two — two cards of one model share a
+    /// name and PCI ids, never a LUID. Packed as the high half above the low
+    /// half, which is a Windows `LUID` read as a little-endian `u64`.
+    pub luid: Option<u64>,
     /// Everything this adapter can do. Available *before* device creation so
     /// selection logic can reject an adapter without paying for a device.
     pub caps: DeviceCaps,
