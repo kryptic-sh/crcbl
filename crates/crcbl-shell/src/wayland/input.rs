@@ -473,9 +473,10 @@ impl WaylandShell {
         // `set_selection` quoting a stale one is a clipboard write a compositor
         // may drop.
         self.seats[index].last_serial = serial;
-        let Some(window) = self.seats[index].keyboard_focus else {
+        let Some(focused) = self.seats[index].keyboard_focus else {
             return;
         };
+        let window = self.keyboard_target(focused);
         let pressed = state == wl_keyboard::key_state::PRESSED;
         let key_code = keymap::key_code(key);
 

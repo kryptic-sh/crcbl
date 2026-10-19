@@ -2941,6 +2941,30 @@ impl WaylandShell {
             .push_back(ShellEvent::CloseRequested { window: id });
     }
 
+    /// The window a key typed into `focused` belongs to: its innermost open
+    /// [grabbing](crate::PopupInput::Grab) popup, or `focused` itself.
+    ///
+    /// An `xdg_popup` grab need not move keyboard focus: the protocol leaves
+    /// the compositor free to keep `wl_keyboard` on the toplevel.
+    /// `PopupInput::Grab` promises the popup the keyboard while it is open,
+    /// so the routing is done here, whichever surface the compositor
+    /// focused.
+    fn keyboard_target(&self, focused: WindowId) -> WindowId {
+        let mut target = focused;
+        while let Some(child) = self
+            .windows
+            .iter()
+            .filter(|(_, state)| {
+                state.parent == Some(target) && state.popup_input == Some(crate::PopupInput::Grab)
+            })
+            .map(|(handle, _)| handle.cast())
+            .last()
+        {
+            target = child;
+        }
+        target
+    }
+
     fn output_by_xdg(&mut self, xdg: usize) -> Option<&mut Output> {
         self.outputs
             .iter_mut()

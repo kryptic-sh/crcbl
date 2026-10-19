@@ -143,7 +143,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   fresh press delivered to the popup queues its `CloseRequested`, which
   `reply_close_request` answers as any other, so a menu can answer `Keep` to
   back out of a submenu. The `Key` press is still delivered, before the request,
-  and a repeat or a release does not dismiss.
+  and a repeat or a release does not dismiss. On Wayland, keys typed while a
+  grabbing popup is open now go to it even when the compositor keeps keyboard
+  focus on its parent.
 - **A Win32 key injected with no scan code now has a `key_code`.** SendKeys,
   remote desktop clients, on-screen keyboards and AutoHotkey send a virtual key
   with scan code `0`, which reported `key_code: None`. The backend now asks
