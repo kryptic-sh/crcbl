@@ -2491,6 +2491,18 @@ Raised by EW on 2026-10-19, not a request yet:
   from the start through unblocked raw (pre-erosion) cells. Declined in its
   favour: returning the nearest few candidates, which pushes the same
   reachability check onto every caller.
+- **`SpanGrid` erosion can leave a route up to half a cell closer to a wall than
+  `NavAgent::radius_m`.** The probe casts each column only at its cell centre,
+  so a wall face inside a cell, short of the centre, counts only from the next
+  column, and the reach test (distance less half a cell, against the radius in
+  cells) does not reach that column for a 0.3 m radius at 0.25 m cells. On EW's
+  seed 6 a waypoint sat 0.28 m from a doorway jamb and the 0.3 m capsule grazed
+  it. Declined: widening the eroded radius by half a cell (EW tried it; it
+  closed stairs, failed seven of EW's tests, and the reach threshold is
+  step-wise, so nothing changes below +0.075 m). EW fixed its stall game-side,
+  following intermediate waypoints within 0.4 m (EW `dfabb4b0`). If it matters
+  engine-side: probe or erode against solids anywhere within a cell, not only at
+  its centre ray.
 
 EW adopts engine revisions independently. Game acceptance, movement locks, gait
 changes and reachable-arrival scheduling remain in EW. New engine work needs a
