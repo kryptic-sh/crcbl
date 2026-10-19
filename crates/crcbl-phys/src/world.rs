@@ -1830,6 +1830,11 @@ impl PhysicsWorld {
     ///
     /// A stale or invalid `exclude` excludes nothing, which is the same answer
     /// as `None`. Triggers remain non-solid and are skipped.
+    ///
+    /// **It matches every layer**: the filter is only
+    /// [`QueryFilter::excluding`]. A caller whose body and rays use a layer
+    /// mask queries through [`cast_ray_filtered`](Self::cast_ray_filtered) with the same
+    /// filter, or a query-only layer it ignores elsewhere blocks it here.
     #[must_use]
     pub fn cast_ray_excluding(
         &mut self,
@@ -1924,6 +1929,11 @@ impl PhysicsWorld {
     /// into a shared [`OverlapQueries`] view, and the same answer on every
     /// thread. This method is [`sweep_sphere_filtered`](Self::sweep_sphere_filtered)
     /// with [`QueryFilter::excluding`].
+    ///
+    /// **It matches every layer**: the filter is only
+    /// [`QueryFilter::excluding`]. A caller whose body and rays use a layer
+    /// mask queries through [`sweep_sphere_filtered`](Self::sweep_sphere_filtered) with the same
+    /// filter, or a query-only layer it ignores elsewhere blocks it here.
     #[must_use]
     pub fn sweep_sphere_excluding(
         &mut self,
@@ -1994,6 +2004,11 @@ impl PhysicsWorld {
     ///
     /// A stale or invalid `exclude` excludes nothing, which is the same answer
     /// as `None`.
+    ///
+    /// **It matches every layer**: the filter is only
+    /// [`QueryFilter::excluding`]. A caller whose body and rays use a layer
+    /// mask queries through [`sweep_capsule_filtered`](Self::sweep_capsule_filtered) with the same
+    /// filter, or a query-only layer it ignores elsewhere blocks it here.
     #[must_use]
     pub fn sweep_capsule_excluding(
         &mut self,
@@ -2050,6 +2065,11 @@ impl PhysicsWorld {
     /// here allocates beyond growing `out`: the broadphase's descent stack and
     /// candidate list are the world's own, so a character resolving its
     /// overlaps every tick costs no allocation.
+    ///
+    /// **It matches every layer**: the filter is only
+    /// [`QueryFilter::excluding`]. A caller whose body and rays use a layer
+    /// mask queries through [`capsule_penetrations_filtered_into`](Self::capsule_penetrations_filtered_into) with the same
+    /// filter, or a query-only layer it ignores elsewhere blocks it here.
     pub fn capsule_penetrations_into(
         &mut self,
         capsule: &Capsule,
