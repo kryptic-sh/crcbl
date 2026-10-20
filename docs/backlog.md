@@ -2384,8 +2384,32 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   640x360) and the run exited 0. A hand-run script, not a CI test: the suite's
   sandbox step never resizes after presenting.
 - `DrawList::push_opacity` and `font::breaks`: not checked on Vulkan.
-- The Win32 pointer-leave fix, cursor shapes and the rest of 0.6–0.8: no
-  per-platform table exists yet. Write it first, then fill the cells.
+- **The table, 2026-10-20.** "CI" is a test in the named suite (nested sway,
+  Xvfb, lavapipe); "laptop" was run on the office laptop (headless sway 1.12,
+  Intel RPL-U Vulkan). X11 cannot run locally (no Xvfb installed). Rows that are
+  CPU-only (`font::breaks`, UAX #9/#14/#29, `TextLayout::caret`, nav) need no
+  per-platform cell.
+
+  | Feature                                       | Wayland                         | X11                     | Vulkan                        |
+  | --------------------------------------------- | ------------------------------- | ----------------------- | ----------------------------- |
+  | `request_frame` / `FrameReady`                | CI, laptop                      | CI                      | n/a                           |
+  | Presenter frame gating                        | CI, laptop (sandbox)            | CI                      | laptop                        |
+  | `set_panel` in place                          | CI, laptop; lyr on Hyprland     | refused (no X11 panels) | n/a                           |
+  | `set_input_region`                            | CI, laptop                      | CI                      | n/a                           |
+  | Cursor shapes                                 | CI, laptop                      | CI (libxcb-cursor)      | n/a                           |
+  | Escape dismisses a `Grab` popup               | CI, laptop                      | CI                      | n/a                           |
+  | Popup reposition                              | refusal in CI; real path laptop | refused                 | n/a                           |
+  | Panel at fractional scale (S21)               | laptop + CI test                | n/a                     | n/a                           |
+  | Fractional scale without the integer step     | unit test; pikr on Hyprland     | n/a                     | n/a                           |
+  | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)       | refused                 | laptop                        |
+  | `display_adapter`                             | laptop (iGPU only)              | `None`, not built       | laptop                        |
+  | `Presenter::resize` with frames in flight     | laptop (scripted)               | not run                 | laptop                        |
+  | `push_opacity` groups                         | n/a                             | n/a                     | CI (lavapipe), laptop (Intel) |
+  | Pointer leave between own windows (Win32 fix) | no test either way              | no test either way      | n/a                           |
+
+  Still open from the table: the pointer-leave case on Wayland and X11 (does
+  moving between two of our windows report the leave), X11 `display_adapter`,
+  and the scripted resize and `grim` read-back as CI tests.
 
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.
