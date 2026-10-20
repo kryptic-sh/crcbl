@@ -519,10 +519,12 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    method itself, through the view's `NSTextInputClient` methods); S3 popup
    repositioning on Wayland **in CI** (CI's sway offers `xdg_wm_base` below 3,
    so CI holds only the refusal; the office laptop's sway 1.12 ran the real path
-   green on 2026-10-20); S16 Vulkan presenting premultiplied on sway; S22 a
-   colour glyph in a GPU golden; S18 FreeBSD beyond `check (freebsd)`'s clippy,
-   in a VM job; S13 cold start to the first presented frame, end to end (the
-   D3D12 instance and first device are measured; see 11).
+   green on 2026-10-20); S16 Vulkan presenting premultiplied on sway **in CI**
+   (`crcbl-app`'s ignored `wayland_transparency` test reads it back with `grim`
+   and passed on the office laptop, not yet in a CI job); S22 a colour glyph in
+   a GPU golden; S18 FreeBSD beyond `check (freebsd)`'s clippy, in a VM job; S13
+   cold start to the first presented frame, end to end (the D3D12 instance and
+   first device are measured; see 11).
 5. **Genuinely impossible, and refused:** D3D12 off Windows, Metal off Apple, a
    software Metal adapter, AppKit reserving screen space (only the menu bar and
    the Dock do). Vulkan on macOS is refused today and could go through MoltenVK
@@ -838,9 +840,14 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      declares an opaque region, which this backend never does. The swapchain's
      premultiplied alpha is `GpuContext`'s (step 3) or the caller's. Not done:
      declaring an opaque region for the windows that are not transparent, which
-     is an optimisation compositors use, and a test that reads pixels back
-     through the compositor (the e2e test checks the cap and that a transparent
-     panel is built).
+     is an optimisation compositors use. The read-back exists:
+     `crates/crcbl-app/tests/wayland_transparency.rs` clears a transparent
+     Vulkan window to half-alpha blue over a red background-layer bar and reads
+     the screen with `grim`. On the office laptop (Intel RPL-U, headless sway
+     1.12 rendering on that GPU) it read (127, 0, 188), the premultiplied blend,
+     and (0, 0, 188) with `crcbl-vk` sending `OPAQUE`. Ignored and not in CI: it
+     needs `grim` and a GPU sway can render on; adding it to the nested-sway job
+     is the remaining step.
    - `MonitorInfo::name` was already `wl_output.name` on Wayland, so S7's name
      is Win32's (`MONITORINFOEX::szDevice`) and AppKit's
      (`NSScreen.localizedName`) to check.
