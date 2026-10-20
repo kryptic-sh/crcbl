@@ -659,3 +659,110 @@ fn nearest_walkable_breaks_ties_by_span_and_reads_the_floor_plan_reads() {
         Ok(Some(DVec3::new(0.5 * CELL_M, ledge, 0.5 * CELL_M)))
     );
 }
+
+/// **A goal no walk reaches is a plan as far toward it as the grid goes**,
+/// and a goal one reaches is the plan itself.
+#[test]
+fn plan_toward_a_reachable_goal_is_the_plan() {
+    let grid = build(config(6.0, 6.0), &[]);
+    let (start, goal) = (DVec3::new(0.5, 0.0, 3.0), DVec3::new(5.0, 0.0, 2.0));
+    let toward = grid.plan_toward(start, goal, 8).unwrap();
+    assert!(toward.reaches_goal);
+    assert_eq!(toward.route, grid.plan(start, goal).unwrap());
+    assert_eq!(Some(&toward.end), toward.route.waypoints.last());
+}
+
+/// **A goal off the region walks to its edge**: the goal is clamped to the
+/// outermost column's centre, whose floor erodes away, and the nearest kept
+/// floor to it is the next column in.
+#[test]
+fn plan_toward_a_goal_outside_the_region_walks_to_its_edge() {
+    let grid = build(config(6.0, 6.0), &[]);
+    let (start, goal) = (DVec3::new(0.5, 0.0, 3.0), DVec3::new(20.0, 0.0, 3.1));
+    assert_eq!(grid.plan(start, goal), Err(GroundRouteError::OutsideGrid));
+
+    let toward = grid.plan_toward(start, goal, 8).unwrap();
+    assert!(!toward.reaches_goal);
+    assert_eq!(toward.end, DVec3::new(6.0 - 1.5 * CELL_M, 0.0, 3.125));
+    assert_eq!(toward.route, grid.plan(start, toward.end).unwrap());
+}
+
+/// **A goal in a wall walks to the wall's near face**, clear of it by the
+/// radius.
+#[test]
+fn plan_toward_a_goal_in_a_wall_walks_to_its_face() {
+    let grid = build(config(4.0, 4.0), &[solid([1.9, 0.0, 0.0], [2.6, 3.0, 4.0])]);
+    let (start, goal) = (DVec3::new(0.5, 0.0, 2.0), DVec3::new(2.0, 0.0, 2.0));
+    assert_eq!(grid.plan(start, goal), Err(GroundRouteError::NoRoute));
+
+    let toward = grid.plan_toward(start, goal, 8).unwrap();
+    assert!(!toward.reaches_goal);
+    assert_eq!(toward.end, grid.nearest_walkable(goal, 8).unwrap().unwrap());
+    assert!(toward.end.x < 1.9 - AGENT.radius_m, "{}", toward.end);
+    assert_eq!(Some(&toward.end), toward.route.waypoints.last());
+}
+
+/// **A goal whose nearest floor the start cannot reach steps back toward the
+/// start**: across a wall sealing the region, the goal's own floor and the
+/// floors nearest the first points back lie on the far side, and the walk
+/// ends on the near side's floor nearest the farthest point that has one —
+/// the column just short of the wall's erosion, not the start.
+#[test]
+fn plan_toward_steps_back_from_an_unreachable_floor() {
+    let grid = build(config(6.0, 6.0), &[solid([2.9, 0.0, 0.0], [3.1, 3.0, 6.0])]);
+    let (start, goal) = (DVec3::new(0.5, 0.0, 3.1), DVec3::new(4.0, 0.0, 3.1));
+    assert_eq!(grid.plan(start, goal), Err(GroundRouteError::NoRoute));
+    let far = grid.nearest_walkable(goal, 8).unwrap().unwrap();
+    assert_eq!(far, grid.nearest_walkable(goal, 0).unwrap().unwrap());
+    assert!(far.x > 3.1, "the goal stands on a floor, beyond the wall");
+
+    let toward = grid.plan_toward(start, goal, 8).unwrap();
+    assert!(!toward.reaches_goal);
+    assert_eq!(toward.end, DVec3::new(9.5 * CELL_M, 0.0, 3.125));
+    assert_eq!(Some(&toward.end), toward.route.waypoints.last());
+}
+
+/// **A walk that gets nowhere ends on the start's floor**, and a query
+/// refuses what `plan` refuses of the start and a goal that is not finite.
+#[test]
+fn plan_toward_ends_at_the_start_or_refuses_a_bad_start() {
+    // The start's floor is boxed in, and every point toward the goal is
+    // outside the box; with no rings, each answers only its own column's
+    // floor, outside the box too.
+    let walls = [
+        solid([1.0, 0.0, 0.0], [1.2, 3.0, 6.0]),
+        solid([0.0, 0.0, 2.0], [1.0, 3.0, 2.2]),
+        solid([0.0, 0.0, 3.8], [1.0, 3.0, 4.0]),
+    ];
+    let grid = build(config(6.0, 6.0), &walls);
+    let start = DVec3::new(0.5, 0.0, 3.1);
+    let goal = DVec3::new(5.0, 0.0, 3.1);
+    assert_eq!(grid.plan(start, goal), Err(GroundRouteError::NoRoute));
+    let toward = grid.plan_toward(start, goal, 0).unwrap();
+    assert!(!toward.reaches_goal);
+    assert!(toward.route.waypoints.is_empty());
+    assert_eq!(
+        toward.end,
+        grid.nearest_walkable(start, 0).unwrap().unwrap()
+    );
+
+    let open = build(config(6.0, 6.0), &[]);
+    let inside = DVec3::new(3.0, 0.0, 3.0);
+    assert_eq!(
+        open.plan_toward(DVec3::new(9.0, 0.0, 3.0), inside, 8),
+        Err(GroundRouteError::OutsideGrid)
+    );
+    assert_eq!(
+        open.plan_toward(DVec3::new(f64::NAN, 0.0, 3.0), inside, 8),
+        Err(GroundRouteError::InvalidWorldPosition)
+    );
+    assert_eq!(
+        open.plan_toward(DVec3::new(0.1, 0.0, 3.0), inside, 8),
+        Err(GroundRouteError::NoRoute),
+        "the eroded edge column keeps no floor"
+    );
+    assert_eq!(
+        open.plan_toward(inside, DVec3::new(f64::INFINITY, 0.0, 3.0), 8),
+        Err(GroundRouteError::InvalidWorldPosition)
+    );
+}

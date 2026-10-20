@@ -13,7 +13,9 @@
 //!   many steps each one took.
 //!
 //! And, as there, [`SpanGrid::nearest_walkable`] for a position that stands on
-//! no kept floor: the floor to plan from instead.
+//! no kept floor: the floor to plan from instead. Its sibling
+//! [`SpanGrid::plan_toward`] is for a goal no walk reaches — off the region,
+//! in a wall or across one — and walks as far toward it as the grid goes.
 //!
 //! # The rung toward the navmesh
 //!
@@ -91,6 +93,15 @@ pub const MAX_SPAN_COLUMN_COUNT: usize = 1 << 22;
 /// [`SpanGridError::RadiusTooWide`]: a cell that small against the body is
 /// finer than routing it needs.
 pub const MAX_EROSION_REACH_CELLS: usize = 64;
+
+/// How many points [`SpanGrid::plan_toward`] tries along the way from the
+/// goal, clamped into the region, back to the start, the clamped goal first.
+///
+/// Each is a [`SpanGrid::nearest_walkable`] and a [`SpanGrid::plan`] at most,
+/// so this bounds the walk's cost; and the farthest point it can stop at, if
+/// the clamped goal's floor is unreachable, is one of these steps back. EW's
+/// value.
+pub const PLAN_TOWARD_STEPS: u32 = 8;
 
 /// The body a grid is built for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -207,6 +218,21 @@ pub enum SpanGridError {
     /// The probe reported a floor whose height or normal is NaN or infinite.
     #[error("the probe reported a floor that is not finite")]
     InvalidFloor,
+}
+
+/// What [`SpanGrid::plan_toward`] planned, and how far toward its goal it
+/// gets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TowardRoute {
+    /// The walk, in [`SpanGrid::plan`]'s shape: every span after the start's,
+    /// ending on [`end`](Self::end). Empty when the walk gets no farther than
+    /// the start's own floor.
+    pub route: GroundRoute,
+    /// The feet position on the floor the walk ends on.
+    pub end: DVec3,
+    /// Whether that floor is the one under the goal, which `plan` reached; if
+    /// not, the walk stops short of the goal at `end`.
+    pub reaches_goal: bool,
 }
 
 /// Every walkable floor in a region, a few per column.
@@ -504,6 +530,98 @@ impl SpanGrid {
             }
         }
         Ok(nearest.map(|(_, span)| self.feet_of(span)))
+    }
+
+    /// A walk from the floor under `start_world_position` toward
+    /// `goal_world_position`, as far as the grid goes: to the goal where
+    /// [`plan`](Self::plan) reaches it, and otherwise as near it as a floor
+    /// the start reaches lies — "walk as far toward X as this grid goes", for
+    /// a goal off the region, in a wall, or across one.
+    ///
+    /// Where `plan` finds no walk to the goal, the goal's X and Z are clamped
+    /// onto the rectangle the region's outermost cell centres span, keeping
+    /// its Y. From that point to the start, [`PLAN_TOWARD_STEPS`] points are
+    /// tried at even steps, the clamped goal first and the start left out:
+    /// each point's [`nearest_walkable`](Self::nearest_walkable) floor within
+    /// `max_rings`, and the first of those floors `plan` reaches from the
+    /// start is where the walk ends. So the walk ends on the floor nearest the
+    /// farthest point along the way that has a reachable one — nearest
+    /// `nearest_walkable`'s sense, so a floor across a thin wall can be the
+    /// nearest to a point and still be passed over as unreachable, for the
+    /// next point back. If none is, the walk ends where it starts, on the
+    /// start's own floor, with an empty route.
+    ///
+    /// A start on a kept floor therefore always gets an answer, and
+    /// [`TowardRoute::reaches_goal`] says whether it is the goal. The same
+    /// grid asked the same question gives the same answer.
+    ///
+    /// # Errors
+    ///
+    /// [`GroundRouteError::InvalidWorldPosition`] or
+    /// [`GroundRouteError::OutsideGrid`] for the start, then
+    /// [`GroundRouteError::NoRoute`] if it stands on no kept floor, then
+    /// [`GroundRouteError::InvalidWorldPosition`] for a goal that is not
+    /// finite. A goal outside the region is not an error: it is what the
+    /// clamp is for.
+    pub fn plan_toward(
+        &self,
+        start_world_position: DVec3,
+        goal_world_position: DVec3,
+        max_rings: usize,
+    ) -> Result<TowardRoute, GroundRouteError> {
+        let from = self
+            .span_at(start_world_position)?
+            .ok_or(GroundRouteError::NoRoute)?;
+        if !goal_world_position.is_finite() {
+            return Err(GroundRouteError::InvalidWorldPosition);
+        }
+        if let (Ok(Some(to)), Ok(route)) = (
+            self.span_at(goal_world_position),
+            self.plan(start_world_position, goal_world_position),
+        ) {
+            return Ok(TowardRoute {
+                route,
+                end: self.feet_of(to),
+                reaches_goal: true,
+            });
+        }
+
+        let (width, height) = (self.config.width, self.config.height);
+        let clamped = DVec2::new(goal_world_position.x, goal_world_position.z).clamp(
+            self.config.cell_center(0, 0),
+            self.config.cell_center(width - 1, height - 1),
+        );
+        let toward = DVec3::new(clamped.x, goal_world_position.y, clamped.y);
+        let mut tried = None;
+        for step in 0..PLAN_TOWARD_STEPS {
+            let point = toward.lerp(
+                start_world_position,
+                f64::from(step) / f64::from(PLAN_TOWARD_STEPS),
+            );
+            // Inside the region: both ends are, and it is a rectangle.
+            let Some(floor) = self.nearest_walkable(point, max_rings)? else {
+                continue;
+            };
+            // Neighbouring points often snap to one floor; plan it once.
+            if tried == Some(floor) {
+                continue;
+            }
+            tried = Some(floor);
+            if let Ok(route) = self.plan(start_world_position, floor) {
+                return Ok(TowardRoute {
+                    route,
+                    end: floor,
+                    reaches_goal: false,
+                });
+            }
+        }
+        Ok(TowardRoute {
+            route: GroundRoute {
+                waypoints: Vec::new(),
+            },
+            end: self.feet_of(from),
+            reaches_goal: false,
+        })
     }
 
     /// The column holding `position`'s X and Z, if the region does.

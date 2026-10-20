@@ -62,6 +62,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   method has a default that answers `Unsupported`, so a `Shell` implemented
   elsewhere still compiles. `HeadlessShell::panel` reads back what a panel was
   last given.
+- **`crcbl_nav::follow::RouteFollower`** walks a planned route: `advance(feet)`
+  drops waypoints the feet have reached and answers a `Steer` — the waypoint,
+  its stop distance and its reach. A waypoint short of the last is dropped only
+  within `FollowDistances::waypoint_reach_m` (`WAYPOINT_REACH_M` by default) and
+  walked to with `WAYPOINT_STOP_M`; the last uses the caller's stop distance. A
+  walk turns where its route turns rather than cutting a doorway's corner into
+  the jamb, which dropping every waypoint within the caller's stop distance did.
+  `FollowDistances::reach_for(index, count)` is the same per-waypoint reach, for
+  an arrival forecast.
+- **`crcbl_nav::follow::StallDetector`** reports a walk stalled once it has not
+  got `headway_m` (`STALL_HEADWAY_M`) from its anchor for `timeout_s`
+  (`STALL_TIMEOUT_S`) while the caller says it is walking. An agent jostling in
+  place stalls, which a per-tick speed floor never catches; waiting at a doorway
+  or holding cover (`walking == false`) never does.
+- **`SpanGrid::plan_toward(start, goal, max_rings)`** walks as far toward a goal
+  as the grid goes when `plan` cannot reach it — off the region, in a wall or
+  across one: it clamps the goal into the region and takes the reachable
+  `nearest_walkable` floor nearest the farthest of `PLAN_TOWARD_STEPS` points
+  back toward the start. `TowardRoute` says where the walk ends and whether that
+  is the goal.
 
 ## [0.6.0] - 2026-10-20
 

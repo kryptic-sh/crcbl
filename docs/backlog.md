@@ -2648,28 +2648,28 @@ snap shipped; what is left was declined:
   thickets keep 60% of speed through a game-local multiplier, and it stays in
   the game until a second caller wants one.
 
-**Decided 2026-10-20: take EW's route following into `crcbl-nav`** (offered by
-EW, proven there and probe-tested on generated maps; EW keeps doorway passage
-order, squad spacing and giving up a route a squadmate blocks). One slice,
-queued after lyr's `set_panel`:
+**EW's route following is in `crcbl-nav`, not yet adopted by EW**
+(`follow::RouteFollower`, `follow::StallDetector`, `SpanGrid::plan_toward`).
+EW's probe results (seeds 0–8) were measured on EW's own code; nothing has run
+the crcbl versions in EW. Where the port differs from EW's source, for EW to
+check on adoption:
 
-- **Waypoint following** (EW `game_ai.rs` `next_route_waypoint`,
-  `route_waypoint_reach`): a waypoint short of the route's last is dropped once
-  within 0.4 m and walked to with a 0.2 m stop distance; the last uses the
-  caller's stop distance. Dropping every waypoint within a 1 m stop distance cut
-  corners into doorway jambs; over EW's seeds 0–8, two-minute patrol probes went
-  from 1–2 frozen agents per seed to none, and pursuit stalls from 3/1/4 to 0.
-  Any arrival forecast must use the same per-waypoint reach.
-- **A bounded walk toward an off-grid goal** (EW `RouteMap::plan_toward`): when
-  planning fails, clamp the goal into the `SpanGrid` region, take
-  `nearest_walkable` there, and if that is unreachable step back toward the
-  start — `nearest_walkable`'s sibling, "walk as far toward X as this grid
-  goes".
-- **Stall detection by headway from an anchor**, not a per-tick speed floor,
-  which never fires for an agent jostling against another. EW counts headway as
-  getting 0.5 m from the anchor and counts a stall only while the caller says it
-  is walking the route, so waiting at a doorway or holding cover never reads as
-  stuck; the crcbl version takes the same "walking" input.
+- **`SpanGrid::plan_toward` needs a start on a kept floor** (`NoRoute`
+  otherwise); EW's `RouteMap::plan` first snaps such a start with
+  `nearest_walkable` (`START_SNAP_CELLS`), and that stays the caller's. It
+  clamps the goal onto the outermost cell centres where EW insets a whole cell,
+  and keeps the goal's Y along the way back where EW used the start's. There is
+  no `GroundGrid` version: EW's flat grid covers the whole world, so a failed
+  plan there has nothing to walk toward.
+- **`StallDetector` keeps reporting a stall** each tick until headway, a tick
+  not walking, or `reset`; EW's patrol zeroed its clock on a stall, its route
+  tracking did not. The caller picks by calling `reset`.
+- **No arrival forecast in the crate.** `Steer::reach_m` and
+  `FollowDistances::reach_for` are the reach EW's `route_arrival` measures to;
+  the forecast itself (controller previews) stays EW's.
+- **Not covered by a test:** the reach comparison's boundary (a waypoint at
+  exactly the reach counts as reached, as in EW) and `plan_toward`'s skip of a
+  floor already tried, which saves a plan and changes no answer.
 
 Raised by EW on 2026-10-19, not a request yet:
 

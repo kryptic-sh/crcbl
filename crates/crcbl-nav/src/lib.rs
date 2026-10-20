@@ -10,6 +10,10 @@
 //!   stairs, cross slopes and pass under floors above, kept a body's radius
 //!   from walls and drops.
 //!
+//! And [`follow`], for walking a route either grid planned: which waypoint to
+//! steer toward, so a walk turns where its route turns, and whether the walk
+//! has stalled.
+//!
 //! # The rung below the navmesh, not a replacement for it
 //!
 //! `docs/plan/24-navigation.md` is still the plan: a Recast-lineage navmesh
@@ -41,5 +45,6 @@
 //!   eight-neighbour and measured. Cutting corners or weighting terrain is the
 //!   navmesh's business, or a caller's.
 
+pub mod follow;
 pub mod grid;
 pub mod spans;
