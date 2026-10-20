@@ -3341,6 +3341,13 @@ tail's sum, not one outlier.
 The median test took about 22 s in both mesh and render, so on this runner most
 of a test's cost is opening devices and building pipelines, not drawing frames.
 
+**`bucket_price::two_material_modes_price_as_one` timed out once on Metal**
+(2026-10-20, main `4490f05d`, run 39409235769, the `mtl-e2e-mesh` half): the
+nextest limit of 240 s, where it took 145 s on 2026-10-02. The commit touched
+only `Presenter::reconfigure`, which this test never reaches, and a re-run of
+the failed job passed. A slow runner, not a regression; if it recurs, it is the
+first mesh test to cut to its gate scene's frame counts or split.
+
 **Cut 2026-10-02: price helpers draw a short run on a device that cannot time a
 pass.** The Apple Paravirtual device reports no `TIMESTAMP_QUERY`, so every
 mesh-suite price test drew `PRICE_WARMUP` plus 48 frames per configuration and
