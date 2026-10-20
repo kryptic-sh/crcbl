@@ -3466,6 +3466,52 @@ fn a_waker_ends_a_wait_from_another_thread_and_rings_coalesce() {
     );
 }
 
+/// **Crossing from one of our windows into another leaves the first before
+/// entering the second.** The X11 half of the Win32 fix where the second
+/// window's arrival swallowed the first's leave. The second window is placed
+/// clear of the first, and the pointer moved from the middle of one to the
+/// middle of the other.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn crossing_into_another_of_our_windows_leaves_the_first() {
+    let mut session = Session::open();
+    let first = session.window(&desc("left"));
+    let second = session.window(&desc("right"));
+    let xid = session.xid(second);
+    session.peer.place(xid, 800, 0);
+    session.pump_until("the right window to move clear of the left", |session| {
+        session
+            .peer
+            .window_origin(xid)
+            .is_some_and(|(x, _)| x >= 800)
+    });
+    let left = session.point_in(first, 320, 240);
+    let right = session.point_in(second, 320, 240);
+    let focus = |events: &[ShellEvent], of: WindowId, entered: bool| {
+        events.iter().position(|event| {
+            matches!(event, ShellEvent::PointerFocus { window, entered: e, .. }
+                if *window == of && *e == entered)
+        })
+    };
+
+    session.peer.motion(left.0, left.1);
+    session.pump_until("the pointer in the left window", |session| {
+        focus(&session.events, first, true).is_some()
+    });
+    session.take_names();
+    session.peer.motion(right.0, right.1);
+    session.pump_until("the pointer in the right window", |session| {
+        focus(&session.events, second, true).is_some()
+    });
+    let left = focus(&session.events, first, false);
+    let entered = focus(&session.events, second, true);
+    assert!(
+        left.is_some_and(|left| entered.is_some_and(|entered| left < entered)),
+        "the left window hears its leave before the right one its entry: {:?}",
+        session.names()
+    );
+}
+
 /// S14 on X11: the same reader as the Wayland suite's, over the same AT-SPI.
 /// Xvfb has no session bus of its own, so this one is a private bus as well;
 /// see [`atspi`].

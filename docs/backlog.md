@@ -2440,10 +2440,13 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   | `display_adapter`                             | laptop (iGPU only)              | laptop (Xwayland, DRI3)                           | laptop                        |
   | `Presenter::resize` with frames in flight     | CI, laptop                      | not run                                           | laptop                        |
   | `push_opacity` groups                         | n/a                             | n/a                                               | CI (lavapipe), laptop (Intel) |
-  | Pointer leave between own windows (Win32 fix) | CI test, laptop                 | no test either way                                | n/a                           |
+  | Pointer leave between own windows (Win32 fix) | CI test, laptop                 | CI test (Xvfb only)                               | n/a                           |
 
-  Still open from the table: the pointer-leave case on X11 (Wayland's is
-  `crossing_into_another_of_our_windows_leaves_the_first`).
+  Still open from the table: nothing runnable here. X11's pointer-leave test
+  (`crossing_into_another_of_our_windows_leaves_the_first` in `x11_e2e`, added
+  2026-10-21) cannot run on Xwayland under sway, whose window manager does not
+  reparent and so never satisfies the suite's `point_in`; only CI's Xvfb jobs
+  run it.
 
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.

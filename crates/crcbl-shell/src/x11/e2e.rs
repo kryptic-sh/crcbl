@@ -836,6 +836,24 @@ impl Peer {
         self.flush();
     }
 
+    /// Moves someone else's window to `(x, y)` on the root, as a window
+    /// manager or a user drag would. Coordinates are `INT16` on the wire and
+    /// travel sign-extended in the value list's 32-bit words.
+    pub fn place(&self, xid: u32, x: i16, y: i16) {
+        let values = [i32::from(x).cast_unsigned(), i32::from(y).cast_unsigned()];
+        // SAFETY: the connection and window are live, and the value list has
+        // exactly the two words the `X | Y` mask declares.
+        unsafe {
+            (self.lib.configure_window)(
+                self.connection,
+                xid,
+                ffi::config_window::X | ffi::config_window::Y,
+                values.as_ptr().cast::<c_void>(),
+            );
+        }
+        self.flush();
+    }
+
     /// The cursor the server is showing right now, wherever the pointer is.
     ///
     /// What the user sees, read back: a window's `CWCursor` cannot be read
