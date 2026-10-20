@@ -57,6 +57,7 @@
 //! | `libxcb-xkb.so.1` | detectable auto-repeat — a repeat with no fake release | the release/press lookahead in [`input`](super::input), which cannot see a pair the socket split |
 //! | `libxcb-cursor.so.0` | themed cursor shapes — the user's XCursor theme, or the core cursor font when there is none | [`CURSOR_SHAPE`](crate::ShellCaps::CURSOR_SHAPE) cleared; a shape is recorded and the root's cursor shows |
 //! | `libxcb-shape.so.0` | a window's SHAPE input region — the pointer outside it goes to the window beneath | [`INPUT_REGION`](crate::ShellCaps::INPUT_REGION) cleared; the whole window keeps the pointer |
+//! | `libxcb-dri3.so.0` | DRI3 `Open`: which GPU the server renders on, for the renderer's adapter choice | `SurfaceTarget::Xcb`'s `main_device` is `None`; the preference alone ranks adapters |
 //!
 //! Deliberately absent: `libxcb-xfixes` (pointer barriers are not needed —
 //! `GrabPointer`'s `confine_to` *is* [`PointerMode::Confined`](crate::PointerMode)
@@ -461,6 +462,23 @@ pub struct ShapeQueryVersionReply {
     pub major_version: u16,
     /// Minor version the server speaks.
     pub minor_version: u16,
+}
+
+/// `xcb_dri3_open_reply_t`. Its one descriptor is fetched with
+/// `xcb_dri3_open_reply_fds`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Dri3OpenReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// How many descriptors came with it: one.
+    pub nfd: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// Padding.
+    pub pad0: [u8; 24],
 }
 
 /// `xcb_xkb_per_client_flags_reply_t`.
@@ -1335,13 +1353,13 @@ mod prototype {
     #[cfg(feature = "x11-e2e")]
     use super::QueryTreeReply;
     use super::{
-        Connection, Cookie, CursorContext, Extension, GenericError, GenericEvent, GetGeometryReply,
-        GetPropertyReply, GetSelectionOwnerReply, GrabPointerReply, InternAtomReply,
-        QueryExtensionReply, QueryPointerReply, RandrCrtcInfoReply, RandrOutputInfoReply,
-        RandrOutputPrimaryReply, RandrQueryVersionReply, RandrScreenResourcesReply, Rectangle,
-        Screen, ScreenIterator, Setup, ShapeQueryVersionReply, TranslateCoordinatesReply,
-        XiEventMask, XiQueryVersionReply, XkbPerClientFlagsReply, XkbUseExtensionReply, c_char,
-        c_int, c_void,
+        Connection, Cookie, CursorContext, Dri3OpenReply, Extension, GenericError, GenericEvent,
+        GetGeometryReply, GetPropertyReply, GetSelectionOwnerReply, GrabPointerReply,
+        InternAtomReply, QueryExtensionReply, QueryPointerReply, RandrCrtcInfoReply,
+        RandrOutputInfoReply, RandrOutputPrimaryReply, RandrQueryVersionReply,
+        RandrScreenResourcesReply, Rectangle, Screen, ScreenIterator, Setup,
+        ShapeQueryVersionReply, TranslateCoordinatesReply, XiEventMask, XiQueryVersionReply,
+        XkbPerClientFlagsReply, XkbUseExtensionReply, c_char, c_int, c_void,
     };
 
     /// `xcb_connection_t *xcb_connect(const char *displayname, int *screenp)`
@@ -1695,6 +1713,17 @@ mod prototype {
     /// xcb_pixmap_t source_bitmap)`
     pub type ShapeMask =
         unsafe extern "C" fn(*mut Connection, u8, u8, u32, i16, i16, u32) -> Cookie;
+
+    /// `xcb_dri3_open_cookie_t xcb_dri3_open(xcb_connection_t *,
+    /// xcb_drawable_t drawable, uint32_t provider)`
+    pub type Dri3Open = unsafe extern "C" fn(*mut Connection, u32, u32) -> Cookie;
+    /// `xcb_dri3_open_reply_t *xcb_dri3_open_reply(…)`
+    pub type Dri3OpenReplyFn =
+        unsafe extern "C" fn(*mut Connection, Cookie, *mut *mut GenericError) -> *mut Dri3OpenReply;
+    /// `int *xcb_dri3_open_reply_fds(xcb_connection_t *,
+    /// xcb_dri3_open_reply_t *reply)` — points into the reply, freed with it.
+    pub type Dri3OpenReplyFds =
+        unsafe extern "C" fn(*mut Connection, *mut Dri3OpenReply) -> *mut c_int;
 }
 
 /// Every libxcb entry point this backend uses.
@@ -1882,6 +1911,21 @@ impl core::fmt::Debug for ShapeLib {
     }
 }
 
+/// libxcb-dri3, when it is there. See [`RandrLib`].
+pub struct Dri3Lib {
+    /// `xcb_dri3_id`; see [`RandrLib::id`].
+    pub id: usize,
+    pub open: prototype::Dri3Open,
+    pub open_reply: prototype::Dri3OpenReplyFn,
+    pub open_reply_fds: prototype::Dri3OpenReplyFds,
+}
+
+impl core::fmt::Debug for Dri3Lib {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Dri3Lib(libxcb-dri3)")
+    }
+}
+
 /// Which optional extension libraries loaded.
 #[derive(Debug)]
 pub struct Ext {
@@ -1898,6 +1942,8 @@ pub struct Ext {
     /// SHAPE, or `None` — then an input region is not applied, and
     /// [`INPUT_REGION`](crate::ShellCaps::INPUT_REGION) is clear.
     pub shape: Option<&'static ShapeLib>,
+    /// DRI3, or `None` — then no target names the server's GPU.
+    pub dri3: Option<&'static Dri3Lib>,
 }
 
 /// The sonames tried, in order.
@@ -1916,6 +1962,8 @@ const XKB_SONAMES: [&CStr; 2] = [c"libxcb-xkb.so.1", c"libxcb-xkb.so"];
 const CURSOR_SONAMES: [&CStr; 2] = [c"libxcb-cursor.so.0", c"libxcb-cursor.so"];
 /// As [`SONAMES`], for libxcb-shape.
 const SHAPE_SONAMES: [&CStr; 2] = [c"libxcb-shape.so.0", c"libxcb-shape.so"];
+/// As [`SONAMES`], for libxcb-dri3.
+const DRI3_SONAMES: [&CStr; 2] = [c"libxcb-dri3.so.0", c"libxcb-dri3.so"];
 
 static LIB: OnceLock<Result<Lib, String>> = OnceLock::new();
 static RANDR: OnceLock<Option<RandrLib>> = OnceLock::new();
@@ -1923,6 +1971,7 @@ static XI: OnceLock<Option<XiLib>> = OnceLock::new();
 static XKB: OnceLock<Option<XkbLib>> = OnceLock::new();
 static CURSOR: OnceLock<Option<CursorLib>> = OnceLock::new();
 static SHAPE: OnceLock<Option<ShapeLib>> = OnceLock::new();
+static DRI3: OnceLock<Option<Dri3Lib>> = OnceLock::new();
 
 /// The `xcb_extension_t*` an [`Ext`] entry holds, as libxcb wants it.
 ///
@@ -1963,6 +2012,7 @@ pub fn load_ext() -> Ext {
         xkb: XKB.get_or_init(load_xkb).as_ref(),
         cursor: CURSOR.get_or_init(load_cursor).as_ref(),
         shape: SHAPE.get_or_init(load_shape).as_ref(),
+        dri3: DRI3.get_or_init(load_dri3).as_ref(),
     }
 }
 
@@ -2329,6 +2379,44 @@ fn load_shape() -> Option<ShapeLib> {
         ),
         rectangles: symbol!("xcb_shape_rectangles", prototype::ShapeRectangles),
         mask: symbol!("xcb_shape_mask", prototype::ShapeMask),
+    })
+}
+
+fn load_dri3() -> Option<Dri3Lib> {
+    let handle = open_library(&DRI3_SONAMES);
+    if handle.is_null() {
+        crcbl_core::log::debug!(
+            "libxcb-dri3 is not available: the renderer is not told which GPU the X server uses"
+        );
+        return None;
+    }
+    /// Resolves one symbol or gives up on the whole extension.
+    macro_rules! symbol {
+        ($name:literal, $ty:ty) => {{
+            // SAFETY: `handle` is a live `dlopen` handle and the name is a
+            // NUL-terminated literal.
+            let raw = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
+            if raw.is_null() {
+                crcbl_core::log::warn!("libxcb-dri3 has no symbol {}; degrading", $name);
+                return None;
+            }
+            // SAFETY: `$ty` is the prototype `xcb/dri3.h` declares for this
+            // symbol.
+            unsafe { core::mem::transmute::<*mut c_void, $ty>(raw) }
+        }};
+    }
+    // SAFETY: `xcb_dri3_id` is a data symbol — an `xcb_extension_t` global —
+    // so the `dlsym` result is its address and is not transmuted to a function.
+    let id = unsafe { dlsym(handle, c"xcb_dri3_id".as_ptr()) } as usize;
+    if id == 0 {
+        crcbl_core::log::warn!("libxcb-dri3 has no xcb_dri3_id; degrading");
+        return None;
+    }
+    Some(Dri3Lib {
+        id,
+        open: symbol!("xcb_dri3_open", prototype::Dri3Open),
+        open_reply: symbol!("xcb_dri3_open_reply", prototype::Dri3OpenReplyFn),
+        open_reply_fds: symbol!("xcb_dri3_open_reply_fds", prototype::Dri3OpenReplyFds),
     })
 }
 

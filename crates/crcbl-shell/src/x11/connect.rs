@@ -113,6 +113,53 @@ impl Conn {
         Some(shape)
     }
 
+    /// The `dev_t` of the GPU the X server renders on, from DRI3 `Open`.
+    ///
+    /// The server hands back a descriptor for its own device node; its
+    /// `st_rdev` is what a backend matches to an adapter's DRM node, as it does
+    /// a Wayland compositor's dmabuf main device. `None` without libxcb-dri3,
+    /// on a server with no DRI3 (Xvfb), or when the open is refused.
+    pub(super) fn dri3_device(&self) -> Option<u64> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::os::unix::fs::MetadataExt;
+
+        let dri3 = self.ext.dri3?;
+        // SAFETY: as `setup_randr` — libxcb owns the returned reply.
+        let query =
+            unsafe { (self.lib.get_extension_data)(self.raw(), ffi::extension_ptr(dri3.id)) };
+        // SAFETY: `query` is libxcb's cached reply when it is not null.
+        if query.is_null() || unsafe { (*query).present } == 0 {
+            crcbl_core::log::debug!("the X server has no DRI3 extension");
+            return None;
+        }
+        // SAFETY: the connection is live and `root` is its screen's root; a
+        // null error pointer discards the error, and a null reply is handled.
+        let reply = unsafe {
+            let cookie = (dri3.open)(self.raw(), self.root, 0);
+            (dri3.open_reply)(self.raw(), cookie, core::ptr::null_mut())
+        };
+        if reply.is_null() {
+            return None;
+        }
+        // SAFETY: `reply` is a live reply this call owns, and its descriptor
+        // array is inside it, `nfd` long.
+        let fd = unsafe {
+            if (*reply).nfd == 1 {
+                Some(*(dri3.open_reply_fds)(self.raw(), reply))
+            } else {
+                None
+            }
+        };
+        // SAFETY: freed exactly once; the descriptor was copied out above.
+        unsafe { ffi::free_reply(reply) };
+        // SAFETY: the reply passed this descriptor to us, and nothing else
+        // holds it, so it is ours to own and close.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd?) };
+        let device = std::fs::File::from(fd).metadata().ok()?.rdev();
+        crcbl_core::log::debug!("crcbl-shell: the X server renders on DRM device {device:#x}");
+        Some(device)
+    }
+
     /// Negotiates XInput 2 and selects raw motion on the root window.
     ///
     /// Returns the extension's **major opcode**, not an event base — XI2

@@ -50,9 +50,9 @@ struct SurfaceEntry {
     /// [`Instance::display_adapter`]; zero for every other target, which
     /// names no `HWND`.
     hwnd: usize,
-    /// A Wayland target's `main_device`, the `dev_t` of the GPU the compositor
-    /// composites on, for [`Instance::display_adapter`]; `None` for every
-    /// other target.
+    /// A Wayland or Xcb target's `main_device`, the `dev_t` of the GPU the
+    /// compositor composites on or the X server renders on, for
+    /// [`Instance::display_adapter`]; `None` for every other target.
     main_device: Option<u64>,
     /// Swapchains still configured on it. `vkDestroySurfaceKHR` with a live
     /// swapchain is undefined behaviour in the driver, so the object outlives
@@ -893,7 +893,9 @@ impl Instance for VkInstance {
                 window,
                 visual_id: _,
                 transparent: _,
+                main_device: device,
             } => {
+                main_device = device;
                 let Some(ext) = self.inner.xcb_ext.as_ref() else {
                     return unsupported("VK_KHR_xcb_surface is not available");
                 };
@@ -1044,7 +1046,8 @@ impl Instance for VkInstance {
     /// adapter scanning out the monitor `surface`'s window is on; see
     /// `crcbl_vk::display` for how that LUID is found. On Wayland, the one
     /// whose DRM primary or render node is the compositor's main device, read
-    /// through `VK_EXT_physical_device_drm`. X11 names neither.
+    /// through `VK_EXT_physical_device_drm`; on X11 the same match against the
+    /// device DRI3 says the server renders on.
     fn display_adapter(&self, surface: SurfaceHandle) -> Result<Option<AdapterId>, HalError> {
         let (hwnd, main_device) = {
             let surfaces = self.inner.surfaces();

@@ -1202,24 +1202,39 @@ mod tests {
     #[test]
     #[ignore = "needs a Wayland session with dmabuf feedback; run with --ignored on a desktop"]
     fn vulkan_names_the_adapter_a_wayland_compositor_composites_on() {
-        let mut shell = crcbl_shell::open_backend(crcbl_shell::ShellBackend::Wayland)
-            .expect("a Wayland session to connect to");
+        vulkan_names_the_main_device(crcbl_shell::ShellBackend::Wayland);
+    }
+
+    /// The same on X11, where the device is the one DRI3 `Open` says the X
+    /// server renders on. Ignored for the same reasons, and Xvfb has no DRI3,
+    /// so it needs a real X server or Xwayland. Verified on Xwayland under
+    /// headless sway on the same laptop.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs an X server with DRI3; run with --ignored on a desktop"]
+    fn vulkan_names_the_adapter_an_x_server_renders_on() {
+        vulkan_names_the_main_device(crcbl_shell::ShellBackend::X11);
+    }
+
+    /// The body of both tests above.
+    #[cfg(target_os = "linux")]
+    fn vulkan_names_the_main_device(backend: crcbl_shell::ShellBackend) {
+        let mut shell = crcbl_shell::open_backend(backend).expect("a session to connect to");
         let window = shell
             .create_window(&crcbl_shell::WindowDesc::default())
             .expect("a window");
         let target = shell.surface_target(window).expect("a live window");
-        let crcbl_hal::SurfaceTarget::Wayland {
-            main_device: Some(device),
-            ..
-        } = target
-        else {
-            panic!("the compositor named no dmabuf main device: {target:?}");
-        };
+        let device = match target {
+            crcbl_hal::SurfaceTarget::Wayland { main_device, .. }
+            | crcbl_hal::SurfaceTarget::Xcb { main_device, .. } => main_device,
+            _ => None,
+        }
+        .unwrap_or_else(|| panic!("the window system named no main device: {target:?}"));
 
         let vulkan = open_backend(GpuBackend::Vulkan).expect("a Vulkan driver");
         // SAFETY: `target` names the window made above, which outlives this
         // surface: it is destroyed only after the surface is.
-        let surface = unsafe { vulkan.create_surface(&target) }.expect("a Wayland surface");
+        let surface = unsafe { vulkan.create_surface(&target) }.expect("a surface");
         let display = vulkan.display_adapter(surface).expect("a live surface");
         vulkan.destroy_surface(surface);
         shell.destroy_window(window).expect("destroy");
@@ -1239,7 +1254,7 @@ mod tests {
             u32::from_str_radix(text.trim().trim_start_matches("0x"), 16).expect("a hex id")
         };
         println!(
-            "crcbl: the compositor composites on {major}:{minor}, which Vulkan names {:?} ({:?})",
+            "crcbl: {backend:?} renders on {major}:{minor}, which Vulkan names {:?} ({:?})",
             adapter.name, adapter.device_type
         );
         assert_eq!(

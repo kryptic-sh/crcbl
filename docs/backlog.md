@@ -135,9 +135,13 @@ if something does, it must not treat them as premultiplied on the way in.
   not been seen; rerun the test after a reboot. Not built: per-surface feedback
   (`get_surface_feedback`), which may name a different main device for a window
   on another GPU's output, and a feedback change after the window exists (the
-  target is read once, at surface creation). X11 still needs DRI3 `Open` on the
-  window's screen and `fstat` of the fd for its `st_rdev`, matched the same way;
-  macOS `CGDirectDisplayCopyCurrentMetalDevice` matched by `registryID`.
+  target is read once, at surface creation). **X11 built 2026-10-20**: DRI3
+  `Open` on the screen's root and `fstat` of the descriptor
+  (`x11::Conn::dri3_device`) fill `SurfaceTarget::Xcb::main_device`, matched the
+  same way; verified by `vulkan_names_the_adapter_an_x_server_renders_on` on
+  Xwayland under headless sway (Intel, red with DRI3 suppressed). Not in CI:
+  Xvfb has no DRI3. macOS still needs `CGDirectDisplayCopyCurrentMetalDevice`
+  matched by `registryID`.
 - **Verified on one desktop only**: an RX 7900 XTX driving the monitor, an AMD
   Raphael iGPU and WARP, Windows 11. There D3D12 and Vulkan both name the RX
   7900 XTX as the display adapter (the cross-check is
@@ -2402,14 +2406,14 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   | Panel at fractional scale (S21)               | laptop + CI test                | n/a                                               | n/a                           |
   | Fractional scale without the integer step     | unit test; pikr on Hyprland     | n/a                                               | n/a                           |
   | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)       | refused                                           | laptop                        |
-  | `display_adapter`                             | laptop (iGPU only)              | `None`, not built                                 | laptop                        |
+  | `display_adapter`                             | laptop (iGPU only)              | laptop (Xwayland, DRI3)                           | laptop                        |
   | `Presenter::resize` with frames in flight     | laptop (scripted)               | not run                                           | laptop                        |
   | `push_opacity` groups                         | n/a                             | n/a                                               | CI (lavapipe), laptop (Intel) |
   | Pointer leave between own windows (Win32 fix) | CI test, laptop                 | no test either way                                | n/a                           |
 
   Still open from the table: the pointer-leave case on X11 (Wayland's is
-  `crossing_into_another_of_our_windows_leaves_the_first`), X11
-  `display_adapter`, and the scripted resize and `grim` read-back as CI tests.
+  `crossing_into_another_of_our_windows_leaves_the_first`), and the scripted
+  resize and `grim` read-back as CI tests.
 
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.

@@ -617,6 +617,7 @@ impl Shell for X11Shell {
             // `create_window` refuses a transparent one (`TRANSPARENT` is not
             // in this backend's caps), so no window here is transparent.
             transparent: false,
+            main_device: self.conn.main_device,
         })
     }
 

@@ -1829,6 +1829,7 @@ pub(crate) mod tests {
                 window: 1,
                 visual_id: 1,
                 transparent: false,
+                main_device: None,
             },
             SurfaceTarget::AppKit {
                 layer: dangling,

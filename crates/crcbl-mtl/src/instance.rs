@@ -750,6 +750,7 @@ pub(crate) mod tests {
                 window: 1,
                 visual_id: 2,
                 transparent: false,
+                main_device: None,
             },
             SurfaceTarget::Win32 {
                 hinstance: dangling,

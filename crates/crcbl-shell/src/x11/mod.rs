@@ -30,6 +30,7 @@
 //! | Key repeat synthesis | not needed — the X server does it |
 //! | Themed cursor shapes | complete where libxcb-cursor is installed — [`CURSOR_SHAPE`](ShellCaps::CURSOR_SHAPE), see [`cursor`]; recorded and not applied without it |
 //! | Input region: a SHAPE input shape | complete where libxcb-shape is installed and the server has SHAPE 1.1 — [`INPUT_REGION`](ShellCaps::INPUT_REGION); not applied without them |
+//! | The server's GPU, for the renderer's adapter choice: DRI3 `Open` | complete where libxcb-dri3 is installed and the server has DRI3 (not Xvfb); `main_device` is `None` without them |
 //!
 //! ## What was cut, and why that seam
 //!
@@ -349,6 +350,8 @@ struct Conn {
     /// libxcb-shape, when the server also has SHAPE 1.1's input shapes; see
     /// [`setup_shape`](Self::setup_shape).
     shape: Option<&'static ffi::ShapeLib>,
+    /// The GPU the server renders on; see [`dri3_device`](Self::dri3_device).
+    main_device: Option<u64>,
     /// Whether the server agreed to stop faking a `KeyRelease` in front of
     /// every auto-repeat; see
     /// [`setup_detectable_auto_repeat`](Self::setup_detectable_auto_repeat).
@@ -889,11 +892,13 @@ impl X11Shell {
             randr_event_base: None,
             xi_opcode: None,
             shape: None,
+            main_device: None,
             detectable_auto_repeat: false,
         };
         conn.randr_event_base = conn.setup_randr();
         conn.xi_opcode = conn.setup_xinput2();
         conn.shape = conn.setup_shape();
+        conn.main_device = conn.dri3_device();
         conn.detectable_auto_repeat = conn.setup_detectable_auto_repeat();
 
         // SAFETY: the connection is live; libxkbcommon-x11 round-trips on it

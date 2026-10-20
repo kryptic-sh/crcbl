@@ -140,6 +140,11 @@ pub enum SurfaceTarget {
         /// so that a backend reads transparency the same way on every window
         /// system.
         transparent: bool,
+        /// The `dev_t` of the DRM device the X server renders on, from DRI3
+        /// `Open` — the counterpart of
+        /// [`Wayland`](Self::Wayland)'s `main_device`, and matched to an
+        /// adapter the same way. `None` without DRI3 (Xvfb has none).
+        main_device: Option<u64>,
     },
     /// Windows: module instance + window handle, and whether the window was
     /// made for per-pixel transparency.
@@ -276,6 +281,7 @@ mod tests {
                 window: 1,
                 visual_id: 2,
                 transparent: false,
+                main_device: None,
             },
             SurfaceTarget::Win32 {
                 hinstance: dangling(),
@@ -322,6 +328,7 @@ mod tests {
                     window: 1,
                     visual_id: 2,
                     transparent: flag,
+                    main_device: None,
                 },
                 SurfaceTarget::Win32 {
                     hinstance: dangling(),
