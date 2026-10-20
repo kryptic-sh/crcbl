@@ -566,3 +566,150 @@ fn hit_tests_and_spans_follow_the_boxes_in_mixed_text() {
     assert_eq!(carets.span(3..6), (run_left, run_right));
     assert_eq!(carets.span(0..0), (0.0, 0.0));
 }
+
+/// **A layout's caret is the text input's**: on one line every char's caret
+/// is [`caret_stops`]'s stop for it, bidi and all — before the first char of
+/// a right-to-left run at the run's right edge, after its first char at that
+/// char's left edge, and at the end of the text at the run's left edge — and
+/// a byte inside a char stands where the char starts.
+#[test]
+fn a_layout_caret_is_the_text_inputs_on_one_line() {
+    let font = Font::sans();
+    let text = "ab \u{5D0}\u{5D1}\u{5D2}";
+    let layout = TextLayout::new(font, text, SIZE, LINE, None);
+    let mut carets = Carets::default();
+    caret_stops(font, text, SIZE, &mut carets);
+    let boundaries = text
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain([text.len()]);
+    for (index, byte) in boundaries.enumerate() {
+        let caret = layout.caret(byte);
+        assert_eq!(
+            caret,
+            Caret {
+                line: 0,
+                x: carets.stops[index],
+                top: 0.0,
+                height: LINE,
+            },
+            "byte {byte}"
+        );
+    }
+    let x = x_by_byte(&layout);
+    let aleph = x.iter().find(|&&(byte, _)| byte == 3).expect("drawn").1;
+    assert_eq!(
+        layout.caret(3).x,
+        layout.width(),
+        "not the run's right edge"
+    );
+    assert_eq!(layout.caret(5).x, aleph, "not aleph's left edge");
+    assert!(layout.caret(text.len()).x < layout.caret(3).x);
+    assert_eq!(layout.caret(4), layout.caret(3), "inside aleph");
+    assert_eq!(layout.caret(text.len() + 9), layout.caret(text.len()));
+}
+
+/// **An override runs the caret right to left**: in Latin letters forced
+/// right to left with U+202E, the caret before each letter is right of the
+/// caret before the next, and the caret after the first is where the first
+/// is drawn — its left edge.
+#[test]
+fn a_caret_in_an_override_runs_right_to_left() {
+    let font = Font::sans();
+    let layout = TextLayout::new(font, "\u{202E}abc\u{202C}", SIZE, LINE, None);
+    let at = |c: char| font.glyph_id(c);
+    let drawn = |c: char| {
+        layout
+            .glyphs()
+            .iter()
+            .find(|glyph| glyph.glyph == at(c))
+            .expect("drawn")
+            .offset
+            .x
+    };
+    // U+202E is three bytes, then one for each letter.
+    let (a, b, c) = (layout.caret(3).x, layout.caret(4).x, layout.caret(5).x);
+    assert!(a > b && b > c, "{a} {b} {c} is not right to left");
+    assert_eq!(b, drawn('a'));
+    assert_eq!(c, drawn('b'));
+}
+
+/// **A wrapped layout's caret finds its line**: a line's first byte is at
+/// that line's start, a byte in the spaces a line broke at is on the line
+/// they end, after its last word, the end of the text is after the last
+/// line's last word, a caret inside a line is where its char is drawn, and
+/// every caret moves with its line's alignment.
+#[test]
+fn a_caret_in_wrapped_text_finds_its_line() {
+    let font = Font::sans();
+    let mut layout = TextLayout::new(font, TEXT, SIZE, LINE, Some(69.0));
+    assert_lines(&layout, &["The quick", "brown fox", "jumps"], "wrap 69");
+    let (brown, fox, fox_end, jumps) = (10, 16, 19, 20);
+    for _ in 0..2 {
+        let offset = |line: usize| layout.lines()[line].offset;
+        let drawn = x_by_byte(&layout);
+        let f = drawn.iter().find(|&&(byte, _)| byte == fox).expect("drawn");
+        assert_eq!(layout.caret(fox).x, f.1, "not where f is drawn");
+        assert_eq!(
+            layout.caret(brown),
+            Caret {
+                line: 1,
+                x: offset(1),
+                top: LINE,
+                height: LINE,
+            }
+        );
+        let space = layout.caret(fox_end);
+        assert_eq!(space.line, 1, "the break's space is not its line's");
+        assert!((space.x - offset(1) - layout.lines()[1].width).abs() < 1e-4);
+        assert_eq!(layout.caret(jumps).line, 2);
+        assert_eq!(layout.caret(jumps).x, offset(2));
+        let end = layout.caret(TEXT.len());
+        assert_eq!((end.line, end.top), (2, 2.0 * LINE));
+        assert!((end.x - offset(2) - layout.lines()[2].width).abs() < 1e-4);
+        layout.align(100.0, TextAlign::Right);
+    }
+}
+
+/// **A wrapped right-to-left paragraph's caret starts each line at its
+/// right**: a Hebrew paragraph broken in two puts the caret before its
+/// second line's word at that line's right edge.
+#[test]
+fn a_caret_in_a_wrapped_hebrew_paragraph_starts_at_the_right() {
+    let font = Font::sans();
+    let word = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
+    let text = format!("{word} {word} {word}");
+    let two = TextLayout::new(font, &format!("{word} {word}"), SIZE, LINE, None).width();
+    let layout = TextLayout::new(font, &text, SIZE, LINE, Some(wrap_width(two + 1.0)));
+    assert_eq!(layout.lines().len(), 2);
+    let second = 2 * word.len() + 2;
+    let caret = layout.caret(second);
+    assert_eq!(caret.line, 1);
+    assert!((caret.x - layout.lines()[1].width).abs() < 1e-3);
+    let first = layout.caret(0);
+    assert_eq!(first.line, 0);
+    assert!((first.x - layout.lines()[0].width).abs() < 1e-3);
+}
+
+/// **Empty text and hard breaks**: empty text's caret is at its one line's
+/// left edge, an empty line's at its own, and a byte in a hard break is at
+/// the end of the line it ends.
+#[test]
+fn a_caret_in_empty_text_and_hard_breaks() {
+    let font = Font::sans();
+    let empty = TextLayout::new(font, "", SIZE, LINE, None);
+    let start = Caret {
+        line: 0,
+        x: 0.0,
+        top: 0.0,
+        height: LINE,
+    };
+    assert_eq!(empty.caret(0), start);
+    assert_eq!(empty.caret(3), start);
+    let layout = TextLayout::new(font, "ab\r\n\r\ncd", SIZE, LINE, None);
+    let ab = layout.lines()[0].width;
+    assert_eq!((layout.caret(2).line, layout.caret(2).x), (0, ab));
+    assert_eq!((layout.caret(3).line, layout.caret(3).x), (0, ab));
+    assert_eq!((layout.caret(4).line, layout.caret(4).x), (1, 0.0));
+    assert_eq!((layout.caret(6).line, layout.caret(6).x), (2, 0.0));
+}

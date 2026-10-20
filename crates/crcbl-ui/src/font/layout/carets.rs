@@ -80,22 +80,46 @@ impl Carets {
 /// width evenly, from its leading edge. A char inside a cluster, where no
 /// caret stands, takes its cluster's edges.
 pub(crate) fn caret_stops(font: &Font, text: &str, size: f32, out: &mut Carets) {
+    line_stops(
+        font,
+        text,
+        Bidi::new(text).as_ref(),
+        0..text.len(),
+        size,
+        out,
+    );
+}
+
+/// [`caret_stops`] of the bytes `line` of `paragraph` — one line of it as a
+/// [`TextLayout`](super::TextLayout) broke it, the spaces it was broken at
+/// its own — shaped with the rest of the paragraph as context and at the
+/// levels `bidi` gives the paragraph, as the layout shaped and placed it:
+/// each stop, from the line's left edge, for each char of the line.
+pub(super) fn line_stops(
+    font: &Font,
+    paragraph: &str,
+    bidi: Option<&Bidi<'_>>,
+    line: Range<usize>,
+    size: f32,
+    out: &mut Carets,
+) {
     out.stops.clear();
     out.trailing.clear();
-    let bidi = Bidi::new(text);
-    // Each piece in logical order: its bytes, its glyphs in `shaped` and
-    // whether it runs right to left.
+    let text = &paragraph[line.clone()];
+    // Each piece in logical order: its bytes in the paragraph, its glyphs in
+    // `shaped` and whether it runs right to left.
     let mut pieces_shaped: Vec<(Range<usize>, Range<usize>, bool)> = Vec::new();
     let mut shaped = Vec::new();
     let mut words_end = 0;
     for (piece, spaces) in pieces(text) {
-        let runs = match &bidi {
+        let piece = line.start + piece.start..line.start + piece.end;
+        let runs = match bidi {
             Some(bidi) => bidi.runs(piece),
             None => vec![(piece, false)],
         };
         for (run, rtl) in runs {
             let first = shaped.len();
-            shape(font, size, text, run.clone(), rtl, &mut shaped);
+            shape(font, size, paragraph, run.clone(), rtl, &mut shaped);
             pieces_shaped.push((run, first..shaped.len(), rtl));
         }
         if !spaces {
@@ -119,9 +143,9 @@ pub(crate) fn caret_stops(font: &Font, text: &str, size: f32, out: &mut Carets) 
         }
         pen
     };
-    let order: Vec<usize> = match &bidi {
+    let order: Vec<usize> = match bidi {
         Some(bidi) => {
-            let levels = bidi.line_levels(0..text.len());
+            let levels = bidi.line_levels(line.clone());
             visual_order(
                 &pieces_shaped[..words_end]
                     .iter()
@@ -135,7 +159,7 @@ pub(crate) fn caret_stops(font: &Font, text: &str, size: f32, out: &mut Carets) 
     for index in order {
         pen = place(index, pen);
     }
-    let rtl = bidi.as_ref().is_some_and(Bidi::rtl);
+    let rtl = bidi.is_some_and(Bidi::rtl);
     let mut left = 0.0;
     for (index, (_, glyphs, _)) in pieces_shaped.iter().enumerate().skip(words_end) {
         if rtl {
@@ -167,7 +191,9 @@ pub(crate) fn caret_stops(font: &Font, text: &str, size: f32, out: &mut Carets) 
             }
         }
     }
-    let starts: Vec<usize> = cluster::clusters(text).map(|range| range.start).collect();
+    let starts: Vec<usize> = cluster::clusters(text)
+        .map(|range| line.start + range.start)
+        .collect();
     let mut edges = starts.iter().map(|&start| {
         // The shaped cluster it lies in, and the cluster starts that share it.
         let at = shaped_clusters.partition_point(|&(first, ..)| first <= start);
@@ -176,9 +202,7 @@ pub(crate) fn caret_stops(font: &Font, text: &str, size: f32, out: &mut Carets) 
         else {
             return (0.0, 0.0);
         };
-        let end = shaped_clusters
-            .get(at)
-            .map_or(text.len(), |&(next, ..)| next);
+        let end = shaped_clusters.get(at).map_or(line.end, |&(next, ..)| next);
         let sharing =
             &starts[starts.partition_point(|&s| s < first)..starts.partition_point(|&s| s < end)];
         // A shaped cluster that starts inside a rule cluster counts its own
@@ -197,7 +221,10 @@ pub(crate) fn caret_stops(font: &Font, text: &str, size: f32, out: &mut Carets) 
     let mut current = (0.0, 0.0);
     let mut next_start = starts.iter().peekable();
     for (byte, _) in text.char_indices() {
-        if next_start.next_if(|&&start| start == byte).is_some() {
+        if next_start
+            .next_if(|&&start| start == line.start + byte)
+            .is_some()
+        {
             current = edges.next().unwrap_or(current);
         }
         out.stops.push(current.0);

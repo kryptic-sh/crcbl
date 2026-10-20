@@ -7,7 +7,7 @@ use core::ops::Range;
 
 use glam::Vec2;
 
-use super::{PositionedGlyph, TextLayout, TextLine, pieces};
+use super::{LineBytes, PositionedGlyph, TextLayout, TextLine, pieces};
 use crate::font::bidi::{Bidi, visual_order};
 use crate::font::shape::{ShapedGlyph, shape};
 use crate::font::{Font, breaks};
@@ -312,11 +312,24 @@ impl Filler<'_> {
         self.line.splice(index..=index, [head, tail]);
     }
 
-    /// Finishes the line with its first `kept` pieces: its glyphs to the end
-    /// of the last, its width to that one's right edge, and — in a paragraph
+    /// Finishes the line with its first `kept` pieces: its bytes from its
+    /// first piece's, which end the line before it in the paragraph, its
+    /// glyphs to the end of the last, its width to that one's right edge,
+    /// and — in a paragraph
     /// with right-to-left levels — those pieces placed again from its left
     /// edge in visual order.
     fn finish(&mut self, kept: usize) {
+        let start = self.start + self.line.first().map_or(0, |piece| piece.bytes.start);
+        let paragraph = self.start..self.start + self.paragraph.len();
+        if let Some(previous) = self.layout.line_bytes.last_mut()
+            && previous.paragraph == paragraph
+        {
+            previous.line.end = start;
+        }
+        self.layout.line_bytes.push(LineBytes {
+            line: start..paragraph.end,
+            paragraph,
+        });
         let last = kept.checked_sub(1).map(|last| &self.line[last]);
         self.layout.lines.push(TextLine {
             glyphs: self.first..last.map_or(self.first, |piece| piece.glyphs.end),

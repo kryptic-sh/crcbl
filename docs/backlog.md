@@ -1374,6 +1374,15 @@ Each step lands in the crate the later steps build on, so the seam goes first.
        them past the line's end on the left, and the caret after them can sit
        left of the input's content box, where scrolling does not follow (the
        scroll offset is clamped at zero). Not seen in a test.
+     - **`TextLayout::caret` (2026-10-20, asked for a launcher's query) is
+       unit-tested only**: no golden, and not tried in the launcher. It runs
+       `carets::line_stops` (what `caret_stops` now calls) over one line, with
+       the line's bytes `fill.rs` records in `LineBytes`. Gaps: a word cut at a
+       soft break inside it keeps its whole-word glyphs in the layout where
+       `harfrust` says the cut is safe, while `line_stops` shapes the head
+       alone; that is equal by `unsafe_to_break`'s definition, but no test cuts
+       a word inside and compares. Each call shapes the line again, cost not
+       measured; a caller drawing every frame should keep the answer.
      - **No `direction` property and no `dir`**: a paragraph's direction is
        always its first strong char's (P2 and P3, as `dir=auto` per paragraph),
        so an empty or digits-only Hebrew field starts left to right.

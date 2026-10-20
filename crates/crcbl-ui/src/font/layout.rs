@@ -71,12 +71,14 @@ use core::ops::Range;
 
 use glam::Vec2;
 
+use super::bidi::Bidi;
 use super::shape::ShapedGlyph;
 use super::{Font, GlyphId};
 
 mod carets;
 mod fill;
 
+use carets::line_stops;
 pub(crate) use carets::{Carets, caret_stops};
 
 /// How close below a whole pixel a width may be and still count as that pixel.
@@ -146,19 +148,48 @@ pub struct TextLine {
     pub offset: f32,
 }
 
+/// Where a caret stands in a [`TextLayout`]: what [`TextLayout::caret`]
+/// answers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Caret {
+    /// Its line in [`TextLayout::lines`].
+    pub line: usize,
+    /// Its x from the text's left, alignment included.
+    pub x: f32,
+    /// Its line's top, from the text's top.
+    pub top: f32,
+    /// Its line's height: [`TextLayout::line_height`].
+    pub height: f32,
+}
+
+/// Where one line of a [`TextLayout`] lies in its text.
+#[derive(Clone, Debug, PartialEq)]
+struct LineBytes {
+    /// Its paragraph's bytes, hard break excluded.
+    paragraph: Range<usize>,
+    /// Its own: from its first char to the next line's first in its
+    /// paragraph, or to the paragraph's end, so the spaces it was broken at
+    /// are its own.
+    line: Range<usize>,
+}
+
 /// A string laid out in one font at one size. See the module docs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextLayout {
     /// The font it was laid out in, fallback faces and all.
     font: Font,
+    /// The size it was laid out at, in pixels per em.
+    size: f32,
+    /// The text it was laid out from.
+    text: String,
     glyphs: Vec<PositionedGlyph>,
     /// Each glyph's face, as [`Font::face`] numbers it.
     faces: Vec<u8>,
     /// The byte offset in the text of the first char of each glyph's cluster.
     bytes: Vec<usize>,
-    /// The text's length in bytes.
-    text_len: usize,
     lines: Vec<TextLine>,
+    /// Where each line lies in the text.
+    line_bytes: Vec<LineBytes>,
     /// Whether each line's paragraph runs right to left.
     rtl: Vec<bool>,
     line_height: f32,
@@ -209,11 +240,13 @@ impl TextLayout {
         let wrap = wrap.map(wrap_width);
         let mut layout = Self {
             font: font.clone(),
+            size,
+            text: text.to_owned(),
             glyphs: Vec::with_capacity(text.len()),
             faces: Vec::with_capacity(text.len()),
             bytes: Vec::with_capacity(text.len()),
-            text_len: text.len(),
             lines: Vec::new(),
+            line_bytes: Vec::new(),
             rtl: Vec::new(),
             line_height,
         };
@@ -275,7 +308,7 @@ impl TextLayout {
                 .find(|&at| self.faces[at] != face)
                 .unwrap_or(self.glyphs.len());
             let text_start = if start == 0 { 0 } else { self.bytes[start] };
-            let text_end = self.bytes.get(end).copied().unwrap_or(self.text_len);
+            let text_end = self.bytes.get(end).copied().unwrap_or(self.text.len());
             runs.push(FaceRun {
                 font: self.font.face(face),
                 glyphs: &self.glyphs[start..end],
@@ -287,7 +320,7 @@ impl TextLayout {
             runs.push(FaceRun {
                 font: &self.font,
                 glyphs: &[],
-                text: 0..self.text_len,
+                text: 0..self.text.len(),
             });
         }
         runs
@@ -297,6 +330,72 @@ impl TextLayout {
     #[must_use]
     pub fn lines(&self) -> &[TextLine] {
         &self.lines
+    }
+
+    /// Where a caret stands before the byte `byte` of the text, measured by
+    /// the code a text input places its caret with — the same stops, from
+    /// the same shaping — so the two never disagree. A text input rounds the
+    /// x to a whole pixel when it draws; this does not.
+    ///
+    /// * **Before a char, at its cluster's leading edge**: the left of a
+    ///   left-to-right cluster, the right of a right-to-left one, in the
+    ///   visual order the line's bidi levels give. A byte inside a cluster —
+    ///   or inside a char — stands where the cluster starts, the stop
+    ///   [`cluster::caret_stops`](super::cluster::caret_stops) names.
+    /// * **At a line's first byte, at that line's start**; a byte in the
+    ///   spaces a wrapped line was broken at, on the line they end, past its
+    ///   last word; a byte in a hard break, at the end of the line it ends.
+    /// * **At the end of the text**, and past it, after the last line's last
+    ///   cluster: its trailing edge.
+    /// * **Empty text** has one line, and the caret stands at its left edge.
+    ///
+    /// It shapes the line again, so a caller drawing every frame keeps the
+    /// answer while the text and caret stay the same.
+    ///
+    /// ```
+    /// # #[cfg(feature = "parsed-font")] {
+    /// use crcbl_ui::font::Font;
+    /// use crcbl_ui::font::layout::TextLayout;
+    ///
+    /// let layout = TextLayout::new(Font::sans(), "ab\ncd", 16.0, 20.0, None);
+    /// let start = layout.caret(0);
+    /// assert_eq!((start.line, start.x, start.top), (0, 0.0, 0.0));
+    /// // After "ab", on the first line, where "b" ends.
+    /// let end = layout.caret(2);
+    /// assert_eq!(end.line, 0);
+    /// assert_eq!(end.x, layout.lines()[0].width);
+    /// // "c" starts the second line.
+    /// let next = layout.caret(3);
+    /// assert_eq!((next.line, next.x, next.top), (1, 0.0, 20.0));
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn caret(&self, byte: usize) -> Caret {
+        let index = self
+            .line_bytes
+            .partition_point(|bytes| bytes.line.start <= byte)
+            .saturating_sub(1);
+        let LineBytes { paragraph, line } = &self.line_bytes[index];
+        let at = self
+            .text
+            .floor_char_boundary(byte.clamp(line.start, line.end));
+        let text = &self.text[paragraph.clone()];
+        let mut carets = Carets::default();
+        line_stops(
+            &self.font,
+            text,
+            Bidi::new(text).as_ref(),
+            line.start - paragraph.start..line.end - paragraph.start,
+            self.size,
+            &mut carets,
+        );
+        let chars = self.text[line.start..at].chars().count();
+        Caret {
+            line: index,
+            x: self.lines[index].offset + carets.stops[chars],
+            top: index as f32 * self.line_height,
+            height: self.line_height,
+        }
     }
 
     /// The pitch between baselines.

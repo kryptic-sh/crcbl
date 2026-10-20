@@ -13,6 +13,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`TextLayout::caret` and `crcbl_ui::font::layout::Caret`**: for a byte of a
+  laid-out text, the line it is on, the caret's x with alignment, and the line's
+  top and height. It measures with the code the text input places its caret
+  with, so right-to-left and mixed text get the same leading-edge carets the
+  widget draws, and wrapped text finds the right line. A launcher drawing its
+  own query no longer has to split it around the caret, which put the caret in
+  the wrong place in right-to-left text.
+
 ## [0.7.0] - 2026-10-20
 
 ### Breaking
