@@ -1709,6 +1709,61 @@ fn a_frame_request_is_answered_after_the_next_commit() {
     ));
 }
 
+/// Powers `HEADLESS-1` back on when the powered-off test is done, however it
+/// ends.
+struct OutputPower;
+
+impl Drop for OutputPower {
+    fn drop(&mut self) {
+        swaymsg(&["output", "HEADLESS-1", "power", "on"]);
+    }
+}
+
+/// **An output that is off answers no frame request until it is back on.** A
+/// compositor sends `wl_callback.done` when it shows the surface, and a
+/// powered-off (DPMS) output shows nothing, so a loop waiting on `FrameReady`
+/// sleeps rather than rendering for nobody, and wakes when the display does.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_frame_request_waits_while_the_output_is_off() {
+    /// Several refreshes at the output's rate: long enough that an answer
+    /// would have come had the output been on.
+    const QUIET: Duration = Duration::from_millis(500);
+
+    let mut session = Session::open();
+    let window = session.create_mapped(&desc("crcbl e2e dark", LogicalSize::new(640.0, 360.0)));
+    let commit = |session: &Session| {
+        crcbl_shell::wayland_test_support::map_window(&*session.shell, window)
+            .expect("commit a buffer");
+    };
+
+    let _restore = OutputPower;
+    assert!(
+        swaymsg(&["output", "HEADLESS-1", "power", "off"]),
+        "sway powers an output off through IPC"
+    );
+    session.take_names();
+    session.shell.request_frame(window).expect("a frame");
+    commit(&session);
+    let until = Instant::now() + QUIET;
+    while Instant::now() < until {
+        session.pump();
+        session.shell.wait_events(Some(Duration::from_millis(20)));
+    }
+    assert_eq!(
+        frames_for(&session.events, window),
+        0,
+        "a powered-off output shows nothing, so it answers nothing: {:?}",
+        session.names()
+    );
+
+    assert!(swaymsg(&["output", "HEADLESS-1", "power", "on"]));
+    session.pump_until("the frame once the output is back", |session| {
+        frames_for(&session.events, window) > 0
+    });
+    session.shell.destroy_window(window).expect("destroy");
+}
+
 /// The pointer outside an input region is not the window's: moving there
 /// leaves the window as moving onto any other surface would, and `None` gives
 /// the whole window back.

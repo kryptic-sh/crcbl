@@ -354,13 +354,12 @@ web and `HeadlessShell` answer at the next pump through `frame::FrameRequests`.
   goes unpaced and the next one asks again. The gate is the same where
   `FRAME_CALLBACK` is clear, which costs a loop that presents twice per pump its
   second present; one that pumps once a frame keeps its cadence.
-- **Never run against an output that is off.** The Wayland e2e
-  (`a_frame_request_is_answered_after_the_next_commit`) shows a commit is
-  answered, once for two requests, and that a destroyed window is not; that a
-  compositor withholds `done` from a surface on a powered-off output is read
-  from the protocol, not observed. sway can turn a headless output off with
-  `swaymsg output HEADLESS-1 power off`, so an e2e that asserts no `FrameReady`
-  for a while and one after `power on` is possible.
+- **An output that is off: seen on sway (2026-10-21).**
+  `a_frame_request_waits_while_the_output_is_off` powers `HEADLESS-1` off
+  (`swaymsg output HEADLESS-1 power off`), requests a frame and commits: no
+  `FrameReady` for 500 ms, then the pending request is answered once the output
+  is powered on, without another commit. Red with the output left on. Other
+  compositors (Hyprland's DPMS) not observed.
 - **Two Wayland mechanisms no event can show.** Destroying the window's
   `wl_callback` in `destroy_objects`, and the early return that shares one
   callback between requests, only stop a proxy leaking: without either, the
@@ -2382,8 +2381,10 @@ named under S-rows above. lyr's observations from its first Hyprland runs
 
 - `set_panel` resizes a layer panel in place on Wayland (154x73 to 362x961, no
   new window): **seen working**.
-- Frame gate: seen working on a nested Hyprland's headless output. A FIFO
-  present to an output that is off (DPMS) is unrun anywhere.
+- Frame gate: seen working on a nested Hyprland's headless output, and on a
+  powered-off sway output (`a_frame_request_waits_while_the_output_is_off`: no
+  answer while off, one after power on). A Vulkan FIFO present to an output that
+  is off is still unrun.
 - `Presenter::resize` draining before a reconfigure (found on D3D12): **seen
   working on Vulkan** (Intel RPL-U, headless sway with
   `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128`, 2026-10-20). The sandbox ran 4000
