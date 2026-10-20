@@ -735,6 +735,71 @@ run_sandbox_resize() {
 reconfigured at each size, nothing left alive, validation silent"
 }
 
+# `run_sandbox_dark <backend>`
+#
+# The output powered off (DPMS) under a running game. The compositor withholds
+# frame callbacks from a surface it is not showing, so the engine's frame gate
+# stops presenting and the swapchain is never asked to present to a dark
+# output; when the output comes back the frames do too, and the run closes
+# cleanly. Counted off the debug log's `FrameReady` events: none may arrive
+# across the dark window beyond one already in flight, and more must after.
+# `DARK_S` is the dark window, a measured absence and so a duration rather than
+# a poll.
+DARK_S=2
+run_sandbox_dark() {
+    local backend="$1"
+    local log="${SWAY_RUNTIME_DIR}/sandbox-dark.log"
+    local ready="shell event: FrameReady"
+    echo "crcbl e2e: running the sandbox on $backend and powering its output off and on"
+
+    CRCBL_SHELL=wayland \
+    CRCBL_VK_VALIDATION=1 \
+    CRCBL_LOG=debug \
+        "${BIN_DIR}/sandbox" --backend "$backend" --title "crcbl e2e sandbox" \
+        >"$log" 2>&1 &
+    local sandbox_pid=$!
+    wait_for_line "the sandbox to be paced by the compositor" "$log" "$ready"
+
+    swaymsg output HEADLESS-1 power off >/dev/null
+    local before after
+    before="$(grep -c "$ready" "$log" || true)"
+    sleep "$DARK_S"
+    after="$(grep -c "$ready" "$log" || true)"
+    swaymsg output HEADLESS-1 power on >/dev/null
+    if [ "$after" -gt $((before + 1)) ]; then
+        echo "crcbl e2e: the output was off and the sandbox still got $((after - before)) \
+frame answers in ${DARK_S}s" >&2
+        kill "$sandbox_pid" 2>/dev/null || true
+        sway_log_tail
+        exit 1
+    fi
+    local deadline=$(( $(date +%s) + SWAY_SESSION_TIMEOUT_S ))
+    while [ "$(grep -c "$ready" "$log" || true)" -le "$after" ]; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "crcbl e2e: the output came back and the sandbox's frames did not" >&2
+            kill "$sandbox_pid" 2>/dev/null || true
+            sway_log_tail
+            exit 1
+        fi
+        sleep "$SWAY_SESSION_POLL_S"
+    done
+
+    swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" kill >/dev/null
+    local status=0
+    wait "$sandbox_pid" || status=$?
+    if [ "$status" -ne 0 ] || ! grep -qE "windowed \([^)]*CloseRequested\)" "$log"; then
+        echo "crcbl e2e: the sandbox did not close cleanly after its output came back \
+(exit $status)" >&2
+        tail -n 40 "$log" >&2
+        sway_log_tail
+        exit 1
+    fi
+    assert_nothing_left_alive "$log" "the sandbox after a dark output"
+    assert_validation_saw_nothing "$log" "the sandbox after a dark output"
+    echo "crcbl e2e: the sandbox slept through ${DARK_S}s of a dark output on wayland/$backend \
+and resumed, nothing left alive, validation silent"
+}
+
 if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
     || ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
     run_sandbox vk windowed
@@ -756,6 +821,8 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     run_sandbox_toggle vk
     # Resized from outside while frames are in flight; reuses the build above.
     run_sandbox_resize vk
+    # And with its output powered off for a while, then back on.
+    run_sandbox_dark vk
     # One more windowed run, this time required to fail. After the passes above
     # rather than instead of any of them: each of those was still graded by the
     # ordinary checks with nothing injected.
