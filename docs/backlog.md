@@ -524,11 +524,13 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    repositioning on Wayland **in CI** (CI's sway offers `xdg_wm_base` below 3,
    so CI holds only the refusal; the office laptop's sway 1.12 ran the real path
    green on 2026-10-20); S16 Vulkan presenting premultiplied on sway **in CI**
-   (`crcbl-app`'s ignored `wayland_transparency` test reads it back with `grim`
-   and passed on the office laptop, not yet in a CI job); S22 a colour glyph in
-   a GPU golden; S18 FreeBSD beyond `check (freebsd)`'s clippy, in a VM job; S13
-   cold start to the first presented frame, end to end (the D3D12 instance and
-   first device are measured; see 11).
+   (`crcbl-app`'s `wayland_transparency` read-back passed on the office laptop,
+   on the Intel iGPU and on llvmpipe under software sway, CI's setup;
+   `run-wayland-e2e.sh` runs it from 2026-10-21, and the first CI result is not
+   yet in); S22 a colour glyph in a GPU golden; S18 FreeBSD beyond
+   `check (freebsd)`'s clippy, in a VM job; S13 cold start to the first
+   presented frame, end to end (the D3D12 instance and first device are
+   measured; see 11).
 5. **Genuinely impossible, and refused:** D3D12 off Windows, Metal off Apple, a
    software Metal adapter, AppKit reserving screen space (only the menu bar and
    the Dock do). Vulkan on macOS is refused today and could go through MoltenVK
@@ -849,9 +851,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      Vulkan window to half-alpha blue over a red background-layer bar and reads
      the screen with `grim`. On the office laptop (Intel RPL-U, headless sway
      1.12 rendering on that GPU) it read (127, 0, 188), the premultiplied blend,
-     and (0, 0, 188) with `crcbl-vk` sending `OPAQUE`. Ignored and not in CI: it
-     needs `grim` and a GPU sway can render on; adding it to the nested-sway job
-     is the remaining step.
+     and (0, 0, 188) with `crcbl-vk` sending `OPAQUE`. It also read the
+     premultiplied blend on llvmpipe with sway rendering in software, which is
+     CI's setup, so `run-wayland-e2e.sh` runs it after the shell suite and the
+     nested-sway job installs `grim`, from 2026-10-21; the first CI result is
+     not yet in.
    - `MonitorInfo::name` was already `wl_output.name` on Wayland, so S7's name
      is Win32's (`MONITORINFOEX::szDevice`) and AppKit's
      (`NSScreen.localizedName`) to check.
@@ -2413,7 +2417,7 @@ named under S-rows above. lyr's observations from its first Hyprland runs
 
   Still open from the table: the pointer-leave case on X11 (Wayland's is
   `crossing_into_another_of_our_windows_leaves_the_first`), and the scripted
-  resize and `grim` read-back as CI tests.
+  resize as a CI test.
 
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.
