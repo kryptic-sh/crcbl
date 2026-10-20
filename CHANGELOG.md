@@ -31,6 +31,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Accessibility on Wayland and X11**: with `crcbl-shell`'s `accesskit`
+  feature, each window's tree is served over AT-SPI through `accesskit_unix`
+  (which brings `zbus`), so Orca can read it and act on it;
+  `ShellCaps::ACCESSIBILITY` is set and the `Accessibility*` events are raised,
+  including `AccessibilityDeactivated` when the last reader leaves.
+
 - **Named keysym constants on `crcbl_core::input::Keysym`**: `ESCAPE`, `RETURN`,
   `KP_ENTER`, `UP`, `DOWN`, `BACKSPACE`, `F1`–`F12` and the rest of the keys no
   layout moves, under their X11 names. Menus and shortcuts compare

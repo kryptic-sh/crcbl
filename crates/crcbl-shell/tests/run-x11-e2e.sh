@@ -112,6 +112,31 @@ if ! crcbl_nextest_summary "$PLAIN" "crcbl e2e" \
 fi
 echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN tests ran against Xvfb on ${DISPLAY}"
 
+# S14: a screen reader's path over AT-SPI. A separate run, because it needs the
+# `accesskit` feature and because it switches AT-SPI on for its whole session
+# bus: `dbus-run-session` gives it a private one (and its own accessibility
+# bus, started on demand by at-spi2-core), and `CRCBL_E2E_PRIVATE_BUS=1` is
+# how the test knows it may. Exactly one test must run, so a renamed test
+# cannot pass this step by matching nothing.
+echo "crcbl e2e: an AT-SPI reader against the shell, on a private session bus"
+ACCESS_LOG="${RUNTIME_DIR}/access.log"
+set +e
+CRCBL_E2E_PRIVATE_BUS=1 dbus-run-session -- cargo nextest run \
+    --locked \
+    --package crcbl-shell \
+    --features x11-e2e,accesskit \
+    --test x11_e2e \
+    --run-ignored all \
+    --test-threads 1 \
+    -E 'test(=a_reader_finds_the_button_and_presses_it)' 2>&1 | tee "$ACCESS_LOG"
+STATUS=${PIPESTATUS[0]}
+set -e
+if [ "$STATUS" -ne 0 ] || ! grep -q "1 test run: 1 passed" "$ACCESS_LOG"; then
+    echo "crcbl e2e: the AT-SPI reader failed or ran no test" >&2
+    log_tail
+    exit 1
+fi
+
 # The X11 half of the foundations stage's sandbox exit criterion — see
 # the same block in `run-wayland-e2e.sh`. `CRCBL_SHELL=x11` because Wayland is
 # tried first by the registry and a silent fallback would report success for

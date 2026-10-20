@@ -140,9 +140,11 @@ win32-ime-e2e = ["win32-e2e"]
 # small dependency set; a desktop program turns it on. See `accessibility`.
 #
 # On Windows it also brings `accesskit_windows`, the UI Automation adapter the
-# Win32 backend answers `WM_GETOBJECT` with. A target-specific optional
-# dependency, so on every other host the feature names it and builds nothing.
-accesskit = ["dep:accesskit", "dep:accesskit_windows"]
+# Win32 backend answers `WM_GETOBJECT` with, and on Linux and FreeBSD
+# `accesskit_unix`, the AT-SPI adapter the Wayland and X11 backends register on
+# the session bus. Target-specific optional dependencies, so on every other host
+# the feature names them and builds nothing.
+accesskit = ["dep:accesskit", "dep:accesskit_windows", "dep:accesskit_unix"]
 
 [lints]
 workspace = true
@@ -164,3 +166,11 @@ accesskit_windows = { version = "0.35.1", optional = true }
 # `accesskit_windows`, so it adds no crate.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Variant", "Win32_UI_Accessibility"] }
+
+# The Wayland and X11 backends' accessibility adapter, behind the `accesskit`
+# feature: it serves the tree over AT-SPI on the session bus and turns Orca's
+# requests into `ActionRequest`s. It brings `zbus` and a small async executor on
+# a thread of its own (approved 2026-10-17). The same set of systems as the
+# build script's `desktop_unix`.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+accesskit_unix = { version = "0.24", optional = true }

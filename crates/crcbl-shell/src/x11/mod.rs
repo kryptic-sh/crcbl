@@ -771,6 +771,9 @@ pub struct X11Shell {
     /// callback, so [`ShellCaps::FRAME_CALLBACK`] is clear.
     frames: crate::frame::FrameRequests,
     lost: Option<String>,
+    /// Each window's AT-SPI adapter; see [`access`](crate::linux::access).
+    #[cfg(feature = "accesskit")]
+    access: crate::linux::access::Adapters,
 }
 
 impl core::fmt::Debug for X11Shell {
@@ -940,6 +943,8 @@ impl X11Shell {
             wake: None,
             frames: crate::frame::FrameRequests::default(),
             lost: None,
+            #[cfg(feature = "accesskit")]
+            access: crate::linux::access::Adapters::default(),
         };
         shell.monitors = shell.enumerate_monitors();
         shell.caps = shell.latch_caps();
@@ -1011,6 +1016,10 @@ impl X11Shell {
         // on — a drop works on a bare `Xvfb` with nothing else running. See
         // [`xdnd`].
         caps.insert(ShellCaps::DRAG_DROP);
+        // AT-SPI is D-Bus, not X11: every window gets an adapter, which reaches
+        // a reader whenever the session has an accessibility bus.
+        #[cfg(feature = "accesskit")]
+        caps.insert(ShellCaps::ACCESSIBILITY);
         // X11 has no viewporter and no equivalent: a client presents pixels at
         // the window's size, full stop. The renderer does the upscale blit.
         caps.remove(ShellCaps::HW_UPSCALE);

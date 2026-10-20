@@ -3465,3 +3465,47 @@ fn a_waker_ends_a_wait_from_another_thread_and_rings_coalesce() {
         start.elapsed()
     );
 }
+
+/// S14 on X11: the same reader as the Wayland suite's, over the same AT-SPI.
+/// Xvfb has no session bus of its own, so this one is a private bus as well;
+/// see [`atspi`].
+#[cfg(feature = "accesskit")]
+#[path = "support/atspi.rs"]
+mod atspi;
+
+#[cfg(feature = "accesskit")]
+#[test]
+#[ignore = "needs an X server and a private AT-SPI bus; run tests/run-x11-e2e.sh"]
+fn a_reader_finds_the_button_and_presses_it() {
+    let bus = atspi::private_bus();
+    let mut session = Session::open();
+    assert!(session.shell.caps().contains(ShellCaps::ACCESSIBILITY));
+    let window = session.window(&desc(atspi::WINDOW_LABEL));
+    let address = atspi::enable(&bus);
+    session.pump_until("the reader's activation", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| atspi::is_activation(event, window))
+    });
+    session
+        .shell
+        .update_accessibility(window, atspi::tree())
+        .expect("a live window");
+    let deadline = Instant::now() + WAIT;
+    while let Err(error) = atspi::press_the_button(&address) {
+        assert!(
+            Instant::now() < deadline,
+            "the reader never pressed: {error}"
+        );
+        session.pump();
+        session.shell.wait_events(Some(Duration::from_millis(50)));
+    }
+    session.pump_until("the press as an action request", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| atspi::is_press(event, window))
+    });
+    session.shell.destroy_window(window).expect("destroy");
+}

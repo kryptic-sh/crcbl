@@ -4277,3 +4277,46 @@ fn escape_on_a_grabbing_popup_is_delivered_then_asks_it_to_close() {
     drop(input);
     session.shell.destroy_window(window).expect("destroy");
 }
+
+/// S14 on Wayland: a window's tree read and acted on over AT-SPI, the way Orca
+/// would; see [`atspi`] for the reader and why it needs a private bus.
+#[cfg(feature = "accesskit")]
+#[path = "support/atspi.rs"]
+mod atspi;
+
+#[cfg(feature = "accesskit")]
+#[test]
+#[ignore = "needs a Wayland compositor and a private AT-SPI bus; run tests/run-wayland-e2e.sh"]
+fn a_reader_finds_the_button_and_presses_it() {
+    let bus = atspi::private_bus();
+    let mut session = Session::open();
+    assert!(session.shell.caps().contains(ShellCaps::ACCESSIBILITY));
+    let window = session.create_mapped(&desc(atspi::WINDOW_LABEL, LogicalSize::new(320.0, 200.0)));
+    let address = atspi::enable(&bus);
+    session.pump_until("the reader's activation", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| atspi::is_activation(event, window))
+    });
+    session
+        .shell
+        .update_accessibility(window, atspi::tree())
+        .expect("a live window");
+    let deadline = Instant::now() + WAIT;
+    while let Err(error) = atspi::press_the_button(&address) {
+        assert!(
+            Instant::now() < deadline,
+            "the reader never pressed: {error}"
+        );
+        session.pump();
+        session.shell.wait_events(Some(Duration::from_millis(50)));
+    }
+    session.pump_until("the press as an action request", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| atspi::is_press(event, window))
+    });
+    session.shell.destroy_window(window).expect("destroy");
+}

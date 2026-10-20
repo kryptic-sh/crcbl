@@ -408,6 +408,8 @@ impl X11Shell {
         if let Some(keymap) = self.keymap.as_mut() {
             keymap.reset_compose();
         }
+        #[cfg(feature = "accesskit")]
+        self.access.focus(window, focused);
         self.queue.push_back(ShellEvent::Focus { window, focused });
     }
 
@@ -484,6 +486,8 @@ impl X11Shell {
         // an outstanding read left alive here answered two seconds later,
         // naming a window this very event has just reported as destroyed.
         self.forget_selection_state(window, event.window);
+        #[cfg(feature = "accesskit")]
+        self.access.close(window);
         self.queue.push_back(ShellEvent::WindowDestroyed { window });
     }
 

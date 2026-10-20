@@ -702,6 +702,8 @@ impl WaylandShell {
             return;
         }
         state.focused = focused;
+        #[cfg(feature = "accesskit")]
+        self.access.focus(window, focused);
         self.queue.push_back(ShellEvent::Focus { window, focused });
     }
 }

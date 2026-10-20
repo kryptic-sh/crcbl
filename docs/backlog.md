@@ -504,10 +504,9 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    while D3D12 is there on every Windows machine. Vulkan's own swapchain has no
    composition mode and Windows drivers offer only opaque alpha for an `HWND`
    surface, so its refusal stays.
-3. **Refused today, to build:** S14 accessibility through AT-SPI on Wayland and
-   X11 (`accesskit_unix`, which brings `zbus`; the owner approved `zbus` on
-   2026-10-17, as AccessKit on 2026-10-16) and on AppKit (`accesskit_macos`), M
-   each; X11 panels, popups and transparency (`_NET_WM_WINDOW_TYPE_DOCK`,
+3. **Refused today, to build:** S14 accessibility on AppKit (`accesskit_macos`),
+   M (Wayland and X11 are built, through `accesskit_unix`; see S14 below); X11
+   panels, popups and transparency (`_NET_WM_WINDOW_TYPE_DOCK`,
    `_NET_WM_STRUT_PARTIAL`, override-redirect popups with a grab, a 32-bit ARGB
    visual once `_NET_WM_CM_Sn` has an owner), M to L together.
 4. **Implemented, untested:** S17 panel focus on Win32 and AppKit, and on
@@ -1663,8 +1662,34 @@ Each step lands in the crate the later steps build on, so the seam goes first.
     - Behaviour, not a bug: Windows has no "the last reader went away" signal,
       so `AccessibilityDeactivated` is never raised on Win32 and trees sent
       after the first activation are always kept, for the window's lifetime.
-    - Still to do, in this order: Wayland and X11 through `accesskit_unix`
-      (AT-SPI over D-Bus); AppKit through `accesskit_macos`.
+    - Wayland and X11 are in (2026-10-21), behind the same feature:
+      `linux::access` keeps one `accesskit_unix::Adapter` per window, opened
+      with the window and closed with it (`destroy_window` and X11's
+      `DestroyNotify`), told of focus changes, and drained in the pump; all
+      three handlers run on the adapter's executor thread and cross on a mutex
+      queue that rings the shell's waker. AT-SPI says when the last reader
+      leaves, so `AccessibilityDeactivated` is raised here, unlike Win32.
+      Verified by `a_reader_finds_the_button_and_presses_it` in both
+      `wayland_e2e` and `x11_e2e`: a `busctl` client on a private
+      `dbus-run-session` bus switches AT-SPI on, finds the window and its button
+      by name through the registry and calls `DoAction`, which must arrive as an
+      `AccessibilityAction`. Both passed on the office laptop (headless sway
+      1.12, and Xwayland under it), and went red with the action handler
+      dropping the request (shared) and with X11 opening no adapter. Both
+      harnesses run it as their own step from 2026-10-21; the first CI result is
+      not yet in. Not covered: the focus state passed to the adapter,
+      deactivation, and X11 window bounds (`Adapter::set_root_window_bounds` is
+      never called, so a reader's screen coordinates for nodes are
+      window-relative; Wayland cannot know its position anyway).
+    - **Decision for the owner: `deny.toml`'s first advisory ignores**
+      (2026-10-21). `accesskit_unix` 0.24, the newest, is on zbus 5, whose
+      `zbus_names`, `zvariant` and `zvariant_derive` RustSec marks unmaintained
+      (RUSTSEC-2026-0370/0371/0372) because zbus 6 absorbed them; no patched
+      version exists. They are ignored by id, each with its reason, so
+      `cargo deny --all-features check` stays green. The alternative is to keep
+      the Linux adapter out of the tree until an `accesskit_unix` on zbus 6
+      ships. Remove the three entries when that release is taken.
+    - Still to do: AppKit through `accesskit_macos`.
 
 14. **Image assets to RGBA (S28), asked by lyr for lyr and pikr on 2026-10-16**,
     relaying the owner: one crcbl crate that turns image files and raw buffers

@@ -276,6 +276,7 @@ impl WaylandShell {
                 close_pending: false,
             })
             .cast();
+        self.opened(handle);
         Ok(handle)
     }
 

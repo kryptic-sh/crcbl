@@ -375,7 +375,13 @@ impl Shell for X11Shell {
                 "the server refused CreateWindow".to_string(),
             ));
         }
-        Ok(self.windows.insert(window).cast())
+        let id: WindowId = self.windows.insert(window).cast();
+        #[cfg(feature = "accesskit")]
+        {
+            let waker = self.waker();
+            self.access.open(id, waker);
+        }
+        Ok(id)
     }
 
     fn destroy_window(&mut self, window: WindowId) -> Result<(), ShellError> {
@@ -386,6 +392,8 @@ impl Shell for X11Shell {
         self.forget_selection_state(window, removed.id);
         self.conn.destroy_x_window(removed.id);
         self.conn.flush();
+        #[cfg(feature = "accesskit")]
+        self.access.close(window);
         self.queue.push_back(ShellEvent::WindowDestroyed { window });
         Ok(())
     }
@@ -535,6 +543,8 @@ impl Shell for X11Shell {
         }
         self.service_transfers();
         self.publish_configurations();
+        #[cfg(feature = "accesskit")]
+        self.queue.extend(self.access.take_events());
     }
 
     /// Blocks until something arrives on the connection or `timeout` elapses.
@@ -581,6 +591,19 @@ impl Shell for X11Shell {
     /// A pipe polled beside the connection — see
     /// [`wake`](crate::linux::wake). `None` only if the process is out of
     /// descriptors, which is logged.
+    /// Handed to the window's AT-SPI adapter, which keeps it only while a
+    /// reader is active.
+    #[cfg(feature = "accesskit")]
+    fn update_accessibility(
+        &mut self,
+        window: WindowId,
+        update: crate::accesskit::TreeUpdate,
+    ) -> Result<(), ShellError> {
+        self.window(window)?;
+        self.access.update(window, update);
+        Ok(())
+    }
+
     fn waker(&mut self) -> Option<crate::ShellWaker> {
         crate::waker::lazy_waker(&mut self.wake, "X11", crate::linux::wake::WakePipe::new)
     }

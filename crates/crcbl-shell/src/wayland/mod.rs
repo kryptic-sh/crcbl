@@ -2108,6 +2108,9 @@ pub struct WaylandShell {
     dmabuf_feedback: *mut WlProxy,
     main_device: Option<u64>,
     pending_main_device: Option<u64>,
+    /// Each window's AT-SPI adapter; see [`access`](crate::linux::access).
+    #[cfg(feature = "accesskit")]
+    access: crate::linux::access::Adapters,
 }
 
 impl core::fmt::Debug for WaylandShell {
@@ -2205,6 +2208,8 @@ impl WaylandShell {
             dmabuf_feedback: ptr::null_mut(),
             main_device: None,
             pending_main_device: None,
+            #[cfg(feature = "accesskit")]
+            access: crate::linux::access::Adapters::default(),
         };
 
         // SAFETY: the display proxy is live and `wl_display.get_registry` takes
@@ -2317,6 +2322,10 @@ impl WaylandShell {
         // `xdg_wm_base`, which `open` requires, has had popups from version 1,
         // and moves them from version 3.
         caps.insert(ShellCaps::POPUP);
+        // AT-SPI is D-Bus, not Wayland: every window gets an adapter, which
+        // reaches a reader whenever the session has an accessibility bus.
+        #[cfg(feature = "accesskit")]
+        caps.insert(ShellCaps::ACCESSIBILITY);
         caps.set(
             ShellCaps::POPUP_REPOSITION,
             !self.conn.wm_base.is_null()
@@ -3503,6 +3512,18 @@ impl WaylandShell {
         self.conn.flush();
     }
 
+    /// What every new window gets once it is in the table: its AT-SPI
+    /// adapter, behind the `accesskit` feature.
+    fn opened(&mut self, window: WindowId) {
+        #[cfg(feature = "accesskit")]
+        {
+            let waker = self.waker();
+            self.access.open(window, waker);
+        }
+        #[cfg(not(feature = "accesskit"))]
+        let _ = window;
+    }
+
     /// Tears one window's objects down, innermost first.
     fn destroy_objects(&mut self, id: WindowId, window: &WlWindow) {
         for (_, proxy) in &window.constraints {
@@ -3928,6 +3949,7 @@ impl Shell for WaylandShell {
                 close_pending: false,
             })
             .cast();
+        self.opened(handle);
         Ok(handle)
     }
 
@@ -3951,6 +3973,8 @@ impl Shell for WaylandShell {
             .remove(window.cast())
             .ok_or_else(|| ShellError::invalid_window(window))?;
         self.destroy_objects(window, &removed);
+        #[cfg(feature = "accesskit")]
+        self.access.close(window);
         self.queue.push_back(ShellEvent::WindowDestroyed { window });
         Ok(())
     }
@@ -4093,6 +4117,19 @@ impl Shell for WaylandShell {
         self.enable_text_input(window, field)
     }
 
+    /// Handed to the window's AT-SPI adapter, which keeps it only while a
+    /// reader is active.
+    #[cfg(feature = "accesskit")]
+    fn update_accessibility(
+        &mut self,
+        window: WindowId,
+        update: crate::accesskit::TreeUpdate,
+    ) -> Result<(), ShellError> {
+        self.window(window)?;
+        self.access.update(window, update);
+        Ok(())
+    }
+
     fn set_text_input_area(
         &mut self,
         window: WindowId,
@@ -4170,6 +4207,8 @@ impl Shell for WaylandShell {
         // instant keyboard focus does.
         self.resolve_held_reads();
         self.drive_repeats();
+        #[cfg(feature = "accesskit")]
+        self.queue.extend(self.access.take_events());
     }
 
     /// Blocks until an event arrives, `timeout` elapses, or a key repeat comes

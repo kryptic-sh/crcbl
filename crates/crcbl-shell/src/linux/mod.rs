@@ -57,6 +57,8 @@ pub(crate) type Nfds = core::ffi::c_ulong;
 #[cfg(target_os = "freebsd")]
 pub(crate) type Nfds = core::ffi::c_uint;
 
+#[cfg(feature = "accesskit")]
+pub(crate) mod access;
 pub mod keymap;
 pub mod wake;
 pub mod xkb;

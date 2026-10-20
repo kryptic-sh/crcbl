@@ -1126,13 +1126,15 @@ jobs:
       # `-dev`-versus-runtime argument.
       # `grim` reads the screen back for `crcbl-app`'s `wayland_transparency`
       # test, which the harness runs between the shell suite and the sandbox.
+      # `dbus` (for `dbus-run-session`) and `at-spi2-core` (the accessibility
+      # bus and registry) are the AT-SPI reader's step, as in the x11 job.
       - name: Install sway and the ALSA headers cpal links against
         timeout-minutes: 10
         uses: ./.github/actions/apt-packages
         with:
           packages: >-
             sway grim libasound2-dev libwayland-client0 libxkbcommon0 libvulkan1
-            mesa-vulkan-drivers vulkan-validationlayers
+            mesa-vulkan-drivers vulkan-validationlayers dbus at-spi2-core
       # Starts headless sway in a private XDG_RUNTIME_DIR, polls for the socket
       # with a deadline and a liveness check on the child, runs the
       # `#[ignore]`d suite with `--features wayland-e2e`, and dumps the
@@ -1201,6 +1203,9 @@ jobs:
       # the same size. It is also the smallest EWMH-complete option packaged —
       # `--no-install-recommends` keeps it to a handful of X libraries, where
       # `marco` or `xfwm4` would drag in half a desktop.
+      #
+      # `dbus` and `at-spi2-core` are for the harness's AT-SPI reader step,
+      # which runs on a private session bus from `dbus-run-session`.
       - name: Install Xvfb, openbox, the X client libraries and the ALSA headers
         timeout-minutes: 10
         uses: ./.github/actions/apt-packages
@@ -1209,7 +1214,7 @@ jobs:
             xvfb openbox libasound2-dev libxcb1 libxcb-randr0 libxcb-xinput0
             libxcb-xtest0 libxcb-xfixes0 libxcb-cursor0 libxcb-shape0
             libxkbcommon0 libxkbcommon-x11-0 libvulkan1 mesa-vulkan-drivers
-            vulkan-validationlayers
+            vulkan-validationlayers dbus at-spi2-core
       # Starts Xvfb on a private display number, polls for its socket with a
       # deadline and a liveness check on the child, runs the `#[ignore]`d suite
       # with `--features x11-e2e`, and dumps the server log tail on any
