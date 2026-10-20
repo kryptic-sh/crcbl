@@ -40,6 +40,28 @@
 //! the seam states — swapchain before surface, surface before the window the
 //! caller owns.
 //!
+//! # Presenting when the window system asks
+//!
+//! A status bar on an output the compositor has turned off is never asked for
+//! a frame there, and a FIFO present to it can block the loop — input, close
+//! button and all — for as long as the output stays off. A loop that presents
+//! only when asked does three things a frame, and the presenter keeps the
+//! state between them:
+//!
+//! 1. Hands every event [`Shell::pump`] delivers to [`Presenter::observe`].
+//! 2. Calls [`Presenter::request_frame`] after [`Presenter::acquire`] hands
+//!    over a frame and before [`Presenter::submit_and_present`].
+//! 3. Skips the frame when `acquire` hands over none. From a present that
+//!    carried a request until the answer is observed, `acquire` answers
+//!    `Ok(None)` without touching the device, and [`Presenter::frame_due`]
+//!    says so ahead of time, for a loop that would rather sleep in
+//!    [`Shell::wait_events`] than spin.
+//!
+//! A presenter whose caller never requests a frame presents exactly as it
+//! always has. [`Presenter::frame_due`] says why the gate behaves the same
+//! whether or not the shell has
+//! [`ShellCaps::FRAME_CALLBACK`](crcbl_shell::ShellCaps::FRAME_CALLBACK).
+//!
 //! # Example
 //!
 //! ```
@@ -61,18 +83,27 @@
 //!     ..PresenterDesc::default()
 //! };
 //! let mut presenter = Presenter::open(&shell, window, extent, &desc)?;
-//! if let Some(frame) = presenter.acquire()? {
+//! let mut presented = 0;
+//! for _ in 0..3 {
+//!     shell.pump(&mut |event| presenter.observe(&event));
+//!     let Some(frame) = presenter.acquire()? else {
+//!         continue;
+//!     };
 //!     let encoder = presenter.device().create_command_encoder(&CommandEncoderDesc {
 //!         label: Some("launcher frame"),
 //!         queue: presenter.queue(),
 //!     });
 //!     // Record into `frame.view` here.
 //!     let commands = encoder.finish()?;
+//!     presenter.request_frame(&mut shell)?;
 //!     assert_eq!(
 //!         presenter.submit_and_present(&frame, commands)?,
 //!         FrameOutcome::Presented
 //!     );
+//!     presented += 1;
 //! }
+//! // No compositor holds the answer back here, so each came at the next pump.
+//! assert_eq!(presented, 3);
 //! presenter.destroy()?;
 //! shell.destroy_window(window)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -88,10 +119,16 @@ use crcbl_hal::{
     SurfaceHandle, SwapchainDesc, SwapchainHandle,
 };
 use crcbl_hal::{Device, Instance};
-use crcbl_shell::{Shell, WindowId};
+use crcbl_shell::{Shell, ShellError, ShellEvent, WindowId};
 
 use crate::adapter::{ADAPTER_ENV_VAR, AdapterPick, Choice, PinMiss, PowerPreference};
 use crate::backend::{GpuBackend, PendingInstance};
+
+use frame_gate::FrameGate;
+
+// Whether the window may present again, between a frame request and its
+// answer.
+mod frame_gate;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -666,6 +703,13 @@ pub struct Presenter {
     /// [`set_pacing`](Self::set_pacing) to [`Pacing::Auto`] can settle against
     /// the sample already taken instead of taking a second one.
     observed_timing: Option<DisplayTiming>,
+    /// The window presented to, or `None` offscreen: what
+    /// [`request_frame`](Self::request_frame) asks for and which
+    /// [`FrameReady`](ShellEvent::FrameReady) [`observe`](Self::observe)
+    /// takes as this presenter's answer.
+    window: Option<WindowId>,
+    /// Where the window's frame request stands; see [`frame_gate`].
+    frame: FrameGate,
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
@@ -707,6 +751,8 @@ enum OpenStage {
 pub struct PendingPresenter {
     stage: OpenStage,
     target: crcbl_hal::SurfaceTarget,
+    /// The window `target` describes, or `None` offscreen.
+    window: Option<WindowId>,
     extent: (u32, u32),
     label: String,
     required_features: Features,
@@ -767,6 +813,7 @@ impl PendingPresenter {
         Ok(Self {
             stage,
             target,
+            window: None,
             extent,
             label: desc.label.to_string(),
             required_features: desc.required_features,
@@ -964,7 +1011,10 @@ impl Presenter {
         // knows there are backends".
         let instance = request_instance(desc)?;
         let target = Self::target(shell, window)?;
-        PendingPresenter::new(OpenStage::Instance(instance), target, extent, desc)
+        let mut pending =
+            PendingPresenter::new(OpenStage::Instance(instance), target, extent, desc)?;
+        pending.window = Some(window);
+        Ok(pending)
     }
 
     /// [`request_open`](Self::request_open) with no window behind it, as
@@ -1014,6 +1064,7 @@ impl Presenter {
     ) -> Result<PendingPresenter, PresentError> {
         let target = Self::target(shell, window)?;
         let mut pending = PendingPresenter::new(OpenStage::Done, target, extent, desc)?;
+        pending.window = Some(window);
         pending.stage = Self::start_device(instance, &pending)?;
         Ok(pending)
     }
@@ -1350,6 +1401,8 @@ impl Presenter {
             // Not asked yet, and the query is only meaningful after a present —
             // see `settle_pacing`.
             observed_timing: None,
+            window: open.window,
+            frame: FrameGate::Open,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
             batch: Vec::with_capacity(1),
@@ -1537,16 +1590,98 @@ impl Presenter {
             .filter(|id| *id > 0)
     }
 
-    /// Acquires the next swapchain image, or reconfigures and says so.
+    /// Asks the shell for a [`FrameReady`](ShellEvent::FrameReady) for this
+    /// presenter's window, to pace the frame about to be presented.
     ///
-    /// `Ok(None)` means the swapchain was out of date and has been
-    /// reconfigured: skip this frame and try the next one.
+    /// Call it after [`acquire`](Self::acquire) hands over a frame and before
+    /// [`submit_and_present`](Self::submit_and_present): on Wayland the
+    /// request is surface state that rides the present's commit, and a
+    /// request made after the present waits for a commit that may never come.
+    /// Once that present has reached the swapchain, `acquire` hands over no
+    /// frame until [`observe`](Self::observe) has seen the answer — see the
+    /// [module docs](self) for the whole loop.
+    ///
+    /// A presenter whose caller never calls this paces exactly as before.
+    /// One with no window behind it
+    /// ([`request_open_offscreen`](Self::request_open_offscreen)) has nothing
+    /// to ask for, and this does nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the window has gone away; the gate is
+    /// left as it was, so a window that is gone never holds it shut.
+    pub fn request_frame<S: Shell + ?Sized>(&mut self, shell: &mut S) -> Result<(), ShellError> {
+        let Some(window) = self.window else {
+            return Ok(());
+        };
+        shell.request_frame(window)?;
+        self.frame = self.frame.requested();
+        Ok(())
+    }
+
+    /// Reads one shell event for what it says about this presenter's frame
+    /// request: the [`FrameReady`](ShellEvent::FrameReady) that answers it,
+    /// or the [`WindowDestroyed`](ShellEvent::WindowDestroyed) after which no
+    /// answer will come. Either lets [`acquire`](Self::acquire) hand over
+    /// frames again; every other event, and either one for another window,
+    /// changes nothing.
+    ///
+    /// Hand it every event [`Shell::pump`] delivers. A caller that requests
+    /// frames and does not feed this waits for an answer that never arrives,
+    /// on every backend alike — see [`frame_due`](Self::frame_due).
+    pub fn observe(&mut self, event: &ShellEvent) {
+        if let ShellEvent::FrameReady { window } | ShellEvent::WindowDestroyed { window } = event
+            && self.window == Some(*window)
+        {
+            self.frame = FrameGate::Open;
+        }
+    }
+
+    /// Whether [`acquire`](Self::acquire) would hand over a frame, as far as
+    /// frame pacing goes: `false` from a present that carried a
+    /// [`request_frame`](Self::request_frame) until [`observe`](Self::observe)
+    /// sees its answer.
+    ///
+    /// A loop with nothing else to do waits for the shell's next event while
+    /// this is `false` — [`Shell::wait_events`] — rather than spinning; the
+    /// answer is an event, so it wakes the wait.
+    ///
+    /// # The same gate on every backend
+    ///
+    /// Where [`ShellCaps::FRAME_CALLBACK`](crcbl_shell::ShellCaps::FRAME_CALLBACK)
+    /// is set the compositor answers, and holds the answer back while nothing
+    /// of the window is shown — an output it turned off, where a FIFO present
+    /// could block forever. Elsewhere the answer comes at the next pump. The
+    /// gate does not read the capability: a loop that pumps once a frame
+    /// presents every frame where the cap is clear, as it did without the
+    /// gate, and one code path means a caller that forgets
+    /// [`observe`](Self::observe) stops at its second frame on every backend
+    /// and in every headless test, not only on Wayland. What it changes there
+    /// is that two presents need a pump between them.
+    #[must_use]
+    pub const fn frame_due(&self) -> bool {
+        self.frame.is_due()
+    }
+
+    /// Acquires the next swapchain image, or says why not.
+    ///
+    /// `Ok(None)` means skip this frame and try the next one, for one of two
+    /// reasons: the swapchain was out of date and has been reconfigured, or
+    /// the last present carried a [`request_frame`](Self::request_frame) whose
+    /// answer [`observe`](Self::observe) has not seen yet
+    /// ([`frame_due`](Self::frame_due) is `false`). The second touches no
+    /// device: an acquire is where a FIFO swapchain on an output that is off
+    /// blocks.
     ///
     /// # Errors
     ///
     /// [`PresentError`] for anything except a swapchain that has merely gone
     /// out of date, which is handled here.
     pub fn acquire(&mut self) -> Result<Option<AcquiredFrame>, PresentError> {
+        if !self.frame.is_due() {
+            return Ok(None);
+        }
+
         // Before anything else, because an error the device reported out of
         // band is a reason not to record another frame. On a backend that
         // reports every failure through its return values this is `None` every
@@ -1747,6 +1882,10 @@ impl Presenter {
             }
             Err(error) => return Err(PresentError::from(error).into()),
         }
+
+        // The present committed, so a request made for this frame is now owed
+        // an answer, and the next frame waits for it.
+        self.frame = self.frame.presented();
 
         // After the present, never before it — and after *this* present rather
         // than at the top of the next frame, because the whole question is what

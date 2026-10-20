@@ -252,11 +252,36 @@ left.** Built as decided on 2026-10-19 for lyr: Wayland answers with
 `wl_surface.frame` and sets `ShellCaps::FRAME_CALLBACK`; X11, Win32, AppKit, the
 web and `HeadlessShell` answer at the next pump through `frame::FrameRequests`.
 
-- **Nothing uses it yet, so lyr's hang is not fixed.** `crcbl-app`'s loop still
-  presents every frame, `Pacing::Auto` still asks for `PresentMode::Fifo`, and
-  `crcbl-vk` still acquires with `u64::MAX`. The fix is the loop requesting a
-  frame before each present and skipping the next present until `FrameReady`
-  where `FRAME_CALLBACK` is set; until then lyr must drive it itself. S.
+- **`Presenter` has the gate; lyr has to opt in, and nothing has run it on a
+  compositor.** `Presenter::request_frame` / `observe` / `frame_due` (state in
+  `present::frame_gate::FrameGate`) make `acquire` answer `Ok(None)` without
+  touching the device from a present that carried a request until the window's
+  `FrameReady` or `WindowDestroyed` is observed. A caller that never requests is
+  unchanged, so lyr's hang stays until lyr feeds `observe` and calls
+  `request_frame` between `acquire` and `submit_and_present`, as the
+  `crcbl_app::present` module docs give. Proven on `HeadlessShell` and the null
+  device only (`present::tests::frame_gate`, ten mutants killed); no Wayland e2e
+  drives a `Presenter` through `request_frame`, so that the request rides the
+  commit Mesa's WSI makes in `vkQueuePresentKHR` is read from the protocol, not
+  observed. `Pacing::Auto` still asks for `PresentMode::Fifo` and `crcbl-vk`
+  still acquires with `u64::MAX`, deliberately: a finite acquire timeout was
+  declined in the 2026-10-19 decision, as it turns a hang into a busy retry that
+  still blocks the loop for the timeout.
+- **The engine loop is not gated.** `crcbl::engine`'s loop presents through each
+  game's own `G::Gpu`, whose `GpuContext::acquire` call it cannot reach, so
+  gating it needs a hook from `HostedGame` to its `GpuContext` (or the gate in
+  `GpuContext` with the loop feeding it events), and decisions this slice did
+  not make: whether ticks keep running while the window is not shown, how the
+  loop sleeps then instead of spinning (`wait_events` with the limiter's
+  deadline, or none), and that `FrameBudget::record` counts a gated frame, which
+  `page.rs` reports as `FrameOutcome::Reconfigured`, toward its
+  reconfigures-in-a-row limit. Needs the owner's call on the tick question.
+- **Behaviour that is not a bug, in the gate:** requests share one answer, so an
+  answer for an earlier commit (a configure's acknowledgement carrying the
+  request) can open the gate before the present it was meant for; that frame
+  goes unpaced and the next one asks again. The gate is the same where
+  `FRAME_CALLBACK` is clear, which costs a loop that presents twice per pump its
+  second present; one that pumps once a frame keeps its cadence.
 - **Never run against an output that is off.** The Wayland e2e
   (`a_frame_request_is_answered_after_the_next_commit`) shows a commit is
   answered, once for two requests, and that a destroyed window is not; that a

@@ -38,6 +38,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   next `pump` and the bit is clear, so one loop works everywhere, and
   `wait_events` does not sleep while an answer is due.
   `HeadlessShell::frame_requested` says whether a request is outstanding.
+- **`crcbl_app::present::Presenter` presents only when the window system asks**,
+  for a caller that opts in: hand every pumped event to `Presenter::observe`,
+  and call `Presenter::request_frame(&mut shell)` between `acquire` and
+  `submit_and_present`. After a present that carried a request, `acquire`
+  answers `Ok(None)` without touching the device until the window's `FrameReady`
+  (or its `WindowDestroyed`) is observed, so a status bar on an output the
+  compositor turned off no longer blocks in a FIFO acquire there;
+  `Presenter::frame_due` says the same ahead of time, for a loop that would
+  rather sleep in `wait_events`. The gate is the same on every backend, so a
+  loop that pumps once a frame keeps its cadence where `FRAME_CALLBACK` is
+  clear, and a caller that never requests a frame presents exactly as before.
 - **`Shell::set_panel(window, size, &PanelDesc)`** changes a live panel's size,
   layer, anchor, margins, reserve and keyboard in place, so a notification stack
   that grows with its toasts, or a bar whose height changes on reload, keeps its

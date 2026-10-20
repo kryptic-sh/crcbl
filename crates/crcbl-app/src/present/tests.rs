@@ -10,6 +10,9 @@ use crcbl_shell::HeadlessShell;
 // The backend walk past a backend that refuses the window.
 mod backend_walk;
 
+// Frame requests pacing the presents.
+mod frame_gate;
+
 /// A headless shell and one window on it.
 fn shell() -> (HeadlessShell, WindowId) {
     let mut shell = HeadlessShell::new();
