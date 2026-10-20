@@ -350,6 +350,10 @@ fn binMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     return;
 }
 
+var<workgroup> starts_scan_0 : array<u32, i32(256)>;
+
+var<workgroup> starts_total_0 : u32;
+
 fn run_start_word_0( region_3 : u32,  bucket_5 : u32) -> u32
 {
     return u32(3) * gen_0.visible_capacity_0 + draw_slot_0(region_3, bucket_5);
@@ -360,21 +364,149 @@ fn count_word_0( region_4 : u32,  bucket_6 : u32) -> u32
     return region_4 * u32(4) * gen_0.bucket_count_0 + bucket_6;
 }
 
+fn scan_starts_0( region_5 : u32,  base_0 : u32,  lane_0 : u32) -> u32
+{
+    var chunk_0 : u32 = gen_0.bucket_count_0 / u32(256);
+    var chunk_1 : u32;
+    if((gen_0.bucket_count_0 % u32(256)) != u32(0))
+    {
+        chunk_1 = chunk_0 + u32(1);
+    }
+    else
+    {
+        chunk_1 = chunk_0;
+    }
+    var first_0 : u32 = lane_0 * chunk_1;
+    var count_0 : u32;
+    if(first_0 < (gen_0.bucket_count_0))
+    {
+        count_0 = min(chunk_1, gen_0.bucket_count_0 - first_0);
+    }
+    else
+    {
+        count_0 = u32(0);
+    }
+    var _S23 : u32 = first_0 + count_0;
+    var bucket_7 : u32 = first_0;
+    var subtotal_0 : u32 = u32(0);
+    for(;;)
+    {
+        if(bucket_7 < _S23)
+        {
+        }
+        else
+        {
+            break;
+        }
+        var _S24 : u32 = atomicLoad(&(counts_and_mesh_args_0[mesh_arg_word_0(region_5, bucket_7, u32(1))]));
+        var subtotal_1 : u32 = subtotal_0 + _S24;
+        bucket_7 = bucket_7 + u32(1);
+        subtotal_0 = subtotal_1;
+    }
+    starts_scan_0[lane_0] = subtotal_0;
+    workgroupBarrier();
+    var stride_0 : u32 = u32(1);
+    for(;;)
+    {
+        if(stride_0 < u32(256))
+        {
+        }
+        else
+        {
+            break;
+        }
+        var index_1 : u32 = (lane_0 + u32(1)) * stride_0 * u32(2) - u32(1);
+        if(index_1 < u32(256))
+        {
+            starts_scan_0[index_1] = starts_scan_0[index_1] + starts_scan_0[index_1 - stride_0];
+        }
+        workgroupBarrier();
+        stride_0 = stride_0 * u32(2);
+    }
+    if(lane_0 == u32(255))
+    {
+        starts_total_0 = starts_scan_0[lane_0];
+        starts_scan_0[lane_0] = u32(0);
+    }
+    workgroupBarrier();
+    stride_0 = u32(128);
+    for(;;)
+    {
+        if(stride_0 > u32(0))
+        {
+        }
+        else
+        {
+            break;
+        }
+        var index_2 : u32 = (lane_0 + u32(1)) * stride_0 * u32(2) - u32(1);
+        if(index_2 < u32(256))
+        {
+            var before_0 : u32 = starts_scan_0[index_2 - stride_0];
+            starts_scan_0[index_2 - stride_0] = starts_scan_0[index_2];
+            starts_scan_0[index_2] = starts_scan_0[index_2] + before_0;
+        }
+        workgroupBarrier();
+        stride_0 = stride_0 / u32(2);
+    }
+    var _S25 : u32 = base_0 + starts_scan_0[lane_0];
+    bucket_7 = first_0;
+    var start_0 : u32 = _S25;
+    for(;;)
+    {
+        if(bucket_7 < _S23)
+        {
+        }
+        else
+        {
+            break;
+        }
+        visible_instances_0[run_start_word_0(region_5, bucket_7)] = start_0;
+        var routed_1 : u32 = atomicLoad(&(counts_and_mesh_args_0[mesh_arg_word_0(region_5, bucket_7, u32(1))]));
+        if(routed_1 != u32(0))
+        {
+            atomicStore(&(counts_and_mesh_args_0[count_word_0(region_5, bucket_7)]), u32(1));
+        }
+        var _S26 : bool;
+        if((gen_0.mode_0) == u32(1))
+        {
+            _S26 = region_5 == u32(0);
+        }
+        else
+        {
+            _S26 = false;
+        }
+        if(_S26)
+        {
+            var early_0 : u32 = atomicLoad(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(1), bucket_7, u32(1))]));
+            visible_instances_0[run_start_word_0(u32(1), bucket_7)] = start_0;
+            visible_instances_0[run_start_word_0(u32(2), bucket_7)] = start_0 + early_0;
+            if(early_0 != u32(0))
+            {
+                atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(1), bucket_7)]), u32(1));
+            }
+        }
+        var start_1 : u32 = start_0 + routed_1;
+        bucket_7 = bucket_7 + u32(1);
+        start_0 = start_1;
+    }
+    workgroupBarrier();
+    return starts_total_0;
+}
+
 fn runs_at_0() -> u32
 {
     return u32(2) * gen_0.visible_capacity_0;
 }
 
 @compute
-@workgroup_size(1, 1, 1)
-fn startsMain()
+@workgroup_size(256, 1, 1)
+fn startsMain(@builtin(local_invocation_index) lane_1 : u32)
 {
-    var face_1 : u32;
-    var face_start_0 : u32;
     if((gen_0.mode_0) == u32(2))
     {
-        face_1 = u32(0);
-        face_start_0 = gen_0.face_runs_at_0;
+        var face_1 : u32 = u32(0);
+        var face_start_0 : u32 = gen_0.face_runs_at_0;
         for(;;)
         {
             if(face_1 < u32(6))
@@ -384,63 +516,14 @@ fn startsMain()
             {
                 break;
             }
-            var _S23 : u32 = u32(1) + face_1;
-            var bucket_7 : u32 = u32(0);
-            for(;;)
-            {
-                if(bucket_7 < (gen_0.bucket_count_0))
-                {
-                }
-                else
-                {
-                    break;
-                }
-                visible_instances_0[run_start_word_0(_S23, bucket_7)] = face_start_0;
-                var reached_0 : u32 = atomicLoad(&(counts_and_mesh_args_0[mesh_arg_word_0(_S23, bucket_7, u32(1))]));
-                if(reached_0 != u32(0))
-                {
-                    atomicStore(&(counts_and_mesh_args_0[count_word_0(_S23, bucket_7)]), u32(1));
-                }
-                var face_start_1 : u32 = face_start_0 + reached_0;
-                bucket_7 = bucket_7 + u32(1);
-                face_start_0 = face_start_1;
-            }
+            var _S27 : u32 = scan_starts_0(u32(1) + face_1, face_start_0, lane_1);
+            var face_start_1 : u32 = face_start_0 + _S27;
             face_1 = face_1 + u32(1);
+            face_start_0 = face_start_1;
         }
         return;
     }
-    var _S24 : u32 = runs_at_0();
-    face_1 = u32(0);
-    face_start_0 = _S24;
-    for(;;)
-    {
-        if(face_1 < (gen_0.bucket_count_0))
-        {
-        }
-        else
-        {
-            break;
-        }
-        visible_instances_0[run_start_word_0(u32(0), face_1)] = face_start_0;
-        var routed_1 : u32 = atomicLoad(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(0), face_1, u32(1))]));
-        if(routed_1 != u32(0))
-        {
-            atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(0), face_1)]), u32(1));
-        }
-        if((gen_0.mode_0) == u32(1))
-        {
-            var early_0 : u32 = atomicLoad(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(1), face_1, u32(1))]));
-            visible_instances_0[run_start_word_0(u32(1), face_1)] = face_start_0;
-            visible_instances_0[run_start_word_0(u32(2), face_1)] = face_start_0 + early_0;
-            if(early_0 != u32(0))
-            {
-                atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(1), face_1)]), u32(1));
-            }
-        }
-        var start_0 : u32 = face_start_0 + routed_1;
-        face_1 = face_1 + u32(1);
-        face_start_0 = start_0;
-    }
+    var _S28 : u32 = scan_starts_0(u32(0), runs_at_0(), lane_1);
     return;
 }
 
@@ -448,18 +531,18 @@ fn startsMain()
 @workgroup_size(64, 1, 1)
 fn scatterMain(@builtin(global_invocation_id) thread_1 : vec3<u32>)
 {
-    var index_1 : u32 = thread_1.x;
-    if(index_1 >= (survivor_count_0()))
+    var index_3 : u32 = thread_1.x;
+    if(index_3 >= (survivor_count_0()))
     {
         return;
     }
-    var bucket_8 : u32 = visible_instances_0[route_word_0(index_1)];
-    if(visible_instances_0[route_word_0(index_1)] == u32(4294967295))
+    var bucket_8 : u32 = visible_instances_0[route_word_0(index_3)];
+    if(visible_instances_0[route_word_0(index_3)] == u32(4294967295))
     {
         return;
     }
-    var entry_1 : u32 = visible_instances_0[index_1];
-    var instance_index_1 : u32 = (visible_instances_0[index_1] & (u32(16777215)));
+    var entry_1 : u32 = visible_instances_0[index_3];
+    var instance_index_1 : u32 = (visible_instances_0[index_3] & (u32(16777215)));
     var face_2 : u32;
     if((gen_0.mode_0) == u32(2))
     {
@@ -478,23 +561,23 @@ fn scatterMain(@builtin(global_invocation_id) thread_1 : vec3<u32>)
                 face_2 = face_2 + u32(1);
                 continue;
             }
-            var region_5 : u32 = u32(1) + face_2;
-            var face_slot_0 : u32 = atomicAdd(&(args_0[arg_word_0(region_5, bucket_8, u32(1))]), u32(1));
-            visible_instances_0[visible_instances_0[run_start_word_0(region_5, bucket_8)] + face_slot_0] = instance_index_1;
+            var region_6 : u32 = u32(1) + face_2;
+            var face_slot_0 : u32 = atomicAdd(&(args_0[arg_word_0(region_6, bucket_8, u32(1))]), u32(1));
+            visible_instances_0[visible_instances_0[run_start_word_0(region_6, bucket_8)] + face_slot_0] = instance_index_1;
             face_2 = face_2 + u32(1);
         }
         return;
     }
-    var _S25 : bool;
+    var _S29 : bool;
     if((gen_0.mode_0) == u32(1))
     {
-        _S25 = ((entry_1 & (u32(2147483648)))) != u32(0);
+        _S29 = ((entry_1 & (u32(2147483648)))) != u32(0);
     }
     else
     {
-        _S25 = false;
+        _S29 = false;
     }
-    if(_S25)
+    if(_S29)
     {
         return;
     }
@@ -515,18 +598,18 @@ fn scatterMain(@builtin(global_invocation_id) thread_1 : vec3<u32>)
 @workgroup_size(64, 1, 1)
 fn lateScatterMain(@builtin(global_invocation_id) thread_2 : vec3<u32>)
 {
-    var index_2 : u32 = thread_2.x;
-    if(index_2 >= (survivor_count_0()))
+    var index_4 : u32 = thread_2.x;
+    if(index_4 >= (survivor_count_0()))
     {
         return;
     }
-    var entry_2 : u32 = visible_instances_0[index_2];
-    if(((visible_instances_0[index_2] & (u32(1073741824)))) == u32(0))
+    var entry_2 : u32 = visible_instances_0[index_4];
+    if(((visible_instances_0[index_4] & (u32(1073741824)))) == u32(0))
     {
         return;
     }
-    var bucket_9 : u32 = visible_instances_0[route_word_0(index_2)];
-    if(visible_instances_0[route_word_0(index_2)] == u32(4294967295))
+    var bucket_9 : u32 = visible_instances_0[route_word_0(index_4)];
+    if(visible_instances_0[route_word_0(index_4)] == u32(4294967295))
     {
         return;
     }
@@ -554,16 +637,16 @@ fn lateFinishMain(@builtin(global_invocation_id) thread_3 : vec3<u32>)
     var drawn_0 : u32 = early_1 + late_0;
     atomicStore(&(args_0[arg_word_0(u32(0), bucket_10, u32(1))]), drawn_0);
     atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(0), bucket_10, u32(1))]), drawn_0);
-    var _S26 : i32;
+    var _S30 : i32;
     if(drawn_0 != u32(0))
     {
-        _S26 = i32(1);
+        _S30 = i32(1);
     }
     else
     {
-        _S26 = i32(0);
+        _S30 = i32(0);
     }
-    atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(0), bucket_10)]), u32(_S26));
+    atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(0), bucket_10)]), u32(_S30));
     return;
 }
 

@@ -35,9 +35,12 @@
 /// `max(buckets, visible_capacity).div_ceil(WORKGROUP_SIZE)` groups of it;
 /// `scatterMain` only scatters, so `visible_capacity.div_ceil(WORKGROUP_SIZE)`.
 /// `lateFinishMain` owns one bucket per invocation, so it needs
-/// `buckets.div_ceil(WORKGROUP_SIZE)` groups.
-/// `startsMain` is one invocation and declares `[numthreads(1, 1, 1)]`.
+/// `buckets.div_ceil(WORKGROUP_SIZE)` groups. `startsMain` is one workgroup of
+/// [`STARTS_WORKGROUP_SIZE`] cooperating invocations.
 pub const WORKGROUP_SIZE: u32 = 64;
+
+/// Invocations in the one workgroup that scans bucket run starts.
+pub const STARTS_WORKGROUP_SIZE: u32 = 256;
 
 /// Bytes of the uniform block.
 ///
@@ -668,10 +671,19 @@ mod tests {
                  the shader"
             );
         }
+        let declaration = format!(
+            "[numthreads({STARTS_WORKGROUP_SIZE}, 1, 1)]\nvoid startsMain(uint lane: SV_GroupIndex)"
+        );
         assert!(
-            source.contains("[numthreads(1, 1, 1)]\nvoid startsMain()"),
-            "draw_gen.slang's prefix sum is not one invocation, and `crcbl_render::DrawGen` \
-             dispatches exactly one"
+            source.contains(&declaration),
+            "draw_gen.slang does not declare `{declaration}`; the renderer dispatches one \
+             workgroup for its prefix sum"
+        );
+        let constant = format!("static const uint STARTS_THREADS = {STARTS_WORKGROUP_SIZE};");
+        assert!(
+            source.contains(&constant),
+            "draw_gen.slang does not declare `{constant}`; its shared scan width has drifted \
+             from the workgroup width"
         );
     }
 

@@ -29,6 +29,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Draw generation now computes bucket run starts with a 256-lane workgroup
+  prefix scan instead of serialising the whole table through one invocation. On
+  the 10,000-instance, 938-bucket sandbox fixture, paired MX550 runs reduced the
+  three aggregated `draw-starts` passes by 96.798–96.958% at p50 and the
+  complete measured pass sum by 5.861–6.103%.
 - Draw generation now routes each survivor through a resident
   `(mesh, material mode)` lookup instead of linearly searching every preceding
   draw bucket. On the 10,000-instance, 938-bucket sandbox fixture, paired MX550

@@ -971,9 +971,7 @@ impl DrawGen {
             &DRAW_GEN,
             "startsMain",
             gen_pipeline_layout,
-            // One invocation for the whole prefix sum, on the shader's own
-            // terms: every start depends on the one before it.
-            1,
+            draw_gen::STARTS_WORKGROUP_SIZE,
         )?;
         rollback.pipelines.push(starts_pipeline);
         let scatter_pipeline = compute_pipeline_entry(

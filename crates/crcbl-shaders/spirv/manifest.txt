@@ -186,16 +186,16 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [draw_gen]
 source = shaders/draw_gen.slang
-source-sha256 = bc5fa75e94b7d042dcaac3fd2287933391c2766b3da80abed54eb562c338bcfe
+source-sha256 = aa6158b1891d4c347c56e75ea09e62d3c194e1ef2712d28da1b7ea48ca85e661
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/draw_gen.spv
-spirv-sha256 = d33ee8d83a8534485e85707201fd4070e01375f7efaf4990dada5c63eaf385ee
+spirv-sha256 = 31cda0f1034fe50692a660125ee4d1521543675009d207eed347d807b3129f14
 wgsl = wgsl/draw_gen.wgsl
-wgsl-sha256 = 5946b79b2dfbcae82563f8f7f4a45171665d1988ab3179dcfe7b6cdefad9f8e7
+wgsl-sha256 = a4818779bb139bfdfe31db41edffa92f8f50f9eb9889dfcc87d967d959024935
 msl = msl/draw_gen.metal
-msl-sha256 = 7223a431c4507aff736b96baf34a0428c40635d6c46ab2a847d8cd7f6e4f94ab
+msl-sha256 = 53e941a23c41e8a509b1c3654bd11ce1715320c4ec0a2bf27ec629b62d9cb854
 dxil = binMain:dxil/draw_gen.bin.dxil:4473f8b74c31459cfdf8976969a3d0affe57b79ed3c4fa4b3d9a67876f8c49f4
-dxil = startsMain:dxil/draw_gen.starts.dxil:785b385b87968cbef453c43ec4988ea14ed5906b732407dc332854a38c927d55
+dxil = startsMain:dxil/draw_gen.starts.dxil:b9fea74b3d654ef509433ab42e1248f82d0e3e70fd43f9f9718312e9ada93b73
 dxil = scatterMain:dxil/draw_gen.scatter.dxil:c268275fc5d6ee7bf2bc948d4e0277efe64421b269343189dbc5204001577809
 dxil = lateScatterMain:dxil/draw_gen.late_scatter.dxil:fea03f43293974858e9a20c582d60042d549a93504ef929a0f05ccd034b6cd3d
 dxil = lateFinishMain:dxil/draw_gen.late_finish.dxil:9de43e03c50e5dc28f36fe7d278d758bc7914cd276c88ef509bfea262c0c6e2a

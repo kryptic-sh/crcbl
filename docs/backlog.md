@@ -3727,9 +3727,9 @@ run to completion at a 363 MiB peak where they aborted before, and that is with
 One item at a time: an implementation agent takes an item with the verification
 below, the change is reviewed and the whole verification re-run by hand, then
 committed on its own and pushed to `main`, and its bullet is deleted here. The
-remaining order, by expected win against risk: P20, P2 (log the real stride
-first — it may be moot), P11, P31 and P32, P12, P13, P22, P23, P21, then the
-rest top to bottom. The verification every item gets:
+remaining order, by expected win against risk: P2 (log the real stride first —
+it may be moot), P11, P31 and P32, P12, P13, P22, P23, P21, then the rest top to
+bottom. The verification every item gets:
 
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
   (it compiles the feature-gated GPU suites too, which a plain workspace check
@@ -3980,16 +3980,6 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 
 ### GPU time
 
-- **P20 — `draw-starts` serialises every bucket prefix.** After direct draw
-  routing removed the preceding linear search, paired 900-frame 1920×1080 runs
-  on the MX550 measured the three aggregated `draw-starts` passes at 0.526/0.531
-  ms p50, or 6.3/6.4% of their complete p50 pass sums. `startsMain` launches one
-  invocation and walks every bucket for each active region, so the fixed
-  `sandbox --scene buckets` workload leaves the GPU mostly idle while one lane
-  prefixes 938 counts. Trial a workgroup prefix scan per region while preserving
-  absolute run starts, empty-bucket indirect counts, face-region packing and the
-  existing GPU readback oracle. Record paired results on the same fixture and
-  retain it only if both the pass and complete pass sum improve repeatably.
 - **P21 — one bind and one indirect call per bucket per pass per view.**
   `BucketDraws::record` issues a call for every bucket, empty or not, in the
   prepass, the forward pass and every shadow view — about ten thousand calls a
@@ -3997,7 +3987,13 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   bucket ranges per partition and one `DrawIndexedIndirectCount` per range, with
   the per-bucket constants moved out of the dynamic uniform. WebGPU needs
   `indirect-first-instance`; the current path stays as the fallback, and the
-  one-call-per-bucket tests change.
+  one-call-per-bucket tests change. Slang's Metal output currently materialises
+  `startsMain`'s 1 KiB workgroup scan scratch in every `draw_gen` compute entry
+  point because it lowers module-scope `groupshared` state through the shared
+  kernel context. The paired Vulkan measurements kept adjacent draw passes in
+  their expected range, but Metal performance is not verified on this Linux
+  machine. Measure it on macOS; if it reduces occupancy, compile the starts
+  entry point as a separate module when this command path is reorganised.
 - **P22 — the shadow cache breaks on any camera move or any instance change.**
   `shadow_group_record` hashes the global `InstancePool::revision` and the
   camera's selection eye for every group, so light maps that do not depend on

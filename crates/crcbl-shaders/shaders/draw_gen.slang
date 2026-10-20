@@ -94,7 +94,7 @@
 //    static arguments, selects the survivor's level, and **routes** it — the
 //    bucket it belongs to goes into the route region, and the bucket's mesh
 //    dispatch y extent counts it.
-// 2. `startsMain`, one invocation: walks the buckets in order and writes each
+// 2. `startsMain`, one workgroup: scans the buckets in order and writes each
 //    one's start as the sum of the counts in front of it — a prefix sum.
 // 3. `scatterMain`, one invocation per survivor: reads its route and that
 //    bucket's start, takes a slot in the run, and writes the instance index.
@@ -109,11 +109,12 @@
 // region being scattered into, and the survivor list cannot hold it either —
 // that is the instance index being scattered.
 //
-// **The prefix sum is serial**, in one invocation, for the reason
-// `exposure.slang`'s reduce is: the bucket table is fixed at build and small —
-// one entry per (resident mesh level, material mode) — so a walk of it is one
-// addition per bucket, where a parallel scan would be several dispatches and an
-// order a device schedules.
+// **The prefix sum is one workgroup**, not several dispatches. Each lane first
+// sums one contiguous chunk of the bucket table, a workgroup-local exclusive
+// scan gives it the total in every chunk before its own, and it then walks its
+// small chunk again to write exact per-bucket starts. Contiguous chunks preserve
+// bucket order; keeping the scan in one workgroup gives its barriers the
+// ordering that separate dispatches would have needed graph passes to express.
 //
 // # Draw regions: more than one set of draws out of one generator
 //
@@ -875,6 +876,15 @@ static const uint NO_BUCKET = 0xffffffff;
 /// table. Kept equal to `crcbl_shaders::draw_gen::ROUTE_MODES` by a source test.
 static const uint ROUTE_MODES = 4;
 
+/// The one prefix-scan workgroup's width. Kept equal to
+/// `crcbl_shaders::draw_gen::STARTS_WORKGROUP_SIZE` by a source test.
+static const uint STARTS_THREADS = 256;
+
+/// One total per lane while the run-start scan climbs and descends its tree,
+/// plus the whole region's total for the caller to place the next face behind.
+groupshared uint starts_scan[STARTS_THREADS];
+groupshared uint starts_total;
+
 /// The bucket that draws `mesh` under `mode`, or `NO_BUCKET` when that key has
 /// no resident bucket. `pack_tables` fills the complete two-bit mode domain for
 /// every mesh the level tables can name, so every valid key is in bounds.
@@ -1218,53 +1228,74 @@ void binMain(uint3 thread: SV_DispatchThreadID)
     visible_instances[route_word(index)] = routed;
 }
 
-/// The second stage, the `draw-starts` pass: where every bucket's run starts
-/// this frame, and whether it draws at all.
-///
-/// One invocation walking the table in bucket order, for the reason the header
-/// gives. By the time it runs every `binMain` invocation has finished, so each
-/// y extent is a total rather than a counter still moving — which is the whole
-/// reason this is a pass of its own.
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void startsMain()
+/// Scans one draw region into absolute starts and returns how many run words the
+/// region occupies. Every lane owns one contiguous bucket chunk, so adding its
+/// exclusive chunk prefix to a local serial prefix produces the same order as a
+/// single walk of the whole table.
+uint scan_starts(uint region, uint base, uint lane)
 {
-    if (gen.mode == DRAW_MODE_FACES)
+    uint chunk = gen.bucket_count / STARTS_THREADS;
+    if (gen.bucket_count % STARTS_THREADS != 0)
     {
-        // Each face's runs end to end, face by face, in their own region of the
-        // buffer: a survivor can reach several faces, so the faces together can
-        // hold more than one capacity of runs.
-        uint face_start = gen.face_runs_at;
-        for (uint face = 0; face < FACE_COUNT; ++face)
+        chunk += 1;
+    }
+    uint first = lane * chunk;
+    uint count = first < gen.bucket_count ? min(chunk, gen.bucket_count - first) : 0;
+    uint end = first + count;
+
+    uint subtotal = 0;
+    for (uint bucket = first; bucket < end; ++bucket)
+    {
+        subtotal +=
+            counts_and_mesh_args[mesh_arg_word(region, bucket, MESH_ARG_GROUP_Y)].load();
+    }
+    starts_scan[lane] = subtotal;
+    GroupMemoryBarrierWithGroupSync();
+
+    // Blelloch's up-sweep leaves the region total at the root.
+    for (uint stride = 1; stride < STARTS_THREADS; stride *= 2)
+    {
+        uint index = (lane + 1) * stride * 2 - 1;
+        if (index < STARTS_THREADS)
         {
-            uint region = FACE_REGION_BASE + face;
-            for (uint bucket = 0; bucket < gen.bucket_count; ++bucket)
-            {
-                visible_instances[run_start_word(region, bucket)] = face_start;
-                uint reached =
-                    counts_and_mesh_args[mesh_arg_word(region, bucket, MESH_ARG_GROUP_Y)].load();
-                if (reached != 0)
-                {
-                    counts_and_mesh_args[count_word(region, bucket)].store(1);
-                }
-                face_start += reached;
-            }
+            starts_scan[index] += starts_scan[index - stride];
         }
-        return;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane == STARTS_THREADS - 1)
+    {
+        starts_total = starts_scan[lane];
+        starts_scan[lane] = 0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Turning the root into zero and swapping the partials on the way down
+    // changes the inclusive tree into one exclusive prefix per lane.
+    for (uint stride = STARTS_THREADS / 2; stride > 0; stride /= 2)
+    {
+        uint index = (lane + 1) * stride * 2 - 1;
+        if (index < STARTS_THREADS)
+        {
+            uint before = starts_scan[index - stride];
+            starts_scan[index - stride] = starts_scan[index];
+            starts_scan[index] += before;
+        }
+        GroupMemoryBarrierWithGroupSync();
     }
 
-    uint start = runs_at();
-    for (uint bucket = 0; bucket < gen.bucket_count; ++bucket)
+    uint start = base + starts_scan[lane];
+    for (uint bucket = first; bucket < end; ++bucket)
     {
-        visible_instances[run_start_word(0, bucket)] = start;
-        uint routed = counts_and_mesh_args[mesh_arg_word(0, bucket, MESH_ARG_GROUP_Y)].load();
+        visible_instances[run_start_word(region, bucket)] = start;
+        uint routed =
+            counts_and_mesh_args[mesh_arg_word(region, bucket, MESH_ARG_GROUP_Y)].load();
         // `1` for a bucket with something in it; an empty one keeps the zero
         // the clearing pass wrote, which is what `IndirectCount`'s call reads.
         if (routed != 0)
         {
-            counts_and_mesh_args[count_word(0, bucket)].store(1);
+            counts_and_mesh_args[count_word(region, bucket)].store(1);
         }
-        if (gen.mode == DRAW_MODE_OCCLUSION)
+        if (gen.mode == DRAW_MODE_OCCLUSION && region == 0)
         {
             // The early run is the front of region 0's, and the late run starts
             // where the early one ends — so the forward pass reads one
@@ -1280,6 +1311,37 @@ void startsMain()
         }
         start += routed;
     }
+    // A face immediately reuses the shared tree for the next region. No lane
+    // may overwrite it until every lane has consumed its own prefix.
+    GroupMemoryBarrierWithGroupSync();
+    return starts_total;
+}
+
+/// The second stage, the `draw-starts` pass: where every bucket's run starts
+/// this frame, and whether it draws at all.
+///
+/// One workgroup scanning the table in bucket order, for the reason the header
+/// gives. By the time it runs every `binMain` invocation has finished, so each
+/// y extent is a total rather than a counter still moving — which is the whole
+/// reason this is a pass of its own.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void startsMain(uint lane: SV_GroupIndex)
+{
+    if (gen.mode == DRAW_MODE_FACES)
+    {
+        // Each face's runs end to end, face by face, in their own region of the
+        // buffer: a survivor can reach several faces, so the faces together can
+        // hold more than one capacity of runs.
+        uint face_start = gen.face_runs_at;
+        for (uint face = 0; face < FACE_COUNT; ++face)
+        {
+            face_start += scan_starts(FACE_REGION_BASE + face, face_start, lane);
+        }
+        return;
+    }
+
+    scan_starts(0, runs_at(), lane);
 }
 
 /// The third stage, the `draw-scatter` pass: every routed survivor's instance
