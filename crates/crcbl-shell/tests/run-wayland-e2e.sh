@@ -687,6 +687,54 @@ run_sandbox_toggle() {
 nothing left alive, validation silent"
 }
 
+# `run_sandbox_resize <backend>`
+#
+# The window resized from outside while frames are in flight, which is what
+# `Presenter::resize`'s drain-before-reconfigure is for (found on D3D12, where
+# `ResizeBuffers` refuses while a back buffer is referenced). sway resizes the
+# floating window twice through IPC; each `Resized` must reach the presenter as
+# a reconfigure at that size, and the run must end at the last one with nothing
+# left alive. The reconfigure lines are `debug`, so this run logs at debug.
+run_sandbox_resize() {
+    local backend="$1"
+    local log="${SWAY_RUNTIME_DIR}/sandbox-resize.log"
+    echo "crcbl e2e: running the sandbox on $backend and resizing it while it presents"
+
+    CRCBL_SHELL=wayland \
+    CRCBL_VK_VALIDATION=1 \
+    CRCBL_LOG=debug \
+        "${BIN_DIR}/sandbox" --backend "$backend" --title "crcbl e2e sandbox" \
+        >"$log" 2>&1 &
+    local sandbox_pid=$!
+    wait_for_line "the sandbox to present windowed" "$log" "shell: the window is windowed"
+
+    local size
+    for size in 900x500 640x360; do
+        swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" resize set "${size%x*}" "${size#*x}" >/dev/null
+        wait_for_line "a reconfigure at $size" "$log" "hal: reconfiguring the swapchain to $size"
+    done
+
+    swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" kill >/dev/null
+    local status=0
+    wait "$sandbox_pid" || status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "crcbl e2e: the sandbox failed while being resized on $backend (exit $status)" >&2
+        tail -n 40 "$log" >&2
+        sway_log_tail
+        exit "$status"
+    fi
+    if ! grep -qE "at 640x360, windowed \([^)]*CloseRequested\)" "$log"; then
+        echo "crcbl e2e: the resized sandbox did not end windowed at 640x360" >&2
+        tail -n 40 "$log" >&2
+        sway_log_tail
+        exit 1
+    fi
+    assert_nothing_left_alive "$log" "the resized sandbox"
+    assert_validation_saw_nothing "$log" "the resized sandbox"
+    echo "crcbl e2e: the sandbox was resized twice while presenting on wayland/$backend, \
+reconfigured at each size, nothing left alive, validation silent"
+}
+
 if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
     || ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
     run_sandbox vk windowed
@@ -706,6 +754,8 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     cargo build --locked --quiet --package crcbl-shell \
         --features wayland-e2e --bin crcbl-e2e-wayland-key
     run_sandbox_toggle vk
+    # Resized from outside while frames are in flight; reuses the build above.
+    run_sandbox_resize vk
     # One more windowed run, this time required to fail. After the passes above
     # rather than instead of any of them: each of those was still graded by the
     # ordinary checks with nothing injected.

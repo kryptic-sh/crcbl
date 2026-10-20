@@ -2389,8 +2389,9 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128`, 2026-10-20). The sandbox ran 4000
   frames while `swaymsg resize set` moved its floating window three times
   partway through; each `Resized` reconfigured the swapchain (900x500, 1500x900,
-  640x360) and the run exited 0. A hand-run script, not a CI test: the suite's
-  sandbox step never resizes after presenting.
+  640x360) and the run exited 0. `run-wayland-e2e.sh`'s `run_sandbox_resize` now
+  does the same in CI (two resizes, a reconfigure required at each), from
+  2026-10-21.
 - `DrawList::push_opacity` and `font::breaks`: not checked on Vulkan.
 - **The table, 2026-10-20.** "CI" is a test in the named suite (nested sway,
   Xvfb, lavapipe); "laptop" was run on the office laptop (headless sway 1.12,
@@ -2417,7 +2418,8 @@ named under S-rows above. lyr's observations from its first Hyprland runs
 
   Still open from the table: the pointer-leave case on X11 (Wayland's is
   `crossing_into_another_of_our_windows_leaves_the_first`), and the scripted
-  resize as a CI test.
+  resize's first CI result (`run_sandbox_resize` in `run-wayland-e2e.sh`, from
+  2026-10-21; red when sway resizes to a size it does not expect).
 
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.
