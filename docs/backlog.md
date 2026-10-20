@@ -223,10 +223,13 @@ that is not a panel, are `InvalidDescriptor` everywhere
   Win32 desktop tests in `win32/shell/tests.rs`
   (`a_reconfigured_appbar_reserves_its_new_height_and_gives_it_back_when_told`,
   `a_reconfigured_panel_changes_band_and_keyboard_in_place`) and the bar half of
-  `tests/appkit_session.rs`'s `panels` were compiled locally and not run, and
-  none of their mutants has been run. Locally verified: the headless test, the
-  Win32 `Panel::desc`/`rect_on` unit test, and mutants of `check_set_panel` and
-  of headless `set_panel`.
+  `tests/appkit_session.rs`'s `panels` were compiled locally and not run, and of
+  their mutants only W1 (the Wayland commit in `reconfigure_layer_surface`
+  removed) has run: it survived the first version of the e2e, which polled for
+  the new height and passed on a later configure's acknowledging commit. The
+  test now asserts the size after one roundtrip and one pump; not yet re-run.
+  Locally verified: the headless test, the Win32 `Panel::desc`/`rect_on` unit
+  test, and mutants of `check_set_panel` and of headless `set_panel`.
 - **Not covered by any test:** the trait default (X11, the web), which an X11
   e2e asserting `Unsupported` would cover; the Wayland refusal of a new layer on
   `zwlr_layer_shell_v1` 1, since sway offers 4; a Win32 appbar moving to another

@@ -3519,9 +3519,19 @@ fn a_reconfigured_panel_is_configured_at_its_new_height_and_reserves_it() {
         .shell
         .set_panel(bar, LogicalSize::new(0.0, f64::from(TALLER)), &desc)
         .expect("set_panel");
-    session.pump_until("the panel's configure at its new height", |session| {
-        session.size(bar) == Some(PhysicalSize::new(OUTPUT_SIZE.width, TALLER))
-    });
+    // sway configures a layer surface from the handler of the commit that
+    // changed it, so one roundtrip has the configure queued and one pump
+    // applies it. Polling instead passed with `set_panel`'s own commit
+    // removed: a later configure's acknowledging commit carried the pending
+    // layer state. The roundtrip only queues what it reads, so nothing this
+    // client sends between `set_panel` and the pump can stand in for it.
+    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, bar).expect("roundtrip");
+    session.pump();
+    assert_eq!(
+        session.size(bar),
+        Some(PhysicalSize::new(OUTPUT_SIZE.width, TALLER)),
+        "the configure that answers set_panel's commit"
+    );
     session.pump_until("tiled windows to give up the new height", |session| {
         session.size(window)
             == Some(PhysicalSize::new(
