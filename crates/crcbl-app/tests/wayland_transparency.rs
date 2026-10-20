@@ -227,7 +227,10 @@ fn a_transparent_window_is_blended_premultiplied_by_the_compositor() {
             break pixel;
         }
     };
-    println!("crcbl s16: the screen shows {pixel:?} at {PROBE:?} (stored blue {blue})");
+    println!(
+        "crcbl s16: the screen shows {pixel:?} at {PROBE:?} (stored blue {blue}) on {:?}",
+        glass.presenter.adapter().map(|adapter| adapter.name)
+    );
     let [red, green, observed_blue] = pixel.map(i32::from);
     let near = |value: i32, want: i32| (value - want).abs() <= TOLERANCE;
     assert!(

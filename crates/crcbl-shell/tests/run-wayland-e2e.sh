@@ -85,6 +85,25 @@ if ! crcbl_nextest_summary "$PLAIN" "crcbl e2e" \
 fi
 echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN tests ran against headless sway"
 
+# S16 through the compositor: a transparent Vulkan window over an opaque bar,
+# read back off the screen with `grim`, which is the only check that the
+# compositor blends what the swapchain asked for (premultiplied) rather than
+# what the cap says. Lives in `crcbl-app`, which has the presenter. The run must
+# report exactly one test, or a renamed test would pass this step by matching
+# nothing.
+echo "crcbl e2e: reading a transparent window back through sway with grim"
+TRANSPARENCY_LOG="${SWAY_RUNTIME_DIR}/transparency.log"
+set +e
+CRCBL_SHELL=wayland cargo test --locked -q -p crcbl-app --test wayland_transparency \
+    -- --ignored --nocapture 2>&1 | tee "$TRANSPARENCY_LOG"
+STATUS=${PIPESTATUS[0]}
+set -e
+if [ "$STATUS" -ne 0 ] || ! grep -q "test result: ok. 1 passed" "$TRANSPARENCY_LOG"; then
+    echo "crcbl e2e: the transparency read-back failed or ran no test" >&2
+    sway_log_tail
+    exit 1
+fi
+
 # The foundations stage's sandbox exit criterion (kept in
 # `docs/notes/backends.md`) is about the *sample*,
 # not about the shell crate's tests: "sandbox opens a window on Linux/Wayland

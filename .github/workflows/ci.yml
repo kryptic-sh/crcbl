@@ -1124,12 +1124,14 @@ jobs:
       # the umbrella now links cpal and ALSA — this job did not compile
       # `crcbl-audio` before and does now. See the `clippy (linux)` job for the
       # `-dev`-versus-runtime argument.
+      # `grim` reads the screen back for `crcbl-app`'s `wayland_transparency`
+      # test, which the harness runs between the shell suite and the sandbox.
       - name: Install sway and the ALSA headers cpal links against
         timeout-minutes: 10
         uses: ./.github/actions/apt-packages
         with:
           packages: >-
-            sway libasound2-dev libwayland-client0 libxkbcommon0 libvulkan1
+            sway grim libasound2-dev libwayland-client0 libxkbcommon0 libvulkan1
             mesa-vulkan-drivers vulkan-validationlayers
       # Starts headless sway in a private XDG_RUNTIME_DIR, polls for the socket
       # with a deadline and a liveness check on the child, runs the
