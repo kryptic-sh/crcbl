@@ -2325,6 +2325,71 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 - System font lookup by family name: `crcbl-font`, decided 2026-10-16 over
   leaving it to the caller (fontdb); see _pikr's port findings_ at the top.
 
+## Raised by lyr on 2026-10-20 (office laptop, Arch, Hyprland 0.56.2)
+
+**1. A native notification seam, asked for by lyr's owner.** One API that lyr,
+pikr and later apps use to create, read, update and dismiss notifications, with
+a capability flag per operation so "not supported here" is never mistaken for
+"worked". Not started; it is a new crate or a `crcbl-shell` module, and taking
+`zbus` on is the owner's call (it would be a new dependency for crcbl).
+
+- **Linux client:** `Notify` (app name, icon, summary, body markup, actions,
+  hints such as `urgency`, `image-data` and `desktop-entry`, `replaces_id`,
+  timeout), `CloseNotification`, the `ActionInvoked`, `NotificationClosed` and
+  `ActivationToken` signals, `GetCapabilities`, `GetServerInformation`.
+- **Linux server** (how a bar "reads" notifications): own
+  `org.freedesktop.Notifications` with `DO_NOT_QUEUE`, `ALLOW_REPLACEMENT` or
+  `REPLACE_EXISTING`, receive `Notify`/`CloseNotification`, emit the signals,
+  report capabilities. lyr has a tested daemon in `lyr-sources`
+  (`notifications::linux`: `Daemon`, `serve` with an `Owned` error naming the
+  owner and pid, `Served::close`/`invoke`, capabilities) on zbus 6 that may be
+  lifted. lyr's two zbus 6 findings: `request_name_with_flags` returns
+  `Err(NameTaken)` rather than `RequestNameReply::Exists`, so the name-taken
+  path needs a private `dbus-daemon` to test; and zbus stops reading a
+  connection while any `MessageStream` on it is full (64 by default), so an
+  unpolled stream during a read that awaits replies on the same connection
+  deadlocks it (lyr's `crates/lyr-sources/src/bus.rs`, `Follow`).
+- **Windows:** create through WinRT `ToastNotificationManager` (needs an
+  AppUserModelID); read and dismiss others' through `UserNotificationListener`
+  (needs the user's permission and package identity); do-not-disturb state if an
+  API exposes it.
+- **macOS:** create through `UNUserNotificationCenter` (needs a bundle); there
+  is no public API for reading other apps' notifications, so that operation
+  fails loudly.
+
+**2. Linux and Vulkan parity for what 0.6–0.8 built on the Windows machine.**
+Each feature needs its Wayland, X11 and Vulkan status listed, and the untested
+cells tested on Linux, not just compiled. That includes the Hyprland CI job
+named under S-rows above. lyr's observations from its first Hyprland runs
+(Vulkan on Intel RPL-U, crcbl 0.7.0):
+
+- `set_panel` resizes a layer panel in place on Wayland (154x73 to 362x961, no
+  new window): **seen working**.
+- Frame gate: seen working on a nested Hyprland's headless output. A FIFO
+  present to an output that is off (DPMS) is unrun anywhere.
+- `Presenter::resize` draining before a reconfigure (found on D3D12): the same
+  reconfigure-with-frames-in-flight case is unrun on Vulkan.
+- `DrawList::push_opacity` and `font::breaks`: not checked on Vulkan.
+- The Win32 pointer-leave fix, cursor shapes and the rest of 0.6–0.8: no
+  per-platform table exists yet. Write it first, then fill the cells.
+
+Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
+workspace with a headless output never touches the live desktop.
+
+**3. Fractional scale walks a window through three buffer sizes (pikr,
+2026-10-20).** On Hyprland at 1.5, a new window presents at 1x (720x448), then
+at the output's integer scale after `wl_output.scale(2)` with
+`set_buffer_scale(2)` (1440x896), then at 1.5 (1080x672) once
+`wp_fractional_scale_v1.preferred_scale(180)` follows `wl_surface.enter`: two
+swapchain rebuilds before the frame that stays. Options: skip the integer step
+when fractional scale is bound, and/or hold the first present until
+`preferred_scale` or `preferred_buffer_scale` arrives, with a timeout. Also
+`set_buffer_scale(2)` stays set beside the viewport destination; Hyprland
+accepts it, but a strict compositor may refuse a buffer whose size is not a
+multiple of the buffer scale (an odd width at 1.5). Unchecked. pikr works around
+the soft-text half itself by rounding window sizes to a multiple of 4 logical
+px.
+
 ## HIGH PRIORITY: EW engine requirements
 
 EW engine requirements take priority over UI/editor expansion. EW adopts engine
