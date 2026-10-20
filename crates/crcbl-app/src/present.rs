@@ -723,6 +723,17 @@ pub struct Presenter {
     /// [`FrameReady`](ShellEvent::FrameReady) [`observe`](Self::observe)
     /// takes as this presenter's answer.
     window: Option<WindowId>,
+    /// Whether a frame request can be answered: `false` for a device that
+    /// records rather than draws, presenting to a real window's surface.
+    ///
+    /// The answer to a request rides the commit a present makes, and the null
+    /// device's present commits nothing, so on Wayland a request it carried
+    /// would never be answered and the gate would stay shut for good. A
+    /// headless window's target is
+    /// [`Offscreen`](crcbl_hal::SurfaceTarget::Offscreen), where the shell
+    /// answers at the next pump whatever the device did, so requests there are
+    /// kept: they are how the gate is tested.
+    answers_requests: bool,
     /// Where the window's frame request stands; see [`frame_gate`].
     frame: FrameGate,
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
@@ -1357,6 +1368,11 @@ impl Presenter {
         let queue = device
             .queue(QueueKind::Graphics)
             .ok_or(PresentError::Unusable("no graphics queue"))?;
+        // `is_gpu` rather than a capability: what is asked is whether a present
+        // reaches the window at all, which no real backend fails and the
+        // recorder never does — not a difference between backends that draw.
+        let answers_requests =
+            device.backend().is_gpu() || matches!(open.target, crcbl_hal::SurfaceTarget::Offscreen);
 
         let swapchain = device.create_swapchain(&config.desc(surface))?;
         let (format, present_mode, image_count, alpha) = (
@@ -1417,6 +1433,7 @@ impl Presenter {
             // see `settle_pacing`.
             observed_timing: None,
             window: open.window,
+            answers_requests,
             frame: FrameGate::Open,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
@@ -1619,14 +1636,16 @@ impl Presenter {
     /// A presenter whose caller never calls this paces exactly as before.
     /// One with no window behind it
     /// ([`request_open_offscreen`](Self::request_open_offscreen)) has nothing
-    /// to ask for, and this does nothing.
+    /// to ask for, and this does nothing; nor does one on the null backend
+    /// presenting to a real window, whose presents commit nothing that could
+    /// carry the request, so the answer would never come.
     ///
     /// # Errors
     ///
     /// [`ShellError::InvalidWindow`] if the window has gone away; the gate is
     /// left as it was, so a window that is gone never holds it shut.
     pub fn request_frame<S: Shell + ?Sized>(&mut self, shell: &mut S) -> Result<(), ShellError> {
-        let Some(window) = self.window else {
+        let Some(window) = self.window.filter(|_| self.answers_requests) else {
             return Ok(());
         };
         shell.request_frame(window)?;

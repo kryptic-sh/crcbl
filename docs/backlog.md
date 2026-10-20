@@ -294,6 +294,18 @@ web and `HeadlessShell` answer at the next pump through `frame::FrameRequests`.
   runs the draw half (`HostedGame::draw`, the menus, the overlay) and skips only
   the present; skipping the draw too would save CPU on a hidden window, but
   `draw_menu` carries state the game reads, so it was left.
+- **The null backend on a real window does not request frames**
+  (`Presenter::answers_requests`). Its presents commit nothing, so on Wayland
+  the answer never came: the engine gate's first push to main (`2a8647fe`) hung
+  `wayland-e2e`'s windowed sandbox run on the null backend until the job's
+  timeout cancelled it (run 39422412990). The presenter decides at open from
+  `BackendKind::is_gpu` and an `Offscreen` target (where `HeadlessShell` answers
+  at the next pump whatever the device did, so the gate's tests keep their
+  requests). Considered and deferred: a seam fact in `SurfaceCaps` saying
+  whether a present reaches the window, the capability-shaped answer the
+  `BackendKind` docs ask for; it touches every backend's `SurfaceCaps`
+  construction, most of them compiled only on other targets, for a question only
+  the recorder answers no to.
 - **Behaviour that is not a bug, in the gate:** requests share one answer, so an
   answer for an earlier commit (a configure's acknowledgement carrying the
   request) can open the gate before the present it was meant for; that frame

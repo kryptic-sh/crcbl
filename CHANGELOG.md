@@ -33,7 +33,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and the loop sleeps in `wait_events` until the answer or the next tick; other
   shells are not asked and present as before. Bundles opt in through
   `GameGpu::presenting_context`, which `impl_game_gpu!` forwards, and
-  `GpuContext` gains `request_frame`, `observe` and `frame_due`.
+  `GpuContext` gains `request_frame`, `observe` and `frame_due`. A `Presenter`
+  on the null backend presenting to a real window never requests, since its
+  presents commit nothing that could carry the request.
 - **`FrameClock::next_tick_due`**: when the next tick comes due, on the timeline
   the clock is fed.
 - **`HeadlessShell::set_outputs_powered`**: with the outputs off, frame requests

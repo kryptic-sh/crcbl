@@ -249,3 +249,47 @@ fn an_offscreen_presenter_ignores_frame_requests() {
     }
     gpu.destroy().expect("teardown");
 }
+
+/// **A null device presenting to a real window is never held.** Its presents
+/// commit nothing, so on Wayland a request it carried was never answered,
+/// and the sandbox's windowed run on the null backend under sway waited for
+/// good. The shell here withholds every answer, as that compositor did: the
+/// presenter on a Wayland target presents every frame, and the same open on
+/// the headless window's own target is held after its first, which is what
+/// shows the answers really are withheld.
+#[test]
+fn a_null_device_presenting_to_a_real_window_is_never_held() {
+    const FRAMES: usize = 5;
+    let run = |wayland: bool| {
+        let (mut shell, window) = super::shell();
+        shell.set_outputs_powered(false);
+        let target = if wayland {
+            wayland_target(false)
+        } else {
+            shell
+                .surface_target(window)
+                .expect("the headless window is alive")
+        };
+        let mut pending = request(
+            target,
+            (320, 240),
+            "null device on a real window",
+            Pacing::Off,
+            Features::empty(),
+            None,
+        );
+        pending.window = Some(window);
+        pending.stage = Presenter::start_device(Box::new(NullInstance::gpu_driven()), &pending)
+            .expect("the null backend starts");
+        let mut gpu = finish_open(pending);
+        let presented = paced_loop(&mut shell, &mut gpu, FRAMES);
+        gpu.destroy().expect("teardown");
+        presented
+    };
+    assert_eq!(run(true), FRAMES, "no request, so nothing to wait for");
+    assert_eq!(
+        run(false),
+        1,
+        "held after the first: the answers are withheld"
+    );
+}
