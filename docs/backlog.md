@@ -200,13 +200,6 @@ if something does, it must not treat them as premultiplied on the way in.
   foreground call; if that goes red, re-arm `TrackMouseEvent` on every
   `WM_MOUSEMOVE` rather than only on the derived entry (`proc.rs`,
   `msg::MOUSE_MOVE`).
-- **Win32 draws the system composition window over an inline pre-edit** (pikr).
-  Every `WM_IME_*` message reaches `DefWindowProc` and nothing clears
-  `ISC_SHOWUICOMPOSITIONWINDOW` in `WM_IME_SETCONTEXT`'s `lParam`, so a field
-  that draws `TextPreedit` itself may show the reading twice. Fix: clear that
-  bit while the window's field takes typing, keeping the candidate window;
-  verify with the Microsoft IME on a desktop. Read from the source, not
-  observed.
 - **AppKit input method: mutants not run.** The `appkit_session` additions went
   red on CI for removing the pre-edit gate in `record_preedit` and the
   end-of-pre-edit block in `insert_text`. Cancelled unrun: the

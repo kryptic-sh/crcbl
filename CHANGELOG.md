@@ -83,6 +83,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   back toward the start. `TowardRoute` says where the walk ends and whether that
   is the goal.
 
+### Fixed
+
+- **A Win32 input method no longer draws its own composition window over the
+  field's pre-edit.** The backend now clears `ISC_SHOWUICOMPOSITIONWINDOW` in
+  `WM_IME_SETCONTEXT`, so the reading shows once, inline at the caret where the
+  field draws `TextPreedit`, instead of again in the system's box beside it; the
+  candidate list is unchanged. Seen with the Microsoft Japanese IME.
+
 ## [0.6.0] - 2026-10-20
 
 ### Breaking

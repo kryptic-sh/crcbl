@@ -438,6 +438,19 @@ pub fn is_text(character: char) -> bool {
     !character.is_control()
 }
 
+/// A `WM_IME_SETCONTEXT`'s `lParam` with the input method's own composition
+/// window turned off, and its candidate windows left as they were.
+///
+/// The field draws the pre-edit itself, from
+/// [`TextPreedit`](crate::ShellEvent::TextPreedit), so the system's window
+/// would show the reading a second time beside it; the candidate list has no
+/// counterpart in the field and stays.
+#[must_use]
+pub const fn without_composition_window(l_param: isize) -> isize {
+    // The `ISC_*` flags are a `DWORD` in the low half, zero-extended here.
+    l_param & !(value::ISC_SHOW_UI_COMPOSITION_WINDOW as isize)
+}
+
 /// Whether a `WM_IME_COMPOSITION`'s `lParam` says the composition string
 /// changed, which is what makes it a pre-edit.
 ///
@@ -509,6 +522,28 @@ mod tests {
         assert!(composition_changed(comp_str | GCS_RESULT_STR));
         assert!(!composition_changed(GCS_RESULT_STR));
         assert!(!composition_changed(0));
+    }
+
+    #[test]
+    fn the_input_methods_composition_window_is_turned_off_and_nothing_else() {
+        /// `ISC_SHOWUICANDIDATEWINDOW`, one per candidate list, in the low bits.
+        const ISC_SHOW_UI_CANDIDATE_WINDOWS: isize = 0x0000_000F;
+        /// `ISC_SHOWUIGUIDELINE`.
+        const ISC_SHOW_UI_GUIDELINE: isize = 0x4000_0000;
+        let composition = value::ISC_SHOW_UI_COMPOSITION_WINDOW as isize;
+        // `ISC_SHOWUIALL`, what a window gaining the context is usually sent.
+        let all = composition | ISC_SHOW_UI_GUIDELINE | ISC_SHOW_UI_CANDIDATE_WINDOWS;
+        assert_eq!(
+            without_composition_window(all),
+            ISC_SHOW_UI_GUIDELINE | ISC_SHOW_UI_CANDIDATE_WINDOWS,
+            "the composition window goes, the guideline and candidates stay"
+        );
+        assert_eq!(without_composition_window(composition), 0);
+        assert_eq!(
+            without_composition_window(ISC_SHOW_UI_CANDIDATE_WINDOWS),
+            ISC_SHOW_UI_CANDIDATE_WINDOWS,
+            "a context with no composition window is left alone"
+        );
     }
 
     #[test]

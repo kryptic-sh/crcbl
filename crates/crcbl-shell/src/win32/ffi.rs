@@ -1086,6 +1086,10 @@ pub mod msg {
     /// `WM_IME_COMPOSITION` — the composition changed. `lParam` holds the
     /// `GCS_*` flags naming what did.
     pub const IME_COMPOSITION: u32 = 0x010F;
+    /// `WM_IME_SETCONTEXT` — the window is gaining or losing the active input
+    /// context. `lParam` holds the `ISC_*` flags saying which of the input
+    /// method's own windows the default handler should show.
+    pub const IME_SET_CONTEXT: u32 = 0x0281;
     /// `WM_SYSCOMMAND` — a window-menu command. `wParam`'s low four bits are
     /// the system's own and are masked off before comparing with an `SC_*`.
     pub const SYS_COMMAND: u32 = 0x0112;
@@ -1454,6 +1458,9 @@ pub mod value {
     /// `GCS_COMPSTR` — the composition string changed, or the index that reads
     /// it.
     pub const GCS_COMP_STR: u32 = 0x0008;
+    /// `ISC_SHOWUICOMPOSITIONWINDOW` — in `WM_IME_SETCONTEXT`'s `lParam`, asks
+    /// the default handler to show the input method's own composition window.
+    pub const ISC_SHOW_UI_COMPOSITION_WINDOW: u32 = 0x8000_0000;
     /// `GCS_CURSORPOS` — the index that reads the cursor within it.
     pub const GCS_CURSOR_POS: u32 = 0x0080;
     /// `IACE_DEFAULT` — give a window back its default input context.

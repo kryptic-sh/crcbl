@@ -769,6 +769,14 @@ pub(super) unsafe extern "system" fn window_proc(
         // window, and it turns a committed result into the `WM_IME_CHAR` and
         // then `WM_CHAR` that the arm above records as the commit. What is
         // taken here is the composition in progress, which nothing else reports.
+        // The field draws its own pre-edit, so the input method is told not
+        // to draw its composition window as well; see
+        // [`keys::without_composition_window`].
+        msg::IME_SET_CONTEXT => {
+            let l_param = keys::without_composition_window(l_param);
+            // SAFETY: as `default` above, with only the flags changed.
+            unsafe { ffi::DefWindowProcW(hwnd, message, w_param, l_param) }
+        }
         msg::IME_START_COMPOSITION => {
             // An input method is free to forget a placement between
             // compositions, so the caret area is restated at every start.
