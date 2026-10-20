@@ -2430,6 +2430,14 @@ offers no dmabuf, and the Intel Vulkan adapter refuses the surface
 `/tmp` quota fills with other sessions' scratch files, which killed a sandbox
 log write once (`TMPDIR` elsewhere avoids it).
 
+**Hyprland cannot nest inside headless sway** (tried 2026-10-20): Hyprland
+0.56.2 binds `xdg_wm_base` at version 6 and sway 1.12 offers 5, so its Wayland
+backend aborts with `CBackend::create() failed!`. The Hyprland job S17 asks for
+needs Hyprland nested in another Hyprland (pikr's way, a hidden special
+workspace on the live desktop, which needs the owner's go-ahead) or a compositor
+offering `xdg_wm_base` 6. The X11 e2e suite needs Xvfb (`xorg-server-xvfb`), not
+installed on the office laptop, so its cells there stay CI-only.
+
 ## HIGH PRIORITY: EW engine requirements
 
 EW engine requirements take priority over UI/editor expansion. EW adopts engine
