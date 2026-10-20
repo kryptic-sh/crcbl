@@ -3531,6 +3531,20 @@ or splitting the two `Modes` rows into two tests; neither was tried, because no
 Metal device is at hand to time it. A sign it is the runner, not the test: its
 145 s on 2026-10-02 against the same 240 s limit.
 
+**And again on 2026-10-21** (main `8f10ef9f`, run 39480198644), so it is no
+longer a one-off: the green runs either side took 202 s and 224 s (39470597952,
+39457309368), against `the_price_of_one_call_per_bucket`'s 70 to 81 s. The Metal
+runner's log says why the obvious cut does not apply: `IndirectCount` has no
+ranged rows there ("records a call per bucket on this device"), so a suite run
+already draws only the two unranged renderers, over `GATE_FRAMES`; the time is
+their construction under Metal's API and shader validation, not frames. Tried
+and reverted the same day: skipping the unranged pair for `Modes::Two` where
+ranged rows exist halved the test on Vulkan here and would change nothing on
+Metal. Next: measure where the 200 s go on a Mac (pipeline creation per material
+mode is the suspect) before choosing between fewer buckets, a shared renderer,
+or a longer per-test limit for this one test with that measurement as its
+reason.
+
 **Cut 2026-10-02: price helpers draw a short run on a device that cannot time a
 pass.** The Apple Paravirtual device reports no `TIMESTAMP_QUERY`, so every
 mesh-suite price test drew `PRICE_WARMUP` plus 48 frames per configuration and
