@@ -2376,19 +2376,28 @@ named under S-rows above. lyr's observations from its first Hyprland runs
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.
 
-**3. Fractional scale walks a window through three buffer sizes (pikr,
-2026-10-20).** On Hyprland at 1.5, a new window presents at 1x (720x448), then
-at the output's integer scale after `wl_output.scale(2)` with
-`set_buffer_scale(2)` (1440x896), then at 1.5 (1080x672) once
-`wp_fractional_scale_v1.preferred_scale(180)` follows `wl_surface.enter`: two
-swapchain rebuilds before the frame that stays. Options: skip the integer step
-when fractional scale is bound, and/or hold the first present until
-`preferred_scale` or `preferred_buffer_scale` arrives, with a timeout. Also
-`set_buffer_scale(2)` stays set beside the viewport destination; Hyprland
-accepts it, but a strict compositor may refuse a buffer whose size is not a
-multiple of the buffer scale (an odd width at 1.5). Unchecked. pikr works around
-the soft-text half itself by rounding window sizes to a multiple of 4 logical
-px.
+**3. Fractional scale walked a window through three buffer sizes (pikr,
+2026-10-20); the integer step is fixed, unverified on Hyprland.** On Hyprland at
+1.5 a new window presented at 1x, then at 2x after `wl_output.scale(2)` and
+`wl_surface.enter` with `set_buffer_scale(2)`, then at 1.5x once
+`wp_fractional_scale_v1.preferred_scale(180)` arrived. Since 2026-10-20 a window
+with a fractional-scale object and a viewport (`WlWindow::is_fractional`) stays
+at 1 until `preferred_scale` and never sends `set_buffer_scale`, which also
+removes the buffer scale left set beside the viewport (a strict compositor may
+refuse an odd-sized buffer under it). **Verified** only by the unit test
+`a_windows_scale_prefers_the_fractional_one` (red without the fix). **Not
+verified on a compositor:** headless sway cannot show the defect. An e2e test
+opening a window on a 1.5 output passed with and without the fix, because sway
+does not send the integer step first, so it was not kept. Owed: a WAYLAND_DEBUG
+run on Hyprland (pikr has the setup) showing two buffer sizes, not three. The 1x
+first present is not avoidable: `preferred_scale` is only sent to a mapped
+surface, and mapping takes a buffer.
+
+**The Wayland e2e harness on the office laptop** (sway installed 2026-10-20)
+runs the shell suite, then fails at its sandbox step because
+`VK_LAYER_KHRONOS_validation` is not installed (`vulkan-validation-layers` on
+Arch); the harness refuses a validation run that never loaded the layer, by
+design.
 
 ## HIGH PRIORITY: EW engine requirements
 

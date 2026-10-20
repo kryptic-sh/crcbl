@@ -66,6 +66,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A Wayland window at a fractional scale no longer takes the integer scale
+  first**: with `fractional-scale-v1` and `wp_viewporter` in use, the window
+  stays at 1 until `preferred_scale` arrives instead of following
+  `wl_output.scale`, so Hyprland at 1.5 rebuilds the swapchain once, not twice,
+  and `set_buffer_scale` is no longer sent alongside the viewport.
+
 - **`crcbl_image::theme` reads `Type=Scalable` directories as scalable**: it
   matched `Scaled`, which the icon-theme specification does not define, so
   Adwaita's and Papirus's SVG directories were read as threshold directories

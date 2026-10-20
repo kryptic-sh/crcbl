@@ -2040,11 +2040,24 @@ impl WlWindow {
     /// `wl_surface.enter` scale otherwise. The two are mutually exclusive by
     /// protocol: a surface using a `wp_viewport` to express its size must not
     /// also set a buffer scale.
+    ///
+    /// **A fractionally scaled window ignores the integer scale while its
+    /// `preferred_scale` is on the way.** `wl_output.scale` and
+    /// `wl_surface.enter` arrive first, so following them meant a swapchain at
+    /// the rounded-up integer scale, rebuilt again a moment later at the real
+    /// one (Hyprland at 1.5: 1x, then 2x, then 1.5x).
     fn scale_factor(&self) -> f64 {
         match self.preferred_scale {
             Some(scale) if scale > 0 => f64::from(scale) / FRACTIONAL_SCALE_DENOMINATOR,
+            None if self.is_fractional() => 1.0,
             _ => f64::from(self.scale.max(1)),
         }
+    }
+
+    /// Whether the compositor scales this window through `fractional-scale-v1`
+    /// and a `wp_viewport`, which takes the place of `set_buffer_scale`.
+    fn is_fractional(&self) -> bool {
+        !self.fractional_scale.is_null() && !self.viewport.is_null()
     }
 }
 
@@ -3141,8 +3154,11 @@ impl WaylandShell {
         // `wl_surface.set_buffer_scale` and a `wp_viewport` destination are two
         // ways of saying the same thing, and the viewporter protocol forbids
         // using both. When the compositor is driving the scale fractionally,
-        // the viewport is the one in effect.
-        if window.preferred_scale.is_none() {
+        // the viewport is the one in effect — from the start, not only once
+        // `preferred_scale` has arrived: a buffer scale set before it stayed
+        // set, and a strict compositor refuses a buffer whose size is not a
+        // multiple of it, which an odd width at 1.5 is.
+        if !window.is_fractional() {
             let surface_proxy = window.surface;
             // SAFETY: the surface is live and `set_buffer_scale` takes one int.
             unsafe { wl_surface::set_buffer_scale(surface_proxy, scale) };
@@ -5092,6 +5108,12 @@ mod tests {
         let mut window = test_window();
         window.scale = 2;
         assert!((window.scale_factor() - 2.0).abs() < f64::EPSILON);
+        // With `fractional-scale-v1` in use the integer scale is not a step
+        // on the way: the window stays at 1 until `preferred_scale` says.
+        window.fractional_scale = ptr::NonNull::<WlProxy>::dangling().as_ptr();
+        window.viewport = ptr::NonNull::<WlProxy>::dangling().as_ptr();
+        assert!(window.is_fractional());
+        assert!((window.scale_factor() - 1.0).abs() < f64::EPSILON);
         // 150%, in the 1/120ths the protocol reports.
         window.preferred_scale = Some(180);
         assert!((window.scale_factor() - 1.5).abs() < 1e-9);
