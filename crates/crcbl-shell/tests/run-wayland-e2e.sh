@@ -615,6 +615,24 @@ wait_for_line() {
     done
 }
 
+# Polls sway's tree until the sandbox's window is in it, or fails showing the
+# sandbox's log. A `swaymsg` command naming the window by app id before then
+# matches nothing and exits non-zero, which is how the resize step first failed
+# in CI: the sandbox had logged its first configure, not yet mapped.
+wait_for_sandbox_window() {
+    local log="$1"
+    local deadline=$(( $(date +%s) + SWAY_SESSION_TIMEOUT_S ))
+    while ! swaymsg -t get_tree | grep -q "\"app_id\": \"${SANDBOX_APP_ID}\""; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "crcbl e2e: the sandbox never mapped a window sway could see" >&2
+            cat "$log" >&2
+            sway_log_tail
+            exit 1
+        fi
+        sleep "$SWAY_SESSION_POLL_S"
+    done
+}
+
 # `run_sandbox_toggle <backend>`
 run_sandbox_toggle() {
     local backend="$1"
@@ -655,16 +673,7 @@ run_sandbox_toggle() {
     # Mapped, and therefore focused: sway focuses a window when it appears, and
     # a window appears when a buffer is attached. Nothing else in this session
     # is mapped to take it away — the sender never presents.
-    local deadline=$(( $(date +%s) + SWAY_SESSION_TIMEOUT_S ))
-    while ! swaymsg -t get_tree | grep -q "\"app_id\": \"${SANDBOX_APP_ID}\""; do
-        if [ "$(date +%s)" -ge "$deadline" ]; then
-            echo "crcbl e2e: the sandbox never mapped a window sway could see" >&2
-            cat "$SANDBOX_LOG" >&2
-            sway_log_tail
-            exit 1
-        fi
-        sleep "$SWAY_SESSION_POLL_S"
-    done
+    wait_for_sandbox_window "$SANDBOX_LOG"
     # It starts windowed, and reading that back is what stops the wait below
     # from being satisfied by a state that was already true before F11.
     wait_for_line "the sandbox to report itself windowed" \
@@ -739,6 +748,7 @@ run_sandbox_resize() {
         >"$log" 2>&1 &
     local sandbox_pid=$!
     wait_for_line "the sandbox to present windowed" "$log" "shell: the window is windowed"
+    wait_for_sandbox_window "$log"
 
     local size
     for size in 900x500 640x360; do
@@ -791,6 +801,7 @@ run_sandbox_dark() {
         >"$log" 2>&1 &
     local sandbox_pid=$!
     wait_for_line "the sandbox to be paced by the compositor" "$log" "$ready"
+    wait_for_sandbox_window "$log"
 
     swaymsg output HEADLESS-1 power off >/dev/null
     local before after

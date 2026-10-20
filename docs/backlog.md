@@ -2389,7 +2389,7 @@ a capability flag per operation so "not supported here" is never mistaken for
   path needs a private `dbus-daemon` to test; and zbus stops reading a
   connection while any `MessageStream` on it is full (64 by default), so an
   unpolled stream during a read that awaits replies on the same connection
-  deadlocks it (lyr's `crates/lyr-sources/src/bus.rs`, `Follow`).
+  deadlocks it (lyr's lyr's `lyr-sources` crate, its `bus.rs`, `Follow`).
 - **Windows:** create through WinRT `ToastNotificationManager` (needs an
   AppUserModelID); read and dismiss others' through `UserNotificationListener`
   (needs the user's permission and package identity); do-not-disturb state if an
