@@ -253,7 +253,8 @@ fn parse_index(text: &str) -> (Vec<ThemeDir>, Vec<String>) {
             let size = number("Size")?;
             let kind = match keys.get("Type").copied().unwrap_or("Threshold") {
                 "Fixed" => SizeKind::Fixed,
-                "Scaled" => SizeKind::Scaled {
+                // The specification's value; `Scaled` is no `Type` it defines.
+                "Scalable" => SizeKind::Scaled {
                     min: number("MinSize").unwrap_or(size),
                     max: number("MaxSize").unwrap_or(size),
                 },
@@ -581,7 +582,7 @@ Type=Fixed
 
 [scalable/apps]
 Size=64
-Type=Scaled
+Type=Scalable
 MinSize=8
 MaxSize=512
 ";
@@ -679,6 +680,43 @@ MaxSize=512
         // No directory matches 30: 16 is 14 away, and 48's threshold reaches
         // down to 46, 16 away. (The scalable directory holds no `term`.)
         assert_eq!(themes.lookup("term", 30, 1), Some(term));
+    }
+
+    /// Adwaita's own sections: a scalable directory whose nominal size is far
+    /// from the request still holds every size it ranges over, so it beats a
+    /// small fixed PNG at either scale. Read as a threshold directory around
+    /// 128 it lost to the 16 px PNG, and an icon drew stretched.
+    #[test]
+    fn a_scalable_directory_beats_a_small_png_it_ranges_over() {
+        let scratch = Scratch::new();
+        scratch.write(
+            "icons/Adwaita/index.theme",
+            "[Icon Theme]
+Directories=16x16/mimetypes,scalable/mimetypes
+             [16x16/mimetypes]
+Size=16
+Type=Fixed
+             [scalable/mimetypes]
+Size=128
+MinSize=8
+MaxSize=512
+Type=Scalable
+",
+        );
+        scratch.write(
+            "icons/Adwaita/16x16/mimetypes/application-x-executable.png",
+            "",
+        );
+        let svg = scratch.write(
+            "icons/Adwaita/scalable/mimetypes/application-x-executable.svg",
+            "",
+        );
+        let mut themes = themes(&scratch);
+        assert_eq!(
+            themes.lookup("application-x-executable", 24, 1),
+            Some(svg.clone())
+        );
+        assert_eq!(themes.lookup("application-x-executable", 24, 2), Some(svg));
     }
 
     /// The same device pixels at the wrong scale are no match: the

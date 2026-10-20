@@ -66,6 +66,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl_image::theme` reads `Type=Scalable` directories as scalable**: it
+  matched `Scaled`, which the icon-theme specification does not define, so
+  Adwaita's and Papirus's SVG directories were read as threshold directories
+  around their nominal size and lost to small PNGs; `IconThemes::lookup` for a
+  24 px icon returned the 16 px PNG, drawn stretched.
+
 - **The Homebrew formula loads on Homebrew 7.** Homebrew now loads every formula
   in a tap for each OS and architecture when it taps it, and this one only had
   its URLs under `on_macos`, so `brew tap kryptic-sh/tap` failed with "invalid
