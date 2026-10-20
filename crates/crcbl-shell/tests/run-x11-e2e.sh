@@ -131,8 +131,13 @@ CRCBL_E2E_PRIVATE_BUS=1 dbus-run-session -- cargo nextest run \
     -E 'test(=a_reader_finds_the_button_and_presses_it)' 2>&1 | tee "$ACCESS_LOG"
 STATUS=${PIPESTATUS[0]}
 set -e
-if [ "$STATUS" -ne 0 ] || ! grep -q "1 test run: 1 passed" "$ACCESS_LOG"; then
-    echo "crcbl e2e: the AT-SPI reader failed or ran no test" >&2
+# Colour-stripped first: CI's `CARGO_TERM_COLOR: always` splits the summary
+# line with escapes, and a plain `grep` of the raw log never matched it there.
+ACCESS_PLAIN="${RUNTIME_DIR}/access.plain.log"
+crcbl_nextest_plain "$ACCESS_LOG" "$ACCESS_PLAIN"
+if [ "$STATUS" -ne 0 ] || ! crcbl_nextest_summary "$ACCESS_PLAIN" "crcbl e2e" \
+    || [ "$CRCBL_NEXTEST_TESTS_RUN" != 1 ]; then
+    echo "crcbl e2e: the AT-SPI reader failed or did not run exactly one test" >&2
     log_tail
     exit 1
 fi
