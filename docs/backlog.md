@@ -3,6 +3,16 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## Release 0.8.0 is not cut (session wrapped up 2026-10-20)
+
+`CHANGELOG.md`'s `[Unreleased]` is on main and complete; it is a minor bump, for
+`FrameOutcome::Held`. Three sessions wait on it: lyr (drops its own
+`Presenter::drain` before resizing, re-runs its D3D12 `set_panel` reshape, and
+sends the Win32 tooltip trace), EW (moves its AI routes onto `RouteFollower`
+with `set_last_stop_m`; EW pins released versions only) and pikr
+(`TextLayout::caret`, and the unsided-`VK_CONTROL` keystroke test). Cut it once
+main's CI is green, and tell those three.
+
 ## NEXT: speed up CI (asked by the owner, 2026-10-20)
 
 Main's CI wall time grew from about 41 min (run 39088257372, 2026-10-18) to
@@ -83,6 +93,16 @@ SVG text shaping and the Unicode text work have shipped; what is left:
    `crcbl_app::TextPump` draws no pre-edit at the caret and never calls
    `set_text_input_area`, so the candidate window sits at the window's origin.
    Build both in `crcbl-app` and `crcbl-ui`'s text field.
+2. **Owed by pikr, not yet run (both need the owner's go-ahead in pikr's
+   session, since they send keystrokes to the desktop).** pikr is on 0.7.0 (pikr
+   `8551e31`, builds unchanged, tests green on Windows and headless Linux).
+   Still to run there: the Japanese IME re-check that 0.7.0's
+   `WM_IME_SETCONTEXT` handling (`keys::without_composition_window`) leaves one
+   reading on screen, not the IME's own composition window beside the inline
+   pre-edit; and, on the release after 0.7.0, the keystroke test with
+   `VK_CONTROL` in place of `VK_LCONTROL` for the unsided-modifier fix, which is
+   unit-tested only. pikr adopts `TextLayout::caret` for its right-to-left query
+   caret in the same release.
 
 **Behaviour, not a bug: an injected Win32 arrow key needs
 `KEYEVENTF_EXTENDEDKEY`** (seen by lyr, 2026-10-20). Without it, `keybd_event`
