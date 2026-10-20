@@ -80,10 +80,22 @@ fn priced() -> bool {
     std::env::var_os("CRCBL_PRICE_FRAMES").is_some()
 }
 
-/// The many row's bucket count: [`MANY`] on a price run, [`GATE_MANY`]
-/// otherwise.
-fn many() -> u32 {
-    if priced() { MANY } else { GATE_MANY }
+/// The many row's mesh count under `modes`: [`MANY`] on a price run, and on a
+/// suite run [`GATE_MANY`] buckets' worth, which under two modes is half as
+/// many meshes, since each mesh is a bucket per mode.
+///
+/// **Why the suite run counts buckets, not meshes.** A frame's cost on the
+/// macOS runner is its calls, each validated by Metal: 64 meshes under two
+/// modes recorded 1292 calls at 38.5 s a frame (main run 39470597952), against
+/// 652 calls at 11.1 s under one, and the two-mode test passed at 202 to 224 s
+/// of nextest's 240 s limit, then timed out four runs running. At the same
+/// bucket count both tests record the same calls.
+fn many(modes: Modes) -> u32 {
+    if priced() {
+        MANY
+    } else {
+        GATE_MANY / modes.per_mesh()
+    }
 }
 
 /// How many instances this run draws: [`INSTANCES`] on a price run, and two per
@@ -135,6 +147,16 @@ enum Modes {
     /// Every mesh by that row and by a double-sided copy of it: two buckets
     /// per mesh, under two pipelines in every pass.
     Two,
+}
+
+impl Modes {
+    /// The buckets one mesh is drawn in.
+    const fn per_mesh(self) -> u32 {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+        }
+    }
 }
 
 /// The material row instance `index` of a `buckets` row draws with: the
@@ -277,7 +299,7 @@ fn price(
     let device = headless.device.as_ref();
     let timed = timed(device);
     let warmup = if priced() { PRICE_WARMUP } else { GATE_WARMUP };
-    let mut rows = [many(), FEW].map(|buckets| row(&headless, buckets, modes, path, timed));
+    let mut rows = [many(modes), FEW].map(|buckets| row(&headless, buckets, modes, path, timed));
     let camera = camera();
 
     for index in 0..warmup + frames {
@@ -417,7 +439,7 @@ fn two_material_modes_price_as_one() {
 /// Prices both rows under `modes` on every geometry path this device has — one
 /// path on a suite run — and asserts what the calls a frame must show.
 fn price_paths(modes: Modes) {
-    let buckets = many();
+    let buckets = many(modes);
     let (extent, frames) = if priced() {
         price_frame()
     } else {
