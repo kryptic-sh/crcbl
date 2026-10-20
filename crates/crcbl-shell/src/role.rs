@@ -246,6 +246,11 @@ pub enum PopupInput {
 /// [`PopupInput::Grab`] popup, as that variant documents. `popup` is `None`
 /// for a window that is not a popup.
 ///
+/// `Escape` is the key's **symbol**, [`Keysym::ESCAPE`](crcbl_core::input::Keysym::ESCAPE),
+/// not its physical key: an xkb remap such as `caps:escape` dismisses the
+/// popup, and a virtual keyboard whose own keymap puts Down on the scancode a
+/// physical Escape has (`wtype` uses evdev 1) does not.
+///
 /// Every backend that builds popups calls this after queueing the key, and on
 /// `true` queues the window's
 /// [`CloseRequested`](crate::ShellEvent::CloseRequested) through its own
@@ -255,7 +260,7 @@ pub(crate) fn escape_dismisses(popup: Option<PopupInput>, key: &crate::ShellEven
         && matches!(
             key,
             crate::ShellEvent::Key {
-                key_code: Some(crcbl_core::KeyCode::Escape),
+                keysym: crcbl_core::input::Keysym::ESCAPE,
                 state: crcbl_core::input::ButtonState::Pressed,
                 repeat: false,
                 ..
@@ -476,26 +481,38 @@ mod tests {
         use crcbl_core::input::{ButtonState, DeviceId, Keysym, Modifiers, Scancode};
 
         let window = crate::WindowId::from_bits(1 << 32).expect("a valid handle");
-        let key = |key_code, state, repeat| ShellEvent::Key {
+        let key = |key_code, keysym, state, repeat| ShellEvent::Key {
             window,
             device: DeviceId(1),
             time: crcbl_core::EventTime::ZERO,
             scancode: Scancode(0),
             key_code,
-            keysym: Keysym::NONE,
+            keysym,
             state,
             repeat,
             modifiers: Modifiers::empty(),
         };
-        let escape = key(Some(KeyCode::Escape), ButtonState::Pressed, false);
+        let pressed = ButtonState::Pressed;
+        let escape = key(Some(KeyCode::Escape), Keysym::ESCAPE, pressed, false);
         let grab = Some(PopupInput::Grab);
         assert!(super::escape_dismisses(grab, &escape));
+        // The symbol decides: Caps Lock remapped to Escape (`caps:escape`)
+        // dismisses, and wtype's Down on evdev 1, Escape's scancode, does not.
+        let remapped = key(Some(KeyCode::CapsLock), Keysym::ESCAPE, pressed, false);
+        assert!(super::escape_dismisses(grab, &remapped));
+        let wtype_down = key(Some(KeyCode::Escape), Keysym::DOWN, pressed, false);
+        assert!(!super::escape_dismisses(grab, &wtype_down));
 
-        // Not a release, a repeat, another key, or a key with no name.
-        let released = key(Some(KeyCode::Escape), ButtonState::Released, false);
-        let repeated = key(Some(KeyCode::Escape), ButtonState::Pressed, true);
-        let enter = key(Some(KeyCode::Enter), ButtonState::Pressed, false);
-        let unnamed = key(None, ButtonState::Pressed, false);
+        // Not a release, a repeat, another key, or a key with no symbol.
+        let released = key(
+            Some(KeyCode::Escape),
+            Keysym::ESCAPE,
+            ButtonState::Released,
+            false,
+        );
+        let repeated = key(Some(KeyCode::Escape), Keysym::ESCAPE, pressed, true);
+        let enter = key(Some(KeyCode::Enter), Keysym::RETURN, pressed, false);
+        let unnamed = key(None, Keysym::NONE, pressed, false);
         for other in [&released, &repeated, &enter, &unnamed] {
             assert!(!super::escape_dismisses(grab, other), "{other:?}");
         }

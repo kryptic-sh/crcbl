@@ -80,6 +80,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A `PopupInput::Grab` popup closes on the Escape keysym, not the Escape
+  key**: the dismissal read `key_code`, the physical key, so a virtual keyboard
+  whose keymap puts another key on Escape's scancode (`wtype`'s Down is evdev 1)
+  closed the popup, and an xkb remap such as `caps:escape` did not. It now reads
+  `keysym == Keysym::ESCAPE`, on every backend.
+
 - **A Wayland window at a fractional scale no longer takes the integer scale
   first**: with `fractional-scale-v1` and `wp_viewporter` in use, the window
   stays at 1 until `preferred_scale` arrives instead of following

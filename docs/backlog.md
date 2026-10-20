@@ -2463,6 +2463,14 @@ offers no dmabuf, and the Intel Vulkan adapter refuses the surface
 `/tmp` quota fills with other sessions' scratch files, which killed a sandbox
 log write once (`TMPDIR` elsewhere avoids it).
 
+**Behaviour, not a crcbl bug: Hyprland keeps a panel's exclusive keyboard under
+its own grabbing popup** (lyr, 2026-10-21, Hyprland 0.56.2). With a layer panel
+holding `keyboard_interactivity = exclusive` and an `xdg_popup` grab open from
+it, Hyprland delivers keys to the panel rather than the popup, so lyr forwards
+the panel's keys to its open dropdown itself. Not checked on sway or another
+compositor; if more than one compositor does it, the shell could do the
+forwarding instead of each program.
+
 **Hyprland cannot nest inside headless sway** (tried 2026-10-20): Hyprland
 0.56.2 binds `xdg_wm_base` at version 6 and sway 1.12 offers 5, so its Wayland
 backend aborts with `CBackend::create() failed!`. The Hyprland job S17 asks for
