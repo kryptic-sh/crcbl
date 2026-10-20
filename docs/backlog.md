@@ -521,11 +521,7 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    method itself, through the view's `NSTextInputClient` methods); S3 popup
    repositioning on Wayland **in CI** (CI's sway offers `xdg_wm_base` below 3,
    so CI holds only the refusal; the office laptop's sway 1.12 ran the real path
-   green on 2026-10-20); S16 Vulkan presenting premultiplied on sway (now in CI:
-   `crcbl-app`'s `wayland_transparency` read-back passed on the office laptop,
-   on the Intel iGPU and on llvmpipe under software sway, CI's setup;
-   `run-wayland-e2e.sh` runs it from 2026-10-21, and it passed in main CI run
-   39470597952); S22 a colour glyph in a GPU golden; S18 FreeBSD beyond
+   green on 2026-10-20); S22 a colour glyph in a GPU golden; S18 FreeBSD beyond
    `check (freebsd)`'s clippy, in a VM job; S13 cold start to the first
    presented frame, end to end (the D3D12 instance and first device are
    measured; see 11).
@@ -2412,7 +2408,8 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   reaches a dark output at all: the sandbox on the Intel iGPU stopped receiving
   `FrameReady` while sway's output was off, kept ticking, resumed on power-on
   and closed cleanly; `run-wayland-e2e.sh`'s `run_sandbox_dark` does the same in
-  CI from 2026-10-21 (red with the output left on).
+  CI from 2026-10-21 (red with the output left on; passed in main CI run
+  39470597952).
 - `Presenter::resize` draining before a reconfigure (found on D3D12): **seen
   working on Vulkan** (Intel RPL-U, headless sway with
   `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128`, 2026-10-20). The sandbox ran 4000
@@ -2420,7 +2417,7 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   partway through; each `Resized` reconfigured the swapchain (900x500, 1500x900,
   640x360) and the run exited 0. `run-wayland-e2e.sh`'s `run_sandbox_resize` now
   does the same in CI (two resizes, a reconfigure required at each), from
-  2026-10-21.
+  2026-10-21; passed in main CI run 39470597952.
 - `DrawList::push_opacity` and `font::breaks`: not checked on Vulkan.
 - **The table, 2026-10-20.** "CI" is a test in the named suite (nested sway,
   Xvfb, lavapipe); "laptop" was run on the office laptop (headless sway 1.12,
@@ -2441,14 +2438,12 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   | Fractional scale without the integer step     | unit test; pikr on Hyprland     | n/a                                               | n/a                           |
   | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)       | refused                                           | laptop                        |
   | `display_adapter`                             | laptop (iGPU only)              | laptop (Xwayland, DRI3)                           | laptop                        |
-  | `Presenter::resize` with frames in flight     | laptop (scripted)               | not run                                           | laptop                        |
+  | `Presenter::resize` with frames in flight     | CI, laptop                      | not run                                           | laptop                        |
   | `push_opacity` groups                         | n/a                             | n/a                                               | CI (lavapipe), laptop (Intel) |
   | Pointer leave between own windows (Win32 fix) | CI test, laptop                 | no test either way                                | n/a                           |
 
   Still open from the table: the pointer-leave case on X11 (Wayland's is
-  `crossing_into_another_of_our_windows_leaves_the_first`), and the scripted
-  resize's first CI result (`run_sandbox_resize` in `run-wayland-e2e.sh`, from
-  2026-10-21; red when sway resizes to a size it does not expect).
+  `crossing_into_another_of_our_windows_leaves_the_first`).
 
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.
