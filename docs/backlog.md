@@ -2367,8 +2367,13 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   new window): **seen working**.
 - Frame gate: seen working on a nested Hyprland's headless output. A FIFO
   present to an output that is off (DPMS) is unrun anywhere.
-- `Presenter::resize` draining before a reconfigure (found on D3D12): the same
-  reconfigure-with-frames-in-flight case is unrun on Vulkan.
+- `Presenter::resize` draining before a reconfigure (found on D3D12): **seen
+  working on Vulkan** (Intel RPL-U, headless sway with
+  `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128`, 2026-10-20). The sandbox ran 4000
+  frames while `swaymsg resize set` moved its floating window three times
+  partway through; each `Resized` reconfigured the swapchain (900x500, 1500x900,
+  640x360) and the run exited 0. A hand-run script, not a CI test: the suite's
+  sandbox step never resizes after presenting.
 - `DrawList::push_opacity` and `font::breaks`: not checked on Vulkan.
 - The Win32 pointer-leave fix, cursor shapes and the rest of 0.6–0.8: no
   per-platform table exists yet. Write it first, then fill the cells.
@@ -2376,28 +2381,17 @@ named under S-rows above. lyr's observations from its first Hyprland runs
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.
 
-**3. Fractional scale walked a window through three buffer sizes (pikr,
-2026-10-20); the integer step is fixed, unverified on Hyprland.** On Hyprland at
-1.5 a new window presented at 1x, then at 2x after `wl_output.scale(2)` and
-`wl_surface.enter` with `set_buffer_scale(2)`, then at 1.5x once
-`wp_fractional_scale_v1.preferred_scale(180)` arrived. Since 2026-10-20 a window
-with a fractional-scale object and a viewport (`WlWindow::is_fractional`) stays
-at 1 until `preferred_scale` and never sends `set_buffer_scale`, which also
-removes the buffer scale left set beside the viewport (a strict compositor may
-refuse an odd-sized buffer under it). **Verified** only by the unit test
-`a_windows_scale_prefers_the_fractional_one` (red without the fix). **Not
-verified on a compositor:** headless sway cannot show the defect. An e2e test
-opening a window on a 1.5 output passed with and without the fix, because sway
-does not send the integer step first, so it was not kept. Owed: a WAYLAND_DEBUG
-run on Hyprland (pikr has the setup) showing two buffer sizes, not three. The 1x
-first present is not avoidable: `preferred_scale` is only sent to a mapped
-surface, and mapping takes a buffer.
-
 **The Wayland e2e harness on the office laptop** (sway installed 2026-10-20)
-runs the shell suite, then fails at its sandbox step because
-`VK_LAYER_KHRONOS_validation` is not installed (`vulkan-validation-layers` on
-Arch); the harness refuses a validation run that never loaded the layer, by
-design.
+runs the shell suite (56 of 56 passed on 2026-10-20), then fails at its sandbox
+step because `VK_LAYER_KHRONOS_validation` is not installed
+(`vulkan-validation-layers` on Arch); the harness refuses a validation run that
+never loaded the layer, by design. Two more things about this machine: headless
+sway's renderer fails EGL on the NVIDIA node while the driver mismatch lasts, so
+without `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128` it renders in software,
+offers no dmabuf, and the Intel Vulkan adapter refuses the surface
+(`ERROR_SURFACE_LOST_KHR`) so the presenter falls to llvmpipe; and the per-user
+`/tmp` quota fills with other sessions' scratch files, which killed a sandbox
+log write once (`TMPDIR` elsewhere avoids it).
 
 ## HIGH PRIORITY: EW engine requirements
 
