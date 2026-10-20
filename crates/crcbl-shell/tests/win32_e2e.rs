@@ -82,10 +82,10 @@ use std::time::{Duration, Instant};
 
 use crcbl_shell::{
     ButtonState, ClipboardContent, ClipboardOffer, ContactId, CursorIcon, DeviceId, DisplayMode,
-    KeyCode, Keysym, LogicalPoint, LogicalRect, LogicalSize, MimeType, PhysicalPoint, PhysicalRect,
-    PointerButton, PointerMode, PopupDesc, PopupInput, PopupPlacement, ScrollDelta, Shell,
-    ShellBackend, ShellCaps, ShellError, ShellEvent, SurfaceTarget, TouchPhase, WindowDesc,
-    WindowId, WindowRole, parse_uri_list,
+    KeyCode, Keysym, LogicalPoint, LogicalRect, LogicalSize, MimeType, PanelAnchor, PanelDesc,
+    PhysicalPoint, PhysicalRect, PointerButton, PointerMode, PopupDesc, PopupInput, PopupPlacement,
+    ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SurfaceTarget, TouchPhase,
+    WindowDesc, WindowId, WindowRole, parse_uri_list,
 };
 
 /// PS/2 set 1 scan codes, spelled as the sender takes them and as
@@ -2557,21 +2557,63 @@ fn a_pointer_driven_by_another_process_moves_clicks_and_scrolls() {
 #[test]
 #[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
 fn a_passthrough_popup_does_not_disarm_its_parents_pointer_leave() {
-    /// Where the pointer rests in the parent: clear of the popup below.
-    const REST: PhysicalPoint = PhysicalPoint::new(300.0, 200.0);
-    /// How far inside the primary screen's corner the pointer is sent.
-    const INSET: i32 = 20;
-
     let mut session = Session::open();
     let window = session.window("leave");
     session.foreground(window);
+    popup_then_leave(
+        &mut session,
+        window,
+        PhysicalPoint::new(300.0, 200.0),
+        LogicalRect::new(LogicalPoint::new(20.0, 20.0), LogicalSize::new(60.0, 20.0)),
+    );
+}
+
+/// The same with lyr's parent: a bar along the top of the screen, which is a
+/// `Panel` that never takes the foreground, and a tooltip below one of its
+/// modules.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_passthrough_popup_does_not_disarm_its_panels_pointer_leave() {
+    let mut session = Session::open();
+    let bar = session.window_with(&WindowDesc {
+        title: "bar",
+        app_id: "sh.kryptic.crcbl.e2e",
+        size: LogicalSize::new(0.0, 30.0),
+        role: WindowRole::Panel(PanelDesc {
+            namespace: "bar",
+            anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+            ..PanelDesc::default()
+        }),
+        ..WindowDesc::default()
+    });
+    popup_then_leave(
+        &mut session,
+        bar,
+        PhysicalPoint::new(310.0, 15.0),
+        LogicalRect::new(LogicalPoint::new(280.0, 0.0), LogicalSize::new(60.0, 30.0)),
+    );
+}
+
+/// Rests the pointer at `rest` in `parent`, opens a passthrough popup below
+/// `anchor`, checks the parent was not left by that alone, then warps the
+/// pointer to a corner of the primary screen outside both and waits for the
+/// parent's leave.
+fn popup_then_leave(
+    session: &mut Session,
+    parent: WindowId,
+    rest: PhysicalPoint,
+    anchor: LogicalRect,
+) {
+    /// How far inside the primary screen's corner the pointer is sent.
+    const INSET: i32 = 20;
+
     session
         .shell
-        .warp_pointer(window, REST)
+        .warp_pointer(parent, rest)
         .expect("POINTER_WARP is claimed");
     session.pump_until("the pointer to enter", |session| {
         session.events.iter().any(|event| {
-            matches!(event, ShellEvent::PointerFocus { window: w, entered: true, .. } if *w == window)
+            matches!(event, ShellEvent::PointerFocus { window: w, entered: true, .. } if *w == parent)
         })
     });
     session.settle();
@@ -2581,8 +2623,8 @@ fn a_passthrough_popup_does_not_disarm_its_parents_pointer_leave() {
         app_id: "sh.kryptic.crcbl.e2e",
         size: LogicalSize::new(120.0, 40.0),
         role: WindowRole::Popup(PopupDesc {
-            parent: window,
-            anchor: LogicalRect::new(LogicalPoint::new(20.0, 20.0), LogicalSize::new(60.0, 20.0)),
+            parent,
+            anchor,
             placement: PopupPlacement::Below,
             input: PopupInput::Passthrough,
         }),
@@ -2592,7 +2634,7 @@ fn a_passthrough_popup_does_not_disarm_its_parents_pointer_leave() {
     assert!(
         !session.events.iter().any(|event| matches!(
             event,
-            ShellEvent::PointerFocus { window: w, entered: false, .. } if *w == window
+            ShellEvent::PointerFocus { window: w, entered: false, .. } if *w == parent
         )),
         "the pointer has not moved, so it has not left: {:?}",
         session.events
@@ -2602,7 +2644,7 @@ fn a_passthrough_popup_does_not_disarm_its_parents_pointer_leave() {
     // A corner of the primary screen outside both windows, as a point in the
     // parent's client coordinates, which is what the warp takes.
     let (width, height) = desktop::primary_screen();
-    let parent = desktop::window_rect(session.hwnd(window));
+    let shown_parent = desktop::window_rect(session.hwnd(parent));
     let shown = desktop::window_rect(session.hwnd(popup));
     let inside = |rect: &desktop::Rect, x: i32, y: i32| {
         (rect.left..rect.right).contains(&x) && (rect.top..rect.bottom).contains(&y)
@@ -2614,19 +2656,19 @@ fn a_passthrough_popup_does_not_disarm_its_parents_pointer_leave() {
         (width - INSET, height - INSET),
     ]
     .into_iter()
-    .find(|&(x, y)| !inside(&parent, x, y) && !inside(&shown, x, y))
+    .find(|&(x, y)| !inside(&shown_parent, x, y) && !inside(&shown, x, y))
     .expect("the windows do not cover every corner of the primary screen");
-    let origin = desktop::client_to_screen(session.hwnd(window), 0, 0);
+    let origin = desktop::client_to_screen(session.hwnd(parent), 0, 0);
     session
         .shell
         .warp_pointer(
-            window,
+            parent,
             PhysicalPoint::new(f64::from(x - origin.x), f64::from(y - origin.y)),
         )
         .expect("POINTER_WARP is claimed");
     session.pump_until("the pointer to leave the parent", |session| {
         session.events.iter().any(|event| {
-            matches!(event, ShellEvent::PointerFocus { window: w, entered: false, .. } if *w == window)
+            matches!(event, ShellEvent::PointerFocus { window: w, entered: false, .. } if *w == parent)
         })
     });
 }
