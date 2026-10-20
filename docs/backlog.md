@@ -196,20 +196,26 @@ if something does, it must not treat them as premultiplied on the way in.
   `win32/input.rs`, `self.consumed.clear()` deleted in `win32/shell.rs`,
   `if dismissed && repeat` in the Win32 key arm, `MAPVK_VK_TO_CHAR` in
   `layout_scancode`, and `if dismissed && !pressed` in Wayland's `key_event`.
-- **Win32 popup leave (lyr): fixed by reading, not yet seen on a desktop.** lyr
-  re-checked on 0.7.0 (2026-10-20): its top `Panel` bar opens a `Passthrough`
-  tooltip below a module, the pointer is warped far off both, and the bar never
-  gets `PointerFocus { entered: false }`. The defect found in `proc.rs`:
-  `Shared::enter` moved the tracked window to the new one without reporting a
-  leave of the old, and the old window's own `WM_MOUSELEAVE` was then dropped as
-  stale by `Shared::leave`, so any crossing into another of the thread's windows
-  left the first entered for good. `Shared::enter` now queues the old window's
-  leave before the new entry
-  (`the_pointer_enters_once_per_arrival_and_a_stale_leave_is_ignored`). Which of
-  the thread's windows took the movement in lyr's case is not known: the tooltip
-  answers `HTTRANSPARENT`, so it would have to be one taken while it was shown.
+- **Win32 popup leave (lyr): still not reproduced; one real defect fixed on the
+  way.** lyr re-checked on 0.7.0 (2026-10-20): its top `Panel` bar opens a
+  `Passthrough` tooltip below a module after a hover delay, the pointer is moved
+  far off both by `SetCursorPos` from another process, and the bar never gets
+  `PointerFocus { entered: false }`.
   `win32_e2e::a_passthrough_popup_does_not_disarm_its_panels_pointer_leave` runs
-  lyr's geometry on CI's desktop.
+  that geometry (a `TOP | LEFT | RIGHT` panel, no foreground call, a popup below
+  a module, a warp to a free corner) and **passed on CI's desktop without any
+  fix** (run 39388509964), as the toplevel-parent test did before it; so CI does
+  not show lyr's bug. Differences left between the two: lyr's tooltip and bar
+  draw through a swapchain, the e2e windows draw nothing; lyr waits a hover
+  delay with the pointer still; lyr moves the pointer from another process. The
+  defect fixed while looking, in `proc.rs`: `Shared::enter` moved the tracked
+  window to a newly entered one without reporting a leave of the old, whose own
+  `WM_MOUSELEAVE` was then dropped as stale by `Shared::leave`, so a crossing
+  between two of the thread's windows left the first entered for good
+  (`the_pointer_enters_once_per_arrival_and_a_stale_leave_is_ignored`, red
+  without the queued leave). Whether that is lyr's case is not known. Next: lyr
+  re-runs its check on 0.8.0 and, if the tooltip still sticks, sends a trace log
+  of `crcbl_shell` around the warp, which says which messages arrived.
 - **AppKit input method: mutants not run.** The `appkit_session` additions went
   red on CI for removing the pre-edit gate in `record_preedit` and the
   end-of-pre-edit block in `insert_text`. Cancelled unrun: the

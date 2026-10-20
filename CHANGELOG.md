@@ -92,9 +92,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **Win32 reports the pointer leaving a window when it crosses into another of
   the app's windows**: the arrival in the second window moved the leave tracking
   to it, and the first window's own leave notification was then dropped as
-  stale, so a bar whose pointer crossed into its tooltip and off the screen
-  never heard `PointerFocus { entered: false }` and kept the tooltip up. The
-  first window's leave now arrives before the second's entry.
+  stale, so the first window never heard `PointerFocus { entered: false }` and
+  stayed entered until the pointer came back. The first window's leave now
+  arrives before the second's entry.
 
 ## [0.7.0] - 2026-10-20
 
