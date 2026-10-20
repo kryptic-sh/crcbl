@@ -3477,6 +3477,60 @@ fn a_reserving_panel_takes_its_edge_from_tiled_windows_and_gives_it_back() {
     session.shell.destroy_window(window).expect("destroy");
 }
 
+/// **S21: a bar on a fractionally scaled output is drawn at that scale.** A
+/// panel is a layer surface, not an `xdg_toplevel`, and gets the same
+/// fractional-scale and viewport objects; the compositor's logical width
+/// (1920 / 1.5 = 1280) and the height asked for both come back at 1.5x.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_panel_on_a_fractional_output_is_configured_at_its_scale() {
+    const HEIGHT: f64 = 30.0;
+    let _restore = OutputScale;
+    assert!(
+        swaymsg(&["output", "HEADLESS-1", "scale", "1.5"]),
+        "sway scales an output through IPC"
+    );
+    let mut session = Session::open();
+    session.pump_until("the output's fractional scale", |session| {
+        (session.monitor_named(OUTPUT_NAME).scale_factor - 1.5).abs() < 1e-9
+    });
+    let monitor = session.monitor_named(OUTPUT_NAME).id;
+    let bar = session.create(&panel(
+        "crcbl e2e scaled bar",
+        LogicalSize::new(0.0, HEIGHT),
+        PanelDesc {
+            namespace: "crcbl-e2e-scaled-bar",
+            monitor: Some(monitor),
+            anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+            ..PanelDesc::default()
+        },
+    ));
+    session.pump_until("the bar's first configure", |session| {
+        session.size(bar).is_some()
+    });
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    session.pump_until("the bar's preferred scale", |session| {
+        session
+            .shell
+            .window_state(bar)
+            .expect("live bar")
+            .scale_factor()
+            .is_some_and(|scale| (scale - 1.0).abs() > 1e-9)
+    });
+    let state = session.shell.window_state(bar).expect("live bar");
+    let scale = state.scale_factor().expect("configured");
+    assert!(
+        (scale - 1.5).abs() < 1e-9,
+        "fractional-scale-v1 reaches a layer surface too, not the integer 2; got {scale}"
+    );
+    assert_eq!(
+        state.size(),
+        Some(PhysicalSize::new(OUTPUT_SIZE.width, 45)),
+        "the output's 1280 logical pixels and the 30 asked for, both at 1.5"
+    );
+    session.shell.destroy_window(bar).expect("destroy");
+}
+
 /// lyr's bar on reload: the same panel made taller in place, configured at
 /// its new height, with the tiled window giving up the new height too; a
 /// change of namespace, and a window that is not a panel, are refused.

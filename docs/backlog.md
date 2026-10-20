@@ -517,11 +517,12 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    field or a sensitive one, the pre-edit an input method sends, and where its
    candidate window opens (`appkit_session`'s `text_input` plays the input
    method itself, through the view's `NSTextInputClient` methods); S3 popup
-   repositioning on Wayland (CI's sway offers `xdg_wm_base` below 3); S21 a
-   panel at a fractional scale; S16 Vulkan presenting premultiplied on sway; S22
-   a colour glyph in a GPU golden; S18 FreeBSD beyond `check (freebsd)`'s
-   clippy, in a VM job; S13 cold start to the first presented frame, end to end
-   (the D3D12 instance and first device are measured; see 11).
+   repositioning on Wayland **in CI** (CI's sway offers `xdg_wm_base` below 3,
+   so CI holds only the refusal; the office laptop's sway 1.12 ran the real path
+   green on 2026-10-20); S16 Vulkan presenting premultiplied on sway; S22 a
+   colour glyph in a GPU golden; S18 FreeBSD beyond `check (freebsd)`'s clippy,
+   in a VM job; S13 cold start to the first presented frame, end to end (the
+   D3D12 instance and first device are measured; see 11).
 5. **Genuinely impossible, and refused:** D3D12 off Windows, Metal off Apple, a
    software Metal adapter, AppKit reserving screen space (only the menu bar and
    the Dock do). Vulkan on macOS is refused today and could go through MoltenVK
@@ -830,7 +831,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      compositor's and arrives as `Resized`, `OwnExtent` is the exclusive zone,
      and `closed` is a `CloseRequested`. That is S1 and S2 (by output), and S21,
      because the fractional-scale and viewport objects are made for every
-     surface; no e2e test runs a panel at a fractional scale yet.
+     surface; `a_panel_on_a_fractional_output_is_configured_at_its_scale` holds
+     a bar at 1.5 (red with the integer scale forced).
    - Transparency (S16) is on: `ShellCaps::TRANSPARENT` is set, because a
      compositor blends a surface by its buffer's alpha unless the client
      declares an opaque region, which this backend never does. The swapchain's
