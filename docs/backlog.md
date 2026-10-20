@@ -2383,8 +2383,11 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   new window): **seen working**.
 - Frame gate: seen working on a nested Hyprland's headless output, and on a
   powered-off sway output (`a_frame_request_waits_while_the_output_is_off`: no
-  answer while off, one after power on). A Vulkan FIFO present to an output that
-  is off is still unrun.
+  answer while off, one after power on). On Vulkan the gate means no present
+  reaches a dark output at all: the sandbox on the Intel iGPU stopped receiving
+  `FrameReady` while sway's output was off, kept ticking, resumed on power-on
+  and closed cleanly; `run-wayland-e2e.sh`'s `run_sandbox_dark` does the same in
+  CI from 2026-10-21 (red with the output left on).
 - `Presenter::resize` draining before a reconfigure (found on D3D12): **seen
   working on Vulkan** (Intel RPL-U, headless sway with
   `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128`, 2026-10-20). The sandbox ran 4000
