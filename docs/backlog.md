@@ -3522,6 +3522,15 @@ only `Presenter::reconfigure`, which this test never reaches, and a re-run of
 the failed job passed. A slow runner, not a regression; if it recurs, it is the
 first mesh test to cut to its gate scene's frame counts or split.
 
+**It recurred on 2026-10-21** (main `ef0adb97`, run 39475798305, the
+`mtl e2e forward + mesh (macos-15)` job): 240 s again, on a commit that touched
+only X11 test code and docs. Reading the test then: a suite run already draws
+`GATE_FRAMES` and prices one geometry path (`price_paths`), so neither half of
+the cut above is left. What is left is fewer buckets in `many()` on a suite run,
+or splitting the two `Modes` rows into two tests; neither was tried, because no
+Metal device is at hand to time it. A sign it is the runner, not the test: its
+145 s on 2026-10-02 against the same 240 s limit.
+
 **Cut 2026-10-02: price helpers draw a short run on a device that cannot time a
 pass.** The Apple Paravirtual device reports no `TIMESTAMP_QUERY`, so every
 mesh-suite price test drew `PRICE_WARMUP` plus 48 frames per configuration and
