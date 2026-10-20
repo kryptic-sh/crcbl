@@ -89,6 +89,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reconfigure, whether from a resize, a pacing change or an out-of-date
   swapchain, now drains the presenter first, so callers no longer need to call
   `Presenter::drain` before resizing.
+- **Win32 reports the pointer leaving a window when it crosses into another of
+  the app's windows**: the arrival in the second window moved the leave tracking
+  to it, and the first window's own leave notification was then dropped as
+  stale, so a bar whose pointer crossed into its tooltip and off the screen
+  never heard `PointerFocus { entered: false }` and kept the tooltip up. The
+  first window's leave now arrives before the second's entry.
 
 ## [0.7.0] - 2026-10-20
 

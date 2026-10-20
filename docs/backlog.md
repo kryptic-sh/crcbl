@@ -196,16 +196,20 @@ if something does, it must not treat them as premultiplied on the way in.
   `win32/input.rs`, `self.consumed.clear()` deleted in `win32/shell.rs`,
   `if dismissed && repeat` in the Win32 key arm, `MAPVK_VK_TO_CHAR` in
   `layout_scancode`, and `if dismissed && !pressed` in Wayland's `key_event`.
-- **Win32 popup leave (lyr): not reproduced on CI.** lyr reported that once a
-  `Passthrough` popup opens from a panel, the panel never gets
-  `PointerFocus { entered: false }`. The e2e test
-  `win32_e2e::a_passthrough_popup_does_not_disarm_its_parents_pointer_leave`
-  passed on CI's real desktop **without** a fix, with a normal foreground window
-  as the parent. lyr's parent is a `Panel` (`WS_EX_NOACTIVATE`, topmost, never
-  foreground), so the next step is the same test with a panel parent and no
-  foreground call; if that goes red, re-arm `TrackMouseEvent` on every
-  `WM_MOUSEMOVE` rather than only on the derived entry (`proc.rs`,
-  `msg::MOUSE_MOVE`).
+- **Win32 popup leave (lyr): fixed by reading, not yet seen on a desktop.** lyr
+  re-checked on 0.7.0 (2026-10-20): its top `Panel` bar opens a `Passthrough`
+  tooltip below a module, the pointer is warped far off both, and the bar never
+  gets `PointerFocus { entered: false }`. The defect found in `proc.rs`:
+  `Shared::enter` moved the tracked window to the new one without reporting a
+  leave of the old, and the old window's own `WM_MOUSELEAVE` was then dropped as
+  stale by `Shared::leave`, so any crossing into another of the thread's windows
+  left the first entered for good. `Shared::enter` now queues the old window's
+  leave before the new entry
+  (`the_pointer_enters_once_per_arrival_and_a_stale_leave_is_ignored`). Which of
+  the thread's windows took the movement in lyr's case is not known: the tooltip
+  answers `HTTRANSPARENT`, so it would have to be one taken while it was shown.
+  `win32_e2e::a_passthrough_popup_does_not_disarm_its_panels_pointer_leave` runs
+  lyr's geometry on CI's desktop.
 - **AppKit input method: mutants not run.** The `appkit_session` additions went
   red on CI for removing the pre-edit gate in `record_preedit` and the
   end-of-pre-edit block in `insert_text`. Cancelled unrun: the

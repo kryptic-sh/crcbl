@@ -402,17 +402,41 @@ impl Shared {
             .map(|known| known.cursor)
     }
 
-    /// Whether the pointer has just arrived in `hwnd`.
+    /// Records a movement at (`x`, `y`) in `hwnd`, and answers whether the
+    /// pointer has just arrived there.
     ///
-    /// `true` exactly once per entry, which is what makes it both the
-    /// [`PointerFocus`](RawEvent::PointerFocus) edge and the moment to arm
-    /// `TrackMouseEvent`. Two windows cannot both be tracked, because the
-    /// pointer is in one place.
-    fn enter(&self, hwnd: isize) -> bool {
-        if self.tracked.get() == hwnd {
+    /// `true` exactly once per entry, which is the moment to arm
+    /// `TrackMouseEvent`; an arrival queues the
+    /// [`PointerFocus`](RawEvent::PointerFocus) entry edge.
+    ///
+    /// **An arrival is also the leave of the window the pointer came from**,
+    /// queued first. The pointer is in one place, so two windows cannot both
+    /// be tracked, and once this one is that window's own `WM_MOUSELEAVE` is
+    /// stale by [`leave`](Self::leave)'s rule whenever it comes; without the
+    /// leave here, a pointer that crossed into another of this thread's
+    /// windows — a tooltip shown under it — and then off the desktop's every
+    /// window left the first one entered for good.
+    fn enter(&self, hwnd: isize, x: i32, y: i32, millis: u32) -> bool {
+        let left = self.tracked.replace(hwnd);
+        if left == hwnd {
             return false;
         }
-        self.tracked.set(hwnd);
+        if left != 0 {
+            self.push(RawEvent::PointerFocus {
+                hwnd: left,
+                entered: false,
+                x: 0,
+                y: 0,
+                millis,
+            });
+        }
+        self.push(RawEvent::PointerFocus {
+            hwnd,
+            entered: true,
+            x,
+            y,
+            millis,
+        });
         true
     }
 
@@ -818,19 +842,12 @@ pub(super) unsafe extern "system" fn window_proc(
 
         msg::MOUSE_MOVE => {
             let (x, y) = pointer::point(l_param);
-            if shared.enter(window) {
+            if shared.enter(window, x, y, millis) {
                 // There is no `WM_MOUSEENTER`. The arrival is derived from the
                 // first movement after a leave, and the leave has to be asked
                 // for — `TrackMouseEvent` is one-shot, so this is also where it
                 // is re-armed.
                 input::track_leave(hwnd);
-                shared.push(RawEvent::PointerFocus {
-                    hwnd: window,
-                    entered: true,
-                    x,
-                    y,
-                    millis,
-                });
             }
             shared.push(RawEvent::PointerMotion {
                 hwnd: window,
@@ -1369,21 +1386,50 @@ mod tests {
         // first movement after a leave — which means the latch has to be right
         // or every mouse movement reports an entry.
         let shared = Shared::default();
-        assert!(shared.enter(1), "the first movement is an arrival");
-        assert!(!shared.enter(1), "and the next two hundred are not");
-        assert!(!shared.enter(1));
+        let focus = |hwnd, entered, x, y| RawEvent::PointerFocus {
+            hwnd,
+            entered,
+            x,
+            y,
+            millis: 0,
+        };
+        assert!(shared.enter(1, 5, 6, 0), "the first movement is an arrival");
+        assert!(
+            !shared.enter(1, 7, 8, 0),
+            "and the next two hundred are not"
+        );
+        assert!(!shared.enter(1, 9, 9, 0));
+        assert_eq!(
+            shared.take_events(),
+            [focus(1, true, 5, 6)],
+            "one entry, where it arrived, and no leave: it came from nowhere"
+        );
 
         // The pointer is in one place, so moving to another window is a leave
-        // of the first even before its one-shot fires.
-        assert!(shared.enter(2));
+        // of the first, reported here because its own one-shot is stale by the
+        // time it fires.
+        assert!(shared.enter(2, 3, 4, 0));
+        assert_eq!(
+            shared.take_events(),
+            [focus(1, false, 0, 0), focus(2, true, 3, 4)],
+            "the first window's leave, then the second's entry"
+        );
         assert!(
             !shared.leave(1),
             "a leave for a window we stopped tracking is stale"
         );
         assert!(shared.leave(2));
         assert!(!shared.leave(2), "and it only fires once");
-        // After a leave the next movement is an arrival again.
-        assert!(shared.enter(2));
+        // After a leave the next movement is an arrival again, from nowhere.
+        assert!(shared.enter(2, 1, 1, 0));
+        assert_eq!(shared.take_events(), [focus(2, true, 1, 1)]);
+
+        // A window destroyed while the pointer was in it is not left: its
+        // events would name a window the consumer has already been told is
+        // gone.
+        shared.forget(2);
+        assert!(shared.enter(1, 2, 2, 0));
+        assert_eq!(shared.take_events(), [focus(1, true, 2, 2)]);
     }
 
     #[test]
@@ -1460,7 +1506,7 @@ mod tests {
             hwnd: 1,
             cursor: 0x1234 as Handle,
         });
-        assert!(shared.enter(1));
+        assert!(shared.enter(1, 0, 0, 0));
         assert!(shared.press(1, 1));
         shared.set_clipped(1);
 
@@ -1468,7 +1514,10 @@ mod tests {
         assert!(shared.limits_for(1).is_none());
         assert_eq!(shared.shape_for(1), None);
         assert_eq!(shared.clipped(), 0);
-        assert!(shared.enter(1), "the reused handle is a fresh arrival");
+        assert!(
+            shared.enter(1, 0, 0, 0),
+            "the reused handle is a fresh arrival"
+        );
         assert!(shared.press(1, 1), "and a fresh capture");
 
         // Another window's state is untouched.
