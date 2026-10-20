@@ -84,6 +84,12 @@ SVG text shaping and the Unicode text work have shipped; what is left:
    `set_text_input_area`, so the candidate window sits at the window's origin.
    Build both in `crcbl-app` and `crcbl-ui`'s text field.
 
+**Behaviour, not a bug: an injected Win32 arrow key needs
+`KEYEVENTF_EXTENDEDKEY`** (seen by lyr, 2026-10-20). Without it, `keybd_event`
+sends the arrow's scan code unprefixed and crcbl reads it as the numpad key with
+that code, which is what the scan code says. A desktop test that injects arrows,
+Home, End, Insert or Delete sets the flag.
+
 **Behaviour, not a bug: Windows shell icons are straight alpha** (measured by
 pikr, 2026-10-20). `IShellItemImageFactory::GetImage` bitmaps on Windows 11 are
 not premultiplied: of 15,071 partly transparent pixels across 139 icons, 7,105
@@ -275,7 +281,14 @@ web and `HeadlessShell` answer at the next pump through `frame::FrameRequests`.
   loop sleeps then instead of spinning (`wait_events` with the limiter's
   deadline, or none), and that `FrameBudget::record` counts a gated frame, which
   `page.rs` reports as `FrameOutcome::Reconfigured`, toward its
-  reconfigures-in-a-row limit. Needs the owner's call on the tick question.
+  reconfigures-in-a-row limit. **Decided 2026-10-20 (the owner's standing rule:
+  the long-term option):** ticks keep running while the window is not shown,
+  because the simulation must not depend on the display (replays, multiplayer
+  and determinism all assume it does not); only rendering waits. The loop sleeps
+  in `wait_events` until `FrameReady` or the next tick's deadline, whichever
+  comes first, and a frame the gate holds back gets an outcome of its own, so it
+  never counts toward `FrameBudget`'s reconfigure limit. Put the gate in
+  `GpuContext` with the loop feeding it events. M.
 - **Behaviour that is not a bug, in the gate:** requests share one answer, so an
   answer for an earlier commit (a configure's acknowledgement carrying the
   request) can open the gate before the present it was meant for; that frame
