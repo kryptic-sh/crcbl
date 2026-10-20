@@ -215,9 +215,15 @@ impl PageBundle {
     /// # Errors
     ///
     /// [`GpuError`] for anything except a swapchain that has merely gone out of
-    /// date, which is reported as [`FrameOutcome::Reconfigured`].
+    /// date, which is reported as [`FrameOutcome::Reconfigured`]. A frame the
+    /// window has not asked for yet is [`FrameOutcome::Held`].
     pub fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
         let Some(acquired) = self.ctx.acquire()? else {
+            // `acquire` answers `None` for both; only a reconfigure changed
+            // the graph's shape.
+            if !self.ctx.frame_due() {
+                return Ok(FrameOutcome::Held);
+            }
             self.dumped = false;
             return Ok(FrameOutcome::Reconfigured);
         };

@@ -1419,8 +1419,11 @@ impl GpuContext {
     /// Acquires the next swapchain image, or reconfigures and says so — see
     /// [`Presenter::acquire`].
     ///
-    /// `Ok(None)` means the swapchain was out of date and has been
-    /// reconfigured: skip this frame and try the next one.
+    /// `Ok(None)` means skip this frame and try the next one: the swapchain
+    /// was out of date and has been reconfigured, or the window has not asked
+    /// for this frame yet ([`frame_due`](Self::frame_due) is `false`, and the
+    /// frame is [`FrameOutcome::Held`]). [`Loop`] asks before it calls a
+    /// bundle's frame, so a bundle it hosts only meets the first.
     ///
     /// # Errors
     ///
@@ -1428,6 +1431,38 @@ impl GpuContext {
     /// date, which is handled here.
     pub fn acquire(&mut self) -> Result<Option<AcquiredFrame>, GpuError> {
         Ok(self.presenter.acquire()?)
+    }
+
+    /// Asks the shell for a [`FrameReady`](ShellEvent::FrameReady) for this
+    /// context's window, to pace the frame about to be presented — see
+    /// [`Presenter::request_frame`]. Nothing happens on an offscreen ring,
+    /// which has no window to ask for.
+    ///
+    /// [`Loop`] calls it before every frame it hands a bundle, on a shell
+    /// with [`ShellCaps::FRAME_CALLBACK`](crcbl_shell::ShellCaps::FRAME_CALLBACK),
+    /// and feeds [`observe`](Self::observe) every event it pumps; see
+    /// [`GameGpu::presenting_context`].
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the window has gone away.
+    pub fn request_frame<S: Shell + ?Sized>(&mut self, shell: &mut S) -> Result<(), ShellError> {
+        self.presenter.request_frame(shell)
+    }
+
+    /// Reads one shell event for the answer to a
+    /// [`request_frame`](Self::request_frame) — see [`Presenter::observe`].
+    pub fn observe(&mut self, event: &ShellEvent) {
+        self.presenter.observe(event);
+    }
+
+    /// Whether the window has asked for the next frame: `false` from a
+    /// present that carried a [`request_frame`](Self::request_frame) until
+    /// [`observe`](Self::observe) sees its answer — see
+    /// [`Presenter::frame_due`].
+    #[must_use]
+    pub const fn frame_due(&self) -> bool {
+        self.presenter.frame_due()
     }
 
     /// Submits `command_buffer` for `acquired`, presents it, and retires the
@@ -1474,6 +1509,9 @@ impl GpuContext {
                         "the swapchain went out of date on the frame that was to be written".into(),
                     )),
                     FrameOutcome::Reconfigured => Ok(()),
+                    // Never handed over: a held frame acquired nothing, so it
+                    // reaches no present to run this after.
+                    FrameOutcome::Held => Ok(()),
                     FrameOutcome::Presented => {
                         *presented += 1;
                         match capture {
@@ -2853,7 +2891,8 @@ impl FrameBudget {
     /// [`LoopError::NeverPresented`] once [`MAX_CONSECUTIVE_RECONFIGURES`]
     /// frames in a row have failed to present. Four seconds of 60 Hz
     /// reconfiguring is far past "a resize storm" and squarely in "this surface
-    /// will never present".
+    /// will never present". A [`FrameOutcome::Held`] frame counts toward
+    /// neither that streak nor the budget.
     pub fn record<G>(&mut self, outcome: FrameOutcome) -> Result<(), LoopError<G>> {
         match outcome {
             FrameOutcome::Presented => {
@@ -2866,6 +2905,11 @@ impl FrameBudget {
                     return Err(LoopError::NeverPresented);
                 }
             }
+            // **Neither presented nor failed.** The window system has not
+            // asked for the frame, and a window that is not shown waits here
+            // for as long as it stays hidden — no evidence against the
+            // surface, so the streak above neither grows nor resets.
+            FrameOutcome::Held => {}
         }
         Ok(())
     }
@@ -4316,6 +4360,33 @@ pub trait GameGpu: GpuSurface + Sized {
         Err(crate::settings::Unsupported)
     }
 
+    /// The context this bundle presents through, so the loop can present
+    /// only when the window system asks.
+    ///
+    /// [`Loop`] feeds it every shell event it pumps
+    /// ([`GpuContext::observe`]), asks it for the next frame before calling
+    /// [`frame`](Self::frame) ([`GpuContext::request_frame`], on a shell with
+    /// [`ShellCaps::FRAME_CALLBACK`](crcbl_shell::ShellCaps::FRAME_CALLBACK)),
+    /// and while the answer is outstanding ([`GpuContext::frame_due`] is
+    /// `false`) does not call [`frame`](Self::frame) at all: the frame is
+    /// [`FrameOutcome::Held`], the simulation keeps ticking, and the loop
+    /// sleeps in [`Shell::wait_events`] until the answer or the next tick. A
+    /// window on an output the compositor turned off is never asked for a
+    /// frame, and a FIFO present to it can block the loop for as long as the
+    /// output stays off.
+    ///
+    /// [`impl_game_gpu!`](crate::impl_game_gpu) answers with the bundle's own
+    /// `context_mut`, so no sample writes this.
+    ///
+    /// **The default answers `None`**, and the loop then presents every frame
+    /// as it did before frame requests existed. Unlike
+    /// [`apply_video`](Self::apply_video)'s default this one is not a refusal
+    /// to report: the loop's own test doubles hold no context to gate, and a
+    /// bundle without one presents unpaced rather than wrongly.
+    fn presenting_context(&mut self) -> Option<&mut GpuContext> {
+        None
+    }
+
     /// Records, submits and presents one frame.
     ///
     /// # Errors
@@ -4602,6 +4673,14 @@ macro_rules! __impl_game_gpu {
 
             fn destroy(self) -> ::core::result::Result<(), $crate::engine::GpuError> {
                 Self::destroy(self)
+            }
+
+            // The same context, for the loop's frame requests: see
+            // `GameGpu::presenting_context`.
+            fn presenting_context(
+                &mut self,
+            ) -> ::core::option::Option<&mut $crate::engine::GpuContext> {
+                ::core::option::Option::Some(Self::context_mut(self))
             }
 
             // Every bundle this macro serves holds a context — the guard above
@@ -6118,15 +6197,59 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // rendering game — nothing but input wakes a Win32 or X11 wait — which
         // put a 180 Hz panel's frames past every other vblank. The limiter owns
         // pacing; this only lets input arrive during time it would have slept.
-        if self.windowed
-            && let Some(idle) = self.clock_source.idle()
-        {
-            self.shell.wait_events(Some(idle));
+        //
+        // **While the frame is held, until the next tick instead.** No frame
+        // will render at the limiter's deadline, so the only things worth
+        // waking for are the answer — an event, which ends the wait — and the
+        // simulation, which keeps its schedule whether or not anyone is
+        // looking. See `Loop::held_idle`.
+        if self.windowed {
+            let idle = if self.frame_held() {
+                self.held_idle()
+            } else {
+                self.clock_source.idle()
+            };
+            if let Some(idle) = idle {
+                self.shell.wait_events(Some(idle));
+            }
         }
 
         let flow = self.frame_body();
         self.record_frame_cost();
         flow
+    }
+
+    /// Whether the bundle's context is waiting for the window system to ask
+    /// for a frame — see [`GameGpu::presenting_context`]. Never, for a bundle
+    /// with no context.
+    fn frame_held(&mut self) -> bool {
+        self.gpu
+            .presenting_context()
+            .is_some_and(|context| !context.frame_due())
+    }
+
+    /// How long a held frame may sleep in [`Shell::wait_events`]: until the
+    /// next tick comes due, read off the frame clock on the timeline the
+    /// clock source feeds it.
+    ///
+    /// **Always bounded.** The limiter may have no deadline at all — no limit,
+    /// or one already passed — but a held frame always has a tick ahead of it
+    /// once a frame has been presented, which is the only way a frame comes
+    /// to be held. A wait with no bound would be the simulation stopping with
+    /// the display, which is the one thing holding frames must not do; one
+    /// bounded by nothing but the limiter would spin on a run with no limit.
+    ///
+    /// `None` on a manual clock, which [`Clock::idle`] says never waits: its
+    /// time moves only when the loop steps it, so no wait brings a tick
+    /// nearer.
+    fn held_idle(&self) -> Option<Duration> {
+        if !matches!(self.clock_source, Clock::Real(_)) {
+            return None;
+        }
+        self.frame_clock
+            .next_tick_due()?
+            .checked_sub(self.clock_source.elapsed())
+            .filter(|idle| !idle.is_zero())
     }
 
     /// The frame proper, with the outermost span open across all of it.
@@ -6198,7 +6321,14 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // event itself rather than from `Pending::toggle_console`, because a
         // *repeat* of the key commits text too and does not toggle anything.
         let mut swallow_text = false;
+        let gpu = &mut self.gpu;
         self.shell.pump(&mut |event| {
+            // **Every event, before anything can return early**: a frame
+            // request's answer, or the window's destruction after which none
+            // will come, is what lets a held frame present.
+            if let Some(context) = gpu.presenting_context() {
+                context.observe(&event);
+            }
             if toggles_console(&event) {
                 swallow_text = true;
             }
@@ -6786,14 +6916,41 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         self.reconcile_pointer_mode();
         self.reconcile_cursor();
 
-        let present = crcbl_core::trace::span(crate::perf::PRESENT_SPAN);
-        let outcome = self.gpu.frame()?;
-        drop(present);
+        // **Only the present waits for the window system.** Everything above
+        // — the input, the ticks, the draw lists — ran as it does on any
+        // frame; a held frame hands the bundle nothing to present and the
+        // device nothing to block on.
+        let outcome = if self.frame_held() {
+            FrameOutcome::Held
+        } else {
+            let present = crcbl_core::trace::span(crate::perf::PRESENT_SPAN);
+            // **Before the bundle's frame, not between its acquire and its
+            // present** as `Presenter::request_frame` puts it: the loop cannot
+            // reach in there. What that order is for holds here too — the
+            // request is pending surface state when the present commits, as
+            // long as the acquire commits nothing, which is read from Mesa's
+            // WSI rather than observed. Only where the compositor answers: elsewhere
+            // the answer comes at the next pump whatever happens, and a pending
+            // one ends every `wait_events` at once, which would cost the
+            // limiter's idle above on every frame.
+            if self
+                .shell
+                .caps()
+                .contains(crcbl_shell::ShellCaps::FRAME_CALLBACK)
+                && let Some(context) = self.gpu.presenting_context()
+            {
+                context.request_frame(self.shell.as_mut())?;
+            }
+            let outcome = self.gpu.frame()?;
+            drop(present);
 
-        // After the frame, because that is when the renderers have recorded
-        // anything to count — and still inside the frame span, so the drain that
-        // closes the frame carries its counters and its spans in one snapshot.
-        crate::perf::sample_counters(self.gpu.counters());
+            // After the frame, because that is when the renderers have recorded
+            // anything to count — and still inside the frame span, so the drain
+            // that closes the frame carries its counters and its spans in one
+            // snapshot.
+            crate::perf::sample_counters(self.gpu.counters());
+            outcome
+        };
 
         self.budget.record(outcome)?;
         Ok(Flow::Continue)
@@ -7762,6 +7919,10 @@ mod tests {
 
     mod ui_scale;
 
+    // The loop's frame requests, on a null context the fixture presents
+    // through.
+    mod frame_gate;
+
     // The Steam limb's checks, which run on this module's fixture.
 
     #[cfg(all(
@@ -8213,6 +8374,12 @@ mod tests {
         /// Every pacing [`GameGpu::set_pacing`] was asked for, in order, so a
         /// revert can be seen to reach the swapchain.
         pacings_asked: Vec<Pacing>,
+        /// A context over the null device that each frame really presents
+        /// through, when a test gives it one — what
+        /// [`GameGpu::presenting_context`] answers, and the only way the
+        /// loop's frame requests reach a presenter whose gate can close.
+        /// `None`, the default, presents nothing and is never gated.
+        context: Option<GpuContext>,
     }
 
     impl FakeGpu {
@@ -8233,6 +8400,16 @@ mod tests {
                 applied_views: Vec::new(),
                 pacing: Pacing::Auto,
                 pacings_asked: Vec::new(),
+                context: None,
+            }
+        }
+
+        /// The same fake, presenting every frame through `context`.
+        fn presenting(context: GpuContext) -> Self {
+            let extent = context.extent();
+            Self {
+                context: Some(context),
+                ..Self::at(extent)
             }
         }
 
@@ -8292,7 +8469,10 @@ mod tests {
 
         fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
             self.extent = extent;
-            Ok(())
+            match &mut self.context {
+                Some(context) => context.resize(extent),
+                None => Ok(()),
+            }
         }
     }
 
@@ -8374,11 +8554,18 @@ mod tests {
                 clusters: Some(0),
                 cull_frame: None,
             };
-            Ok(FrameOutcome::Presented)
+            match &mut self.context {
+                Some(context) => null_frame(context),
+                None => Ok(FrameOutcome::Presented),
+            }
+        }
+
+        fn presenting_context(&mut self) -> Option<&mut GpuContext> {
+            self.context.as_mut()
         }
 
         fn destroy(self) -> Result<(), GpuError> {
-            Ok(())
+            self.context.map_or(Ok(()), GpuContext::destroy)
         }
     }
 

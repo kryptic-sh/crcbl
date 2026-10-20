@@ -13,8 +13,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`FrameOutcome::Held`**: a frame the window system has not asked for yet
+  (`Presenter::request_frame` is outstanding and its `FrameReady` has not been
+  observed), so nothing was acquired or presented. A `match` on `FrameOutcome`
+  needs the new arm. `FrameBudget::record` counts it toward neither the
+  presented frames nor the reconfigure streak behind
+  `LoopError::NeverPresented`, and `PageBundle::frame` reports it rather than
+  `Reconfigured`.
+
 ### Added
 
+- **The engine loop presents only when the window system asks**: on a shell with
+  `ShellCaps::FRAME_CALLBACK` (Wayland), `crcbl::engine::Loop` requests a frame
+  before every present and feeds the context every event it pumps, so a window
+  on an output the compositor turned off no longer blocks the whole loop in a
+  FIFO present. While a frame is held the simulation keeps ticking on schedule
+  and the loop sleeps in `wait_events` until the answer or the next tick; other
+  shells are not asked and present as before. Bundles opt in through
+  `GameGpu::presenting_context`, which `impl_game_gpu!` forwards, and
+  `GpuContext` gains `request_frame`, `observe` and `frame_due`.
+- **`FrameClock::next_tick_due`**: when the next tick comes due, on the timeline
+  the clock is fed.
+- **`HeadlessShell::set_outputs_powered`**: with the outputs off, frame requests
+  are held rather than answered at the next pump and do not cut a wait short, as
+  a compositor withholds `wl_surface.frame` from a surface that is not shown.
 - **`TextLayout::caret` and `crcbl_ui::font::layout::Caret`**: for a byte of a
   laid-out text, the line it is on, the caret's x with alignment, and the line's
   top and height. It measures with the code the text input places its caret

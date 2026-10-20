@@ -341,6 +341,9 @@ pub struct HeadlessShell {
     wake: Option<Arc<HeadlessWake>>,
     /// [`Shell::request_frame`]s the next pump answers.
     frames: FrameRequests,
+    /// Whether the outputs are on, so frame requests are answered. See
+    /// [`set_outputs_powered`](HeadlessShell::set_outputs_powered).
+    outputs_powered: bool,
 }
 
 /// The headless shell's doorbell: a flag and the condition variable a wait
@@ -427,6 +430,7 @@ impl HeadlessShell {
             configure_delay: DEFAULT_CONFIGURE_DELAY,
             wake: None,
             frames: FrameRequests::default(),
+            outputs_powered: true,
         }
     }
 
@@ -1123,6 +1127,25 @@ impl HeadlessShell {
         Ok(self.frames.contains(window))
     }
 
+    /// Turns every output off or back on, as far as frame requests go.
+    ///
+    /// **A compositor's frame pacing, modelled.** Where
+    /// [`ShellCaps::FRAME_CALLBACK`] is set, a window on an output that is off
+    /// is never asked for a frame: Wayland withholds `wl_surface.frame`'s
+    /// `done` until something of the surface is shown again, which is what
+    /// `swaymsg output HEADLESS-1 power off` does to a real one. With this
+    /// `false`, a [`Shell::request_frame`] is held rather than answered at the
+    /// next pump, and a held request does not cut a
+    /// [`wait_events`](Shell::wait_events) short; it is answered at the first
+    /// pump after this is `true` again, unless its window was destroyed
+    /// first. Every other event is delivered as before.
+    ///
+    /// On by default: a request is answered at the next pump, as on every
+    /// backend without the capability.
+    pub fn set_outputs_powered(&mut self, powered: bool) {
+        self.outputs_powered = powered;
+    }
+
     /// Starts a pretend assistive technology reading `window`, raising
     /// [`ShellEvent::AccessibilityActivated`]. Does nothing if one already is.
     ///
@@ -1764,11 +1787,13 @@ impl Shell for HeadlessShell {
 
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
         self.keep_alive();
-        let windows = &self.windows;
-        self.queue.extend(
-            self.frames
-                .take_due(|window| windows.contains(window.cast())),
-        );
+        if self.outputs_powered {
+            let windows = &self.windows;
+            self.queue.extend(
+                self.frames
+                    .take_due(|window| windows.contains(window.cast())),
+            );
+        }
         // Drain by count rather than `while let`: a sink that injects further
         // events (a UI that opens a window on a click) must not be able to spin
         // this loop forever, and the events it queued belong to the next frame
@@ -1816,7 +1841,7 @@ impl Shell for HeadlessShell {
         self.waits += 1;
         if !self.caps.contains(ShellCaps::EVENT_WAIT)
             || !self.queue.is_empty()
-            || self.frames.is_pending()
+            || (self.outputs_powered && self.frames.is_pending())
         {
             return;
         }
@@ -3388,6 +3413,32 @@ mod tests {
             start.elapsed()
         );
         assert_eq!(frames_for(&drain(&mut shell), window), 1);
+    }
+
+    #[test]
+    fn an_output_that_is_off_holds_frame_requests_until_it_is_on() {
+        let (mut shell, window) = shell_with_configured_window();
+        shell.set_outputs_powered(false);
+        shell.request_frame(window).expect("a frame");
+        assert_eq!(frames_for(&drain(&mut shell), window), 0, "held");
+        assert!(shell.frame_requested(window).expect("live"), "still owed");
+
+        let wait = Duration::from_millis(20);
+        let start = std::time::Instant::now();
+        shell.wait_events(Some(wait));
+        assert!(
+            start.elapsed() >= wait,
+            "a held request cut the wait short after {:?}",
+            start.elapsed()
+        );
+
+        shell.set_outputs_powered(true);
+        assert_eq!(
+            frames_for(&drain(&mut shell), window),
+            1,
+            "answered once on"
+        );
+        assert!(!shell.frame_requested(window).expect("live"));
     }
 
     #[test]

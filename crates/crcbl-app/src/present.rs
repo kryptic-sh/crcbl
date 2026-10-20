@@ -55,7 +55,8 @@
 //!    carried a request until the answer is observed, `acquire` answers
 //!    `Ok(None)` without touching the device, and [`Presenter::frame_due`]
 //!    says so ahead of time, for a loop that would rather sleep in
-//!    [`Shell::wait_events`] than spin.
+//!    [`Shell::wait_events`] than spin. A loop that counts its frames records
+//!    that one as [`FrameOutcome::Held`], not as a reconfigure.
 //!
 //! A presenter whose caller never requests a frame presents exactly as it
 //! always has. [`Presenter::frame_due`] says why the gate behaves the same
@@ -293,6 +294,20 @@ pub enum FrameOutcome {
     /// The swapchain no longer matched the surface, so it was reconfigured and
     /// this frame was skipped. Expected traffic during a resize, not an error.
     Reconfigured,
+    /// The window system has not asked for this frame yet, so nothing was
+    /// acquired or presented: the last present carried a
+    /// [`Presenter::request_frame`] whose
+    /// [`FrameReady`](ShellEvent::FrameReady) has not been observed
+    /// ([`Presenter::frame_due`] is `false`).
+    ///
+    /// **Not a failed present, and counted as neither kind.** A window on an
+    /// output the compositor turned off is held here for as long as the output
+    /// stays off, which is no reason to give up on the surface; a loop that
+    /// counts frames that failed to present in a row leaves this out of the
+    /// count, and one that counts presented frames leaves it out of that.
+    /// [`acquire`](Presenter::acquire) reports it as `Ok(None)`, the answer it
+    /// gives a reconfigure too, and `frame_due` is what tells the two apart.
+    Held,
 }
 
 // ---------------------------------------------------------------------------

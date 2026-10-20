@@ -280,22 +280,20 @@ web and `HeadlessShell` answer at the next pump through `frame::FrameRequests`.
   still acquires with `u64::MAX`, deliberately: a finite acquire timeout was
   declined in the 2026-10-19 decision, as it turns a hang into a busy retry that
   still blocks the loop for the timeout.
-- **The engine loop is not gated.** `crcbl::engine`'s loop presents through each
-  game's own `G::Gpu`, whose `GpuContext::acquire` call it cannot reach, so
-  gating it needs a hook from `HostedGame` to its `GpuContext` (or the gate in
-  `GpuContext` with the loop feeding it events), and decisions this slice did
-  not make: whether ticks keep running while the window is not shown, how the
-  loop sleeps then instead of spinning (`wait_events` with the limiter's
-  deadline, or none), and that `FrameBudget::record` counts a gated frame, which
-  `page.rs` reports as `FrameOutcome::Reconfigured`, toward its
-  reconfigures-in-a-row limit. **Decided 2026-10-20 (the owner's standing rule:
-  the long-term option):** ticks keep running while the window is not shown,
-  because the simulation must not depend on the display (replays, multiplayer
-  and determinism all assume it does not); only rendering waits. The loop sleeps
-  in `wait_events` until `FrameReady` or the next tick's deadline, whichever
-  comes first, and a frame the gate holds back gets an outcome of its own, so it
-  never counts toward `FrameBudget`'s reconfigure limit. Put the gate in
-  `GpuContext` with the loop feeding it events. M.
+- **The engine loop's gate has run on `HeadlessShell` and the null device
+  only.** `crcbl::engine::Loop` requests a frame before each present where the
+  shell has `ShellCaps::FRAME_CALLBACK`, feeds `GpuContext::observe` from its
+  pump, records a held frame as `FrameOutcome::Held` and sleeps in `wait_events`
+  until the answer or `FrameClock::next_tick_due` (`engine::tests::frame_gate`,
+  with `HeadlessShell::set_outputs_powered` standing in for an output that is
+  off). No sample has been run on sway with its output powered off, so that the
+  hang is gone is read from the protocol, not observed. The request is made
+  before the bundle's `frame`, not between its acquire and present as the
+  `Presenter` docs give, because the loop cannot reach in there; that no commit
+  lands between the two on Mesa's WSI is likewise unobserved. A held frame still
+  runs the draw half (`HostedGame::draw`, the menus, the overlay) and skips only
+  the present; skipping the draw too would save CPU on a hidden window, but
+  `draw_menu` carries state the game reads, so it was left.
 - **Behaviour that is not a bug, in the gate:** requests share one answer, so an
   answer for an earlier commit (a configure's acknowledgement carrying the
   request) can open the gate before the present it was meant for; that frame

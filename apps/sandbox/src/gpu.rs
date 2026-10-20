@@ -537,11 +537,12 @@ impl Gpu {
 
 /// The frame's half of this bundle, for [`crcbl::engine::Loop`].
 ///
-/// One-line forwards. Every one but the last three already existed for the loop
-/// that used to call them from `app.rs`; the trait is what lets the engine call
-/// them instead. The pair before the last is debug-console decision 3's
-/// (`docs/notes/tooling.md`), and the last is the live seam of
-/// `[engine.video] present_mode`, written out here rather than through
+/// One-line forwards. Every one before `apply_video` already existed for the
+/// loop that used to call them from `app.rs`; the trait is what lets the engine
+/// call them instead. `apply_video` and `set_debug_view` are debug-console
+/// decision 3's (`docs/notes/tooling.md`), `set_pacing` is the live seam of
+/// `[engine.video] present_mode`, and `presenting_context` is the context the
+/// loop paces presents through — written out here rather than through
 /// `crcbl::impl_game_gpu!(Gpu, with_renderer)` because this bundle writes its
 /// whole block by hand.
 impl crcbl::engine::GameGpu for Gpu {
@@ -607,6 +608,10 @@ impl crcbl::engine::GameGpu for Gpu {
         pacing: crcbl::engine::Pacing,
     ) -> Result<crcbl::settings::Landed<crcbl::engine::Pacing>, crcbl::settings::Unsupported> {
         Ok(self.ctx.switch_pacing(pacing))
+    }
+
+    fn presenting_context(&mut self) -> Option<&mut crcbl::engine::GpuContext> {
+        Some(&mut self.ctx)
     }
 }
 

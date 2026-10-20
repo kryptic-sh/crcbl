@@ -440,6 +440,23 @@ impl FrameClock {
         (self.accumulator_nanos / self.tick_nanos) as u32
     }
 
+    /// When the next tick comes due, on the timeline
+    /// [`FrameClock::update`] is fed: the last update, plus whatever the
+    /// accumulator still lacks of a whole tick. A tick already pending is due
+    /// at the last update. `None` before the first update, which has no
+    /// timeline to answer on.
+    ///
+    /// What a loop that has nothing to render may sleep until: no tick is due
+    /// before this, so a wait that ends here keeps the simulation on schedule.
+    #[must_use]
+    pub const fn next_tick_due(&self) -> Option<Duration> {
+        let Some(last) = self.last_update else {
+            return None;
+        };
+        let short = self.tick_nanos.saturating_sub(self.accumulator_nanos);
+        Some(last.saturating_add(Duration::from_nanos(short)))
+    }
+
     /// The id of the most recently simulated tick.
     #[inline]
     #[must_use]
@@ -612,6 +629,40 @@ mod tests {
             clock.update(time.elapsed());
             assert_eq!(tick_count(&mut clock), 2);
         }
+    }
+
+    /// The next tick is due a whole tick after an update that left nothing
+    /// over, the remainder after one that left part of a tick, and at the
+    /// update itself while a whole tick is still pending.
+    #[test]
+    fn the_next_tick_is_due_when_the_accumulator_fills() {
+        let mut time = ManualTime::new();
+        let mut clock = FrameClock::new(60);
+        assert_eq!(clock.next_tick_due(), None, "no update, no timeline");
+        clock.update(time.elapsed());
+        assert_eq!(clock.next_tick_due(), Some(clock.tick_dt()));
+
+        time.advance(clock.tick_dt() / 4);
+        clock.update(time.elapsed());
+        assert_eq!(
+            clock.next_tick_due(),
+            Some(clock.tick_dt()),
+            "a quarter tick in, the deadline has not moved"
+        );
+
+        time.advance(clock.tick_dt());
+        clock.update(time.elapsed());
+        assert_eq!(
+            clock.next_tick_due(),
+            Some(time.elapsed()),
+            "a whole tick is pending, so it is due now"
+        );
+        assert_eq!(tick_count(&mut clock), 1);
+        assert_eq!(
+            clock.next_tick_due(),
+            Some(clock.tick_dt() * 2),
+            "and once it ran, the one after is due on the same grid"
+        );
     }
 
     #[test]
