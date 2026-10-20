@@ -1786,6 +1786,54 @@ fn the_pointer_outside_an_input_region_leaves_the_window() {
     session.shell.destroy_window(window).expect("destroy");
 }
 
+/// **Crossing from one of our windows into another leaves the first before
+/// entering the second.** The Wayland half of the Win32 fix in which the
+/// second window's arrival swallowed the first's leave, so the first stayed
+/// hovered: here `wl_pointer.leave` and `enter` name their surfaces, and each
+/// must reach its own window, in that order.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn crossing_into_another_of_our_windows_leaves_the_first() {
+    let mut session = Session::open();
+    let first = session.create_mapped(&tiled("crcbl e2e left tile"));
+    let second = session.create_mapped(&tiled("crcbl e2e right tile"));
+    let half = PhysicalSize::new(OUTPUT_SIZE.width / 2, OUTPUT_SIZE.height);
+    session.pump_until("two tiles side by side", |session| {
+        session.size(first) == Some(half) && session.size(second) == Some(half)
+    });
+    let input = VirtualInput::attach(&*session.shell, first).expect("virtual devices");
+    let middle = OUTPUT_SIZE.height / 2;
+    let focus = |events: &[ShellEvent], of: WindowId, entered: bool| {
+        events.iter().position(|event| {
+            matches!(event, ShellEvent::PointerFocus { window, entered: e, .. }
+                if *window == of && *e == entered)
+        })
+    };
+
+    // sway puts the first tile on the left.
+    input.move_to(half.width / 2, middle, LAYOUT_SIZE);
+    session.pump_until("the pointer in the left tile", |session| {
+        focus(&session.events, first, true).is_some()
+    });
+    session.events.clear();
+
+    input.move_to(half.width + half.width / 2, middle, LAYOUT_SIZE);
+    session.pump_until("the pointer in the right tile", |session| {
+        focus(&session.events, second, true).is_some()
+    });
+    let left = focus(&session.events, first, false);
+    let entered = focus(&session.events, second, true);
+    assert!(
+        left.is_some_and(|left| entered.is_some_and(|entered| left < entered)),
+        "the left tile hears its leave before the right one its entry: {:?}",
+        session.names()
+    );
+
+    drop(input);
+    session.shell.destroy_window(second).expect("destroy");
+    session.shell.destroy_window(first).expect("destroy");
+}
+
 /// A wheel detent is detents, not the pixel count the compositor made up.
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]

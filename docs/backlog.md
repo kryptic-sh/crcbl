@@ -2405,11 +2405,11 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   | `display_adapter`                             | laptop (iGPU only)              | `None`, not built                                 | laptop                        |
   | `Presenter::resize` with frames in flight     | laptop (scripted)               | not run                                           | laptop                        |
   | `push_opacity` groups                         | n/a                             | n/a                                               | CI (lavapipe), laptop (Intel) |
-  | Pointer leave between own windows (Win32 fix) | no test either way              | no test either way                                | n/a                           |
+  | Pointer leave between own windows (Win32 fix) | CI test, laptop                 | no test either way                                | n/a                           |
 
-  Still open from the table: the pointer-leave case on Wayland and X11 (does
-  moving between two of our windows report the leave), X11 `display_adapter`,
-  and the scripted resize and `grim` read-back as CI tests.
+  Still open from the table: the pointer-leave case on X11 (Wayland's is
+  `crossing_into_another_of_our_windows_leaves_the_first`), X11
+  `display_adapter`, and the scripted resize and `grim` read-back as CI tests.
 
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.
