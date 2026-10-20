@@ -3476,6 +3476,86 @@ fn a_reserving_panel_takes_its_edge_from_tiled_windows_and_gives_it_back() {
     session.shell.destroy_window(window).expect("destroy");
 }
 
+/// lyr's bar on reload: the same panel made taller in place, configured at
+/// its new height, with the tiled window giving up the new height too; a
+/// change of namespace, and a window that is not a panel, are refused.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_reconfigured_panel_is_configured_at_its_new_height_and_reserves_it() {
+    const HEIGHT: u32 = 30;
+    const TALLER: u32 = 50;
+    let mut session = Session::open();
+    let window = session.create_mapped(&tiled("crcbl e2e beside the growing bar"));
+    session.pump_until("the tiled window to fill the output", |session| {
+        session.size(window) == Some(OUTPUT_SIZE)
+    });
+
+    let monitor = session.monitor_named(OUTPUT_NAME).id;
+    let desc = PanelDesc {
+        namespace: "crcbl-e2e-growing-bar",
+        monitor: Some(monitor),
+        anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+        reserve: Reserve::OwnExtent,
+        ..PanelDesc::default()
+    };
+    let bar = session.create(&panel(
+        "crcbl e2e growing bar",
+        LogicalSize::new(0.0, f64::from(HEIGHT)),
+        desc,
+    ));
+    session.pump_until("the panel's first configure", |session| {
+        session.size(bar) == Some(PhysicalSize::new(OUTPUT_SIZE.width, HEIGHT))
+    });
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    session.pump_until("tiled windows to give up the bar's height", |session| {
+        session.size(window)
+            == Some(PhysicalSize::new(
+                OUTPUT_SIZE.width,
+                OUTPUT_SIZE.height - HEIGHT,
+            ))
+    });
+
+    session
+        .shell
+        .set_panel(bar, LogicalSize::new(0.0, f64::from(TALLER)), &desc)
+        .expect("set_panel");
+    session.pump_until("the panel's configure at its new height", |session| {
+        session.size(bar) == Some(PhysicalSize::new(OUTPUT_SIZE.width, TALLER))
+    });
+    session.pump_until("tiled windows to give up the new height", |session| {
+        session.size(window)
+            == Some(PhysicalSize::new(
+                OUTPUT_SIZE.width,
+                OUTPUT_SIZE.height - TALLER,
+            ))
+    });
+
+    let renamed = PanelDesc {
+        namespace: "crcbl-e2e-renamed-bar",
+        ..desc
+    };
+    assert!(
+        matches!(
+            session
+                .shell
+                .set_panel(bar, LogicalSize::new(0.0, 1.0), &renamed),
+            Err(ShellError::InvalidDescriptor(_))
+        ),
+        "a layer surface's namespace is fixed"
+    );
+    assert!(
+        matches!(
+            session
+                .shell
+                .set_panel(window, LogicalSize::new(0.0, 1.0), &desc),
+            Err(ShellError::InvalidDescriptor(_))
+        ),
+        "a toplevel is not a panel"
+    );
+    session.shell.destroy_window(bar).expect("destroy");
+    session.shell.destroy_window(window).expect("destroy");
+}
+
 /// The launcher pikr is: an unanchored overlay that takes the keyboard when it
 /// maps, so the keys typed the moment it appears are its own.
 #[test]

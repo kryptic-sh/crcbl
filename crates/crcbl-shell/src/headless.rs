@@ -232,8 +232,10 @@ struct HeadlessWindow {
     parent: Option<WindowId>,
     /// What input a popup takes, which decides whether `Escape` dismisses it.
     popup_input: Option<crate::PopupInput>,
-    /// The monitor a panel was created for, whose unplugging asks it to close.
-    panel_monitor: Option<MonitorId>,
+    /// What a panel was created with, or last given by [`Shell::set_panel`];
+    /// its monitor's unplugging asks it to close. `None` for every other
+    /// window.
+    panel: Option<crate::role::KeptPanel>,
     /// [`Shell::set_text_input`]'s last word.
     text_input: Option<TextPurpose>,
     /// [`Shell::set_input_region`]'s last word: `None` for the whole window.
@@ -282,6 +284,22 @@ impl HeadlessWindow {
         self.size()
             .or_else(|| self.pending.map(|pending| pending.size))
             .unwrap_or(PhysicalSize::new(1, 1))
+    }
+
+    /// Takes `size` as the configure on its way, or as a new one due in
+    /// `countdown` pumps once the first has been delivered: a window system
+    /// answering a request for a new size.
+    fn configure_at(&mut self, size: LogicalSize, countdown: u32) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.size = size.to_physical(pending.scale_factor);
+        } else if let Some(config) = self.configuration {
+            self.pending = Some(PendingConfigure {
+                size: size.to_physical(config.scale_factor),
+                scale_factor: config.scale_factor,
+                mode: config.mode,
+                countdown,
+            });
+        }
     }
 }
 
@@ -1011,7 +1029,10 @@ impl HeadlessShell {
         let panels: Vec<WindowId> = self
             .windows
             .iter()
-            .filter(|(_, state)| state.panel_monitor == Some(id) && !state.close_pending)
+            .filter(|(_, state)| {
+                state.panel.as_ref().and_then(|panel| panel.desc().monitor) == Some(id)
+                    && !state.close_pending
+            })
             .map(|(window, _)| window.cast())
             .collect();
         for panel in panels {
@@ -1056,6 +1077,22 @@ impl HeadlessShell {
     /// [`ShellError::InvalidWindow`] if the handle is stale.
     pub fn text_input(&self, window: WindowId) -> Result<Option<TextPurpose>, ShellError> {
         Ok(self.window(window)?.text_input)
+    }
+
+    /// What the panel was created with, or last given by
+    /// [`Shell::set_panel`]; `None` for a window that is not a panel.
+    ///
+    /// Headless-only, for the same reason as [`title`](Self::title).
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    pub fn panel(&self, window: WindowId) -> Result<Option<crate::PanelDesc<'_>>, ShellError> {
+        Ok(self
+            .window(window)?
+            .panel
+            .as_ref()
+            .map(crate::role::KeptPanel::desc))
     }
 
     /// The rectangles the window last limited its pointer input to, with
@@ -1518,12 +1555,14 @@ impl Shell for HeadlessShell {
             }
         };
 
-        let (parent, popup_input, panel_monitor) = match desc.role {
+        let (parent, popup_input, panel) = match desc.role {
             crate::WindowRole::Popup(popup) => {
                 self.window(popup.parent)?;
                 (Some(popup.parent), Some(popup.input), None)
             }
-            crate::WindowRole::Panel(panel) => (None, None, panel.monitor),
+            crate::WindowRole::Panel(panel) => {
+                (None, None, Some(crate::role::KeptPanel::new(&panel)))
+            }
             crate::WindowRole::Toplevel => (None, None, None),
         };
         let countdown = self.configure_delay;
@@ -1550,7 +1589,7 @@ impl Shell for HeadlessShell {
                 accept_drops: desc.accept_drops,
                 parent,
                 popup_input,
-                panel_monitor,
+                panel,
                 text_input: None,
                 input_region: None,
                 #[cfg(feature = "accesskit")]
@@ -1695,16 +1734,27 @@ impl Shell for HeadlessShell {
         if state.parent.is_none() {
             return Err(crate::role::not_a_popup(popup));
         }
-        if let Some(pending) = state.pending.as_mut() {
-            pending.size = size.to_physical(pending.scale_factor);
-        } else if let Some(config) = state.configuration {
-            state.pending = Some(PendingConfigure {
-                size: size.to_physical(config.scale_factor),
-                scale_factor: config.scale_factor,
-                mode: config.mode,
-                countdown,
-            });
-        }
+        state.configure_at(size, countdown);
+        Ok(())
+    }
+
+    /// Records the new descriptor, which [`panel`](Self::panel) reads back,
+    /// and takes the new size as a pending configure, as
+    /// [`create_window`](Shell::create_window) takes a panel's first.
+    fn set_panel(
+        &mut self,
+        window: WindowId,
+        size: LogicalSize,
+        panel: &crate::PanelDesc<'_>,
+    ) -> Result<(), ShellError> {
+        let was = self.window(window)?.panel.as_ref().map(|kept| kept.desc());
+        crate::role::check_set_panel(window, was, panel, self.caps, self.backend(), |monitor| {
+            self.monitor(monitor).is_some()
+        })?;
+        let countdown = self.configure_delay;
+        let state = self.window_mut(window)?;
+        state.panel = Some(crate::role::KeptPanel::new(panel));
+        state.configure_at(size, countdown);
         Ok(())
     }
 
@@ -2292,6 +2342,113 @@ mod tests {
         let state = shell.window_state(window).expect("state");
         assert_eq!(state.effective_mode(), Some(DisplayMode::Windowed));
         assert!(!state.mode_request_honoured());
+    }
+
+    /// A reconfigured panel keeps its new descriptor and is configured at its
+    /// new size, reported by a `Resized` as its first size was; a change of
+    /// namespace or monitor, a window that is no panel, a descriptor a new
+    /// panel could not have and a stale handle are each refused, and a
+    /// refusal changes nothing.
+    #[test]
+    fn a_reconfigured_panel_is_configured_at_its_new_size() {
+        let mut shell = HeadlessShell::new();
+        let monitor = shell.monitors()[0].id;
+        let bar = crate::PanelDesc {
+            namespace: "bar",
+            monitor: Some(monitor),
+            anchor: crate::PanelAnchor::TOP | crate::PanelAnchor::LEFT | crate::PanelAnchor::RIGHT,
+            reserve: crate::Reserve::OwnExtent,
+            ..crate::PanelDesc::default()
+        };
+        let window = shell
+            .create_window(&WindowDesc {
+                size: LogicalSize::new(400.0, 30.0),
+                role: crate::WindowRole::Panel(bar),
+                ..WindowDesc::default()
+            })
+            .expect("a panel");
+        settle(&mut shell);
+        let scale = shell
+            .window_state(window)
+            .expect("live")
+            .scale_factor()
+            .expect("configured");
+
+        let taller = crate::PanelDesc {
+            layer: crate::PanelLayer::Overlay,
+            margins: crate::Margins {
+                top: 4.0,
+                ..crate::Margins::default()
+            },
+            keyboard: crate::PanelKeyboard::OnDemand,
+            ..bar
+        };
+        let size = LogicalSize::new(400.0, 50.0);
+        shell.set_panel(window, size, &taller).expect("set_panel");
+        assert_eq!(shell.panel(window).expect("live"), Some(taller));
+        assert_eq!(
+            shell.window_state(window).expect("live").size(),
+            Some(LogicalSize::new(400.0, 30.0).to_physical(scale)),
+            "a request: nothing changes before the window system answers"
+        );
+        let mut resized = Vec::new();
+        for _ in 0..8 {
+            resized.extend(
+                drain(&mut shell)
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        ShellEvent::Resized {
+                            window: of, size, ..
+                        } if of == window => Some(size),
+                        _ => None,
+                    }),
+            );
+        }
+        assert_eq!(resized, [size.to_physical(scale)]);
+
+        let refused = |shell: &mut HeadlessShell, panel: &crate::PanelDesc<'_>| match shell
+            .set_panel(window, LogicalSize::new(1.0, 1.0), panel)
+        {
+            Err(ShellError::InvalidDescriptor(message)) => message,
+            other => panic!("expected InvalidDescriptor, got {other:?}"),
+        };
+        let renamed = crate::PanelDesc {
+            namespace: "dock",
+            ..taller
+        };
+        assert!(refused(&mut shell, &renamed).contains("namespace"));
+        let anywhere = crate::PanelDesc {
+            monitor: None,
+            ..taller
+        };
+        assert!(refused(&mut shell, &anywhere).contains("monitor"));
+        let toplevel = shell
+            .create_window(&WindowDesc::default())
+            .expect("a toplevel");
+        assert!(matches!(
+            shell.set_panel(toplevel, size, &taller),
+            Err(ShellError::InvalidDescriptor(message)) if message.contains("not a panel")
+        ));
+        let cornered = crate::PanelDesc {
+            anchor: crate::PanelAnchor::TOP | crate::PanelAnchor::LEFT,
+            ..taller
+        };
+        assert!(matches!(
+            shell.set_panel(window, size, &cornered),
+            Err(ShellError::Unsupported { .. })
+        ));
+        assert_eq!(
+            shell.panel(window).expect("live"),
+            Some(taller),
+            "a refused descriptor is not recorded"
+        );
+        assert_eq!(shell.panel(toplevel).expect("live"), None);
+
+        shell.destroy_window(window).expect("destroy");
+        assert!(matches!(
+            shell.set_panel(window, size, &taller),
+            Err(ShellError::InvalidWindow { .. })
+        ));
     }
 
     /// A repositioned popup is configured at its new size, as a window system

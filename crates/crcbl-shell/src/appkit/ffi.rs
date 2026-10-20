@@ -527,6 +527,7 @@ mod sys {
         pub fn class_addMethod(class: Class, name: Sel, imp: Imp, types: *const c_char)
         -> ObjcBool;
         pub fn class_addProtocol(class: Class, protocol: Id) -> ObjcBool;
+        pub fn object_setClass(object: Id, class: Class) -> Class;
 
         pub fn objc_autoreleasePoolPush() -> *mut c_void;
         pub fn objc_autoreleasePoolPop(pool: *mut c_void);
@@ -661,7 +662,7 @@ pub use sys::{
     CGWindowLevelForKey, DisableSecureEventInput, EnableSecureEventInput,
     NSAllRomanInputSourcesLocaleIdentifier, NSApplicationDidChangeScreenParametersNotification,
     NSDefaultRunLoopMode, class_addMethod, class_addProtocol, objc_allocateClassPair,
-    objc_getProtocol, objc_registerClassPair,
+    objc_getProtocol, objc_registerClassPair, object_setClass,
 };
 
 /// The three declarations that exist for the macOS test suite alone.

@@ -2411,6 +2411,49 @@ mod macos {
             [visible[0], visible[1] + visible[3], visible[2], HEIGHT],
             "across the top of the visible frame, at its own height: {facts:?}"
         );
+
+        // lyr's bar on reload: taller, an overlay, and clickable into, in place.
+        const TALLER: f64 = 40.0;
+        let reloaded = PanelDesc {
+            monitor: Some(primary),
+            layer: PanelLayer::Overlay,
+            anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+            keyboard: PanelKeyboard::OnDemand,
+            ..PanelDesc::default()
+        };
+        shell
+            .set_panel(bar, LogicalSize::new(0.0, TALLER), &reloaded)
+            .expect("set_panel");
+        wait_for(shell, "the bar's resize to its new height", |shell| {
+            let state = shell.window_state(bar).ok()?;
+            (state.size()?.height
+                == LogicalSize::new(0.0, TALLER)
+                    .to_physical(state.scale_factor()?)
+                    .height)
+                .then_some(())
+        });
+        let facts = session_support::window_facts(BAR).expect("the bar is readable");
+        assert_eq!(
+            [facts.frame[1] + facts.frame[3], facts.frame[3]],
+            [visible[1] + visible[3], TALLER],
+            "still against the top, at its new height: {facts:?}"
+        );
+        assert_eq!(facts.level, POP_UP_MENU_LEVEL, "an overlay now: {facts:?}");
+        assert!(
+            facts.can_become_key,
+            "an on-demand bar can take the keyboard: {facts:?}"
+        );
+        let renamed = PanelDesc {
+            namespace: "renamed",
+            ..reloaded
+        };
+        assert!(
+            matches!(
+                shell.set_panel(bar, LogicalSize::new(0.0, TALLER), &renamed),
+                Err(ShellError::InvalidDescriptor(_))
+            ),
+            "a panel's namespace is fixed"
+        );
         shell.destroy_window(bar).expect("destroy the bar");
 
         let launcher = shell

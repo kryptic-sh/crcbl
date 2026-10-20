@@ -38,6 +38,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   next `pump` and the bit is clear, so one loop works everywhere, and
   `wait_events` does not sleep while an answer is due.
   `HeadlessShell::frame_requested` says whether a request is outstanding.
+- **`Shell::set_panel(window, size, &PanelDesc)`** changes a live panel's size,
+  layer, anchor, margins, reserve and keyboard in place, so a notification stack
+  that grows with its toasts, or a bar whose height changes on reload, keeps its
+  surface and swapchain instead of being destroyed and created again with a
+  flicker. The new size arrives as the next `Resized`, as the first one did.
+  Wayland sends the `zwlr_layer_surface_v1` setters and a commit; Win32 sets the
+  styles and the z-order band, registers, moves or removes the appbar, and
+  places the window again; AppKit sets the level and the frame. The namespace
+  and the monitor are fixed at creation on every backend, and changing either is
+  `ShellError::InvalidDescriptor`, as is a window that is not a panel. The trait
+  method has a default that answers `Unsupported`, so a `Shell` implemented
+  elsewhere still compiles. `HeadlessShell::panel` reads back what a panel was
+  last given.
 
 ## [0.6.0] - 2026-10-20
 

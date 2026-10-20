@@ -36,20 +36,20 @@
 //! # Placed again when the desktop moves
 //!
 //! A panel's rectangle comes from its monitor's geometry, so it is computed
-//! again after `WM_DISPLAYCHANGE`, after a DPI change, and after a work area
-//! moves without a display change (the taskbar moved, an appbar came or went),
-//! which arrives as `WM_SETTINGCHANGE`. A panel whose monitor was unplugged is
-//! asked to close; see
+//! again by [`Shell::set_panel`], after `WM_DISPLAYCHANGE`, after a DPI
+//! change, and after a work area moves without a display change (the taskbar
+//! moved, an appbar came or went), which arrives as `WM_SETTINGCHANGE`. A
+//! panel whose monitor was unplugged is asked to close; see
 //! [`ShellEvent::MonitorRemoved`](crate::ShellEvent::MonitorRemoved).
 
 use core::ptr;
 
 use crate::{
     LogicalSize, Margins, MonitorId, MonitorInfo, PanelAnchor, PanelDesc, PanelKeyboard,
-    PanelLayer, PhysicalRect, Reserve, ShellError, WindowDesc, WindowId,
+    PanelLayer, PhysicalRect, Reserve, Shell, ShellError, WindowDesc, WindowId,
 };
 
-use super::ffi::{self, AppBarData, Handle, Point, appbar, msg, value};
+use super::ffi::{self, AppBarData, Handle, Point, appbar, msg, style, value};
 use super::geometry::{self, Insets};
 use super::shell::Win32Shell;
 use super::window::{Created, class_name};
@@ -90,6 +90,20 @@ impl Panel {
                 Reserve::None | Reserve::IgnoreOthers => None,
             },
             appbar: false,
+        }
+    }
+
+    /// The descriptor it stands for, under `namespace`, which Win32 places
+    /// nothing by and so keeps apart.
+    pub(super) fn desc<'a>(&self, namespace: &'a str) -> PanelDesc<'a> {
+        PanelDesc {
+            namespace,
+            monitor: self.monitor,
+            layer: self.layer,
+            anchor: self.anchor,
+            reserve: self.reserve,
+            margins: self.margins,
+            keyboard: self.keyboard,
         }
     }
 
@@ -333,6 +347,87 @@ impl Win32Shell {
         }
     }
 
+    /// Gives a panel a new size and descriptor in place, for
+    /// [`Shell::set_panel`]: the styles of its new layer and keyboard, the
+    /// topmost band joined or left, an appbar registered or removed as it now
+    /// reserves or does not, and its place worked out again. The resize is
+    /// reported as any other, through `WM_SIZE`.
+    ///
+    /// # Errors
+    ///
+    /// What [`crate::role::check_set_panel`] refuses.
+    pub(super) fn reconfigure_panel(
+        &mut self,
+        window: WindowId,
+        size: LogicalSize,
+        desc: &PanelDesc<'_>,
+    ) -> Result<(), ShellError> {
+        let state = self.window(window)?;
+        let was = state.panel.map(|panel| panel.desc(&state.panel_namespace));
+        crate::role::check_set_panel(window, was, desc, self.caps(), self.backend(), |monitor| {
+            self.monitor(monitor).is_some()
+        })?;
+        let old = state
+            .panel
+            .ok_or_else(|| crate::role::not_a_panel(window))?;
+        let (hwnd, transparent) = (state.raw(), state.transparent);
+        let mut panel = Panel::new(desc, size);
+        panel.appbar = match (old.appbar, panel.edge.is_some()) {
+            (true, true) => true,
+            (true, false) => {
+                Self::remove_appbar(hwnd);
+                false
+            }
+            (false, true) => Self::register_appbar(hwnd),
+            (false, false) => false,
+        };
+        let styles = geometry::with_transparency(
+            geometry::panel_styles(panel.layer, panel.keyboard),
+            transparent,
+        );
+        let was_topmost =
+            geometry::panel_styles(old.layer, old.keyboard).ex_style & style::EX_TOPMOST;
+        // SAFETY: reading this shell's own window's style, for the visible
+        // bit, which is state and not style.
+        let visible =
+            unsafe { ffi::GetWindowLongPtrW(hwnd, value::GWL_STYLE) } as u32 & style::VISIBLE;
+        Self::set_styles(hwnd, styles.style | visible, styles.ex_style);
+        // The topmost bit is the one style `SetWindowLongPtrW` cannot change:
+        // only the z-order can, so a panel changing band is moved into it.
+        let (after, z_order) = if styles.ex_style & style::EX_TOPMOST == was_topmost {
+            (ptr::null_mut(), value::SWP_NO_Z_ORDER)
+        } else if styles.ex_style & style::EX_TOPMOST != 0 {
+            (value::HWND_TOPMOST as Handle, 0)
+        } else {
+            (value::HWND_BOTTOM as Handle, 0)
+        };
+        // SAFETY: this shell's own window; the insert-after is null or a
+        // documented pseudo-handle, the size and position are unused, and
+        // `SWP_FRAME_CHANGED` makes the system take the styles just written.
+        unsafe {
+            ffi::SetWindowPos(
+                hwnd,
+                after,
+                0,
+                0,
+                0,
+                0,
+                value::SWP_NO_MOVE
+                    | value::SWP_NO_SIZE
+                    | value::SWP_NO_ACTIVATE
+                    | value::SWP_FRAME_CHANGED
+                    | z_order,
+            );
+        }
+        let state = self.window_mut(window)?;
+        state.panel = Some(panel);
+        state.requested_size = size;
+        let state = self.window(window)?;
+        self.refresh_limits(state);
+        self.place_panel(window);
+        Ok(())
+    }
+
     /// Registers `hwnd` as an appbar, with [`msg::APP_BAR`] for its
     /// notifications. `false`, with a warning, if the shell refuses.
     fn register_appbar(hwnd: Handle) -> bool {
@@ -437,6 +532,46 @@ mod tests {
     /// `ABN_STATECHANGE` and `ABN_WINDOWARRANGE`, the codes a panel ignores.
     const STATE_CHANGE: u32 = 0;
     const WINDOW_ARRANGE: u32 = 3;
+
+    /// `set_panel` compares against the descriptor a panel stands for, so
+    /// it has to be the one it was made from; and a bar given a new height
+    /// is placed at that height, in the same place.
+    #[test]
+    fn a_panel_stands_for_its_descriptor_and_is_placed_at_its_new_size() {
+        let desc = PanelDesc {
+            namespace: "bar",
+            monitor: Some(MonitorId(7)),
+            layer: PanelLayer::Overlay,
+            anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+            reserve: Reserve::IgnoreOthers,
+            margins: Margins {
+                top: 4.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 2.0,
+            },
+            keyboard: PanelKeyboard::OnDemand,
+        };
+        let bar = Panel::new(&desc, LogicalSize::new(0.0, 30.0));
+        assert_eq!(bar.desc("bar"), desc);
+
+        let monitor = MonitorInfo {
+            id: MonitorId(7),
+            name: "DISPLAY1".to_string(),
+            bounds: PhysicalRect::new(0, 0, 1920, 1080),
+            work_area: PhysicalRect::new(0, 0, 1920, 1040),
+            scale_factor: 1.5,
+            refresh_millihertz: 60_000,
+            is_primary: true,
+        };
+        let taller = Panel::new(&desc, LogicalSize::new(0.0, 50.0)).rect_on(&monitor);
+        assert_eq!(taller, PhysicalRect::new(3, 6, 1917, 75));
+        let before = bar.rect_on(&monitor);
+        assert_eq!(
+            (before.x, before.y, before.width),
+            (taller.x, taller.y, taller.width)
+        );
+    }
 
     #[test]
     fn an_appbar_notice_is_decoded_from_its_code_and_lparam() {

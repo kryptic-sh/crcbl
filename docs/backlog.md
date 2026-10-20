@@ -209,17 +209,40 @@ if something does, it must not treat them as premultiplied on the way in.
   `refresh_secure_input` passing `true` for focus, `refresh_secure_input`
   guarded by `field.is_some()`, and `set_marked_text` ignoring `selected`.
 
-**Decided 2026-10-19: panels can be reconfigured, asked by lyr.** A panel's size
-and margins are fixed at `create_window`, so lyr's notification stack (an
-Overlay panel whose height follows the toasts) and its bar's height on reload
-destroy and recreate the panel, a fresh surface and swapchain each time. Build
-`Shell::set_panel(window, size, &PanelDesc)`: size, anchor, margins, reserve,
-layer and keyboard change in place (`zwlr_layer_surface_v1`'s setters and a
-commit on Wayland, `SetWindowPos` and the appbar on Win32, `setFrame:` and the
-level on AppKit), reported through the usual `Resized`/configuration; the
-namespace and the monitor cannot change on Wayland, so changing either is a
-named error everywhere. Declined: narrower `set_panel_size`/`set_panel_margins`,
-which would grow a call per field. M.
+**`Shell::set_panel`: what is left.** Built as decided on 2026-10-19 for lyr:
+size, layer, anchor, margins, reserve and keyboard change in place on Wayland
+(`layer::reconfigure_layer_surface`), Win32 (`panel::reconfigure_panel`), AppKit
+(`panel::reconfigure_panel`) and `HeadlessShell`; X11 and the web answer the
+trait default, `Unsupported`. A change of namespace or monitor, and a window
+that is not a panel, are `InvalidDescriptor` everywhere
+(`role::check_set_panel`). Declined then: narrower
+`set_panel_size`/`set_panel_margins`, which would grow a call per field.
+
+- **Only CI runs the platform halves.** The Wayland e2e
+  (`a_reconfigured_panel_is_configured_at_its_new_height_and_reserves_it`), the
+  Win32 desktop tests in `win32/shell/tests.rs`
+  (`a_reconfigured_appbar_reserves_its_new_height_and_gives_it_back_when_told`,
+  `a_reconfigured_panel_changes_band_and_keyboard_in_place`) and the bar half of
+  `tests/appkit_session.rs`'s `panels` were compiled locally and not run, and
+  none of their mutants has been run. Locally verified: the headless test, the
+  Win32 `Panel::desc`/`rect_on` unit test, and mutants of `check_set_panel` and
+  of headless `set_panel`.
+- **Not covered by any test:** the trait default (X11, the web), which an X11
+  e2e asserting `Unsupported` would cover; the Wayland refusal of a new layer on
+  `zwlr_layer_shell_v1` 1, since sway offers 4; a Win32 appbar moving to another
+  edge while it stays an appbar; a Win32 panel whose `ABM_NEW` was refused
+  registering on a later `set_panel`.
+- **AppKit swaps the window's class** (`object_setClass`) between the two panel
+  classes when the keyboard goes to or from `None`. Sound because `build_class`
+  gives neither instance storage; read from the runtime's documentation and
+  checked only by the session test's `canBecomeKeyWindow` read-back.
+- **Behaviour that is not a bug:** on Win32 and AppKit a panel changed to
+  `Exclusive` takes the keyboard only when next shown, and one changed to `None`
+  while it holds the keyboard keeps it until the user clicks elsewhere; Wayland
+  hands it over or takes it at the commit. All three read from the platforms'
+  documentation, not observed. No `Resized` arrives when the size did not
+  change. A panel whose monitor is gone is refused with `NoSuchMonitor`, as
+  creating it would be.
 
 **Frame pacing (`Shell::request_frame`, `ShellEvent::FrameReady`): what is
 left.** Built as decided on 2026-10-19 for lyr: Wayland answers with

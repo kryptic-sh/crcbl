@@ -1186,6 +1186,9 @@ pub mod value {
     /// `HWND_BOTTOM`, as `SetWindowPos`'s insert-after: the bottom of the
     /// z-order.
     pub const HWND_BOTTOM: isize = 1;
+    /// `HWND_TOPMOST`, as `SetWindowPos`'s insert-after: the top of the
+    /// topmost band, which the window joins.
+    pub const HWND_TOPMOST: isize = -1;
 
     /// `PM_REMOVE`.
     pub const PM_REMOVE: u32 = 0x0001;

@@ -749,7 +749,7 @@ impl Win32Shell {
     /// writing it back without this bit stops a window receiving `WM_DROPFILES`
     /// the first time it goes borderless, with nothing anywhere reporting that
     /// drops stopped working.
-    fn set_styles(hwnd: Handle, window_style: u32, ex_style: u32) {
+    pub(super) fn set_styles(hwnd: Handle, window_style: u32, ex_style: u32) {
         // SAFETY: reading this shell's own window's extended style, only to
         // carry across the write below the two bits that are state fixed
         // elsewhere rather than style: the drop registration, and the missing

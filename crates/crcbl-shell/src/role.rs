@@ -281,20 +281,101 @@ pub(crate) fn check(
     }
     match desc.role {
         WindowRole::Toplevel => Ok(()),
-        WindowRole::Panel(panel) => {
-            if !caps.contains(ShellCaps::PANEL) {
-                return unsupported("panel windows");
-            }
-            if panel.reserve == Reserve::OwnExtent && panel.reserved_edge().is_none() {
-                return unsupported("a reserved panel that is not held against one edge");
-            }
-            match panel.monitor {
-                Some(monitor) if !has_monitor(monitor) => Err(ShellError::NoSuchMonitor(monitor.0)),
-                _ => Ok(()),
-            }
-        }
+        WindowRole::Panel(panel) => check_panel(&panel, caps, backend, has_monitor),
         WindowRole::Popup(_) if !caps.contains(ShellCaps::POPUP) => unsupported("popup windows"),
         WindowRole::Popup(_) => Ok(()),
+    }
+}
+
+/// The panel half of [`check`], which
+/// [`Shell::set_panel`](crate::Shell::set_panel) applies to a panel's new
+/// descriptor too, so a panel cannot be reconfigured into one it could not
+/// have been created as.
+fn check_panel(
+    panel: &PanelDesc<'_>,
+    caps: ShellCaps,
+    backend: ShellBackend,
+    has_monitor: impl Fn(MonitorId) -> bool,
+) -> Result<(), ShellError> {
+    let unsupported = |what| Err(ShellError::Unsupported { backend, what });
+    if !caps.contains(ShellCaps::PANEL) {
+        return unsupported("panel windows");
+    }
+    if panel.reserve == Reserve::OwnExtent && panel.reserved_edge().is_none() {
+        return unsupported("a reserved panel that is not held against one edge");
+    }
+    match panel.monitor {
+        Some(monitor) if !has_monitor(monitor) => Err(ShellError::NoSuchMonitor(monitor.0)),
+        _ => Ok(()),
+    }
+}
+
+/// What every backend checks before it reconfigures a panel with
+/// [`Shell::set_panel`](crate::Shell::set_panel): that the window is a panel,
+/// whose descriptor is `was`, that the new descriptor keeps its namespace and
+/// its monitor, and that it passes the checks a new panel would.
+///
+/// The namespace and the monitor are fixed by `wlr-layer-shell`, which names
+/// both in `get_layer_surface` and has no request to change either. Refusing
+/// a change on every backend, rather than only where the protocol does, keeps
+/// a panel that works on one system from failing on another.
+pub(crate) fn check_set_panel(
+    window: WindowId,
+    was: Option<PanelDesc<'_>>,
+    panel: &PanelDesc<'_>,
+    caps: ShellCaps,
+    backend: ShellBackend,
+    has_monitor: impl Fn(MonitorId) -> bool,
+) -> Result<(), ShellError> {
+    let Some(was) = was else {
+        return Err(not_a_panel(window));
+    };
+    if panel.namespace != was.namespace {
+        return Err(ShellError::InvalidDescriptor(
+            "set_panel: a panel's namespace is fixed when it is created".to_string(),
+        ));
+    }
+    if panel.monitor != was.monitor {
+        return Err(ShellError::InvalidDescriptor(
+            "set_panel: a panel's monitor is fixed when it is created".to_string(),
+        ));
+    }
+    check_panel(panel, caps, backend, has_monitor)
+}
+
+/// What [`Shell::set_panel`](crate::Shell::set_panel) answers for a window
+/// that is not a panel, in every backend's words alike.
+pub(crate) fn not_a_panel(window: WindowId) -> ShellError {
+    ShellError::InvalidDescriptor(format!("set_panel: {window:?} is not a panel"))
+}
+
+/// A [`PanelDesc`] kept past the call that gave it, for the backends that
+/// have no panel record of their own: the namespace owned, the rest as given.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct KeptPanel {
+    namespace: String,
+    /// The descriptor with an empty namespace, which [`desc`](Self::desc)
+    /// puts back.
+    desc: PanelDesc<'static>,
+}
+
+impl KeptPanel {
+    pub(crate) fn new(desc: &PanelDesc<'_>) -> Self {
+        Self {
+            namespace: desc.namespace.to_string(),
+            desc: PanelDesc {
+                namespace: "",
+                ..*desc
+            },
+        }
+    }
+
+    /// The descriptor as it was given.
+    pub(crate) fn desc(&self) -> PanelDesc<'_> {
+        PanelDesc {
+            namespace: &self.namespace,
+            ..self.desc
+        }
     }
 }
 

@@ -2622,6 +2622,127 @@ fn a_reserving_bar_is_an_appbar_that_takes_its_edge_and_gives_it_back() {
     assert_eq!(after, before, "destroying the bar gave the edge back");
 }
 
+/// lyr's bar on reload: a reserving bar made taller in place reserves the
+/// new height, moves into the new strip and reports the new size as a
+/// resize; made to reserve nothing, it gives the edge back while it lives.
+#[test]
+#[ignore = "reserves part of the real desktop's work area: run-win32-e2e.ps1 runs it"]
+fn a_reconfigured_appbar_reserves_its_new_height_and_gives_it_back_when_told() {
+    const HEIGHT: f64 = 30.0;
+    const TALLER: f64 = 50.0;
+    let mut shell = shell();
+    let primary = shell
+        .monitors()
+        .iter()
+        .find(|monitor| monitor.is_primary)
+        .cloned()
+        .expect("a primary monitor");
+    let before = work_area_until(&mut shell, |_| true);
+    let depth = |height: f64| {
+        LogicalSize::new(0.0, height)
+            .to_physical(primary.scale_factor)
+            .height
+    };
+    let desc = crate::PanelDesc {
+        monitor: Some(primary.id),
+        anchor: crate::PanelAnchor::TOP | crate::PanelAnchor::LEFT | crate::PanelAnchor::RIGHT,
+        reserve: crate::Reserve::OwnExtent,
+        ..crate::PanelDesc::default()
+    };
+    let bar = shell
+        .create_window(&panel_desc(
+            "crcbl reconfigured appbar",
+            LogicalSize::new(0.0, HEIGHT),
+            desc,
+        ))
+        .expect("a reserving panel");
+    shell.pump(&mut |_| {});
+    work_area_until(&mut shell, |area| area.y == before.y + depth(HEIGHT) as i32);
+
+    shell
+        .set_panel(bar, LogicalSize::new(0.0, TALLER), &desc)
+        .expect("set_panel");
+    let reserved = work_area_until(&mut shell, |area| area.y == before.y + depth(TALLER) as i32);
+    assert_eq!(
+        (reserved.y, reserved.height),
+        (
+            before.y + depth(TALLER) as i32,
+            before.height - depth(TALLER)
+        ),
+        "the work area gave up the new height at the top"
+    );
+    let (_, _, rect) = styles_and_rect(hwnd_of(&shell, bar));
+    assert_eq!(
+        (rect.top, rect.bottom - rect.top),
+        (before.y, depth(TALLER) as i32),
+        "the bar sits in the new strip"
+    );
+    assert_eq!(
+        shell
+            .window_state(bar)
+            .expect("live")
+            .size()
+            .map(|size| size.height),
+        Some(depth(TALLER)),
+        "the new height arrived as a resize"
+    );
+
+    let unreserved = crate::PanelDesc {
+        reserve: crate::Reserve::None,
+        ..desc
+    };
+    shell
+        .set_panel(bar, LogicalSize::new(0.0, TALLER), &unreserved)
+        .expect("set_panel");
+    let after = work_area_until(&mut shell, |area| area == before);
+    assert_eq!(
+        after, before,
+        "a bar that stops reserving gives the edge back"
+    );
+    shell.destroy_window(bar).expect("destroy");
+}
+
+/// A reconfigured panel takes the styles of its new layer and keyboard: out
+/// of the topmost band for `Bottom`, activatable for `OnDemand`, and back.
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_reconfigured_panel_changes_band_and_keyboard_in_place() {
+    use super::super::ffi::style;
+    let mut shell = shell();
+    let size = LogicalSize::new(200.0, 200.0);
+    let desc = crate::PanelDesc {
+        anchor: crate::PanelAnchor::TOP | crate::PanelAnchor::RIGHT,
+        ..crate::PanelDesc::default()
+    };
+    let widget = shell
+        .create_window(&panel_desc("crcbl reconfigured panel", size, desc))
+        .expect("a panel");
+    shell.pump(&mut |_| {});
+    let hwnd = hwnd_of(&shell, widget);
+    let (_, ex_style, _) = styles_and_rect(hwnd);
+    assert_ne!(ex_style & style::EX_TOPMOST, 0);
+    assert_ne!(ex_style & style::EX_NO_ACTIVATE, 0);
+
+    let lowered = crate::PanelDesc {
+        layer: crate::PanelLayer::Bottom,
+        keyboard: crate::PanelKeyboard::OnDemand,
+        ..desc
+    };
+    shell.set_panel(widget, size, &lowered).expect("set_panel");
+    shell.pump(&mut |_| {});
+    let (_, ex_style, _) = styles_and_rect(hwnd);
+    assert_eq!(ex_style & style::EX_TOPMOST, 0, "left the topmost band");
+    assert_eq!(ex_style & style::EX_NO_ACTIVATE, 0, "can take the keyboard");
+    assert_ne!(ex_style & style::EX_TOOL_WINDOW, 0, "still a panel");
+
+    shell.set_panel(widget, size, &desc).expect("set_panel");
+    shell.pump(&mut |_| {});
+    let (_, ex_style, _) = styles_and_rect(hwnd);
+    assert_ne!(ex_style & style::EX_TOPMOST, 0, "back in the topmost band");
+    assert_ne!(ex_style & style::EX_NO_ACTIVATE, 0);
+    shell.destroy_window(widget).expect("destroy");
+}
+
 /// Explorer notices a full-screen window on its own schedule, after the
 /// window takes the foreground; this is a generous ceiling, not a wait.
 const FULL_SCREEN_PATIENCE: Duration = Duration::from_secs(10);

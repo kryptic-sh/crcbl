@@ -7,15 +7,24 @@
 //! before the initial commit because layer-surface state is double-buffered and
 //! the first configure answers that commit.
 //!
+//! [`Shell::set_panel`] sends the same requests again, `set_layer` with them,
+//! and commits: the compositor answers with a configure, which reports the
+//! new size as the first one did. The namespace and the output are arguments
+//! of `get_layer_surface` and nothing changes them afterwards.
+//!
 //! What the compositor decides is the size along an axis anchored at both
 //! ends. [`layer_size`] sends zero there, which is the protocol's "you assign
 //! it", and the configure carries the answer; see
 //! [`WaylandShell::layer_configured`].
 
-use crate::{LogicalSize, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, Reserve, ShellError};
+use crate::{
+    LogicalSize, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, Reserve, Shell, ShellError,
+    WindowId,
+};
 
 use super::ffi::{self, WlProxy};
 use super::protocol::layer_shell::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
+use super::protocol::wayland::wl_surface;
 use super::{WaylandShell, round_logical};
 
 /// `zwlr_layer_shell_v1` 4 is the lowest version with
@@ -28,6 +37,10 @@ pub(super) const LAYER_SHELL_VERSION: u32 = 4;
 /// The first `zwlr_layer_shell_v1` version with `on_demand` keyboard
 /// interactivity.
 const ON_DEMAND_SINCE: u32 = 4;
+
+/// The first `zwlr_layer_surface_v1` version with `set_layer`; before it a
+/// layer surface stays in the layer it was made in.
+const SET_LAYER_SINCE: u32 = 2;
 
 /// The layer-shell `layer` enum for a [`PanelLayer`].
 const fn layer_of(layer: PanelLayer) -> u32 {
@@ -103,6 +116,45 @@ fn exclusive_zone(desc: &PanelDesc<'_>, size: LogicalSize) -> i32 {
     }
 }
 
+/// Refuses [`PanelKeyboard::OnDemand`] on a layer shell of `version` older
+/// than [`ON_DEMAND_SINCE`]: the other two interactivities would each be a
+/// different panel from the one asked for, one that cannot be typed into or
+/// one that takes the keyboard from everything else.
+fn check_keyboard(keyboard: PanelKeyboard, version: u32) -> Result<(), ShellError> {
+    if keyboard == PanelKeyboard::OnDemand && version < ON_DEMAND_SINCE {
+        return Err(WaylandShell::unsupported(
+            "an on-demand panel keyboard (needs zwlr_layer_shell_v1 version 4)",
+        ));
+    }
+    Ok(())
+}
+
+/// Sends a layer surface every piece of its state but the layer, which
+/// `get_layer_surface` takes and `set_layer` changes.
+///
+/// # Safety
+///
+/// `layer` must be a live `zwlr_layer_surface_v1`.
+unsafe fn send_state(layer: *mut WlProxy, desc: &PanelDesc<'_>, size: LogicalSize) {
+    let (width, height) = layer_size(desc.anchor, size);
+    let margins = desc.margins;
+    // SAFETY: the caller guarantees a live layer surface, and each request
+    // takes plain integers.
+    unsafe {
+        zwlr_layer_surface_v1::set_size(layer, width, height);
+        zwlr_layer_surface_v1::set_anchor(layer, anchor_of(desc.anchor));
+        zwlr_layer_surface_v1::set_exclusive_zone(layer, exclusive_zone(desc, size));
+        zwlr_layer_surface_v1::set_margin(
+            layer,
+            round_logical(margins.top),
+            round_logical(margins.right),
+            round_logical(margins.bottom),
+            round_logical(margins.left),
+        );
+        zwlr_layer_surface_v1::set_keyboard_interactivity(layer, keyboard_of(desc.keyboard));
+    }
+}
+
 impl WaylandShell {
     /// Makes `surface` a layer surface and sends its whole initial state.
     ///
@@ -114,10 +166,7 @@ impl WaylandShell {
     /// [`ShellError::WindowCreation`] if the compositor has withdrawn
     /// `zwlr_layer_shell_v1` or the request fails, and
     /// [`ShellError::Unsupported`] for [`PanelKeyboard::OnDemand`] on a
-    /// compositor older than [`ON_DEMAND_SINCE`] — the other two
-    /// interactivities would each be a different panel from the one asked for,
-    /// one that cannot be typed into or one that takes the keyboard from
-    /// everything else.
+    /// compositor older than [`ON_DEMAND_SINCE`]; see [`check_keyboard`].
     pub(super) fn create_layer_surface(
         &mut self,
         surface: *mut WlProxy,
@@ -132,16 +181,8 @@ impl WaylandShell {
             ));
         }
         // SAFETY: `shell` was just checked non-null and is a live global.
-        if desc.keyboard == PanelKeyboard::OnDemand
-            && unsafe { ffi::proxy_version(shell) } < ON_DEMAND_SINCE
-        {
-            return Err(Self::unsupported(
-                "an on-demand panel keyboard (needs zwlr_layer_shell_v1 version 4)",
-            ));
-        }
+        check_keyboard(desc.keyboard, unsafe { ffi::proxy_version(shell) })?;
         let output = self.output_proxy_for(desc.monitor);
-        let (width, height) = layer_size(desc.anchor, size);
-        let margins = desc.margins;
         // SAFETY: the shell global and `surface` are live, `surface` has no
         // role and no buffer yet, and a null output is the protocol's own
         // "the compositor chooses". Every later request goes to the layer
@@ -159,19 +200,63 @@ impl WaylandShell {
                     "zwlr_layer_shell_v1.get_layer_surface failed".to_string(),
                 ));
             }
-            zwlr_layer_surface_v1::set_size(layer, width, height);
-            zwlr_layer_surface_v1::set_anchor(layer, anchor_of(desc.anchor));
-            zwlr_layer_surface_v1::set_exclusive_zone(layer, exclusive_zone(desc, size));
-            zwlr_layer_surface_v1::set_margin(
-                layer,
-                round_logical(margins.top),
-                round_logical(margins.right),
-                round_logical(margins.bottom),
-                round_logical(margins.left),
-            );
-            zwlr_layer_surface_v1::set_keyboard_interactivity(layer, keyboard_of(desc.keyboard));
+            send_state(layer, desc, size);
             Ok(layer)
         }
+    }
+
+    /// Sends a panel's layer surface its new state and commits it, for
+    /// [`Shell::set_panel`]. The compositor answers with a configure, which
+    /// [`layer_configured`](Self::layer_configured) takes as it took the first.
+    ///
+    /// # Errors
+    ///
+    /// What [`crate::role::check_set_panel`] refuses, and
+    /// [`ShellError::Unsupported`] for [`PanelKeyboard::OnDemand`] on a layer
+    /// shell older than [`ON_DEMAND_SINCE`] or a new layer on one older than
+    /// [`SET_LAYER_SINCE`].
+    pub(super) fn reconfigure_layer_surface(
+        &mut self,
+        window: WindowId,
+        size: LogicalSize,
+        desc: &PanelDesc<'_>,
+    ) -> Result<(), ShellError> {
+        let state = self.window(window)?;
+        let was = state.panel.as_ref().map(crate::role::KeptPanel::desc);
+        crate::role::check_set_panel(window, was, desc, self.caps, self.backend(), |monitor| {
+            self.monitor(monitor).is_some()
+        })?;
+        let (layer, surface) = (state.layer_surface, state.surface);
+        let was_layer = was.map(|was| was.layer);
+        if layer.is_null() {
+            return Err(ShellError::Backend(format!(
+                "set_panel: {window:?} has no layer surface"
+            )));
+        }
+        // SAFETY: a live layer surface, checked non-null just above; a layer
+        // surface has its shell's version.
+        let version = unsafe { ffi::proxy_version(layer) };
+        check_keyboard(desc.keyboard, version)?;
+        let set_layer = version >= SET_LAYER_SINCE;
+        if !set_layer && was_layer != Some(desc.layer) {
+            return Err(Self::unsupported(
+                "changing a panel's layer (needs zwlr_layer_shell_v1 version 2)",
+            ));
+        }
+        // SAFETY: the window's own live layer surface and `wl_surface`; the
+        // commit applies the double-buffered state just sent.
+        unsafe {
+            send_state(layer, desc, size);
+            if set_layer {
+                zwlr_layer_surface_v1::set_layer(layer, layer_of(desc.layer));
+            }
+            wl_surface::commit(surface);
+        }
+        self.conn.flush();
+        let state = self.window_mut(window)?;
+        state.panel = Some(crate::role::KeptPanel::new(desc));
+        state.requested_size = size;
+        Ok(())
     }
 
     /// A `zwlr_layer_surface_v1.configure`: the size the compositor assigned,

@@ -1943,8 +1943,9 @@ struct WlWindow {
     placement: Option<crate::PopupPlacement>,
     /// What input a popup takes, which decides whether `Escape` dismisses it.
     popup_input: Option<crate::PopupInput>,
-    /// The monitor a panel was created for, whose removal asks it to close.
-    panel_monitor: Option<MonitorId>,
+    /// What a panel was created with, or last given by [`Shell::set_panel`];
+    /// its monitor's removal asks it to close. `None` for every other window.
+    panel: Option<crate::role::KeptPanel>,
     decoration: *mut WlProxy,
     fractional_scale: *mut WlProxy,
     viewport: *mut WlProxy,
@@ -2706,7 +2707,10 @@ impl WaylandShell {
                 let panels: Vec<WindowId> = self
                     .windows
                     .iter()
-                    .filter(|(_, window)| window.panel_monitor == Some(monitor))
+                    .filter(|(_, window)| {
+                        window.panel.as_ref().and_then(|panel| panel.desc().monitor)
+                            == Some(monitor)
+                    })
                     .map(|(handle, _)| handle.cast())
                     .collect();
                 for panel in panels {
@@ -3824,7 +3828,7 @@ impl Shell for WaylandShell {
                 parent: None,
                 placement: None,
                 popup_input: None,
-                panel_monitor: panel.and_then(|panel| panel.monitor),
+                panel: panel.as_ref().map(crate::role::KeptPanel::new),
                 decoration,
                 fractional_scale,
                 viewport,
@@ -3999,6 +4003,15 @@ impl Shell for WaylandShell {
         size: LogicalSize,
     ) -> Result<(), ShellError> {
         self.move_popup(popup, anchor, size)
+    }
+
+    fn set_panel(
+        &mut self,
+        window: WindowId,
+        size: LogicalSize,
+        panel: &crate::PanelDesc<'_>,
+    ) -> Result<(), ShellError> {
+        self.reconfigure_layer_surface(window, size, panel)
     }
 
     fn set_text_input(
@@ -5133,7 +5146,7 @@ mod tests {
             parent: None,
             placement: None,
             popup_input: None,
-            panel_monitor: None,
+            panel: None,
             decoration: ptr::null_mut(),
             fractional_scale: ptr::null_mut(),
             viewport: ptr::null_mut(),

@@ -250,7 +250,7 @@ impl WaylandShell {
                 parent: Some(popup.parent),
                 placement: Some(popup.placement),
                 popup_input: Some(popup.input),
-                panel_monitor: None,
+                panel: None,
                 decoration: ptr::null_mut(),
                 fractional_scale,
                 viewport,

@@ -568,6 +568,54 @@ pub trait Shell: core::fmt::Debug {
         })
     }
 
+    /// Gives a live panel a new size and a new [`PanelDesc`]: its layer,
+    /// anchor, reserve, margins and keyboard change in place, with the same
+    /// surface and the same swapchain, where destroying it and creating
+    /// another would flicker.
+    ///
+    /// `size` means what [`WindowDesc::size`] means for a panel: ignored along
+    /// an axis anchored to both opposite edges. The new descriptor is checked
+    /// as [`create_window`](Self::create_window) checks one, so a reserving
+    /// panel must still name one edge. A request, like the rest of a window's
+    /// geometry: the size the panel gets arrives as the next
+    /// [`ShellEvent::Resized`], as its first one did, and none arrives when
+    /// the size did not change.
+    ///
+    /// **The namespace and the monitor cannot change.** `wlr-layer-shell`
+    /// fixes both when the surface is made, and every backend refuses a
+    /// change to either alike; close the panel and open another for that.
+    ///
+    /// A visible panel changed to [`PanelKeyboard::Exclusive`] takes the
+    /// keyboard at once on Wayland, where the compositor hands it over; on
+    /// Win32 and AppKit it takes it when it is next shown, as a new one does.
+    ///
+    /// A provided method answering [`ShellError::Unsupported`], as
+    /// [`create_window`](Self::create_window) answers a panel on a backend
+    /// without [`ShellCaps::PANEL`], once the handle has been checked; every
+    /// backend with panels implements it.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle,
+    /// [`ShellError::InvalidDescriptor`] for a window that is not a panel or a
+    /// descriptor that changes its namespace or its monitor, and whatever
+    /// [`create_window`](Self::create_window) refuses a panel with:
+    /// [`ShellError::Unsupported`] for what the backend cannot build, and
+    /// [`ShellError::NoSuchMonitor`] if the panel's monitor is gone.
+    fn set_panel(
+        &mut self,
+        window: WindowId,
+        size: LogicalSize,
+        panel: &PanelDesc<'_>,
+    ) -> Result<(), ShellError> {
+        let _ = (size, panel);
+        self.window_state(window)?;
+        Err(ShellError::Unsupported {
+            backend: self.backend(),
+            what: "panel windows",
+        })
+    }
+
     /// Every connected monitor.
     ///
     /// Invalidated by [`ShellEvent::MonitorsChanged`]; call again rather than

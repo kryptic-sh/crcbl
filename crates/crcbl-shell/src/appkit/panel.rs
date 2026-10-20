@@ -14,6 +14,11 @@
 //! `hidesOnDeactivate` is turned off: an `NSPanel` hides whenever its
 //! application stops being active by default, which for a bar is always.
 //!
+//! [`Shell::set_panel`] changes all but the monitor and the namespace in
+//! place: the level and the collection behaviour are set again, the window's
+//! class is swapped between the two panel classes when it starts or stops
+//! taking the keyboard, and its frame is computed again.
+//!
 //! A panel's frame is computed again when the screens change, and a panel
 //! whose screen was detached is asked to close; see
 //! [`ShellEvent::MonitorRemoved`](crate::ShellEvent::MonitorRemoved).
@@ -22,7 +27,7 @@ use core::ptr;
 
 use crate::{
     LogicalSize, Margins, MonitorId, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, Reserve,
-    WindowId,
+    Shell, ShellError, WindowId,
 };
 
 use super::ffi::{self, Id, NSPoint, NSRect, NSSize, Sel};
@@ -56,6 +61,20 @@ impl Panel {
             margins: desc.margins,
             keyboard: desc.keyboard,
             size,
+        }
+    }
+
+    /// The descriptor it stands for, under `namespace`, which AppKit places
+    /// nothing by and so keeps apart.
+    pub(super) fn desc<'a>(&self, namespace: &'a str) -> PanelDesc<'a> {
+        PanelDesc {
+            namespace,
+            monitor: self.monitor,
+            layer: self.layer,
+            anchor: self.anchor,
+            reserve: self.reserve,
+            margins: self.margins,
+            keyboard: self.keyboard,
         }
     }
 
@@ -136,6 +155,50 @@ impl AppKitShell {
                 panel.keyboard == PanelKeyboard::OnDemand,
             );
         }
+    }
+
+    /// Gives a panel a new size and descriptor in place, for
+    /// [`Shell::set_panel`]: the level and the keyboard class of its new layer
+    /// and keyboard, and its frame worked out again, whose resize is reported
+    /// as any other, through `windowDidResize:`.
+    ///
+    /// # Errors
+    ///
+    /// What [`crate::role::check_set_panel`] refuses, and
+    /// [`ShellError::Connect`] if the panel class it now needs cannot be built.
+    pub(super) fn reconfigure_panel(
+        &mut self,
+        window: WindowId,
+        size: LogicalSize,
+        desc: &PanelDesc<'_>,
+    ) -> Result<(), ShellError> {
+        let state = self.window(window)?;
+        let was = state.panel.map(|panel| panel.desc(&state.panel_namespace));
+        crate::role::check_set_panel(window, was, desc, self.caps(), self.backend(), |monitor| {
+            self.monitor(monitor).is_some()
+        })?;
+        let old = state
+            .panel
+            .ok_or_else(|| crate::role::not_a_panel(window))?;
+        let ns_window = state.window;
+        let panel = Panel::new(desc, size);
+        let takes_keyboard = panel.keyboard != PanelKeyboard::None;
+        if takes_keyboard != (old.keyboard != PanelKeyboard::None) {
+            let class = super::window::panel_class(takes_keyboard)?;
+            // SAFETY: a live window of this shell, on the main thread. Both
+            // panel classes are `NSPanel` subclasses `build_class` made with no
+            // instance storage of their own, so the object is laid out alike
+            // under either, and they differ only in what they answer
+            // `canBecomeKeyWindow`.
+            unsafe { ffi::object_setClass(ns_window, class) };
+        }
+        // SAFETY: a live window of a panel class, on the main thread.
+        unsafe { Self::configure_panel(ns_window, &panel) };
+        let state = self.window_mut(window)?;
+        state.panel = Some(panel);
+        state.requested_size = size;
+        self.place_panel(window, &panel);
+        Ok(())
     }
 
     /// Shows a panel: made key if it takes the keyboard outright, otherwise

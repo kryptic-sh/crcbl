@@ -130,9 +130,14 @@ pub(super) struct WinWindow {
     /// `WM_DROPFILES` — so this is the second half of the gate rather than the
     /// gate, and [`dnd`](super::dnd) says why a second half is worth having.
     accept_drops: bool,
-    /// What a panel was created with, so it can be placed again; `None` for
+    /// What a panel was created with, or last given by
+    /// [`set_panel`](Shell::set_panel), so it can be placed again; `None` for
     /// every other window. See [`panel`](super::panel).
     pub(super) panel: Option<Panel>,
+    /// A panel's [`PanelDesc::namespace`](crate::PanelDesc::namespace), which
+    /// places nothing here and is kept only so that `set_panel` refuses a
+    /// change to it as every backend does. Empty for every other window.
+    pub(super) panel_namespace: String,
     /// Whether [`WindowDesc::transparent`] was set: created with
     /// `WS_EX_NOREDIRECTIONBITMAP`, and so what
     /// [`SurfaceTarget::Win32`]'s `transparent` reports.
@@ -1405,6 +1410,10 @@ impl Shell for Win32Shell {
             accept_drops: desc.accept_drops,
             transparent: desc.transparent,
             panel,
+            panel_namespace: match desc.role {
+                crate::WindowRole::Panel(panel) => panel.namespace.to_string(),
+                _ => String::new(),
+            },
             popup,
             input_region: None,
         };
@@ -1623,6 +1632,15 @@ impl Shell for Win32Shell {
         size: crate::LogicalSize,
     ) -> Result<(), ShellError> {
         self.move_popup(popup, anchor, size)
+    }
+
+    fn set_panel(
+        &mut self,
+        window: WindowId,
+        size: crate::LogicalSize,
+        panel: &crate::PanelDesc<'_>,
+    ) -> Result<(), ShellError> {
+        self.reconfigure_panel(window, size, panel)
     }
 
     fn monitors(&self) -> &[MonitorInfo] {
