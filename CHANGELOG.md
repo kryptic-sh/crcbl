@@ -23,6 +23,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   own query no longer has to split it around the caret, which put the caret in
   the wrong place in right-to-left text.
 
+### Fixed
+
+- **Win32 reads the unsided `VK_CONTROL`, `VK_MENU` and `VK_SHIFT`**: a key
+  injected by the unsided virtual key with no scan code, as some automation
+  tools and remote-input stacks send, set only that bit, so `Ctrl+V` reached the
+  app as a plain `v`. The unsided key now counts where no sided key that would
+  decide is down; a real keyboard's modifiers and AltGr are reported as before,
+  and an unsided Control never makes AltGr.
+
 ## [0.7.0] - 2026-10-20
 
 ### Breaking

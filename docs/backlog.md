@@ -2747,6 +2747,25 @@ validation before a reusable port can be specified. GPU residency likewise needs
 measured pressure and a proven game-local policy. Keep those decisions in EW's
 backlog; do not create speculative engine implementations for them.
 
+## Win32 unsided modifier keys: unit-tested only (2026-10-20)
+
+`keys::modifiers` (`crcbl-shell/src/win32/keys.rs`) now counts the unsided
+`VK_CONTROL`, `VK_MENU` and `VK_SHIFT` where no sided key that would decide is
+down, so a key injected by the unsided virtual key with scan code 0 no longer
+loses its modifier. Verified only by
+`an_unsided_modifier_counts_where_no_sided_one_is_down` over synthesized
+`GetKeyboardState` arrays, each of its six hand mutants failing it. **Not
+verified**: that an injected unsided `VK_CONTROL` actually leaves `VK_LCONTROL`
+clear in `GetKeyboardState` on Windows 11 (the premise of the report); no
+desktop test injects one. A `SendInput` of `VK_CONTROL` with `wScan` 0 followed
+by `V`, read through `Win32Shell::modifiers_now`, would settle it.
+
+**Decided without the owner**: the unsided Control never makes AltGr. AltGr is
+Windows' sided synthesis (left Control with right Alt), so an injected unsided
+Control beside a US right Alt reports `CTRL | ALT`, not `ALT_GR`. The other
+reading — count the unsided Control as the left one everywhere — would turn that
+chord into AltGr and drop both modifiers.
+
 ## The release pipeline: what 0.1.0 left open (2026-10-16)
 
 The owner asked, relayed by the lyr session, for a release pipeline matching

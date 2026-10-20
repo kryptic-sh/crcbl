@@ -1543,10 +1543,10 @@ pub mod value {
 
     /// `VK_SHIFT`-adjacent virtual keys, left and right told apart.
     ///
-    /// The unsided `VK_SHIFT`/`VK_CONTROL`/`VK_MENU` are deliberately not here:
-    /// the AltGr disambiguation in
+    /// The AltGr disambiguation in
     /// [`keys::modifiers`](crate::win32::keys::modifiers) depends on seeing
-    /// *which* Control is down.
+    /// *which* Control is down, so it reads these first and the unsided
+    /// [`VK_SHIFT`]/[`VK_CONTROL`]/[`VK_MENU`] only where they add a key.
     pub const VK_L_SHIFT: usize = 0xA0;
     /// See [`VK_L_SHIFT`].
     pub const VK_R_SHIFT: usize = 0xA1;
@@ -1558,6 +1558,13 @@ pub mod value {
     pub const VK_L_MENU: usize = 0xA4;
     /// See [`VK_L_SHIFT`].
     pub const VK_R_MENU: usize = 0xA5;
+    /// `VK_SHIFT`: either Shift, which Windows sets with a sided one and
+    /// alone for a key injected by this unsided virtual key.
+    pub const VK_SHIFT: usize = 0x10;
+    /// `VK_CONTROL`. See [`VK_SHIFT`].
+    pub const VK_CONTROL: usize = 0x11;
+    /// `VK_MENU`: Alt. See [`VK_SHIFT`].
+    pub const VK_MENU: usize = 0x12;
     /// `VK_LWIN`.
     pub const VK_L_WIN: usize = 0x5B;
     /// `VK_RWIN`.

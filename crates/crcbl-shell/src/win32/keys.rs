@@ -346,6 +346,19 @@ const fn is_toggled(keys: &[u8; 256], key: usize) -> bool {
 /// indistinguishable from AltGr alone at this layer, on Windows, by
 /// construction. Every toolkit has this limitation and none of them can fix it;
 /// it is recorded here rather than discovered.
+///
+/// # An unsided key counts where no sided one is down
+///
+/// Windows sets the unsided `VK_CONTROL`, `VK_MENU` and `VK_SHIFT` alongside
+/// whichever sided key is down, and a key injected by the unsided virtual key
+/// with no scan code — what some automation tools and remote-input stacks send
+/// — can set the unsided one alone, and reading only the sided keys turned
+/// that `Ctrl+V` into a plain `v`. So the unsided key adds its modifier as a
+/// left key would — except where the sided key that would decide is already down: an
+/// unsided Control beside a left Control is that Control, AltGr's synthesized
+/// one included, and an unsided Alt beside a right Alt is that Alt, which may
+/// be AltGr's. It never makes AltGr: that pair is Windows' sided synthesis,
+/// and an injected Control beside a US right Alt is still `Ctrl+Alt`.
 #[must_use]
 pub fn modifiers(keys: &[u8; 256]) -> Modifiers {
     let left_control = is_down(keys, value::VK_L_CONTROL);
@@ -353,14 +366,24 @@ pub fn modifiers(keys: &[u8; 256]) -> Modifiers {
     let left_alt = is_down(keys, value::VK_L_MENU);
     let right_alt = is_down(keys, value::VK_R_MENU);
     let alt_gr = right_alt && left_control;
+    let unsided_control = is_down(keys, value::VK_CONTROL) && !left_control;
+    let unsided_alt = is_down(keys, value::VK_MENU) && !right_alt;
 
     let mut modifiers = Modifiers::empty();
     modifiers.set(
         Modifiers::SHIFT,
-        is_down(keys, value::VK_L_SHIFT) || is_down(keys, value::VK_R_SHIFT),
+        is_down(keys, value::VK_L_SHIFT)
+            || is_down(keys, value::VK_R_SHIFT)
+            || is_down(keys, value::VK_SHIFT),
     );
-    modifiers.set(Modifiers::CTRL, right_control || (left_control && !alt_gr));
-    modifiers.set(Modifiers::ALT, left_alt || (right_alt && !alt_gr));
+    modifiers.set(
+        Modifiers::CTRL,
+        right_control || unsided_control || (left_control && !alt_gr),
+    );
+    modifiers.set(
+        Modifiers::ALT,
+        left_alt || unsided_alt || (right_alt && !alt_gr),
+    );
     modifiers.set(
         Modifiers::SUPER,
         is_down(keys, value::VK_L_WIN) || is_down(keys, value::VK_R_WIN),
@@ -837,6 +860,35 @@ mod tests {
             value::VK_R_CONTROL,
         ]));
         assert!(both.contains(Modifiers::ALT_GR | Modifiers::CTRL));
+    }
+
+    #[test]
+    fn an_unsided_modifier_counts_where_no_sided_one_is_down() {
+        // The bug this exists to not have: Ctrl injected as the unsided
+        // `VK_CONTROL` made Ctrl+V a plain v.
+        assert_eq!(modifiers(&held(&[value::VK_CONTROL])), Modifiers::CTRL);
+        assert_eq!(modifiers(&held(&[value::VK_MENU])), Modifiers::ALT);
+        assert_eq!(modifiers(&held(&[value::VK_SHIFT])), Modifiers::SHIFT);
+        // Beside a sided key, as Windows reports a real keyboard's, it adds
+        // nothing.
+        let right = modifiers(&held(&[value::VK_CONTROL, value::VK_R_CONTROL]));
+        assert_eq!(right, Modifiers::CTRL);
+        let left = modifiers(&held(&[value::VK_CONTROL, value::VK_L_CONTROL]));
+        assert_eq!(left, Modifiers::CTRL);
+
+        // AltGr as Windows reports it, the unsided bits set with the sided
+        // ones: still AltGr alone, neither a Control nor an Alt.
+        let alt_gr = modifiers(&held(&[
+            value::VK_L_CONTROL,
+            value::VK_R_MENU,
+            value::VK_CONTROL,
+            value::VK_MENU,
+        ]));
+        assert_eq!(alt_gr, Modifiers::ALT_GR);
+        // An injected Control beside a US right Alt is not AltGr's
+        // synthesized one.
+        let injected = modifiers(&held(&[value::VK_CONTROL, value::VK_R_MENU]));
+        assert_eq!(injected, Modifiers::CTRL | Modifiers::ALT);
     }
 
     #[test]
