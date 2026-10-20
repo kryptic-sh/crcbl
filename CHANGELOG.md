@@ -30,6 +30,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Named keysym constants on `crcbl_core::input::Keysym`**: `ESCAPE`, `RETURN`,
+  `KP_ENTER`, `UP`, `DOWN`, `BACKSPACE`, `F1`–`F12` and the rest of the keys no
+  layout moves, under their X11 names. Menus and shortcuts compare
+  `ShellEvent::Key`'s `keysym` against them rather than `key_code`, which an xkb
+  remap or a virtual keyboard's keymap does not change.
+
 - **`Instance::display_adapter` answers on Wayland through `crcbl-vk`**: the
   adapter whose DRM primary or render node (`VK_EXT_physical_device_drm`) is the
   compositor's dmabuf main device. On a hybrid laptop the ranked adapter walk

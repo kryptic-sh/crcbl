@@ -174,10 +174,15 @@ pub enum ShellEvent {
         scancode: Scancode,
         /// The physical key, layout-independent. `None` when the scancode maps
         /// to no key this engine names — the key is still bindable through
-        /// `scancode`.
+        /// `scancode`. Right for game bindings (WASD stays where the fingers
+        /// are), wrong for menus and shortcuts: an xkb remap such as
+        /// `caps:escape` or a virtual keyboard's own keymap does not change it
+        /// (`wtype`'s Down arrives on evdev 1, which is Escape).
         key_code: Option<KeyCode>,
-        /// The symbol this key produces in the current layout, for rebind
-        /// menus and shortcut labels.
+        /// The symbol this key produces in the current layout, for menus,
+        /// shortcuts, rebind menus and shortcut labels. The keys no layout
+        /// moves have named constants, [`Keysym::ESCAPE`], [`Keysym::DOWN`]
+        /// and the rest.
         keysym: Keysym,
         /// Down or up.
         state: ButtonState,

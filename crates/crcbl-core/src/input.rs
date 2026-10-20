@@ -205,6 +205,124 @@ impl Keysym {
     /// backend that could not map one. `XKB_KEY_NoSymbol`.
     pub const NONE: Self = Self(0);
 
+    // The keys whose symbol no layout moves, by their X11 names (`XK_` dropped,
+    // in `SCREAMING_CASE`), from `X11/keysymdef.h`. Compare
+    // `ShellEvent::Key`'s `keysym` against these, not its `key_code`, to act on
+    // the key the layout produced: `key_code` is the physical key, which an xkb
+    // remap (`caps:escape`) or a virtual keyboard's own keymap does not change.
+    /// `XK_BackSpace`.
+    pub const BACKSPACE: Self = Self(0xFF08);
+    /// `XK_Tab`.
+    pub const TAB: Self = Self(0xFF09);
+    /// `XK_Return`.
+    pub const RETURN: Self = Self(0xFF0D);
+    /// `XK_Pause`.
+    pub const PAUSE: Self = Self(0xFF13);
+    /// `XK_Scroll_Lock`.
+    pub const SCROLL_LOCK: Self = Self(0xFF14);
+    /// `XK_Escape`.
+    pub const ESCAPE: Self = Self(0xFF1B);
+    /// `XK_Home`.
+    pub const HOME: Self = Self(0xFF50);
+    /// `XK_Left`.
+    pub const LEFT: Self = Self(0xFF51);
+    /// `XK_Up`.
+    pub const UP: Self = Self(0xFF52);
+    /// `XK_Right`.
+    pub const RIGHT: Self = Self(0xFF53);
+    /// `XK_Down`.
+    pub const DOWN: Self = Self(0xFF54);
+    /// `XK_Prior`.
+    pub const PAGE_UP: Self = Self(0xFF55);
+    /// `XK_Next`.
+    pub const PAGE_DOWN: Self = Self(0xFF56);
+    /// `XK_End`.
+    pub const END: Self = Self(0xFF57);
+    /// `XK_Print`.
+    pub const PRINT: Self = Self(0xFF61);
+    /// `XK_Insert`.
+    pub const INSERT: Self = Self(0xFF63);
+    /// `XK_Menu`.
+    pub const MENU: Self = Self(0xFF67);
+    /// `XK_Num_Lock`.
+    pub const NUM_LOCK: Self = Self(0xFF7F);
+    /// `XK_KP_Enter`.
+    pub const KP_ENTER: Self = Self(0xFF8D);
+    /// `XK_KP_Multiply`.
+    pub const KP_MULTIPLY: Self = Self(0xFFAA);
+    /// `XK_KP_Add`.
+    pub const KP_ADD: Self = Self(0xFFAB);
+    /// `XK_KP_Subtract`.
+    pub const KP_SUBTRACT: Self = Self(0xFFAD);
+    /// `XK_KP_Decimal`.
+    pub const KP_DECIMAL: Self = Self(0xFFAE);
+    /// `XK_KP_Divide`.
+    pub const KP_DIVIDE: Self = Self(0xFFAF);
+    /// `XK_KP_0`.
+    pub const KP_0: Self = Self(0xFFB0);
+    /// `XK_KP_1`.
+    pub const KP_1: Self = Self(0xFFB1);
+    /// `XK_KP_2`.
+    pub const KP_2: Self = Self(0xFFB2);
+    /// `XK_KP_3`.
+    pub const KP_3: Self = Self(0xFFB3);
+    /// `XK_KP_4`.
+    pub const KP_4: Self = Self(0xFFB4);
+    /// `XK_KP_5`.
+    pub const KP_5: Self = Self(0xFFB5);
+    /// `XK_KP_6`.
+    pub const KP_6: Self = Self(0xFFB6);
+    /// `XK_KP_7`.
+    pub const KP_7: Self = Self(0xFFB7);
+    /// `XK_KP_8`.
+    pub const KP_8: Self = Self(0xFFB8);
+    /// `XK_KP_9`.
+    pub const KP_9: Self = Self(0xFFB9);
+    /// `XK_F1`.
+    pub const F1: Self = Self(0xFFBE);
+    /// `XK_F2`.
+    pub const F2: Self = Self(0xFFBF);
+    /// `XK_F3`.
+    pub const F3: Self = Self(0xFFC0);
+    /// `XK_F4`.
+    pub const F4: Self = Self(0xFFC1);
+    /// `XK_F5`.
+    pub const F5: Self = Self(0xFFC2);
+    /// `XK_F6`.
+    pub const F6: Self = Self(0xFFC3);
+    /// `XK_F7`.
+    pub const F7: Self = Self(0xFFC4);
+    /// `XK_F8`.
+    pub const F8: Self = Self(0xFFC5);
+    /// `XK_F9`.
+    pub const F9: Self = Self(0xFFC6);
+    /// `XK_F10`.
+    pub const F10: Self = Self(0xFFC7);
+    /// `XK_F11`.
+    pub const F11: Self = Self(0xFFC8);
+    /// `XK_F12`.
+    pub const F12: Self = Self(0xFFC9);
+    /// `XK_Shift_L`.
+    pub const SHIFT_L: Self = Self(0xFFE1);
+    /// `XK_Shift_R`.
+    pub const SHIFT_R: Self = Self(0xFFE2);
+    /// `XK_Control_L`.
+    pub const CONTROL_L: Self = Self(0xFFE3);
+    /// `XK_Control_R`.
+    pub const CONTROL_R: Self = Self(0xFFE4);
+    /// `XK_Caps_Lock`.
+    pub const CAPS_LOCK: Self = Self(0xFFE5);
+    /// `XK_Alt_L`.
+    pub const ALT_L: Self = Self(0xFFE9);
+    /// `XK_Alt_R`.
+    pub const ALT_R: Self = Self(0xFFEA);
+    /// `XK_Super_L`.
+    pub const SUPER_L: Self = Self(0xFFEB);
+    /// `XK_Super_R`.
+    pub const SUPER_R: Self = Self(0xFFEC);
+    /// `XK_Delete`.
+    pub const DELETE: Self = Self(0xFFFF);
+
     /// Start of the "Unicode keysym" block: `0x0100_0000 | codepoint`.
     const UNICODE_BASE: u32 = 0x0100_0000;
 
