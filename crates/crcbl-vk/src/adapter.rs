@@ -54,6 +54,52 @@ pub(crate) struct AdapterRecord {
     /// neither Metal nor WebGPU has one, so it stays inside this backend and
     /// [`crate::device`] spends it converting a read to nanoseconds.
     pub(crate) timestamp_period_ns: f32,
+    /// The DRM nodes this device is, from `VK_EXT_physical_device_drm`;
+    /// empty on a driver without it. See [`DrmNodes`].
+    pub(crate) drm: DrmNodes,
+}
+
+/// A physical device's DRM primary and render nodes, as `dev_t`s.
+///
+/// What a Wayland compositor's dmabuf feedback names is a `dev_t` of either
+/// node type — the protocol leaves which one unspecified — so a device is
+/// matched by [`contains`](Self::contains), never by comparing one number.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DrmNodes {
+    pub(crate) primary: Option<u64>,
+    pub(crate) render: Option<u64>,
+}
+
+impl DrmNodes {
+    /// The nodes `VkPhysicalDeviceDrmPropertiesEXT` reports.
+    fn of(props: &vk::PhysicalDeviceDrmPropertiesEXT<'_>) -> Self {
+        let node = |has: vk::Bool32, major: i64, minor: i64| {
+            let major = u32::try_from(major).ok()?;
+            let minor = u32::try_from(minor).ok()?;
+            (has == vk::TRUE).then(|| makedev(major, minor))
+        };
+        Self {
+            primary: node(props.has_primary, props.primary_major, props.primary_minor),
+            render: node(props.has_render, props.render_major, props.render_minor),
+        }
+    }
+
+    /// Whether `device` is one of these nodes.
+    pub(crate) fn contains(self, device: u64) -> bool {
+        self.primary == Some(device) || self.render == Some(device)
+    }
+}
+
+/// Linux's `dev_t` for a major and minor number, transcribed from glibc's
+/// `__gnu_dev_makedev` (`<bits/sysmacros.h>`), which musl encodes the same
+/// way: the low 8 bits of the minor, then the low 12 of the major, then the
+/// rest of the minor, then the rest of the major.
+fn makedev(major: u32, minor: u32) -> u64 {
+    let (major, minor) = (u64::from(major), u64::from(minor));
+    ((major & 0x0000_0fff) << 8)
+        | ((major & 0xffff_f000) << 32)
+        | (minor & 0x0000_00ff)
+        | ((minor & 0xffff_ff00) << 12)
 }
 
 /// Which of the Vulkan 1.3 baseline features a device has.
@@ -644,20 +690,8 @@ fn describe(
     debug_utils: bool,
     surface_caps2: bool,
 ) -> AdapterRecord {
-    let mut vulkan_1_2_props = vk::PhysicalDeviceVulkan12Properties::default();
-    // `VkPhysicalDeviceIDProperties` rather than `Vulkan11Properties`, which
-    // carries the same LUID: this is core since 1.1, where the other needs a
-    // 1.2 device to be chained at all.
-    let mut id_props = vk::PhysicalDeviceIDProperties::default();
-    let mut properties2 = vk::PhysicalDeviceProperties2::default()
-        .push_next(&mut vulkan_1_2_props)
-        .push_next(&mut id_props);
-    // SAFETY: `physical` came from this instance, and the chained structs are
-    // stack locals that outlive the call.
-    unsafe { instance.get_physical_device_properties2(physical, &mut properties2) };
-    let properties = properties2.properties;
-
-    // SAFETY: as above; the call only reads driver-owned tables.
+    // SAFETY: `physical` came from this instance; the call only reads
+    // driver-owned tables.
     let device_extensions =
         match unsafe { instance.enumerate_device_extension_properties(physical) } {
             Ok(properties) => properties,
@@ -671,6 +705,31 @@ fn describe(
                 Vec::new()
             }
         };
+    let mut vulkan_1_2_props = vk::PhysicalDeviceVulkan12Properties::default();
+    // `VkPhysicalDeviceIDProperties` rather than `Vulkan11Properties`, which
+    // carries the same LUID: this is core since 1.1, where the other needs a
+    // 1.2 device to be chained at all.
+    let mut id_props = vk::PhysicalDeviceIDProperties::default();
+    // Chained only where the driver lists the extension: a struct in the
+    // chain that the device does not know is invalid usage.
+    let drm_extension = has_device_extension(&device_extensions, ext::physical_device_drm::NAME);
+    let mut drm_props = vk::PhysicalDeviceDrmPropertiesEXT::default();
+    let mut properties2 = vk::PhysicalDeviceProperties2::default()
+        .push_next(&mut vulkan_1_2_props)
+        .push_next(&mut id_props);
+    if drm_extension {
+        properties2 = properties2.push_next(&mut drm_props);
+    }
+    // SAFETY: `physical` came from this instance, and the chained structs are
+    // stack locals that outlive the call.
+    unsafe { instance.get_physical_device_properties2(physical, &mut properties2) };
+    let properties = properties2.properties;
+    let drm = if drm_extension {
+        DrmNodes::of(&drm_props)
+    } else {
+        DrmNodes::default()
+    };
+
     // Both or neither: numbering a present buys nothing without a way to wait
     // on the number, and the wait has nothing to wait for without the number.
     let present_feedback_extensions =
@@ -852,12 +911,53 @@ fn describe(
         families,
         core_1_3,
         timestamp_period_ns: timestamp_period_of(&properties.limits, features),
+        drm,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Values printed by glibc's own `makedev` from `<sys/sysmacros.h>`; the
+    /// first is a DRM render node's, `226:128`.
+    #[test]
+    fn makedev_matches_glibc() {
+        assert_eq!(makedev(226, 128), 0xe280);
+        assert_eq!(makedev(0x12345, 0x6789a), 0x0001_2000_6783_459a);
+        assert_eq!(makedev(u32::MAX, u32::MAX), u64::MAX);
+    }
+
+    /// A feedback `dev_t` names either node, so either matches, and a device
+    /// without the extension matches nothing.
+    #[test]
+    fn a_device_is_matched_by_either_drm_node() {
+        let props = vk::PhysicalDeviceDrmPropertiesEXT {
+            has_primary: vk::TRUE,
+            primary_major: 226,
+            primary_minor: 1,
+            has_render: vk::TRUE,
+            render_major: 226,
+            render_minor: 128,
+            ..Default::default()
+        };
+        let nodes = DrmNodes::of(&props);
+        assert!(nodes.contains(makedev(226, 1)), "the primary node");
+        assert!(nodes.contains(makedev(226, 128)), "the render node");
+        assert!(
+            !nodes.contains(makedev(226, 129)),
+            "another GPU's render node"
+        );
+        let render_only = DrmNodes::of(&vk::PhysicalDeviceDrmPropertiesEXT {
+            has_primary: vk::FALSE,
+            ..props
+        });
+        assert!(
+            !render_only.contains(makedev(226, 1)),
+            "a node not reported"
+        );
+        assert!(!DrmNodes::default().contains(0), "no extension, no match");
+    }
 
     /// The seam has one sample-count ceiling and Vulkan reports three masks, so
     /// the honest answer is their intersection: a caller told "8" for colour

@@ -100,18 +100,24 @@ if something does, it must not treat them as premultiplied on the way in.
 `PowerPreference`, `AdapterPick`, `Instance::display_adapter`; the policy is
 `crcbl_app::adapter::choose` and `rank`):
 
-- **`Instance::display_adapter` answers `None` on Wayland, X11 and macOS.**
-  Unknown leaves the preference to decide, so a laptop's external monitor on the
-  dGPU under `LowPower` renders on the iGPU and copies. Mechanisms, none built
-  and none checked against a machine: Wayland, `zwp_linux_dmabuf_v1` version 4
-  `get_surface_feedback` on the window's surface, whose `main_device` (a
-  `dev_t`) matches `VkPhysicalDeviceDrmPropertiesEXT`'s primary or render node
-  (`VK_EXT_physical_device_drm`; neither `crcbl-shell` nor `crcbl-vk` binds
-  either today, and the shell would have to hand the `dev_t` across, since
-  `SurfaceTarget` carries only the two pointers); X11, DRI3 `Open` on the
-  window's screen, `fstat` of the returned fd for its `st_rdev`, matched the
-  same way; macOS, `CGDirectDisplayCopyCurrentMetalDevice` for the window's
-  display, matched to the `MTLDevice` by `registryID`.
+- **`Instance::display_adapter` answers on Wayland (built 2026-10-20) and `None`
+  on X11 and macOS.** Wayland: the shell binds `zwp_linux_dmabuf_v1` at version
+  4, reads the _default_ feedback's `main_device` (`wayland/dmabuf.rs`) into
+  `SurfaceTarget::Wayland::main_device`, and `crcbl-vk` matches it to an
+  adapter's primary or render node from `VK_EXT_physical_device_drm`
+  (`adapter::DrmNodes`). **Verified** on the office laptop (Hyprland, Intel
+  Raptor Lake iGPU + NVIDIA MX550, Arch) by the ignored
+  `crcbl_app::backend::tests::vulkan_names_the_adapter_a_wayland_compositor_composites_on`,
+  judged by sysfs's PCI ids for the `dev_t`; it went red with the render-node
+  match removed. **Not verified**: the MX550 was absent from Vulkan during that
+  run (NVIDIA userspace 615.78 against a 615.71 kernel module, pending a
+  reboot), so the two-GPU case — that the dGPU is listed and _not_ chosen — has
+  not been seen; rerun the test after a reboot. Not built: per-surface feedback
+  (`get_surface_feedback`), which may name a different main device for a window
+  on another GPU's output, and a feedback change after the window exists (the
+  target is read once, at surface creation). X11 still needs DRI3 `Open` on the
+  window's screen and `fstat` of the fd for its `st_rdev`, matched the same way;
+  macOS `CGDirectDisplayCopyCurrentMetalDevice` matched by `registryID`.
 - **Verified on one desktop only**: an RX 7900 XTX driving the monitor, an AMD
   Raphael iGPU and WARP, Windows 11. There D3D12 and Vulkan both name the RX
   7900 XTX as the display adapter (the cross-check is
@@ -3421,6 +3427,19 @@ which was a `DeviceLost` from the paravirtual driver's watchdog rather than a
 deadline, and which no deadline changes. If it recurs, give the grass tests a
 smaller field on that runner (the `bucket_price` gate-scene pattern) or split
 the frame's submission so no one command buffer runs long.
+
+## `crcbl-font`'s fontconfig tests assume CI's fonts (2026-10-20)
+
+`crcbl-font --test system`'s
+`fontconfig::dejavu_sans_is_found_in_its_regular_and_bold_faces` and
+`fontconfig::monospace_resolves_to_fontconfigs_choice` fail on any desktop
+without DejaVu: on the office laptop (Arch, no `ttf-dejavu`) `monospace`
+resolves to Nimbus Mono PS and DejaVu Sans is not found. They are right on CI's
+image and say nothing about the code elsewhere. A local `cargo test --workspace`
+stops at them unless run with `--no-fail-fast` or with `ttf-dejavu` installed.
+Options, undecided: skip loudly when `fc-list` has no DejaVu (a skip that reads
+as a pass, which the verification rules warn against), or ask fontconfig for
+whatever face it picks and assert only that `find` agrees with `fc-match`.
 
 ## Checks that fail without a defect (2026-10-06)
 

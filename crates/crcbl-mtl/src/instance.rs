@@ -743,6 +743,7 @@ pub(crate) mod tests {
                 display: dangling,
                 surface: dangling,
                 transparent: false,
+                main_device: None,
             },
             SurfaceTarget::Xcb {
                 connection: dangling,

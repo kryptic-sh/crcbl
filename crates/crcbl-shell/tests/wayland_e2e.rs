@@ -403,6 +403,7 @@ fn the_surface_target_exists_before_the_window_has_a_size() {
         display,
         surface,
         transparent,
+        main_device: _,
     } = target
     else {
         panic!("a Wayland backend must produce a Wayland target, got {target:?}");

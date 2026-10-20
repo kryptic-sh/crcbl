@@ -50,6 +50,10 @@ struct SurfaceEntry {
     /// [`Instance::display_adapter`]; zero for every other target, which
     /// names no `HWND`.
     hwnd: usize,
+    /// A Wayland target's `main_device`, the `dev_t` of the GPU the compositor
+    /// composites on, for [`Instance::display_adapter`]; `None` for every
+    /// other target.
+    main_device: Option<u64>,
     /// Swapchains still configured on it. `vkDestroySurfaceKHR` with a live
     /// swapchain is undefined behaviour in the driver, so the object outlives
     /// the handle by exactly this count.
@@ -858,6 +862,7 @@ impl Instance for VkInstance {
             })
         };
         let mut hwnd = 0;
+        let mut main_device = None;
         let raw = match *target {
             // Transparency changes nothing about the surface on Wayland or X11:
             // the swapchain's composite alpha is the whole of it, chosen from
@@ -866,7 +871,9 @@ impl Instance for VkInstance {
                 display,
                 surface,
                 transparent: _,
+                main_device: device,
             } => {
+                main_device = device;
                 let Some(ext) = self.inner.wayland_ext.as_ref() else {
                     return unsupported("VK_KHR_wayland_surface is not available");
                 };
@@ -938,6 +945,7 @@ impl Instance for VkInstance {
             owner: self.inner.id,
             platform: target.platform_name(),
             hwnd,
+            main_device,
             swapchains: 0,
         });
         crcbl_core::log::debug!(
@@ -1032,12 +1040,29 @@ impl Instance for VkInstance {
         Ok(build_surface_caps(&capabilities, &formats, &present_modes))
     }
 
-    /// The physical device whose `deviceLUID` is the LUID of the adapter
-    /// scanning out the monitor `surface`'s window is on. See
-    /// `crcbl_vk::display` for how that LUID is found, and why only a Win32
-    /// window has one to find.
+    /// On Win32, the physical device whose `deviceLUID` is the LUID of the
+    /// adapter scanning out the monitor `surface`'s window is on; see
+    /// `crcbl_vk::display` for how that LUID is found. On Wayland, the one
+    /// whose DRM primary or render node is the compositor's main device, read
+    /// through `VK_EXT_physical_device_drm`. X11 names neither.
     fn display_adapter(&self, surface: SurfaceHandle) -> Result<Option<AdapterId>, HalError> {
-        let hwnd = self.inner.surfaces().entry(surface, self.inner.id)?.hwnd;
+        let (hwnd, main_device) = {
+            let surfaces = self.inner.surfaces();
+            let entry = surfaces.entry(surface, self.inner.id)?;
+            (entry.hwnd, entry.main_device)
+        };
+        if let Some(device) = main_device {
+            let found = self
+                .inner
+                .adapters
+                .iter()
+                .find(|record| record.drm.contains(device))
+                .map(|record| record.info.id);
+            crcbl_core::log::debug!(
+                "crcbl-vk: the compositor composites on DRM device {device:#x}, adapter {found:?}"
+            );
+            return Ok(found);
+        }
         if hwnd == 0 {
             return Ok(None);
         }
@@ -1446,6 +1471,7 @@ mod tests {
             owner,
             platform: "test",
             hwnd: 0,
+            main_device: None,
             swapchains: 0,
         })
     }

@@ -1186,6 +1186,69 @@ mod tests {
         unsafe { DestroyWindow(hwnd) };
     }
 
+    /// **Vulkan names the adapter a Wayland compositor composites on.** The
+    /// shell reads the compositor's dmabuf `main_device` and `crcbl-vk` matches
+    /// it to an adapter's DRM node; the judge is the kernel, not either of
+    /// them: the PCI vendor and device ids sysfs gives for that `dev_t` must be
+    /// the adapter's own. Printed, so a run on a hybrid laptop says which GPU
+    /// the panel is on.
+    ///
+    /// Ignored because it needs a live Wayland session whose compositor
+    /// offers `zwp_linux_dmabuf_v1` at version 4 and a Vulkan driver with
+    /// `VK_EXT_physical_device_drm`; there it fails rather than skips when
+    /// either is missing. Verified on Hyprland with an Intel Raptor Lake iGPU
+    /// beside an NVIDIA MX550.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs a Wayland session with dmabuf feedback; run with --ignored on a desktop"]
+    fn vulkan_names_the_adapter_a_wayland_compositor_composites_on() {
+        let mut shell = crcbl_shell::open_backend(crcbl_shell::ShellBackend::Wayland)
+            .expect("a Wayland session to connect to");
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("a window");
+        let target = shell.surface_target(window).expect("a live window");
+        let crcbl_hal::SurfaceTarget::Wayland {
+            main_device: Some(device),
+            ..
+        } = target
+        else {
+            panic!("the compositor named no dmabuf main device: {target:?}");
+        };
+
+        let vulkan = open_backend(GpuBackend::Vulkan).expect("a Vulkan driver");
+        // SAFETY: `target` names the window made above, which outlives this
+        // surface: it is destroyed only after the surface is.
+        let surface = unsafe { vulkan.create_surface(&target) }.expect("a Wayland surface");
+        let display = vulkan.display_adapter(surface).expect("a live surface");
+        vulkan.destroy_surface(surface);
+        shell.destroy_window(window).expect("destroy");
+
+        let adapters = vulkan.adapters();
+        let adapter = adapters
+            .iter()
+            .find(|info| Some(info.id) == display)
+            .unwrap_or_else(|| panic!("no adapter is DRM device {device:#x}: {adapters:#?}"));
+        // `major:minor` from the glibc `dev_t` layout, as sysfs names it.
+        let major = ((device >> 8) & 0xfff) | ((device >> 32) & !0xfff);
+        let minor = (device & 0xff) | ((device >> 12) & !0xff);
+        let sysfs = format!("/sys/dev/char/{major}:{minor}/device");
+        let read_id = |file: &str| {
+            let text = std::fs::read_to_string(format!("{sysfs}/{file}"))
+                .unwrap_or_else(|error| panic!("{sysfs}/{file}: {error}"));
+            u32::from_str_radix(text.trim().trim_start_matches("0x"), 16).expect("a hex id")
+        };
+        println!(
+            "crcbl: the compositor composites on {major}:{minor}, which Vulkan names {:?} ({:?})",
+            adapter.name, adapter.device_type
+        );
+        assert_eq!(
+            (adapter.vendor_id, adapter.device_id),
+            (read_id("vendor"), read_id("device")),
+            "the adapter is not the PCI device behind {major}:{minor}"
+        );
+    }
+
     /// On a machine with a driver this genuinely opens the platform's backend,
     /// which is correct and not something to assert against; the point is the
     /// failure path's message, which is what a developer with no driver actually

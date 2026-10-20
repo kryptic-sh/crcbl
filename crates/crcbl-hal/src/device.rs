@@ -447,7 +447,8 @@ pub trait Instance: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// | --- | --- | --- |
     /// | `crcbl-dx12` | Win32 | the adapter whose `EnumOutputs` holds `MonitorFromWindow` |
     /// | `crcbl-vk` | Win32 | the adapter whose `deviceLUID` is the monitor's GDI adapter's |
-    /// | `crcbl-vk` | Wayland, X11 | `None`, not built yet |
+    /// | `crcbl-vk` | Wayland | the adapter whose DRM node is the compositor's dmabuf main device |
+    /// | `crcbl-vk` | X11 | `None`, not built yet |
     /// | `crcbl-mtl` | macOS | `None`, not built yet |
     /// | `crcbl-webgpu` | browser | `None`: a page cannot know |
     ///

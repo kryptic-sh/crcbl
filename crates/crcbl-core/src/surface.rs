@@ -116,6 +116,14 @@ pub enum SurfaceTarget {
         /// surface by its buffer's alpha, so a presenter asks for
         /// premultiplied alpha; the surface itself is made the same way.
         transparent: bool,
+        /// The `dev_t` of the DRM device the compositor composites on, as
+        /// `zwp_linux_dmabuf_feedback_v1.main_device` names it: the GPU a
+        /// buffer reaches without a copy between devices, which a backend
+        /// matches to one of its adapters for `Instance::display_adapter`
+        /// (`crcbl-hal`, named rather than linked, see the module docs).
+        /// `None` when the compositor offers no `zwp_linux_dmabuf_v1` at
+        /// version 4 or had not answered when the target was read.
+        main_device: Option<u64>,
     },
     /// X11 through XCB: `xcb_connection_t*` plus the window's XID.
     Xcb {
@@ -261,6 +269,7 @@ mod tests {
                 display: dangling(),
                 surface: dangling(),
                 transparent: false,
+                main_device: None,
             },
             SurfaceTarget::Xcb {
                 connection: dangling(),
@@ -306,6 +315,7 @@ mod tests {
                     display: dangling(),
                     surface: dangling(),
                     transparent: flag,
+                    main_device: None,
                 },
                 SurfaceTarget::Xcb {
                     connection: dangling(),

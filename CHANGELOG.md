@@ -15,6 +15,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`SurfaceTarget::Wayland` has a `main_device: Option<u64>` field**: the
+  `dev_t` of the GPU the compositor composites on, read from
+  `zwp_linux_dmabuf_v1`'s default feedback. Code that builds the variant, or
+  destructures it without `..`, needs the field.
+
 - **`FrameOutcome::Held`**: a frame the window system has not asked for yet
   (`Presenter::request_frame` is outstanding and its `FrameReady` has not been
   observed), so nothing was acquired or presented. A `match` on `FrameOutcome`
@@ -24,6 +29,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Reconfigured`.
 
 ### Added
+
+- **`Instance::display_adapter` answers on Wayland through `crcbl-vk`**: the
+  adapter whose DRM primary or render node (`VK_EXT_physical_device_drm`) is the
+  compositor's dmabuf main device. On a hybrid laptop the ranked adapter walk
+  now knows which GPU a window reaches without a copy between devices. X11 and
+  macOS still answer `None`.
 
 - **The engine loop presents only when the window system asks**: on a shell with
   `ShellCaps::FRAME_CALLBACK` (Wayland), `crcbl::engine::Loop` requests a frame

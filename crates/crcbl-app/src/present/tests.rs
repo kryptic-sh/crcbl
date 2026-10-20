@@ -1170,6 +1170,7 @@ fn wayland_target(transparent: bool) -> crcbl_hal::SurfaceTarget {
         display: core::ptr::NonNull::dangling(),
         surface: core::ptr::NonNull::dangling(),
         transparent,
+        main_device: None,
     }
 }
 

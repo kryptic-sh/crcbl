@@ -171,6 +171,7 @@
 mod cursor_shape;
 mod data;
 mod data_device;
+mod dmabuf;
 mod fd;
 pub mod ffi;
 mod frame;
@@ -219,6 +220,7 @@ use ffi::{Lib, WlArgument, WlDisplay, WlMessage, WlProxy};
 use protocol::cursor_shape::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1};
 use protocol::fractional_scale::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
 use protocol::layer_shell::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
+use protocol::linux_dmabuf::{zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1};
 use protocol::pointer_constraints::{zwp_locked_pointer_v1, zwp_pointer_constraints_v1};
 use protocol::relative_pointer::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1};
 use protocol::text_input::zwp_text_input_manager_v3;
@@ -417,6 +419,8 @@ enum ObjectKind {
     FractionalScale,
     /// A `wl_callback` from `wl_surface.frame`; see [`frame`].
     FrameCallback,
+    /// The default `zwp_linux_dmabuf_feedback_v1`; see [`dmabuf`].
+    DmabufFeedback,
     Seat,
     Pointer,
     Keyboard,
@@ -602,6 +606,13 @@ enum RawEvent {
     TextInput {
         text_input: usize,
         event: text_input::Event,
+    },
+    DmabufMainDevice {
+        feedback: usize,
+        device: Option<u64>,
+    },
+    DmabufDone {
+        feedback: usize,
     },
     KeyboardKeymap {
         keyboard: usize,
@@ -938,6 +949,13 @@ unsafe extern "C" fn dispatch(
                     _ => None,
                 };
                 sink.events.extend(raw);
+            }
+        }
+        ObjectKind::DmabufFeedback => {
+            // SAFETY: see the note above the `match`.
+            if let Some(event) = unsafe { zwp_linux_dmabuf_feedback_v1::decode_event(opcode, args) }
+            {
+                sink.events.extend(dmabuf::decode_event(proxy, event));
             }
         }
         ObjectKind::FrameCallback => {
@@ -1351,6 +1369,7 @@ struct Conn {
     layer_shell: *mut WlProxy,
     text_input_manager: *mut WlProxy,
     cursor_shape_manager: *mut WlProxy,
+    dmabuf: *mut WlProxy,
     /// Owned by the connection, reached only as a raw pointer; see [`Sink`].
     sink: *mut Sink,
 }
@@ -1379,6 +1398,7 @@ enum Singleton {
     LayerShell,
     TextInputManager,
     CursorShapeManager,
+    Dmabuf,
 }
 
 impl Singleton {
@@ -1397,6 +1417,7 @@ impl Singleton {
             Self::LayerShell => &mut conn.layer_shell,
             Self::TextInputManager => &mut conn.text_input_manager,
             Self::CursorShapeManager => &mut conn.cursor_shape_manager,
+            Self::Dmabuf => &mut conn.dmabuf,
         }
     }
 
@@ -1416,6 +1437,7 @@ impl Singleton {
             Self::LayerShell => zwlr_layer_shell_v1::NAME,
             Self::TextInputManager => zwp_text_input_manager_v3::NAME,
             Self::CursorShapeManager => wp_cursor_shape_manager_v1::NAME,
+            Self::Dmabuf => zwp_linux_dmabuf_v1::NAME,
         }
     }
 }
@@ -2068,6 +2090,11 @@ pub struct WaylandShell {
     /// and polled beside the connection from then on.
     wake: Option<std::sync::Arc<crate::linux::wake::WakePipe>>,
     lost: Option<String>,
+    /// The default dmabuf feedback, and the main device its last whole batch
+    /// named and the one its batch in flight names; see [`dmabuf`].
+    dmabuf_feedback: *mut WlProxy,
+    main_device: Option<u64>,
+    pending_main_device: Option<u64>,
 }
 
 impl core::fmt::Debug for WaylandShell {
@@ -2140,6 +2167,7 @@ impl WaylandShell {
             layer_shell: ptr::null_mut(),
             text_input_manager: ptr::null_mut(),
             cursor_shape_manager: ptr::null_mut(),
+            dmabuf: ptr::null_mut(),
             sink: Sink::boxed(lib),
         };
 
@@ -2161,6 +2189,9 @@ impl WaylandShell {
             caps: ShellCaps::empty(),
             wake: None,
             lost: None,
+            dmabuf_feedback: ptr::null_mut(),
+            main_device: None,
+            pending_main_device: None,
         };
 
         // SAFETY: the display proxy is live and `wl_display.get_registry` takes
@@ -2431,6 +2462,17 @@ impl WaylandShell {
                     Singleton::TextInputManager
                 );
             }
+            // Below version 4 there is no feedback to read, and binding the
+            // manager would buy nothing.
+            "zwp_linux_dmabuf_v1" if version >= dmabuf::DMABUF_VERSION => {
+                bind!(
+                    dmabuf,
+                    zwp_linux_dmabuf_v1,
+                    dmabuf::DMABUF_VERSION,
+                    Singleton::Dmabuf
+                );
+                self.add_dmabuf_feedback();
+            }
             "wp_cursor_shape_manager_v1" => {
                 bind!(
                     cursor_shape_manager,
@@ -2614,6 +2656,13 @@ impl WaylandShell {
                 self.conn
                     .release(proxy, wp_cursor_shape_manager_v1::destroy);
             },
+            // The feedback first: it was made from the manager, and the
+            // device it named goes with it.
+            Singleton::Dmabuf => {
+                self.remove_dmabuf_feedback();
+                // SAFETY: as above.
+                unsafe { self.conn.release(proxy, zwp_linux_dmabuf_v1::destroy) };
+            }
         }
         self.conn.flush();
         crcbl_core::log::warn!(
@@ -2926,6 +2975,10 @@ impl WaylandShell {
                 RawEvent::SeatCapabilities { seat, capabilities } => {
                     self.seat_capabilities_changed(seat, capabilities);
                 }
+                RawEvent::DmabufMainDevice { feedback, device } => {
+                    self.dmabuf_main_device(feedback, device);
+                }
+                RawEvent::DmabufDone { feedback } => self.dmabuf_done(feedback),
                 event @ (RawEvent::DataOffer { .. }
                 | RawEvent::OfferMime { .. }
                 | RawEvent::Selection { .. }
@@ -3616,7 +3669,9 @@ impl Drop for WaylandShell {
                 self.conn.release_since(output, 3, wl_output::release);
             }
         }
+        self.remove_dmabuf_feedback();
         let globals = [
+            self.conn.dmabuf,
             self.conn.cursor_shape_manager,
             self.conn.layer_shell,
             self.conn.data_device_manager,
@@ -4169,6 +4224,7 @@ impl Shell for WaylandShell {
             display: self.conn.display.cast::<c_void>(),
             surface,
             transparent: state.transparent,
+            main_device: self.main_device,
         })
     }
 
