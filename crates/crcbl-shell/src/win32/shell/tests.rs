@@ -2677,14 +2677,29 @@ fn a_reconfigured_appbar_reserves_its_new_height_and_gives_it_back_when_told() {
         (before.y, depth(TALLER) as i32),
         "the bar sits in the new strip"
     );
+    // `work_area_until` returns without pumping when the work area has
+    // already moved, which `ABM_SETPOS` does before it returns, so the
+    // `WM_SIZE` the move produced is still waiting to be published.
+    let mut resized = Vec::new();
+    shell.pump(&mut |event| {
+        if let ShellEvent::Resized { window, size, .. } = event
+            && window == bar
+        {
+            resized.push(size.height);
+        }
+    });
+    assert_eq!(
+        resized.last(),
+        Some(&depth(TALLER)),
+        "the new height arrived as a resize"
+    );
     assert_eq!(
         shell
             .window_state(bar)
             .expect("live")
             .size()
             .map(|size| size.height),
-        Some(depth(TALLER)),
-        "the new height arrived as a resize"
+        Some(depth(TALLER))
     );
 
     let unreserved = crate::PanelDesc {
