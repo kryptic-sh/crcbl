@@ -843,6 +843,10 @@ pub(super) unsafe extern "system" fn window_proc(
         msg::MOUSE_MOVE => {
             let (x, y) = pointer::point(l_param);
             if shared.enter(window, x, y, millis) {
+                // Which window a movement arrived in, at trace: the crossings
+                // between this thread's windows are what a stuck leave turns
+                // on, and nothing else records them.
+                crcbl_core::log::trace!("win32: pointer arrived in {window:#x} at ({x}, {y})");
                 // There is no `WM_MOUSEENTER`. The arrival is derived from the
                 // first movement after a leave, and the leave has to be asked
                 // for — `TrackMouseEvent` is one-shot, so this is also where it
@@ -859,7 +863,18 @@ pub(super) unsafe extern "system" fn window_proc(
         }
 
         msg::MOUSE_LEAVE => {
-            if shared.leave(window) {
+            let current = shared.leave(window);
+            // A stale leave is dropped without an event, so this is the only
+            // record that it came at all.
+            crcbl_core::log::trace!(
+                "win32: WM_MOUSELEAVE for {window:#x} ({})",
+                if current {
+                    "reported"
+                } else {
+                    "stale, dropped"
+                }
+            );
+            if current {
                 shared.push(RawEvent::PointerFocus {
                     hwnd: window,
                     entered: false,

@@ -215,7 +215,9 @@ if something does, it must not treat them as premultiplied on the way in.
   (`the_pointer_enters_once_per_arrival_and_a_stale_leave_is_ignored`, red
   without the queued leave). Whether that is lyr's case is not known. Next: lyr
   re-runs its check on 0.8.0 and, if the tooltip still sticks, sends a trace log
-  of `crcbl_shell` around the warp, which says which messages arrived.
+  of `crcbl_shell` around the warp: `proc.rs` logs each arrival in a window and
+  each `WM_MOUSELEAVE` at trace, stale ones included, so the log says whether
+  the bar's leave came at all and whether the tooltip ever took a movement.
 - **AppKit input method: mutants not run.** The `appkit_session` additions went
   red on CI for removing the pre-edit gate in `record_preedit` and the
   end-of-pre-edit block in `insert_text`. Cancelled unrun: the
