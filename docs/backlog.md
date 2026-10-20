@@ -3619,6 +3619,37 @@ migrates every caller and deletes its own copy in the same change.
   `MenuStyle`'s fields only restate the sheet. Giving those trees the game's
   sheets would fix it. Nobody has asked yet.
 
+## The September perf campaign sits unported on an archive branch (2026-10-20)
+
+On 2026-10-20 a local `main` turned out to hold a 56-commit performance campaign
+from 2026-09-22/23, never pushed and by then 974 commits behind `origin/main`.
+It is preserved, with the uncommitted draw-starts trial as its last commit, on
+**`archive/perf-campaign-2026-09`** (forked from `e5b5a5b4`); `main` was reset
+to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
+`docs/backlog.md`, `apps/sandbox/src/{app,main}.rs`, `crcbl-phys/src/world.rs`,
+`crcbl-render/src/{draw_gen,ssr,forward/view}.rs`, `draw_gen.slang` and
+`mesh.slang`.
+
+- **Superseded, do not port:** `perf(render): route draws through direct table`
+  and the draw-starts WIP. Upstream rebuilt draw-gen routing as a bucket lookup
+  with a workgroup scan (`eba4dc1d`, `5e2e0852`).
+- **Not upstream, worth porting one commit at a time** (cherry-pick, re-run
+  `crcbl-shaders`' generator rather than resolving generated files, re-measure
+  on the current tree since the numbers in the branch's backlog predate a month
+  of renderer work): half-resolution SSR march (re-blesses `golden/ssr.png`),
+  local exposure-tile merge, sun-only light-cluster fast path, pre-scaled and
+  force-unrolled shadow blocker taps, reused shadow probe comparisons, skipped
+  empty probe gathers, reused CMAA blend coordinates, skipped fill-light
+  specular, degraded-broadphase BVH rebuild (`crcbl-phys`), parallel sandbox
+  crowd queries, and the sandbox stress scenes and tick-timing reports they were
+  measured with.
+- **The branch's own `docs/backlog.md`** records each trial's measurement and
+  the trials it rejected (LTC transform/corner/frame caches, Smith-term hoist,
+  carried froxel depth, backface light exit, shared frame buffers, blocker
+  unroll hint). Read it before re-proposing any of them, and fold the surviving
+  rejections into this file as each item is ported.
+- Delete the branch once everything worth keeping is ported or declined here.
+
 ## Performance review and execution priority (2026-09-17)
 
 Performance work takes priority over feature expansion. Complete the review and
