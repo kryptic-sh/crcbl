@@ -3515,17 +3515,6 @@ tail's sum, not one outlier.
 The median test took about 22 s in both mesh and render, so on this runner most
 of a test's cost is opening devices and building pipelines, not drawing frames.
 
-**`bucket_price::two_material_modes_price_as_one` timed out on Metal four runs
-running (2026-10-20 and 21), cut 2026-10-21; the first CI result is not yet
-in.** Green runs took 202 s and 224 s of nextest's 240 s (main runs 39470597952,
-39457309368). The Metal runner's own timings named the cost: the many row's
-recording, one validated call at a time, 1292 calls at 38.5 s a frame under two
-modes against 652 at 11.1 s under one. A suite run now gives the many row
-`GATE_MANY` buckets whatever the modes (`bucket_price::many`), so 32 meshes
-under two modes and both tests record the same calls; the assertions' margin
-over `FEW` is unchanged in kind. Tried first and reverted: skipping the unranged
-rows, which Metal never draws (it has no ranged rows).
-
 **Cut 2026-10-02: price helpers draw a short run on a device that cannot time a
 pass.** The Apple Paravirtual device reports no `TIMESTAMP_QUERY`, so every
 mesh-suite price test drew `PRICE_WARMUP` plus 48 frames per configuration and
