@@ -2074,6 +2074,10 @@ impl Presenter {
 
     /// Resizes the swapchain to `extent`.
     ///
+    /// Waits for every frame in flight and retires it first, as
+    /// [`drain`](Self::drain) does, so a caller resizing after presenting has
+    /// nothing to drain itself.
+    ///
     /// # Errors
     ///
     /// [`PresentError`] if the reconfigure failed. A zero extent is *not* an
@@ -2096,6 +2100,14 @@ impl Presenter {
             self.config.extent.0,
             self.config.extent.1
         );
+        // **Nothing in flight may survive into the reconfigure.** A command
+        // buffer that drew into a back buffer holds its own reference to it
+        // until it is destroyed, and `ResizeBuffers` refuses while any
+        // reference is left (`DXGI_ERROR_INVALID_CALL`): the backend can wait
+        // for the queue, but it cannot destroy a command buffer this presenter
+        // still owns. Every caller that resized after presenting hit that on
+        // D3D12, so the presenter drains here rather than asking each one to.
+        self.drain()?;
         // Reconfigure, never destroy-and-recreate: the handle stays valid
         // across a resize storm, which is what the seam promises callers.
         self.device

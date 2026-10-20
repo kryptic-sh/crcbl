@@ -246,6 +246,20 @@ that is not a panel, are `InvalidDescriptor` everywhere
   change. A panel whose monitor is gone is refused with `NoSuchMonitor`, as
   creating it would be.
 
+**A presenter resized after presenting on D3D12: proven on the null backend
+only.** lyr hit `DXGI_ERROR_INVALID_CALL` from `ResizeBuffers` on 0.7.0 (Windows
+11, RX 7900 XTX) when a bar resized in place by `set_panel` called
+`Presenter::resize`: the presenter's in-flight command buffers still held the
+back buffers, which `crcbl-dx12`'s `reconfigure_swapchain` documents it cannot
+release. `Presenter::reconfigure` now drains first
+(`a_resize_after_presenting_reconfigures_with_nothing_in_flight` checks that
+every command buffer is destroyed before the `Reconfigured` event). lyr's fix
+was the same drain in its own code, screenshot-checked; this crcbl change has
+not run on a D3D12 window. No CI test presents to a D3D12 window and then
+resizes: `tests/windowed_e2e.rs` is Vulkan only, and the D3D12 suites present
+offscreen, where a reconfigure makes new ring images and never calls
+`ResizeBuffers`. A Win32 D3D12 leg of the windowed e2e would close it.
+
 **Frame pacing (`Shell::request_frame`, `ShellEvent::FrameReady`): what is
 left.** Built as decided on 2026-10-19 for lyr: Wayland answers with
 `wl_surface.frame` and sets `ShellCaps::FRAME_CALLBACK`; X11, Win32, AppKit, the

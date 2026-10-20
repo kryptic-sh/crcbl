@@ -1851,6 +1851,60 @@ fn a_deeper_ring_keeps_more_frames_in_flight() {
     gpu.destroy().expect("teardown");
 }
 
+/// **A resize after presenting reconfigures with nothing in flight.** Every
+/// command buffer the presenter submitted is destroyed before the swapchain
+/// is reconfigured: D3D12's `ResizeBuffers` refuses while one still holds a
+/// back buffer, which is what a bar resized in place after it had drawn hit.
+#[test]
+fn a_resize_after_presenting_reconfigures_with_nothing_in_flight() {
+    use crcbl_hal::null::{Event, ObjectKind};
+
+    let (mut shell, window, recorder, mut gpu) = null_context("resize drain test", Pacing::Vsync);
+    for _ in 0..FRAMES_IN_FLIGHT + 1 {
+        null_frame(&mut gpu).expect("present");
+    }
+    assert!(
+        !gpu.in_flight.is_empty(),
+        "frames are in flight before the resize, or this checks nothing"
+    );
+
+    gpu.resize((640, 480)).expect("a resize after presenting");
+    assert!(gpu.in_flight.is_empty(), "nothing is left in flight");
+    let events = recorder.events();
+    let reconfigured = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::Reconfigured {
+                    extent: (640, 480),
+                    ..
+                }
+            )
+        })
+        .expect("the resize reconfigured the swapchain");
+    let before = &events[..reconfigured];
+    let count = |kind: fn(&Event) -> bool| before.iter().filter(|event| kind(event)).count();
+    let finished = count(|event| matches!(event, Event::Finished { .. }));
+    let destroyed = count(|event| {
+        matches!(
+            event,
+            Event::Destroyed {
+                kind: ObjectKind::CommandBuffer
+            }
+        )
+    });
+    assert!(finished > 0);
+    assert_eq!(
+        destroyed, finished,
+        "every command buffer is destroyed before the reconfigure"
+    );
+
+    null_frame(&mut gpu).expect("a frame at the new size");
+    gpu.destroy().expect("teardown");
+    shell.destroy_window(window).expect("the window goes away");
+}
+
 /// The runtime switch, against a backend that records what the swapchain
 /// did: a pacing change rebuilds when — and only when — the present mode
 /// moves.
@@ -2727,12 +2781,24 @@ fn a_submit_carries_what_rides_with_it_and_reports_the_present_to_its_hook() {
         [vec![frame, copy]],
         "one submission, the frame first and what rides with it after"
     );
+    // The suboptimal rebuild drains the ring, so what joined it is read from
+    // what was destroyed: the copy once, by the hook, and the frame once, by
+    // the drain. A copy that had joined the ring would be destroyed again.
+    assert!(gpu.in_flight.is_empty(), "the rebuild drained the ring");
+    let destroyed = recorder
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::Destroyed {
+                    kind: crcbl_hal::null::ObjectKind::CommandBuffer
+                }
+            )
+        })
+        .count();
     assert_eq!(
-        gpu.in_flight
-            .iter()
-            .map(|(_, buffer)| *buffer)
-            .collect::<Vec<_>>(),
-        [frame],
+        destroyed, 2,
         "only the frame's own buffer joins the ring; the rest are the caller's"
     );
 

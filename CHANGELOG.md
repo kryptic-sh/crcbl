@@ -40,6 +40,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   app as a plain `v`. The unsided key now counts where no sided key that would
   decide is down; a real keyboard's modifiers and AltGr are reported as before,
   and an unsided Control never makes AltGr.
+- **`Presenter::resize` works on D3D12 after frames have been presented**: it
+  failed with `DXGI_ERROR_INVALID_CALL` from `ResizeBuffers`, because the
+  command buffers still in flight held the back buffers. Every swapchain
+  reconfigure, whether from a resize, a pacing change or an out-of-date
+  swapchain, now drains the presenter first, so callers no longer need to call
+  `Presenter::drain` before resizing.
 
 ## [0.7.0] - 2026-10-20
 
