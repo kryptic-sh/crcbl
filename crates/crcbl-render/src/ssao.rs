@@ -1279,8 +1279,18 @@ mod tests {
     /// silently ignores; narrower, and part of the shader's range is
     /// unreachable. Neither shows up as anything but a knob that does less than
     /// it says.
+    ///
+    /// Holds [`TECHNIQUE_SWITCH`] for the reason
+    /// [`the_console_radius_range_is_the_range_the_march_honours`] does:
+    /// [`the_seams_other_side_is_what_the_chain_ships`] moves this default to
+    /// `INTENSITY_MAX` and back under it.
+    ///
+    /// [`the_seams_other_side_is_what_the_chain_ships`]: fn@the_seams_other_side_is_what_the_chain_ships
     #[test]
     fn the_console_range_is_the_range_the_reconstruction_honours() {
+        let _technique = TECHNIQUE_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
             r_ssao_intensity.kind(),
             crcbl_console::Kind::Float {

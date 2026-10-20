@@ -3486,6 +3486,14 @@ Each of these has failed once and passed on a rerun with the code unchanged. A
 failure of one wants a rerun before a diagnosis; one that repeats on an idle
 machine, or twice in CI, is real.
 
+- **`crcbl-render forward::tests::the_mesh_tail_records_a_flat_call_per_partition_behind_a_task_stage`**
+  — failed 1 in 25 runs of `cargo test -p crcbl-render --lib` on the office
+  laptop (2026-10-20), at its `renderer.counters().draws` against
+  `recorded_draws` assertion. Not diagnosed; the shape matches the
+  `r_ssao_intensity` race fixed the same day (a test reading a console default
+  another test moves under `ssao::TECHNIQUE_SWITCH`), so look first for a
+  console variable it reads without that lock or `forward`'s own.
+
 - **`editor document::undo_property_tests::random_histories_walk_back_through_every_state`**
   — a proptest that takes about 25 s alone. During a local verify on 2026-10-06,
   with two other worktrees compiling, three of the editor's app tests took 148
