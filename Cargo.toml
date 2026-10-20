@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "apps/*"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/kryptic-sh/crcbl"
@@ -157,11 +157,11 @@ dirs = "7.0"
 # otherwise have to be published ahead of the crate whose tests use it.
 # `deny.toml`'s `allow-wildcard-paths` is what lets these through the wildcard
 # ban.
-crcbl = { path = "crates/crcbl", version = "0.6.0" }
-crcbl-core = { path = "crates/crcbl-core", version = "0.6.0" }
-crcbl-golden = { path = "crates/crcbl-golden", version = "0.6.0" }
-crcbl-font = { path = "crates/crcbl-font", version = "0.6.0" }
-crcbl-image = { path = "crates/crcbl-image", version = "0.6.0" }
+crcbl = { path = "crates/crcbl", version = "0.7.0" }
+crcbl-core = { path = "crates/crcbl-core", version = "0.7.0" }
+crcbl-golden = { path = "crates/crcbl-golden", version = "0.7.0" }
+crcbl-font = { path = "crates/crcbl-font", version = "0.7.0" }
+crcbl-image = { path = "crates/crcbl-image", version = "0.7.0" }
 # `default-features = false`, which is the 3D half of the pack: the primitives,
 # the materials and the grid page, without the `.crpix` sprites and the sheet
 # loader its `bake` feature carries. Neither consumer wants those —
@@ -169,34 +169,34 @@ crcbl-image = { path = "crates/crcbl-image", version = "0.6.0" }
 # is for blocking a map out — and the switch has to be here rather than on the
 # member, because cargo refuses a member that turns off a default the workspace
 # entry left on.
-crcbl-greybox = { path = "crates/crcbl-greybox", version = "0.6.0", default-features = false }
-crcbl-hal = { path = "crates/crcbl-hal", version = "0.6.0" }
-crcbl-app = { path = "crates/crcbl-app", version = "0.6.0" }
-crcbl-frame = { path = "crates/crcbl-frame", version = "0.6.0" }
-crcbl-render = { path = "crates/crcbl-render", version = "0.6.0" }
-crcbl-shaders = { path = "crates/crcbl-shaders", version = "0.6.0" }
-crcbl-shell = { path = "crates/crcbl-shell", version = "0.6.0" }
-crcbl-sprite = { path = "crates/crcbl-sprite", version = "0.6.0" }
-crcbl-client = { path = "crates/crcbl-client", version = "0.6.0" }
-crcbl-ecs = { path = "crates/crcbl-ecs", version = "0.6.0" }
-crcbl-net = { path = "crates/crcbl-net", version = "0.6.0" }
-crcbl-phys = { path = "crates/crcbl-phys", version = "0.6.0" }
-crcbl-rand = { path = "crates/crcbl-rand", version = "0.6.0" }
-crcbl-server = { path = "crates/crcbl-server", version = "0.6.0" }
-crcbl-dx12 = { path = "crates/crcbl-dx12", version = "0.6.0" }
-crcbl-mtl = { path = "crates/crcbl-mtl", version = "0.6.0" }
-crcbl-vk = { path = "crates/crcbl-vk", version = "0.6.0" }
-crcbl-webgpu = { path = "crates/crcbl-webgpu", version = "0.6.0" }
-crcbl-input = { path = "crates/crcbl-input", version = "0.6.0" }
-crcbl-jobs = { path = "crates/crcbl-jobs", version = "0.6.0" }
-crcbl-wl-scanner = { path = "crates/crcbl-wl-scanner", version = "0.6.0" }
-crcbl-store = { path = "crates/crcbl-store", version = "0.6.0" }
-crcbl-audio = { path = "crates/crcbl-audio", version = "0.6.0" }
+crcbl-greybox = { path = "crates/crcbl-greybox", version = "0.7.0", default-features = false }
+crcbl-hal = { path = "crates/crcbl-hal", version = "0.7.0" }
+crcbl-app = { path = "crates/crcbl-app", version = "0.7.0" }
+crcbl-frame = { path = "crates/crcbl-frame", version = "0.7.0" }
+crcbl-render = { path = "crates/crcbl-render", version = "0.7.0" }
+crcbl-shaders = { path = "crates/crcbl-shaders", version = "0.7.0" }
+crcbl-shell = { path = "crates/crcbl-shell", version = "0.7.0" }
+crcbl-sprite = { path = "crates/crcbl-sprite", version = "0.7.0" }
+crcbl-client = { path = "crates/crcbl-client", version = "0.7.0" }
+crcbl-ecs = { path = "crates/crcbl-ecs", version = "0.7.0" }
+crcbl-net = { path = "crates/crcbl-net", version = "0.7.0" }
+crcbl-phys = { path = "crates/crcbl-phys", version = "0.7.0" }
+crcbl-rand = { path = "crates/crcbl-rand", version = "0.7.0" }
+crcbl-server = { path = "crates/crcbl-server", version = "0.7.0" }
+crcbl-dx12 = { path = "crates/crcbl-dx12", version = "0.7.0" }
+crcbl-mtl = { path = "crates/crcbl-mtl", version = "0.7.0" }
+crcbl-vk = { path = "crates/crcbl-vk", version = "0.7.0" }
+crcbl-webgpu = { path = "crates/crcbl-webgpu", version = "0.7.0" }
+crcbl-input = { path = "crates/crcbl-input", version = "0.7.0" }
+crcbl-jobs = { path = "crates/crcbl-jobs", version = "0.7.0" }
+crcbl-wl-scanner = { path = "crates/crcbl-wl-scanner", version = "0.7.0" }
+crcbl-store = { path = "crates/crcbl-store", version = "0.7.0" }
+crcbl-audio = { path = "crates/crcbl-audio", version = "0.7.0" }
 # Steamworks over the SDK's flat C API, loaded at runtime — see
 # `docs/notes/backends.md`. Only the umbrella's `steam` feature names it.
-crcbl-steam = { path = "crates/crcbl-steam", version = "0.6.0" }
-crcbl-assets = { path = "crates/crcbl-assets", version = "0.6.0" }
-crcbl-ui = { path = "crates/crcbl-ui", version = "0.6.0" }
+crcbl-steam = { path = "crates/crcbl-steam", version = "0.7.0" }
+crcbl-assets = { path = "crates/crcbl-assets", version = "0.7.0" }
+crcbl-ui = { path = "crates/crcbl-ui", version = "0.7.0" }
 # `default-features = false`, which turns the `gltf` feature off: what a member
 # gets by naming this crate is the half that reads no source format — the
 # meshlet builder, the simplifier, the LOD chain, the cluster DAG, and `scn`,
@@ -205,70 +205,70 @@ crcbl-ui = { path = "crates/crcbl-ui", version = "0.6.0" }
 # feature does. The switch has to be here rather than on the member, for the
 # reason `crcbl-greybox` above gives: cargo silently ignores a member that turns
 # off a default the workspace entry left on.
-crcbl-scene = { path = "crates/crcbl-scene", version = "0.6.0", default-features = false }
-crcbl-anim = { path = "crates/crcbl-anim", version = "0.6.0" }
+crcbl-scene = { path = "crates/crcbl-scene", version = "0.7.0", default-features = false }
+crcbl-anim = { path = "crates/crcbl-anim", version = "0.7.0" }
 # Ragdolls: where the skeleton and the solver meet, so that neither
 # `crcbl-anim` nor `crcbl-phys` has to depend on the other.
-crcbl-ragdoll = { path = "crates/crcbl-ragdoll", version = "0.6.0" }
+crcbl-ragdoll = { path = "crates/crcbl-ragdoll", version = "0.7.0" }
 # `std::process::Command` that opens no console window on Windows. No
 # dependencies, so build scripts and `crcbl-core` can take it; `clippy.toml`
 # disallows the plain constructor.
-crcbl-spawn = { path = "crates/crcbl-spawn", version = "0.6.0" }
+crcbl-spawn = { path = "crates/crcbl-spawn", version = "0.7.0" }
 # The particle simulation. Depends on `glam` alone, so the arrow into it costs
 # a browser build nothing beyond the simulation itself — there is no renderer,
 # no shader and no asset parser in it, by design.
-crcbl-vfx = { path = "crates/crcbl-vfx", version = "0.6.0" }
+crcbl-vfx = { path = "crates/crcbl-vfx", version = "0.7.0" }
 # Bodies of water and their medium, as data: `docs/plan/55-water.md`'s first
 # decision. Depends on `thiserror` alone, so the renderer, the physics world and
 # a server that draws nothing can all read one body.
-crcbl-water = { path = "crates/crcbl-water", version = "0.6.0" }
+crcbl-water = { path = "crates/crcbl-water", version = "0.7.0" }
 # The wind field: `docs/plan/56-wind.md`'s two authored layers, the weather over
 # them and the one formula every consumer samples with. The arrow into
 # `crcbl-phys` is that document's decision 6 — physics declares `WindQuery` and
 # this crate implements it, so the crate with the bodies in it does not link the
 # crate with the weather in it.
-crcbl-wind = { path = "crates/crcbl-wind", version = "0.6.0" }
+crcbl-wind = { path = "crates/crcbl-wind", version = "0.7.0" }
 # The grid-inventory kit: the container primitive, the item catalogue, the
 # placement rules and the move protocol with its server-side stash, headless.
 # `serde`, `ron` and `thiserror`, plus `crcbl-core` for the `PlayerId` a stash
 # is keyed by and `crcbl-store` for the storage it is written through — no
 # renderer — so the server and the client can link the same placement code
 # without agreeing on one.
-crcbl-inventory = { path = "crates/crcbl-inventory", version = "0.6.0" }
+crcbl-inventory = { path = "crates/crcbl-inventory", version = "0.7.0" }
 # Ground navigation: the grid router EW proved before the engine had one, and
 # the rung below `docs/plan/24-navigation.md`'s navmesh. `glam` and `thiserror`
 # and nothing else, so the arrow into it costs a browser build the router and
 # no more — see that crate's own manifest.
-crcbl-nav = { path = "crates/crcbl-nav", version = "0.6.0" }
+crcbl-nav = { path = "crates/crcbl-nav", version = "0.7.0" }
 # The console registry: the variable and command vocabulary the UI, the engine
 # and the CLI all speak. It depends on nothing but `core`/`std`, so the arrow
 # into it costs every target the same nothing — see that crate's own manifest.
-crcbl-console = { path = "crates/crcbl-console", version = "0.6.0" }
+crcbl-console = { path = "crates/crcbl-console", version = "0.7.0" }
 # The field description an editor's property panel reads, and the derive that
 # writes it. Two crates because a `proc-macro = true` crate can export nothing
 # but macros; the trait half depends on `glam` and `thiserror` alone, so the
 # arrow into it from a component costs a browser build the description and no
 # more, and the macro half is host-compiled and reaches no target at all. See
 # UI rung 8's inspector (`crcbl_ui::tree::widgets::inspector`) for what reads it.
-crcbl-reflect = { path = "crates/crcbl-reflect", version = "0.6.0" }
-crcbl-reflect-derive = { path = "crates/crcbl-reflect-derive", version = "0.6.0" }
+crcbl-reflect = { path = "crates/crcbl-reflect", version = "0.7.0" }
+crcbl-reflect-derive = { path = "crates/crcbl-reflect-derive", version = "0.7.0" }
 # The golden suites' shared fixture, `apps/crcbl-sample-test`. A path-only
 # workspace member like every crate above, and a `[dev-dependencies]` entry
 # wherever it is named — see that crate's own manifest for why it is under
 # `apps/` rather than beside `crcbl-golden`.
-crcbl-sample-test = { path = "apps/crcbl-sample-test", version = "0.6.0" }
+crcbl-sample-test = { path = "apps/crcbl-sample-test", version = "0.7.0" }
 # **The three samples another member names.** `apps/editor`'s
 # `tests/vocabularies.rs` opens breakout's and puppet's committed scenes through
 # `crcbl::registry`, which is what says a tool opens *any* registered scene
 # rather than the one game it was built against, and its shipped vocabulary
 # registers all three so their scenes can be edited. See `apps/editor/Cargo.toml`.
-breakout = { path = "apps/breakout", version = "0.6.0" }
-puppet = { path = "apps/puppet", version = "0.6.0" }
-towers = { path = "apps/towers", version = "0.6.0" }
+breakout = { path = "apps/breakout", version = "0.7.0" }
+puppet = { path = "apps/puppet", version = "0.7.0" }
+towers = { path = "apps/towers", version = "0.7.0" }
 # The editor, which `crates/crcbl-cli` names for one thing: the scene
 # vocabulary the editor ships (`crcbl_editor::scene::vocabulary`), so `crcbl
 # scene` opens what the editor opens. See that crate's manifest.
-editor = { path = "apps/editor", version = "0.6.0" }
+editor = { path = "apps/editor", version = "0.7.0" }
 bytemuck = { version = "1", features = ["derive"] }
 
 [workspace.lints.rust]

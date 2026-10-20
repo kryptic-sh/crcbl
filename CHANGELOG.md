@@ -13,6 +13,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-20
+
 ### Breaking
 
 - **`Shell::request_frame` is a required trait method**, so a `Shell`
@@ -21001,7 +21003,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/kryptic-sh/crcbl/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/kryptic-sh/crcbl/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/kryptic-sh/crcbl/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kryptic-sh/crcbl/compare/v0.3.0...v0.4.0
