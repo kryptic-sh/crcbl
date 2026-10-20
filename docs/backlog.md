@@ -521,11 +521,11 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    method itself, through the view's `NSTextInputClient` methods); S3 popup
    repositioning on Wayland **in CI** (CI's sway offers `xdg_wm_base` below 3,
    so CI holds only the refusal; the office laptop's sway 1.12 ran the real path
-   green on 2026-10-20); S16 Vulkan presenting premultiplied on sway **in CI**
-   (`crcbl-app`'s `wayland_transparency` read-back passed on the office laptop,
+   green on 2026-10-20); S16 Vulkan presenting premultiplied on sway (now in CI:
+   `crcbl-app`'s `wayland_transparency` read-back passed on the office laptop,
    on the Intel iGPU and on llvmpipe under software sway, CI's setup;
-   `run-wayland-e2e.sh` runs it from 2026-10-21, and the first CI result is not
-   yet in); S22 a colour glyph in a GPU golden; S18 FreeBSD beyond
+   `run-wayland-e2e.sh` runs it from 2026-10-21, and it passed in main CI run
+   39470597952); S22 a colour glyph in a GPU golden; S18 FreeBSD beyond
    `check (freebsd)`'s clippy, in a VM job; S13 cold start to the first
    presented frame, end to end (the D3D12 instance and first device are
    measured; see 11).
@@ -852,8 +852,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      and (0, 0, 188) with `crcbl-vk` sending `OPAQUE`. It also read the
      premultiplied blend on llvmpipe with sway rendering in software, which is
      CI's setup, so `run-wayland-e2e.sh` runs it after the shell suite and the
-     nested-sway job installs `grim`, from 2026-10-21; the first CI result is
-     not yet in.
+     nested-sway job installs `grim`, from 2026-10-21; it passed in main CI
+     run 39470597952.
    - `MonitorInfo::name` was already `wl_output.name` on Wayland, so S7's name
      is Win32's (`MONITORINFOEX::szDevice`) and AppKit's
      (`NSScreen.localizedName`) to check.
@@ -1676,8 +1676,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `AccessibilityAction`. Both passed on the office laptop (headless sway
       1.12, and Xwayland under it), and went red with the action handler
       dropping the request (shared) and with X11 opening no adapter. Both
-      harnesses run it as their own step from 2026-10-21; the first CI result is
-      not yet in. Not covered: the focus state passed to the adapter,
+      harnesses run it as their own step from 2026-10-21; both passed in main CI
+      run 39470597952. Not covered: the focus state passed to the adapter,
       deactivation, and X11 window bounds (`Adapter::set_root_window_bounds` is
       never called, so a reader's screen coordinates for nodes are
       window-relative; Wayland cannot know its position anyway).
