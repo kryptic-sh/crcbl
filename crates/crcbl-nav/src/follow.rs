@@ -179,6 +179,20 @@ impl RouteFollower {
     pub fn distances(&self) -> FollowDistances {
         self.distances
     }
+
+    /// Changes the stop distance for the route's last waypoint, from the next
+    /// [`advance`](Self::advance) on.
+    ///
+    /// For a walker whose stop distance at the end depends on what it is doing
+    /// when it gets there — running rather than walking, or making for cover —
+    /// and is set again each tick. Raising it can finish the route at the next
+    /// `advance` from feet that had not reached the last waypoint before;
+    /// waypoints short of the last are reached by
+    /// [`waypoint_reach_m`](FollowDistances::waypoint_reach_m) and are not
+    /// affected.
+    pub fn set_last_stop_m(&mut self, last_stop_m: f64) {
+        self.distances.last_stop_m = last_stop_m;
+    }
 }
 
 /// Whether a walk is making headway, measured from an anchor: where the feet
@@ -410,6 +424,38 @@ mod tests {
             None,
             "a dropped waypoint never comes back"
         );
+    }
+
+    /// **A stop distance changed mid-route takes effect at the next
+    /// `advance`**, for the last waypoint only: raised, feet that were short of
+    /// the end have arrived; lowered, they have not, and a waypoint short of the
+    /// last still drops by the waypoint reach.
+    #[test]
+    fn a_last_stop_changed_mid_route_applies_from_the_next_advance() {
+        let first = DVec3::new(1.0, 0.0, 0.0);
+        let last = DVec3::new(1.0, 0.0, 3.0);
+        let mut follower = RouteFollower::new(
+            GroundRoute {
+                waypoints: vec![first, last],
+            },
+            FollowDistances::new(0.5),
+        );
+        let feet = last - DVec3::Z * 1.5;
+
+        follower.set_last_stop_m(0.25);
+        let near_first = first + DVec3::Z * (WAYPOINT_REACH_M * 0.5);
+        assert_eq!(
+            follower.advance(near_first).unwrap().waypoint,
+            last,
+            "the first waypoint still drops by the waypoint reach"
+        );
+        let steer = follower.advance(feet).unwrap();
+        assert_eq!((steer.stop_distance_m, steer.reach_m), (0.25, 0.25));
+
+        follower.set_last_stop_m(2.0);
+        assert_eq!(follower.distances().last_stop_m, 2.0);
+        assert_eq!(follower.advance(feet), None, "1.5 m off is inside 2 m");
+        assert!(follower.is_finished());
     }
 
     /// **Distances are over the ground**: feet a stair's height off a

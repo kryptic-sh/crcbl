@@ -22,6 +22,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   widget draws, and wrapped text finds the right line. A launcher drawing its
   own query no longer has to split it around the caret, which put the caret in
   the wrong place in right-to-left text.
+- **`crcbl_nav::follow::RouteFollower::set_last_stop_m`** changes the last
+  waypoint's stop distance from the next `advance` on, for a walker whose stop
+  distance at the end depends on what it is doing and is set every tick. Before,
+  it was fixed when the follower was made.
 
 ### Fixed
 

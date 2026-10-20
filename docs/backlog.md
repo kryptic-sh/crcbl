@@ -2650,11 +2650,18 @@ snap shipped; what is left was declined:
   thickets keep 60% of speed through a game-local multiplier, and it stays in
   the game until a second caller wants one.
 
-**EW's route following is in `crcbl-nav`, not yet adopted by EW**
-(`follow::RouteFollower`, `follow::StallDetector`, `SpanGrid::plan_toward`).
-EW's probe results (seeds 0–8) were measured on EW's own code; nothing has run
-the crcbl versions in EW. Where the port differs from EW's source, for EW to
-check on adoption:
+**EW's route following is in `crcbl-nav`, partly adopted by EW**
+(`follow::RouteFollower`, `follow::StallDetector`, `SpanGrid::plan_toward`). On
+0.7.0 (EW `4d310c47`, reported 2026-10-20) EW uses `WAYPOINT_REACH_M`,
+`WAYPOINT_STOP_M`, `FollowDistances::reach_for` and `StallDetector`, with its
+suite green; `plan_toward` is next. `RouteFollower` did not fit, because EW's
+last stop distance changes mid-route with the AI's locomotion and cover state;
+`RouteFollower::set_last_stop_m` answers that and is not yet in a release. EW
+also replaces an AI's waypoints directly at many sites (cover, search, assist,
+rescue); a fresh `RouteFollower::new(route, follower.distances())` covers that,
+so no replace method was added. EW's probe results (seeds 0–8) were measured on
+EW's own code. Where the port differs from EW's source, for EW to check on
+adoption:
 
 - **`SpanGrid::plan_toward` needs a start on a kept floor** (`NoRoute`
   otherwise); EW's `RouteMap::plan` first snaps such a start with
