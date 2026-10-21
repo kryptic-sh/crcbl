@@ -755,6 +755,23 @@ run_sandbox_resize() {
         swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" resize set "${size%x*}" "${size#*x}" >/dev/null
         wait_for_line "a reconfigure at $size" "$log" "hal: reconfiguring the swapchain to $size"
     done
+    # A frame at the last size before closing: the summary reports the extent
+    # last presented, and a close answered in the same pump as the reconfigure
+    # (on lavapipe, at a few frames a second) left it at the size before. The
+    # first `FrameReady` after the reconfigure may still answer the frame
+    # before it; the second can only follow a frame presented after it.
+    local reconfigured deadline
+    reconfigured="$(grep -n "hal: reconfiguring the swapchain to 640x360" "$log" | head -1 | cut -d: -f1)"
+    deadline=$(( $(date +%s) + SWAY_SESSION_TIMEOUT_S ))
+    while [ "$(tail -n "+${reconfigured}" "$log" | grep -c "shell event: FrameReady" || true)" -lt 2 ]; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "crcbl e2e: no frame was presented at 640x360 after the reconfigure" >&2
+            kill "$sandbox_pid" 2>/dev/null || true
+            sway_log_tail
+            exit 1
+        fi
+        sleep "$SWAY_SESSION_POLL_S"
+    done
 
     swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" kill >/dev/null
     local status=0
