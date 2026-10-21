@@ -2526,8 +2526,17 @@ devices loses nothing. Not checked: whether a **real** touchpad's scroll keeps
 its finger source under Hyprland (the virtual one does not), which decides
 whether lyr and pikr see pixels or detents from this laptop's touchpad.
 
-Not a CI job: no runner has a Hyprland to host it. The sandbox passes stay
-sway-only (they drive `swaymsg` from the shell).
+**Not a CI job on GitHub's runners, checked 2026-10-21.** Hyprland 0.56.2
+started with no host compositor and no DRM device (`env -i`, a private runtime
+directory, `AQ_DRM_DEVICES` naming nothing) aborts in `CBackend::create()`:
+aquamarine's headless backend is only a fallback beside a real one, and
+aquamarine reads no variable that selects it. Nested in headless Weston 15.0.1,
+its Wayland backend reports "Missing protocols" and the fallback "Cannot open
+backend: no allocator available": it needs a GBM allocator, which needs a GPU's
+DRM render node, and hosted runners have no `/dev/dri`. headless sway cannot
+host it either (`xdg_wm_base` 5 against the 6 it binds). A self-hosted runner
+with a GPU and a running Hyprland could run this script; that is the owner's
+call. The sandbox passes stay sway-only (they drive `swaymsg` from the shell).
 
 The X11 e2e suite runs on the office laptop since 2026-10-21 (Xvfb and openbox
 installed): 50 of 50 with no window manager and 50 of 50 under openbox, the
