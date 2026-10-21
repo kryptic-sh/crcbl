@@ -14,8 +14,9 @@
 #
 #   * The sandbox passes: they resize, fullscreen and power outputs through
 #     `swaymsg` from the shell and are `run-wayland-e2e.sh`'s alone.
-#   * `SWAY_ONLY` below: tests that read something only sway has. Each is
-#     excluded by name, printed, and counted, so an exclusion is never a pass.
+#   * `SWAY_ONLY` below: tests that assert sway's answer where Hyprland's
+#     differs. Each is excluded by name, printed, and counted, so an exclusion
+#     is never a pass.
 
 set -euo pipefail
 
@@ -27,24 +28,27 @@ source "${CRATE_DIR}/tests/hyprland-session.sh"
 # shellcheck source=tools/nextest-summary.sh
 source "${REPO_ROOT}/tools/nextest-summary.sh"
 
-# `server_side_decorations_are_negotiated_rather_than_assumed` reads sway's
-# per-window `border` field, which says whether the client draws its own
-# decorations; Hyprland has no such field to read.
+# Each of these asserts sway's answer to a question Hyprland 0.56.2 answers
+# differently, diagnosed from a `WAYLAND_DEBUG=1` run against this harness; in
+# none is crcbl's side at fault.
 #
-# `a_frame_request_waits_while_the_output_is_off` asserts that a powered-off
-# output answers no frame request. Hyprland answers anyway, by design: it keeps
-# sending frame callbacks to surfaces it is not showing (`misc.render_unfocused_fps`),
-# so a client there keeps rendering, at a reduced rate, while its output is dark.
+#   * `server_side_decorations_are_negotiated_rather_than_assumed` reads sway's
+#     per-window `border` field; Hyprland has no such field.
+#   * `a_frame_request_waits_while_the_output_is_off`: Hyprland keeps answering
+#     frame requests for surfaces it is not showing (`misc.render_unfocused_fps`),
+#     so a client there keeps rendering while its output is dark.
+#   * `a_touchpad_scroll_is_reported_as_pixels_not_as_detents`: the virtual
+#     pointer sends a finger-source scroll, and Hyprland passes it on as a wheel
+#     with an `axis_value120`, which crcbl rightly reads as detents.
+#   * `the_pointer_outside_an_input_region_leaves_the_window`: crcbl sets and
+#     commits the region, and Hyprland sends motion outside it on the
+#     fullscreen test window rather than a leave.
+#   * `a_seat_that_loses_its_devices_drops_focus_and_keeps_running`: Hyprland's
+#     seat advertises a pointer and a keyboard from the start and keeps them
+#     when the virtual devices go, so nothing is lost to report.
 SWAY_ONLY=(
     server_side_decorations_are_negotiated_rather_than_assumed
     a_frame_request_waits_while_the_output_is_off
-)
-
-# Seen to differ on Hyprland 0.56.2 and **not yet diagnosed** — whether each is
-# Hyprland's behaviour or crcbl's defect is open in `docs/backlog.md` ("Hyprland
-# runs nested inside the live Hyprland"). Not run here until it is, and printed
-# as such, so a run is not read as covering them.
-UNDIAGNOSED=(
     a_touchpad_scroll_is_reported_as_pixels_not_as_detents
     the_pointer_outside_an_input_region_leaves_the_window
     a_seat_that_loses_its_devices_drops_focus_and_keeps_running
@@ -68,11 +72,7 @@ hyprland_session_start
 
 filter="all()"
 for test in "${SWAY_ONLY[@]}"; do
-    echo "crcbl e2e: not run on Hyprland: $test (sway-only)"
-    filter="${filter} - test(=${test})"
-done
-for test in "${UNDIAGNOSED[@]}"; do
-    echo "crcbl e2e: not run on Hyprland: $test (differs there, undiagnosed; see docs/backlog.md)"
+    echo "crcbl e2e: not run on Hyprland: $test (asserts sway's behaviour; see this script)"
     filter="${filter} - test(=${test})"
 done
 
@@ -101,5 +101,5 @@ if [ "$STATUS" -ne 0 ] || ! crcbl_nextest_summary "$PLAIN" "crcbl e2e"; then
     hyprland_log_tail
     exit 1
 fi
-echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN tests ran against a nested Hyprland; not run: ${#SWAY_ONLY[@]} sway-only, ${#UNDIAGNOSED[@]} undiagnosed"
+echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN tests ran against a nested Hyprland; ${#SWAY_ONLY[@]} assert sway's behaviour and were not run"
 echo "crcbl e2e: the sandbox passes are sway-only; run tests/run-wayland-e2e.sh for them"

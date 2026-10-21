@@ -2513,21 +2513,18 @@ drives either compositor through its `wm_` functions, which
 `CRCBL_E2E_COMPOSITOR=hyprland` points at `hyprctl eval`; the nested config
 gives Hyprland sway's two `HEADLESS` outputs, its float rules, no gaps, and
 `follow_mouse = 2` with `mouse_move_focuses_monitor = false`. On the office
-laptop: 55 of 55 pass, with 5 not run and named by the script. Sway-only, by
-design: the decoration test (it reads sway's `border` field) and
-`a_frame_request_waits_while_the_output_is_off` (Hyprland keeps answering frame
-requests for surfaces it is not showing, `misc.render_unfocused_fps`, so a
-client keeps rendering while its output is dark). **Differ on Hyprland, not
-diagnosed** (each is Hyprland's behaviour or crcbl's defect, unknown which):
-
-- `a_touchpad_scroll_is_reported_as_pixels_not_as_detents`: a virtual pointer's
-  finger scroll came back as `Lines` (-0.87), so Hyprland sent a value120 with
-  it or crcbl misread the source; on a real touchpad under Hyprland that would
-  turn pixels into detents. Read a `WAYLAND_DEBUG=1` run.
-- `the_pointer_outside_an_input_region_leaves_the_window`: no leave when the
-  pointer moves out of an input region.
-- `a_seat_that_loses_its_devices_drops_focus_and_keeps_running`: no leave when
-  the virtual pointer is destroyed.
+laptop: 55 of 55 pass, and 5 that assert sway's answer are not run, each named
+with its reason in the script. Every one was diagnosed from a `WAYLAND_DEBUG=1`
+run, and in none is crcbl at fault: the decoration test reads sway's `border`
+field; Hyprland keeps answering frame requests for surfaces it is not showing
+(`misc.render_unfocused_fps`), so a client keeps rendering while its output is
+dark; it passes a virtual pointer's finger scroll on as a wheel with an
+`axis_value120` (crcbl rightly reads detents); it sends motion, not a leave,
+outside a committed input region on the fullscreen test window; and its seat
+advertises a pointer and keyboard from the start, so destroying the virtual
+devices loses nothing. Not checked: whether a **real** touchpad's scroll keeps
+its finger source under Hyprland (the virtual one does not), which decides
+whether lyr and pikr see pixels or detents from this laptop's touchpad.
 
 Not a CI job: no runner has a Hyprland to host it. The sandbox passes stay
 sway-only (they drive `swaymsg` from the shell).
