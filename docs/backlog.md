@@ -116,6 +116,38 @@ not premultiplied: of 15,071 partly transparent pixels across 139 icons, 7,105
 have a colour channel above alpha. Nothing in crcbl converts shell icons today;
 if something does, it must not treat them as premultiplied on the way in.
 
+**Vulkan enumeration wakes the dGPU a `LowPower` program never uses** (pikr,
+2026-10-21, the office laptop: Intel RPL-U driving every output, NVIDIA MX550
+with none, proprietary driver, loader 1.4.363). pikr on 0.7.0 picks Intel, yet
+`vkEnumeratePhysicalDevices` loads and initialises the NVIDIA ICD: a running
+pikr held 12 `/dev/nvidia*` descriptors and the NVIDIA libraries while rendering
+on Intel. Launch to "GPU chosen", three runs in a nested Hyprland: 215, 121, 123
+ms with every ICD against 36, 19, 15 ms with `VK_ICD_FILENAMES` naming Intel's;
+first paint 319, 196, 190 ms against 203, 128, 105 ms, and 72 ms with
+`VK_LOADER_DRIVERS_SELECT='*intel*'`, which left no NVIDIA descriptor or
+mapping. On a laptop that runtime-suspends its dGPU this probably also wakes it
+(not observable there: `power/control` is pinned on). Not built; the options,
+none chosen:
+
+- Restrict the loader before `crcbl-vk` opens it, when `CRCBL_ADAPTER` is unset
+  and the preference is `LowPower`: find the display's device first (the Wayland
+  dmabuf `main_device` the shell already reads, or the DRM device with
+  `boot_vga` under `/sys/class/drm`), map its kernel driver to an ICD manifest,
+  and load only that one. `CRCBL_ADAPTER` and `HighPerformance` keep loading
+  every ICD. The catch is the mechanism: `VK_LOADER_DRIVERS_SELECT` is an
+  environment variable, and setting one from a running, possibly threaded
+  process is `unsafe` in Rust 2024 for good reason.
+  `VK_LUNARG_direct_driver_loading` avoids the environment by handing the loader
+  the chosen driver's `vkGetInstanceProcAddr`, at the price of reading ICD
+  manifests and opening the driver library ourselves.
+- Leave it to the program: document `VK_LOADER_DRIVERS_SELECT` for launchers and
+  bars, which start often and render little.
+
+Also verified there: `CRCBL_ADAPTER=discrete` renders on the MX550 and presents
+across to the Intel-driven output (first paint 512 ms), and the office laptop's
+Wayland harness run on 2026-10-21 chose the MX550 under `HighPerformance` the
+same way, validation silent.
+
 **Adapter choice, left over from the 2026-10-19 slice** (lazy describe,
 `PowerPreference`, `AdapterPick`, `Instance::display_adapter`; the policy is
 `crcbl_app::adapter::choose` and `rank`):
