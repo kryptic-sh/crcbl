@@ -1567,16 +1567,26 @@ impl Conn {
         // barrier — and the reason the sequence is written out rather than
         // replaced by `wl_display_dispatch`, which blocks.
         unsafe {
-            if (self.lib.display_dispatch_pending)(display) < 0 {
+            let mut dispatched = (self.lib.display_dispatch_pending)(display);
+            if dispatched < 0 {
                 return Err(self.disconnected());
             }
             // `prepare_read` fails while this thread still has queued events;
             // dispatch them and try again. Bounded by the queue, not by time.
             while (self.lib.display_prepare_read)(display) != 0 {
-                if (self.lib.display_dispatch_pending)(display) < 0 {
+                let more = (self.lib.display_dispatch_pending)(display);
+                if more < 0 {
                     return Err(self.disconnected());
                 }
+                dispatched += more;
             }
+            // **Events already in hand end the wait.** Another reader of this
+            // display — Mesa's Vulkan WSI, during a present — moves our events
+            // off the socket into the queue without dispatching them, so they
+            // are only dispatched here, and the socket they came from is quiet.
+            // Sleeping on it held a pointer press until the next unrelated
+            // event, up to a whole timeout late.
+            let timeout_ms = if dispatched > 0 { 0 } else { timeout_ms };
             if (self.lib.display_flush)(display) < 0 && timeout_ms != 0 {
                 // A full socket with nothing to read would otherwise block for
                 // the whole timeout waiting for a peer that is waiting for us.

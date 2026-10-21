@@ -13,6 +13,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Wayland event read off the socket by someone else no longer waits behind
+  `wait_events`'s timeout.** Mesa's Vulkan WSI reads the shared display during a
+  present, which moves the shell's pending events into libwayland's queue;
+  `wait_events` dispatched them and then slept the whole timeout on the now
+  quiet socket, so a pointer press reached `pump` only with the next unrelated
+  event, up to a second late (lyr's clicks on Hyprland). The wait now ends at
+  once when it dispatched anything.
+
 ## [0.8.0] - 2026-10-21
 
 ### Breaking

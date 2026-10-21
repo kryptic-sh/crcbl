@@ -337,6 +337,52 @@ pub fn roundtrip(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError> 
     Ok(())
 }
 
+/// Reads what the compositor has sent into libwayland's queues **without
+/// dispatching any of it** — what Mesa's Vulkan WSI does to the shell's events
+/// when it reads the shared display during a present. Waits up to `timeout_ms`
+/// for the socket to become readable.
+///
+/// Answers whether it read: `false` when nothing arrived in time, or when
+/// events were already queued, in which case `wl_display_prepare_read`
+/// refuses and there is nothing for this helper to add.
+///
+/// # Errors
+///
+/// As [`roundtrip`], and [`ShellError::Backend`] if the read itself fails.
+pub fn read_without_dispatching(
+    shell: &dyn Shell,
+    window: WindowId,
+    timeout_ms: c_int,
+) -> Result<bool, ShellError> {
+    let SurfaceTarget::Wayland { display, .. } = shell.surface_target(window)? else {
+        return Err(ShellError::Backend(
+            "not a Wayland window; this helper is only for the Wayland backend".to_string(),
+        ));
+    };
+    let lib = ffi::load().map_err(|detail| ShellError::Backend(detail.to_string()))?;
+    let display: *mut WlDisplay = display.as_ptr().cast();
+    // SAFETY: the display belongs to the shell and is live while it is
+    // borrowed, and this runs on the shell's thread. `prepare_read` is paired
+    // with exactly one `read_events` or `cancel_read`, as libwayland requires;
+    // nothing here dispatches, so no dispatcher runs.
+    unsafe {
+        if (lib.display_prepare_read)(display) != 0 {
+            return Ok(false);
+        }
+        let fd = (lib.display_get_fd)(display);
+        if !ffi::poll_readable_with(fd, &[], timeout_ms) {
+            (lib.display_cancel_read)(display);
+            return Ok(false);
+        }
+        if (lib.display_read_events)(display) < 0 {
+            return Err(ShellError::Backend(
+                "wl_display_read_events failed".to_string(),
+            ));
+        }
+    }
+    Ok(true)
+}
+
 /// The most clipboard payloads one selection may have in flight at once.
 ///
 /// The backend's bound, re-exported: the module that owns it is crate-private,

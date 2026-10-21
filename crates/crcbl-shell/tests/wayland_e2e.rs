@@ -1889,6 +1889,59 @@ fn crossing_into_another_of_our_windows_leaves_the_first() {
     session.shell.destroy_window(first).expect("destroy");
 }
 
+/// **An event someone else read off the socket is not left waiting behind a
+/// sleep.** Mesa's Vulkan WSI reads the shared display during a present, which
+/// moves the shell's own pending events into libwayland's queue without
+/// dispatching them; the next `wait_events` then has events in hand and a quiet
+/// socket. It slept the whole timeout there, so a press reached `pump` only
+/// with the next socket activity, up to a second late (lyr, on Hyprland).
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn an_event_already_read_off_the_socket_ends_the_wait() {
+    /// Far longer than any wait that found its events at once can take.
+    const LONG_WAIT: Duration = Duration::from_secs(3);
+    /// What "at once" may cost, scheduler noise included.
+    const PROMPT: Duration = Duration::from_millis(500);
+
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e read elsewhere");
+    input.move_to(960, 540, LAYOUT_SIZE);
+    session.pump_until("the pointer to enter", |session| {
+        session.names().contains(&"PointerFocus")
+    });
+    session.take_names();
+
+    input.button(evdev::BTN_LEFT, true);
+    // Read what arrives into the queue the way the WSI would, dispatching
+    // nothing, then wait: every wait here follows a read that found events, so
+    // each has events in hand and must end at once. A motion still in flight
+    // can arrive before the press, hence the loop until the press is out.
+    let deadline = Instant::now() + WAIT;
+    while !session.names().contains(&"Button") {
+        assert!(
+            Instant::now() < deadline,
+            "the press never reached the shell"
+        );
+        if !crcbl_shell::wayland_test_support::read_without_dispatching(&*session.shell, window, 50)
+            .expect("read")
+        {
+            continue;
+        }
+        let started = Instant::now();
+        session.shell.wait_events(Some(LONG_WAIT));
+        let waited = started.elapsed();
+        assert!(
+            waited < PROMPT,
+            "wait_events held events it already had for {waited:?} of its {LONG_WAIT:?}"
+        );
+        session.pump();
+    }
+
+    input.button(evdev::BTN_LEFT, false);
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
 /// A wheel detent is detents, not the pixel count the compositor made up.
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
