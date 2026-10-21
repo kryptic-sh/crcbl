@@ -3,15 +3,11 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Release 0.8.0 is not cut (session wrapped up 2026-10-20)
+## EW has not been told 0.8.0 shipped (2026-10-21)
 
-`CHANGELOG.md`'s `[Unreleased]` is on main and complete; it is a minor bump, for
-`FrameOutcome::Held`. Three sessions wait on it: lyr (drops its own
-`Presenter::drain` before resizing, re-runs its D3D12 `set_panel` reshape, and
-sends the Win32 tooltip trace), EW (moves its AI routes onto `RouteFollower`
-with `set_last_stop_m`; EW pins released versions only) and pikr
-(`TextLayout::caret`, and the unsided-`VK_CONTROL` keystroke test). Cut it once
-main's CI is green, and tell those three.
+0.8.0 is on crates.io with `RouteFollower::set_last_stop_m`, which EW waits on
+to move its AI routes (EW pins released versions only). pikr and lyr were told
+in session; no EW session was running to tell. Delete this once EW knows.
 
 ## NEXT: speed up CI (asked by the owner, 2026-10-20)
 
