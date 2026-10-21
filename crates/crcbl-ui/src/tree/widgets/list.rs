@@ -25,7 +25,7 @@
 //! never takes focus away.
 
 use super::{Ui, WidgetKind, WidgetState, typed};
-use crate::style::{Declaration, Sides};
+use crate::style::{Declaration, PseudoClasses, Sides};
 use crate::tree::{Behavior, KeySource, LengthAuto, Overflow, Position, Response, hash_of};
 
 /// How many rows a list builds past each edge of its view: enough that a step
@@ -45,6 +45,23 @@ impl Ui {
         selector: &str,
         rows: usize,
         row_height: f32,
+        row: impl FnMut(&mut Self, usize),
+    ) -> Response {
+        self.selectable_list(selector, rows, row_height, None, row)
+    }
+
+    /// [`Ui::list`] with one row selected: row `selected` is built
+    /// `:checked`, for the stylesheet to draw as `.list-row:checked`, and a
+    /// screen reader hears it as selected. For a list whose current row is the
+    /// application's — a launcher's result Return accepts — rather than
+    /// wherever focus is.
+    #[track_caller]
+    pub fn selectable_list(
+        &mut self,
+        selector: &str,
+        rows: usize,
+        row_height: f32,
+        selected: Option<usize>,
         mut row: impl FnMut(&mut Self, usize),
     ) -> Response {
         let selector = typed("list", selector);
@@ -54,7 +71,7 @@ impl Ui {
             &selector,
             &[Declaration::Overflow(Overflow::Scroll)],
             Behavior::NONE,
-            |ui| focused = ui.list_rows(rows, height, &mut row),
+            |ui| focused = ui.list_rows(rows, height, selected, &mut row),
         );
         self.set_widget_state(response.key, WidgetState::Rows(focused));
         self.mark(response.key, WidgetKind::List);
@@ -67,6 +84,7 @@ impl Ui {
         &mut self,
         rows: usize,
         height: f32,
+        selected: Option<usize>,
         row: &mut impl FnMut(&mut Self, usize),
     ) -> Option<usize> {
         let list = self.nodes[*self.open.last().expect("called inside the list block")].key;
@@ -92,10 +110,16 @@ impl Ui {
                 .chain(outside.filter(|&index| index >= window.end));
             for index in indices {
                 let inline = row_inline(index, height);
-                let response =
-                    ui.block_keyed_with(index, ".list-row", &inline, Behavior::BUTTON, |ui| {
-                        row(ui, index);
-                    });
+                let state = if selected == Some(index) {
+                    PseudoClasses::CHECKED
+                } else {
+                    PseudoClasses::NONE
+                };
+                let parsed = ui.node_selector(".list-row");
+                let key = ui.key(KeySource::Keyed(hash_of(index)));
+                let response = ui.open_block(key, parsed, &inline, Behavior::BUTTON, state, |ui| {
+                    row(ui, index);
+                });
                 ui.mark(response.key, WidgetKind::ListRow);
                 if response.focused {
                     focused = Some(index);

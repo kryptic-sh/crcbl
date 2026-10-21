@@ -13,6 +13,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`Ui::set_accessible_label(key, label)`** (the `accesskit` feature) names a
+  node for screen readers this frame: the text spans directly inside it are not
+  read on their own, and a block left holding nothing else reads as one `Label`.
+  For a name drawn as pieces, such as a label split into runs to accent a search
+  match, which read as "ga" then "mma" without it.
+- **`Ui::selectable_list`**: `Ui::list` with one row selected, built `:checked`
+  so a stylesheet draws it as `.list-row:checked`, and read as selected by a
+  screen reader. `Ui::list` is `selectable_list` with no selection.
+
 ## [0.8.1] - 2026-10-21
 
 ### Fixed

@@ -576,6 +576,10 @@ pub struct Ui {
     /// clicked, as [`Ui::set_focus`] waits for it; see `accessibility.rs`.
     #[cfg(feature = "accesskit")]
     requested_click: Option<NodeKey>,
+    /// This frame's names for nodes a screen reader should hear as one thing;
+    /// see [`Ui::set_accessible_label`].
+    #[cfg(feature = "accesskit")]
+    accessible_labels: HashMap<NodeKey, String>,
     /// Every paragraph as the last layout broke it into lines; see
     /// `paragraph.rs`.
     paragraphs: Vec<paragraph::LaidOut>,
@@ -601,6 +605,8 @@ impl Ui {
     pub fn begin_frame_with(&mut self, pointer: PointerInput, nav: NavInput) {
         self.frame += 1;
         self.nodes.clear();
+        #[cfg(feature = "accesskit")]
+        self.accessible_labels.clear();
         self.children.clear();
         self.text.clear();
         self.cut.clear();

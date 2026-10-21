@@ -250,3 +250,85 @@ fn a_paragraph_reads_as_its_runs_in_order() {
         .collect();
     assert_eq!(words, ["Build finished in ", "4 minutes"]);
 }
+
+/// **A block named with `set_accessible_label` reads as that name, not as the
+/// spans it was drawn in**: "gamma" drawn as "ga" and "mma" so the match can
+/// be accented is one label, and without the name it is the two pieces.
+#[test]
+fn a_named_block_reads_as_its_name_not_its_pieces() {
+    let pieces = |ui: &mut Ui, named: bool| {
+        frame(ui, idle(), NavInput::default(), |ui| {
+            let mut spans = Vec::new();
+            let label = ui.block(".label", &[], |ui| {
+                spans.push(ui.span(".hl", "ga", &[]).key);
+                spans.push(ui.span(".tx", "mma", &[]).key);
+            });
+            if named {
+                ui.set_accessible_label(label.key, "gamma");
+            }
+            (label.key, spans)
+        })
+    };
+    let mut ui = Ui::new();
+
+    let (label, spans) = pieces(&mut ui, true);
+    let update = ui.accessibility_update();
+    let named = node(&update, label);
+    assert_eq!(named.role(), Role::Label);
+    assert_eq!(named.label(), Some("gamma"));
+    assert!(named.children().is_empty(), "the pieces are not read again");
+    for span in spans {
+        assert!(
+            update.nodes.iter().all(|(id, _)| *id != NodeId(span.0)),
+            "{span:?} is one of the name's pieces"
+        );
+    }
+
+    let (label, spans) = pieces(&mut ui, false);
+    let update = ui.accessibility_update();
+    assert_eq!(
+        node(&update, label).children(),
+        spans.iter().map(|key| NodeId(key.0)).collect::<Vec<_>>(),
+        "unnamed, a reader hears each piece"
+    );
+}
+
+/// **The selected row of a selectable list is selected to a reader, and no
+/// other row says anything either way**, nor does any row of a plain list.
+#[test]
+fn a_selectable_lists_selected_row_reads_as_selected() {
+    let selections = |ui: &mut Ui, selected: Option<usize>| {
+        let list = frame(ui, idle(), NavInput::default(), |ui| {
+            ui.selectable_list("#rows", 3, 20.0, selected, |ui, index| {
+                ui.span("", format!("row {index}").as_str(), &[]);
+            })
+        });
+        let update = ui.accessibility_update();
+        let content = node(&update, list.key).children()[0];
+        let rows = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == content)
+            .expect("the list's content")
+            .1
+            .children()
+            .to_vec();
+        rows.iter()
+            .map(|row| {
+                let (_, row) = update
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| id == row)
+                    .expect("a row");
+                assert_eq!(row.role(), Role::ListItem);
+                row.is_selected()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut ui = Ui::new();
+    // Tall enough for every row from the first frame, which builds only what
+    // a list of unknown height would show.
+    ui.add_stylesheet("rows.css", "#rows { height: 100px; }");
+    assert_eq!(selections(&mut ui, Some(1)), [None, Some(true), None]);
+    assert_eq!(selections(&mut ui, None), [None, None, None]);
+}

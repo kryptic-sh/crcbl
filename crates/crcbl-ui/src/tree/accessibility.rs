@@ -39,6 +39,13 @@
 //! name drawn beside it rather than inside it (a text input's label, a select's
 //! caption) is not tied to it.
 //!
+//! # Names a caller gives
+//!
+//! [`Ui::set_accessible_label`] names a node for this frame. Its own text spans
+//! are then not read on their own — they are the pieces the name stands for, as
+//! when a label is drawn as runs to accent part of it — and a block left with
+//! nothing else to hold is read as one [`Role::Label`].
+//!
 //! # Actions
 //!
 //! A focusable node offers [`Action::Focus`], the focused node
@@ -118,6 +125,16 @@ impl Ui {
             }
             _ => false,
         }
+    }
+
+    /// Names the node `key` for screen readers this frame, as `label`: what a
+    /// reader hears for it, in place of the text spans directly inside it. For
+    /// a name drawn as pieces — a label split into runs so the characters a
+    /// search matched can be accented reads as its runs, "ga" then "mma",
+    /// unless the block holding them is named "gamma". Set it each frame the
+    /// node is built; a key not built this frame is ignored.
+    pub fn set_accessible_label(&mut self, key: NodeKey, label: &str) {
+        self.accessible_labels.insert(key, label.to_owned());
     }
 
     /// The node a screen reader clicked since the last frame, now reporting
@@ -204,15 +221,39 @@ impl Ui {
         ) {
             node.set_selected(state.contains(PseudoClasses::CHECKED));
         }
+        // A list row is selected only in a list that has a selection,
+        // [`Ui::selectable_list`]; a plain list's rows say nothing either way.
+        if kind == WidgetKind::ListRow && state.contains(PseudoClasses::CHECKED) {
+            node.set_selected(true);
+        }
 
+        let label = self.accessible_labels.get(&frame.key);
         if is_whole(kind) {
             self.name_from_contents(index, kind, &mut node);
         } else {
+            let mut held = false;
             let mut next = frame.first_child;
             while let Some(child) = next {
-                self.push_accessible(child, &mut node, out);
+                let is_text = matches!(
+                    self.nodes[child].content,
+                    Content::Text { .. } | Content::Run { .. }
+                );
+                if label.is_none() || !is_text {
+                    self.push_accessible(child, &mut node, out);
+                    held = true;
+                }
                 next = self.nodes[child].next_sibling;
             }
+            if label.is_some()
+                && !held
+                && frame.content == Content::Block
+                && kind == WidgetKind::None
+            {
+                node.set_role(Role::Label);
+            }
+        }
+        if let Some(label) = label {
+            node.set_label(label.as_str());
         }
         out.push((id, node));
     }

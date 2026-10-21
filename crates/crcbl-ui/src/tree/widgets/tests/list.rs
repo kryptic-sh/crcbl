@@ -306,3 +306,32 @@ fn a_list_that_grows_taller_asks_for_a_rebuild() {
     assert_eq!(page.built, (0..rows).collect::<Vec<_>>());
     assert!(!ui.needs_rebuild());
 }
+
+/// **A selectable list builds its selected row `:checked`, and only that row**,
+/// so a stylesheet draws the application's current row as `.list-row:checked`;
+/// a plain list's rows are never checked.
+#[test]
+fn a_selectable_lists_selected_row_is_checked() {
+    let accent = linear("#c03030");
+    let mut ui = Ui::new();
+    sheet(&mut ui);
+    ui.add_stylesheet("selected.css", ".list-row:checked { background: #c03030; }");
+    let page = frame(&mut ui, idle(), NavInput::default(), |ui| {
+        let list = ui.selectable_list("#rows", 3, ROW, Some(1), |_, _| {});
+        ListPage {
+            list,
+            built: Vec::new(),
+            nodes: 0,
+        }
+    });
+    let checked: Vec<bool> = (0..3)
+        .map(|index| style_of(&ui, row_key(&ui, &page, index)).background == accent)
+        .collect();
+    assert_eq!(checked, [false, true, false]);
+
+    let plain = list_page(&mut ui, 3, idle(), NavInput::default());
+    let checked: Vec<bool> = (0..3)
+        .map(|index| style_of(&ui, row_key(&ui, &plain, index)).background == accent)
+        .collect();
+    assert_eq!(checked, [false; 3], "a plain list has no selection");
+}
