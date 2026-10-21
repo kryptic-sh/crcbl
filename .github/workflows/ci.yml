@@ -1218,8 +1218,8 @@ jobs:
             xvfb openbox libasound2-dev libxcb1 libxcb-randr0 libxcb-xinput0
             libxcb-xtest0 libxcb-xfixes0 libxcb-cursor0 libxcb-shape0
             libxkbcommon0 libxkbcommon-x11-0 libvulkan1 mesa-vulkan-drivers
-            vulkan-validationlayers dbus at-spi2-core
-            xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils
+            vulkan-validationlayers dbus at-spi2-core xserver-xorg-core
+            xserver-xorg-video-dummy x11-xserver-utils
       # Starts Xvfb on a private display number, polls for its socket with a
       # deadline and a liveness check on the child, runs the `#[ignore]`d suite
       # with `--features x11-e2e`, and dumps the server log tail on any
