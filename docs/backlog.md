@@ -2503,6 +2503,12 @@ the panel's keys to its open dropdown itself. Not checked on sway or another
 compositor; if more than one compositor does it, the shell could do the
 forwarding instead of each program.
 
+**Behaviour, not a crcbl bug: Hyprland moves pointer focus to a layer surface
+that takes the keyboard** (lyr, 2026-10-21, Hyprland 0.56.2). Until the pointer
+next moves, every click goes to that surface at a position outside it, such as
+(569, -41), so a panel without a grab sees presses outside its own bounds. lyr
+handles it; crcbl passes the coordinates on as the compositor sent them.
+
 **Hyprland cannot nest inside headless sway** (tried 2026-10-20): Hyprland
 0.56.2 binds `xdg_wm_base` at version 6 and sway 1.12 offers 5, so its Wayland
 backend aborts with `CBackend::create() failed!`. The Hyprland job S17 asks for
