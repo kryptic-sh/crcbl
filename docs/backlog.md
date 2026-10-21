@@ -517,11 +517,14 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    `_NET_WM_STRUT_PARTIAL`, override-redirect popups with a grab, a 32-bit ARGB
    visual once `_NET_WM_CM_Sn` has an owner), M to L together.
 4. **Implemented, untested:** S17 panel focus on Win32 and AppKit, and on
-   Hyprland (a CI job of its own, M to L); S7 monitor hot-plug on X11 (Xvfb and
-   `xrandr --setmonitor`), Win32 and AppKit; S9 X11 compose through a real
-   server, Win32 pre-edit (`win32-ime-e2e` is not enabled by
-   `run-win32-e2e.ps1`), AppKit dead keys, and AppKit's input method against a
-   real one — whether one in its native mode gives way to the Roman-only
+   Hyprland in CI (a job of its own, M to L; on the office laptop's nested
+   Hyprland 0.56.2, 2026-10-21, an exclusive panel took the keyboard as on sway,
+   and an OnDemand panel took it **on map**, where sway waits for a click, kept
+   it on a click and gave it back on a click in a tiled window); S7 monitor
+   hot-plug on X11 (Xvfb and `xrandr --setmonitor`), Win32 and AppKit; S9 X11
+   compose through a real server, Win32 pre-edit (`win32-ime-e2e` is not enabled
+   by `run-win32-e2e.ps1`), AppKit dead keys, and AppKit's input method against
+   a real one — whether one in its native mode gives way to the Roman-only
    restriction `appkit::view::allow_input_methods` sets for a window with no
    field or a sensitive one, the pre-edit an input method sends, and where its
    candidate window opens (`appkit_session`'s `text_input` plays the input
@@ -2437,9 +2440,9 @@ named under S-rows above. lyr's observations from its first Hyprland runs
 - `DrawList::push_opacity` and `font::breaks`: not checked on Vulkan.
 - **The table, 2026-10-20.** "CI" is a test in the named suite (nested sway,
   Xvfb, lavapipe); "laptop" was run on the office laptop (headless sway 1.12,
-  Intel RPL-U Vulkan). X11 cannot run locally (no Xvfb installed). Rows that are
-  CPU-only (`font::breaks`, UAX #9/#14/#29, `TextLayout::caret`, nav) need no
-  per-platform cell.
+  Intel RPL-U Vulkan). The X11 suite also runs locally since 2026-10-21. Rows
+  that are CPU-only (`font::breaks`, UAX #9/#14/#29, `TextLayout::caret`, nav)
+  need no per-platform cell.
 
   | Feature                                       | Wayland                         | X11                                               | Vulkan                        |
   | --------------------------------------------- | ------------------------------- | ------------------------------------------------- | ----------------------------- |
@@ -2493,13 +2496,29 @@ next moves, every click goes to that surface at a position outside it, such as
 (569, -41), so a panel without a grab sees presses outside its own bounds. lyr
 handles it; crcbl passes the coordinates on as the compositor sent them.
 
-**Hyprland cannot nest inside headless sway** (tried 2026-10-20): Hyprland
-0.56.2 binds `xdg_wm_base` at version 6 and sway 1.12 offers 5, so its Wayland
-backend aborts with `CBackend::create() failed!`. The Hyprland job S17 asks for
-needs Hyprland nested in another Hyprland (pikr's way, a hidden special
-workspace on the live desktop, which needs the owner's go-ahead) or a compositor
-offering `xdg_wm_base` 6. The X11 e2e suite needs Xvfb (`xorg-server-xvfb`), not
-installed on the office laptop, so its cells there stay CI-only.
+**Hyprland runs nested inside the live Hyprland, hidden** (owner's go-ahead,
+2026-10-21; it cannot nest in headless sway, whose `xdg_wm_base` 5 is below the
+6 Hyprland 0.56.2 binds). pikr's recipe, Lua config: start it with
+`hyprctl eval "hl.exec_cmd('Hyprland -c nested.lua', { workspace = 'special:nestedtest silent', no_initial_focus = true })"`
+so nothing flashes (a hyprlang `dispatch` fails on 0.56); find it by diffing
+`hyprctl instances -j`, polling rather than sleeping; then inside it
+`hyprctl output create headless TEST-1` and disable `WAYLAND-1`, because the
+live compositor never draws a hidden special workspace, so the nested output
+gets no frame callbacks and FIFO presents block. Clients use its
+`WAYLAND_DISPLAY` and `HYPRLAND_INSTANCE_SIGNATURE`.
+
+The Wayland e2e suite against it (2026-10-21): 29 of 60 pass, and none of the 31
+failures is a crcbl defect. Most drive sway over IPC or assume its two
+`HEADLESS` outputs (`swaymsg`, `LAYOUT_SIZE`, `OUTPUT_SIZE`); two configure
+tests see Hyprland tile a window sway's config floats; the clipboard tests stop
+on `swaymsg` focusing their peer, as they say they must; and the dead-key test
+needs the harness's `XCOMPOSEFILE`, which that run did not set. A Hyprland job
+would need those assumptions behind a compositor switch. The Hyprland-specific
+behaviour seen is S17's, recorded there.
+
+The X11 e2e suite runs on the office laptop since 2026-10-21 (Xvfb and openbox
+installed): 50 of 50 with no window manager and 50 of 50 under openbox, the
+AT-SPI step and every sandbox step passing in both.
 
 ## HIGH PRIORITY: EW engine requirements
 
