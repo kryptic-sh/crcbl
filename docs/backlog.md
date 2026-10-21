@@ -1652,6 +1652,19 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       pending click never marking the node or never applied, a disabled node's
       click accepted, Focus not forwarded to `set_focus`, and the update's focus
       always the window.
+    - **Asked by pikr, 2026-10-21, after shipping `accesskit` on 0.8.0** (its
+      tree reads right on Hyprland with AT-SPI on): (1) an accessible name for a
+      node drawn as several spans. pikr draws a row's label as runs so the
+      matched characters are accented, so "gamma" with "ga" matched reads as two
+      labels, "ga" and "mma". Options: a way to set a node's label (on a block's
+      `Response`, or as a builder option), or a rule that adjacent spans inside
+      one block read as one label joined without spaces; `gather_text` puts a
+      space between spans today, which is wrong for runs within one word. (2)
+      Selected state for `Ui::list` rows: `set_selected` covers `Tab`,
+      `SelectOption` and `OutlinerRow` only, and pikr's current row (the one
+      Return accepts, drawn with its own class) is a list item. Options: a way
+      to mark the current list item selected, or reading a `:checked` list row
+      as selected. Neither built.
     - Gaps in crcbl-ui's tree. Values the tree never stores: a slider has no
       numeric value, range or step, and a drag-value only the text it shows
       (both are the caller's `&mut`); a checkbox-like block built without
