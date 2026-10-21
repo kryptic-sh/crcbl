@@ -2524,7 +2524,11 @@ outside a committed input region on the fullscreen test window; and its seat
 advertises a pointer and keyboard from the start, so destroying the virtual
 devices loses nothing. Not checked: whether a **real** touchpad's scroll keeps
 its finger source under Hyprland (the virtual one does not), which decides
-whether lyr and pikr see pixels or detents from this laptop's touchpad.
+whether lyr and pikr see pixels or detents from this laptop's touchpad. A hand
+check on 2026-10-22 (the sandbox with `CRCBL_LOG=debug WAYLAND_DEBUG=1`,
+scrolled over by hand) captured nothing, since the pointer never entered its
+window in time, and the owner chose to leave it; repeat it when someone is at
+the laptop.
 
 **Not a CI job on GitHub's runners, checked 2026-10-21.** Hyprland 0.56.2
 started with no host compositor and no DRM device (`env -i`, a private runtime
