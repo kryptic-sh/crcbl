@@ -129,19 +129,19 @@ if something does, it must not treat them as premultiplied on the way in.
   Raptor Lake iGPU + NVIDIA MX550, Arch) by the ignored
   `crcbl_app::backend::tests::vulkan_names_the_adapter_a_wayland_compositor_composites_on`,
   judged by sysfs's PCI ids for the `dev_t`; it went red with the render-node
-  match removed. **Not verified**: the MX550 was absent from Vulkan during that
-  run (NVIDIA userspace 615.78 against a 615.71 kernel module, pending a
-  reboot), so the two-GPU case — that the dGPU is listed and _not_ chosen — has
-  not been seen; rerun the test after a reboot. Not built: per-surface feedback
-  (`get_surface_feedback`), which may name a different main device for a window
-  on another GPU's output, and a feedback change after the window exists (the
-  target is read once, at surface creation). **X11 built 2026-10-20**: DRI3
-  `Open` on the screen's root and `fstat` of the descriptor
-  (`x11::Conn::dri3_device`) fill `SurfaceTarget::Xcb::main_device`, matched the
-  same way; verified by `vulkan_names_the_adapter_an_x_server_renders_on` on
-  Xwayland under headless sway (Intel, red with DRI3 suppressed). Not in CI:
-  Xvfb has no DRI3. macOS still needs `CGDirectDisplayCopyCurrentMetalDevice`
-  matched by `registryID`.
+  match removed. The two-GPU case ran on 2026-10-21, after a reboot loaded the
+  matching NVIDIA module: with the MX550 listed beside the iGPU, the test still
+  named the Intel adapter (226:128), which drives both the panel and the HDMI
+  output on that laptop. Not seen: a laptop whose external output is wired to
+  the dGPU. Not built: per-surface feedback (`get_surface_feedback`), which may
+  name a different main device for a window on another GPU's output, and a
+  feedback change after the window exists (the target is read once, at surface
+  creation). **X11 built 2026-10-20**: DRI3 `Open` on the screen's root and
+  `fstat` of the descriptor (`x11::Conn::dri3_device`) fill
+  `SurfaceTarget::Xcb::main_device`, matched the same way; verified by
+  `vulkan_names_the_adapter_an_x_server_renders_on` on Xwayland under headless
+  sway (Intel, red with DRI3 suppressed). Not in CI: Xvfb has no DRI3. macOS
+  still needs `CGDirectDisplayCopyCurrentMetalDevice` matched by `registryID`.
 - **Verified on one desktop only**: an RX 7900 XTX driving the monitor, an AMD
   Raphael iGPU and WARP, Windows 11. There D3D12 and Vulkan both name the RX
   7900 XTX as the display adapter (the cross-check is
@@ -25761,10 +25761,29 @@ whether `crcbl-webgpu` names the adapter it opened is unchecked.
 
 **What this is worth acting on:**
 
-- **Find out whether `crcbl-webgpu` survives the same machine.** That is the
-  backend we are keeping, and it is the only version of this question that
-  matters. The site deploys it now, so the reporter can simply retry — nobody
-  has asked them to.
+- **Answered on the office laptop itself, 2026-10-21** (Intel RPL-U + MX550,
+  Arch, Hyprland, Chromium 155, a local `web/build.sh` site, breakout): the old
+  failure does not reproduce on `crcbl-webgpu`, and what does fail is
+  Chromium's. Out of the box Chromium grants no WebGPU adapter here ("No
+  available adapters"), so the demo shows its no-WebGPU banner. With
+  `--enable-unsafe-webgpu` alone it grants SwiftShader and breakout runs, no
+  errors. With the gates' `hardware` flags
+  (`--enable-features=Vulkan --use-angle=vulkan`) under Wayland ozone, which
+  Chromium itself logs as "not compatible with Vulkan", Dawn takes the MX550 and
+  Chromium's shared-image code fails `Error creating wgpu::Texture` on every
+  frame: the canvas reads back black and the demo never ticks. Adding
+  `--use-webgpu-power-preference=default-low-power` keeps Dawn on the iGPU the
+  compositor uses, and `web/tools/browser-e2e.mjs` then passes every check but
+  one (run headed inside headless sway with `CRCBL_WEB_E2E_HEADED=1`,
+  `CRCBL_CHROMIUM_FLAGS="--ozone-platform=wayland ..."`):
+  `the breakout::art::SURROUND clear reaches the canvas sRGB-encoded` found the
+  clear on 4.4% of the canvas against a 15% floor, at a 927x435 viewport rather
+  than the gate's usual Xvfb size. Not followed up: whether that check is
+  viewport-dependent or a real encode miss on this adapter. crcbl calls
+  `requestAdapter()` with no `powerPreference`, so it takes the browser's
+  default either way; passing the presenter's preference through was considered
+  and not done, since a game asking for `HighPerformance` would then pick
+  exactly the device that fails here.
 - **The failure mode is recorded, and the surviving backend does not share it.**
   `crcbl-wgpu` surfaced these through `crcbl_wgpu::errors` and `crcbl::web`'s
   `gpu error`, which was better than silence — but the engine kept running for
