@@ -56,6 +56,10 @@ mod keycode {
     pub const LEFT_SHIFT: u8 = 50;
     /// `KEY_ESC`, evdev 1.
     pub const ESCAPE: u8 = 9;
+    /// `KEY_APOSTROPHE`, evdev 40: `dead_acute` in `us(intl)`.
+    pub const APOSTROPHE: u8 = 48;
+    /// `KEY_E`, evdev 18.
+    pub const E: u8 = 26;
 }
 
 /// How long any single wait may take before the test fails.
@@ -1285,10 +1289,10 @@ fn monitors_are_enumerated_in_one_coordinate_space() {
 // Two heads
 // ---------------------------------------------------------------------------
 //
-// `Xvfb` drives one CRTC, so these run against `Xorg` and its dummy driver,
-// which `run-x11-heads-e2e.sh` starts and `run-x11-e2e.sh` leaves out. The
-// dummy driver's outputs are named `DUMMY0` onwards, and `xrandr` turns them
-// on and off as a cable would.
+// `Xvfb` drives one CRTC, so these run against `Xorg` and its dummy driver:
+// every test named `xorg_` is `run-x11-xorg-e2e.sh`'s, and `run-x11-e2e.sh`
+// leaves them out. The dummy driver's outputs are named `DUMMY0` onwards, and
+// `xrandr` turns them on and off as a cable would.
 
 /// The first head, and where it is.
 const FIRST_HEAD: (&str, PhysicalRect) = ("DUMMY0", PhysicalRect::new(0, 0, 1920, 1080));
@@ -1296,7 +1300,7 @@ const FIRST_HEAD: (&str, PhysicalRect) = ("DUMMY0", PhysicalRect::new(0, 0, 1920
 const SECOND_HEAD: (&str, PhysicalRect) = ("DUMMY1", PhysicalRect::new(1920, 0, 1280, 720));
 /// A third output, off unless a test plugs it in where the second was.
 const THIRD_HEAD: &str = "DUMMY2";
-/// The mode `run-x11-heads-e2e.sh` gives the outputs the dummy driver starts
+/// The mode `tools/x11-display.sh` gives the outputs the dummy driver starts
 /// disconnected, which have none of their own.
 const ADDED_MODE: &str = "1280x720_60";
 
@@ -1387,8 +1391,8 @@ impl Session {
 /// **Two heads are two monitors, tiled in the screen's one coordinate space**,
 /// each where RandR put it, at its mode's rate, and the primary one primary.
 #[test]
-#[ignore = "needs two X heads; run tests/run-x11-heads-e2e.sh"]
-fn two_heads_are_two_monitors_side_by_side() {
+#[ignore = "needs Xorg; run tests/run-x11-xorg-e2e.sh"]
+fn xorg_two_heads_are_two_monitors_side_by_side() {
     let _heads = Heads::apply();
     let mut session = Session::open();
     let first = session.head(FIRST_HEAD.0);
@@ -1406,8 +1410,8 @@ fn two_heads_are_two_monitors_side_by_side() {
 /// `MonitorsChanged` whose list no longer has it**, and the head that stayed
 /// keeps its id.
 #[test]
-#[ignore = "needs two X heads; run tests/run-x11-heads-e2e.sh"]
-fn two_heads_unplugging_one_names_it_and_the_other_keeps_its_id() {
+#[ignore = "needs Xorg; run tests/run-x11-xorg-e2e.sh"]
+fn xorg_two_heads_unplugging_one_names_it_and_the_other_keeps_its_id() {
     let _heads = Heads::apply();
     let mut session = Session::open();
     let first = session.head(FIRST_HEAD.0);
@@ -1451,8 +1455,8 @@ fn two_heads_unplugging_one_names_it_and_the_other_keeps_its_id() {
 /// id is then refused rather than sent to whatever took its place — the
 /// obligation `crcbl_shell::monitor`'s docs put on every backend.
 #[test]
-#[ignore = "needs two X heads; run tests/run-x11-heads-e2e.sh"]
-fn two_heads_a_monitor_that_left_never_returns_under_its_old_id() {
+#[ignore = "needs Xorg; run tests/run-x11-xorg-e2e.sh"]
+fn xorg_two_heads_a_monitor_that_left_never_returns_under_its_old_id() {
     let _heads = Heads::apply();
     let mut session = Session::open();
     let first = session.head(FIRST_HEAD.0);
@@ -1483,8 +1487,8 @@ fn two_heads_a_monitor_that_left_never_returns_under_its_old_id() {
 /// not anything then makes it fullscreen: the move is the backend's, through
 /// `ConfigureWindow`, and comes before the request a window manager may refuse.
 #[test]
-#[ignore = "needs two X heads; run tests/run-x11-heads-e2e.sh"]
-fn two_heads_a_borderless_window_naming_the_second_moves_onto_it() {
+#[ignore = "needs Xorg; run tests/run-x11-xorg-e2e.sh"]
+fn xorg_two_heads_a_borderless_window_naming_the_second_moves_onto_it() {
     let _heads = Heads::apply();
     let mut session = Session::open();
     let second = session.head(SECOND_HEAD.0);
@@ -1572,6 +1576,93 @@ fn a_keystroke_carries_the_keycode_the_keysym_and_the_text() {
     }
     assert_eq!(keys[1].3, ButtonState::Released);
     assert!(!keys[1].4);
+}
+
+/// Runs `setxkbmap` with `args` against the harness's display.
+fn setxkbmap(args: &[&str]) {
+    let status = crcbl_spawn::command("setxkbmap")
+        .args(args)
+        .status()
+        .expect("setxkbmap is installed");
+    assert!(status.success(), "setxkbmap {args:?} failed: {status}");
+}
+
+/// The server's layout as `us(intl)`, where the apostrophe is `dead_acute`,
+/// until dropped, when it is plain `us` again for every test after this one.
+struct DeadKeyLayout;
+
+impl DeadKeyLayout {
+    fn set() -> Self {
+        setxkbmap(&["-layout", "us", "-variant", "intl"]);
+        Self
+    }
+}
+
+impl Drop for DeadKeyLayout {
+    fn drop(&mut self) {
+        setxkbmap(&["-layout", "us", "-variant", ""]);
+    }
+}
+
+/// **A dead key commits nothing and composes with the key after it**, through
+/// the server's own keymap and the table `run-x11-xorg-e2e.sh` names in
+/// `XCOMPOSEFILE`; a key with no sequence after the dead key cancels it and
+/// commits nothing. The X11 half of the sway suite's
+/// `a_dead_key_composes_with_the_key_after_it`, and an `xorg_` test because
+/// Xvfb 21.1 compiles a layout `setxkbmap` sends it and keeps its own.
+#[test]
+#[ignore = "needs Xorg; run tests/run-x11-xorg-e2e.sh"]
+fn xorg_a_dead_key_composes_with_the_key_after_it() {
+    // Set before the shell connects, so the keymap it loads is this one.
+    let _layout = DeadKeyLayout::set();
+    let mut session = Session::open();
+    assert!(
+        session.shell.caps().contains(ShellCaps::TEXT_COMPOSE),
+        "libxkbcommon-x11 is loaded"
+    );
+    let window = session.window(&desc("compose"));
+    session.focus(window);
+    session.take_names();
+
+    for code in [
+        keycode::APOSTROPHE,
+        keycode::E,
+        keycode::APOSTROPHE,
+        keycode::A,
+        keycode::A,
+    ] {
+        session.peer.key(code, true);
+        session.peer.key(code, false);
+    }
+    let released = |session: &Session| {
+        session
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ShellEvent::Key {
+                        state: ButtonState::Released,
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    session.pump_until("every key's release", |session| released(session) == 5);
+    let text: Vec<&str> = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::TextCommit { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text,
+        ["é", "a"],
+        "the dead key and `e` compose, and `a` after a dead key cancels it"
+    );
 }
 
 /// A held key repeats, the repeats say so, and there are no phantom releases.

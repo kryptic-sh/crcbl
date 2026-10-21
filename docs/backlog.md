@@ -530,19 +530,18 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    Hyprland 0.56.2, 2026-10-21, an exclusive panel took the keyboard as on sway,
    and an OnDemand panel took it **on map**, where sway waits for a click, kept
    it on a click and gave it back on a click in a tiled window); S7 monitor
-   hot-plug on Win32 and AppKit; S9 X11 compose through a real server, Win32
-   pre-edit (`win32-ime-e2e` is not enabled by `run-win32-e2e.ps1`), AppKit dead
-   keys, and AppKit's input method against a real one — whether one in its
-   native mode gives way to the Roman-only restriction
-   `appkit::view::allow_input_methods` sets for a window with no field or a
-   sensitive one, the pre-edit an input method sends, and where its candidate
-   window opens (`appkit_session`'s `text_input` plays the input method itself,
-   through the view's `NSTextInputClient` methods); S3 popup repositioning on
-   Wayland **in CI** (CI's sway offers `xdg_wm_base` below 3, so CI holds only
-   the refusal; the office laptop's sway 1.12 ran the real path green on
-   2026-10-20); S22 a colour glyph in a GPU golden; S18 FreeBSD beyond
-   `check (freebsd)`'s clippy, in a VM job; S13 cold start to the first
-   presented frame, end to end (the D3D12 instance and first device are
+   hot-plug on Win32 and AppKit; S9 Win32 pre-edit (`win32-ime-e2e` is not
+   enabled by `run-win32-e2e.ps1`), AppKit dead keys, and AppKit's input method
+   against a real one — whether one in its native mode gives way to the
+   Roman-only restriction `appkit::view::allow_input_methods` sets for a window
+   with no field or a sensitive one, the pre-edit an input method sends, and
+   where its candidate window opens (`appkit_session`'s `text_input` plays the
+   input method itself, through the view's `NSTextInputClient` methods); S3
+   popup repositioning on Wayland **in CI** (CI's sway offers `xdg_wm_base`
+   below 3, so CI holds only the refusal; the office laptop's sway 1.12 ran the
+   real path green on 2026-10-20); S22 a colour glyph in a GPU golden; S18
+   FreeBSD beyond `check (freebsd)`'s clippy, in a VM job; S13 cold start to the
+   first presented frame, end to end (the D3D12 instance and first device are
    measured; see 11).
 5. **Genuinely impossible, and refused:** D3D12 off Windows, Metal off Apple, a
    software Metal adapter, AppKit reserving screen space (only the menu bar and
@@ -29670,7 +29669,7 @@ are in docs/notes/backends.md.
   that ignores the request entirely, would break the sandbox passes' extent
   assertions — a real configuration, not exercised.
 - **X11 multi-monitor under a window manager's own placement.** The two-head
-  tests (`run-x11-heads-e2e.sh`, Xorg's dummy driver) cover enumeration,
+  tests (`run-x11-xorg-e2e.sh`, Xorg's dummy driver) cover enumeration,
   unplugging, replugging and a borderless window sent to the second head, with
   and without openbox; CI runs them without. A fullscreen window **granted** on
   the second head by a window manager, and a window kept on a head that is then

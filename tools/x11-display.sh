@@ -18,7 +18,7 @@
 #   DISPLAY             exported, pointing at the server this started
 #   SCREEN              the geometry it was started with, depth included
 #   RUNTIME_DIR         a private 0700 directory, removed by the trap below
-#   XVFB_PID            the server, for a liveness check (Xorg's, with two heads)
+#   XVFB_PID            the server, for a liveness check (Xorg's, if asked for)
 #   WM_PID              the window manager, unset when there is none
 #   DISPLAY_TIMEOUT_S   the deadline, so a caller's own polls share it
 #   log_tail            prints the server's log tail, and the manager's
@@ -49,12 +49,13 @@
 #   CRCBL_E2E_DISPLAY_TIMEOUT_S  How long to wait for the display, in seconds.
 #   CRCBL_E2E_X11_SCREEN         The `-screen 0` geometry, depth included.
 #   CRCBL_E2E_X11_WM             A window manager command; none by default.
-#   CRCBL_E2E_X11_HEADS          `2` for two heads: see below.
+#   CRCBL_E2E_X11_SERVER         `xvfb`, the default, or `xorg`: see below.
 #
-# # Two heads: Xorg's dummy driver, not Xvfb
+# # `xorg`: Xorg's dummy driver, not Xvfb
 #
 # `Xvfb` drives one CRTC, so a second monitor, and a monitor unplugged, cannot
-# happen on it. With `CRCBL_E2E_X11_HEADS=2` this starts the real `Xorg` with
+# happen on it, and 21.1 compiles a layout `setxkbmap` sends and keeps its own.
+# With `CRCBL_E2E_X11_SERVER=xorg` this starts the real `Xorg` with
 # the dummy driver (`xf86-video-dummy` on Arch, `xserver-xorg-video-dummy` on
 # Debian and Ubuntu) instead, unprivileged and through the server binary
 # rather than the console-only `Xorg.wrap`. The dummy driver has sixteen
@@ -71,13 +72,13 @@ DISPLAY_TIMEOUT_S="${CRCBL_E2E_DISPLAY_TIMEOUT_S:-20}"
 POLL_INTERVAL_S=0.1
 SCREEN="${CRCBL_E2E_X11_SCREEN:-1920x1080x24}"
 
-# The mode two-head runs add to the outputs that start with none: CVT's
+# The mode an `xorg` run adds to the outputs that start with none: CVT's
 # 1280x720 at 60, as `cvt 1280 720 60` prints it.
 TWO_HEADS_MODE="1280x720_60"
 TWO_HEADS_MODELINE="74.48 1280 1336 1472 1664 720 721 724 746 -hsync +vsync"
 
 XORG=""
-if [ "${CRCBL_E2E_X11_HEADS:-1}" = 2 ]; then
+if [ "${CRCBL_E2E_X11_SERVER:-xvfb}" = xorg ]; then
     # The server binary, not the `Xorg` on the path: that is `Xorg.wrap`,
     # which refuses anyone not on a console.
     for candidate in /usr/lib/Xorg /usr/lib/xorg/Xorg; do
@@ -87,11 +88,11 @@ if [ "${CRCBL_E2E_X11_HEADS:-1}" = 2 ]; then
         fi
     done
     if [ -z "$XORG" ] || ! command -v xrandr >/dev/null 2>&1; then
-        echo "crcbl e2e: two heads need Xorg, its dummy driver and xrandr; one is not installed" >&2
+        echo "crcbl e2e: CRCBL_E2E_X11_SERVER=xorg needs Xorg, its dummy driver and xrandr; one is not installed" >&2
         exit 1
     fi
-elif [ "${CRCBL_E2E_X11_HEADS:-1}" != 1 ]; then
-    echo "crcbl e2e: CRCBL_E2E_X11_HEADS is 1 or 2, not ${CRCBL_E2E_X11_HEADS}" >&2
+elif [ "${CRCBL_E2E_X11_SERVER:-xvfb}" != xvfb ]; then
+    echo "crcbl e2e: CRCBL_E2E_X11_SERVER is xvfb or xorg, not ${CRCBL_E2E_X11_SERVER}" >&2
     exit 1
 elif ! command -v Xvfb >/dev/null 2>&1; then
     echo "crcbl e2e: Xvfb is not installed; install it or run the harness elsewhere" >&2

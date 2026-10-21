@@ -1,2 +1,2 @@
-# The compose table run-wayland-e2e.sh names in XCOMPOSEFILE.
+# The compose table run-wayland-e2e.sh and run-x11-e2e.sh name in XCOMPOSEFILE.
 <dead_acute> <e> : "é" eacute

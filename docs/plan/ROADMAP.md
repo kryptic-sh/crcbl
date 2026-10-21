@@ -475,20 +475,20 @@ new harnesses arrive faster than this document is edited.
 harnesses cited elsewhere in this file, `run-jobs-e2e.sh` among them, are not
 rows below.
 
-| Harness                                         | What it needs                           |
-| ----------------------------------------------- | --------------------------------------- |
-| `crates/crcbl-shell/tests/run-wayland-e2e.sh`   | nested headless sway                    |
-| `crates/crcbl-shell/tests/run-x11-e2e.sh`       | Xvfb                                    |
-| `crates/crcbl-shell/tests/run-x11-heads-e2e.sh` | Xorg, its dummy driver and `xrandr`     |
-| `crates/crcbl-vk/tests/run-vk-e2e.sh`           | lavapipe unless `CRCBL_VK_ICD=hardware` |
-| `crates/crcbl-mtl/tests/run-mtl-e2e.sh`         | a Metal device (macOS)                  |
-| `crates/crcbl-dx12/tests/run-dx12-e2e.sh`       | a D3D12 device (Windows)                |
-| `web/run-cross-backend-e2e.sh`                  | both backends                           |
-| `crates/crcbl/tests/run-render-e2e.sh`          | a GPU the renderer opens                |
-| `crates/crcbl-cli/tests/run-cli-e2e.sh`         | nothing                                 |
-| `apps/lantern/tests/run-lantern-golden.sh`      | a GPU (lighting goldens)                |
-| `apps/shard/tests/run-shard-golden.sh`          | a GPU (the zone on every geometry path) |
-| `web/run-browser-e2e.sh`                        | Chrome + Xvfb                           |
+| Harness                                        | What it needs                           |
+| ---------------------------------------------- | --------------------------------------- |
+| `crates/crcbl-shell/tests/run-wayland-e2e.sh`  | nested headless sway                    |
+| `crates/crcbl-shell/tests/run-x11-e2e.sh`      | Xvfb                                    |
+| `crates/crcbl-shell/tests/run-x11-xorg-e2e.sh` | Xorg, its dummy driver and `xrandr`     |
+| `crates/crcbl-vk/tests/run-vk-e2e.sh`          | lavapipe unless `CRCBL_VK_ICD=hardware` |
+| `crates/crcbl-mtl/tests/run-mtl-e2e.sh`        | a Metal device (macOS)                  |
+| `crates/crcbl-dx12/tests/run-dx12-e2e.sh`      | a D3D12 device (Windows)                |
+| `web/run-cross-backend-e2e.sh`                 | both backends                           |
+| `crates/crcbl/tests/run-render-e2e.sh`         | a GPU the renderer opens                |
+| `crates/crcbl-cli/tests/run-cli-e2e.sh`        | nothing                                 |
+| `apps/lantern/tests/run-lantern-golden.sh`     | a GPU (lighting goldens)                |
+| `apps/shard/tests/run-shard-golden.sh`         | a GPU (the zone on every geometry path) |
+| `web/run-browser-e2e.sh`                       | Chrome + Xvfb                           |
 
 `web/run-browser-e2e.sh` is the P5 gate itself and needs no GPU: it serves the
 built site, drives it in a real browser over the DevTools protocol, sends a real
