@@ -252,8 +252,15 @@ impl Ui {
                 node.set_role(Role::Label);
             }
         }
+        // Where the name goes is the role's: AccessKit names a `Label` from
+        // its value, as it does every text span, and everything else from its
+        // label, so a `Label` carrying the name as a label reads as nothing.
         if let Some(label) = label {
-            node.set_label(label.as_str());
+            if node.role() == Role::Label {
+                node.set_value(label.as_str());
+            } else {
+                node.set_label(label.as_str());
+            }
         }
         out.push((id, node));
     }

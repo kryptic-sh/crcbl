@@ -251,6 +251,44 @@ fn a_paragraph_reads_as_its_runs_in_order() {
     assert_eq!(words, ["Build finished in ", "4 minutes"]);
 }
 
+/// The name a screen reader hears for `node`, by AccessKit's own rule
+/// (`accesskit_consumer`'s `label_comes_from_value`, which the AT-SPI and UI
+/// Automation adapters both follow): a `Label` is named by its value, anything
+/// else by its label.
+fn reader_name(node: &Node) -> Option<&str> {
+    if node.role() == Role::Label {
+        node.value()
+    } else {
+        node.label()
+    }
+}
+
+/// **A named block that still holds a widget keeps its role and is named by
+/// its label**: the name stands for its text spans and the button stays.
+#[test]
+fn a_named_block_holding_a_widget_keeps_its_role() {
+    let mut ui = Ui::new();
+    let (row, button) = frame(&mut ui, idle(), NavInput::default(), |ui| {
+        let mut button = None;
+        let row = ui.block(".row", &[], |ui| {
+            ui.span(".hl", "ga", &[]);
+            ui.span(".tx", "mma", &[]);
+            button = Some(ui.button("#go", "Go").key);
+        });
+        ui.set_accessible_label(row.key, "gamma");
+        (row.key, button.expect("built"))
+    });
+    let update = ui.accessibility_update();
+    let named = node(&update, row);
+    assert_eq!(named.role(), Role::GenericContainer);
+    assert_eq!(reader_name(named), Some("gamma"));
+    assert_eq!(
+        named.children(),
+        [NodeId(button.0)],
+        "only the button is left to read"
+    );
+}
+
 /// **A block named with `set_accessible_label` reads as that name, not as the
 /// spans it was drawn in**: "gamma" drawn as "ga" and "mma" so the match can
 /// be accented is one label, and without the name it is the two pieces.
@@ -275,7 +313,7 @@ fn a_named_block_reads_as_its_name_not_its_pieces() {
     let update = ui.accessibility_update();
     let named = node(&update, label);
     assert_eq!(named.role(), Role::Label);
-    assert_eq!(named.label(), Some("gamma"));
+    assert_eq!(reader_name(named), Some("gamma"));
     assert!(named.children().is_empty(), "the pieces are not read again");
     for span in spans {
         assert!(
