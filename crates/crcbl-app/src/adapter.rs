@@ -63,6 +63,21 @@
 //! that cannot present, is refused. Only the ranked walk steps past an adapter
 //! that cannot serve the window.
 //!
+//! # Choosing a GPU does not stop Vulkan loading the others
+//!
+//! Ranking happens after enumeration, and enumeration has the Vulkan loader
+//! initialise every installed driver. On a hybrid laptop a
+//! [`LowPower`](PowerPreference::LowPower) program that renders on the iGPU
+//! still loads the dGPU's driver and opens its device nodes: measured by pikr
+//! on 2026-10-21 (Intel RPL-U and NVIDIA MX550, proprietary driver), about
+//! 100 ms of start-up, and on a laptop that runtime-suspends its dGPU it
+//! likely wakes it. A program that starts often and renders little — a
+//! launcher, a bar — can have its launcher set the loader's own
+//! `VK_LOADER_DRIVERS_SELECT` (`'*intel*'` there) so only that driver loads.
+//! This crate does not set it: an environment variable written from a running
+//! process races every thread that reads the environment, and mapping the
+//! display's device to the right driver is the user's knowledge, not ours.
+//!
 //! # `crcbl-dx12` keeps its own pin
 //!
 //! `crcbl_dx12::pin` and `CRCBL_DX12_ADAPTER` are unchanged and still serve that
