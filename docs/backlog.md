@@ -11,6 +11,15 @@ day with a Wayland event-delivery fix and no API change, so EW should take
 0.8.1. pikr and lyr were told in session; no EW session was running to tell.
 Delete this once EW knows.
 
+## pikr waits on a release after 0.8.1 (2026-10-22)
+
+`[Unreleased]` holds `Ui::set_accessible_label` and `Ui::selectable_list`, which
+pikr asked for and verified through AT-SPI on Hyprland against main `acfad914`
+(the list item reads "gamma" whole and carries `selected`). pikr adopts them in
+the bump after the next release; its patch is ready. No breaking change, so a
+patch release. Cut it when the owner approves, then tell pikr. Delete this entry
+then.
+
 ## NEXT: speed up CI (asked by the owner, 2026-10-20)
 
 Main's CI wall time grew from about 41 min (run 39088257372, 2026-10-18) to
