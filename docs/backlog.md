@@ -3696,6 +3696,16 @@ Each of these has failed once and passed on a rerun with the code unchanged. A
 failure of one wants a rerun before a diagnosis; one that repeats on an idle
 machine, or twice in CI, is real.
 
+- **`crcbl engine::tests::frame_gate::a_held_frame_sleeps_until_the_next_tick`**
+  — failed on `build + test (macos-latest)` (main `7b41e2c0`, run 39677150501,
+  2026-10-22) with 2 sleeps where it asserts exactly 3, on a commit touching
+  only `crcbl-ui` accessibility. It passed when the failed job was re-run. It
+  times real sleeps: a held frame that took longer than a tick finds the next
+  tick already due and rightly does not sleep, so a slow runner can fall short
+  of "one sleep a held frame". If it recurs, the owner's call is whether the
+  assertion should be "at most one sleep a held frame, and at least one in the
+  run" rather than exactly one.
+
 - **`crcbl-render forward::tests::the_mesh_tail_records_a_flat_call_per_partition_behind_a_task_stage`**
   — failed 1 in 25 runs of `cargo test -p crcbl-render --lib` on the office
   laptop (2026-10-20), at its `renderer.counters().draws` against
