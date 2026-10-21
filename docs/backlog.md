@@ -2507,14 +2507,30 @@ live compositor never draws a hidden special workspace, so the nested output
 gets no frame callbacks and FIFO presents block. Clients use its
 `WAYLAND_DISPLAY` and `HYPRLAND_INSTANCE_SIGNATURE`.
 
-The Wayland e2e suite against it (2026-10-21): 29 of 60 pass, and none of the 31
-failures is a crcbl defect. Most drive sway over IPC or assume its two
-`HEADLESS` outputs (`swaymsg`, `LAYOUT_SIZE`, `OUTPUT_SIZE`); two configure
-tests see Hyprland tile a window sway's config floats; the clipboard tests stop
-on `swaymsg` focusing their peer, as they say they must; and the dead-key test
-needs the harness's `XCOMPOSEFILE`, which that run did not set. A Hyprland job
-would need those assumptions behind a compositor switch. The Hyprland-specific
-behaviour seen is S17's, recorded there.
+**`crates/crcbl-shell/tests/run-wayland-e2e-hyprland.sh` runs the Wayland suite
+against it** (2026-10-21; `hyprland-session.sh` starts and stops it). The suite
+drives either compositor through its `wm_` functions, which
+`CRCBL_E2E_COMPOSITOR=hyprland` points at `hyprctl eval`; the nested config
+gives Hyprland sway's two `HEADLESS` outputs, its float rules, no gaps, and
+`follow_mouse = 2` with `mouse_move_focuses_monitor = false`. On the office
+laptop: 55 of 55 pass, with 5 not run and named by the script. Sway-only, by
+design: the decoration test (it reads sway's `border` field) and
+`a_frame_request_waits_while_the_output_is_off` (Hyprland keeps answering frame
+requests for surfaces it is not showing, `misc.render_unfocused_fps`, so a
+client keeps rendering while its output is dark). **Differ on Hyprland, not
+diagnosed** (each is Hyprland's behaviour or crcbl's defect, unknown which):
+
+- `a_touchpad_scroll_is_reported_as_pixels_not_as_detents`: a virtual pointer's
+  finger scroll came back as `Lines` (-0.87), so Hyprland sent a value120 with
+  it or crcbl misread the source; on a real touchpad under Hyprland that would
+  turn pixels into detents. Read a `WAYLAND_DEBUG=1` run.
+- `the_pointer_outside_an_input_region_leaves_the_window`: no leave when the
+  pointer moves out of an input region.
+- `a_seat_that_loses_its_devices_drops_focus_and_keeps_running`: no leave when
+  the virtual pointer is destroyed.
+
+Not a CI job: no runner has a Hyprland to host it. The sandbox passes stay
+sway-only (they drive `swaymsg` from the shell).
 
 The X11 e2e suite runs on the office laptop since 2026-10-21 (Xvfb and openbox
 installed): 50 of 50 with no window manager and 50 of 50 under openbox, the

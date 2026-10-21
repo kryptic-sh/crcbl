@@ -111,8 +111,26 @@ struct Session {
 impl Session {
     fn open() -> Self {
         let shell = crcbl_shell::open_backend(ShellBackend::Wayland)
-            .expect("the harness exported WAYLAND_DISPLAY for a live sway");
+            .expect("the harness exported WAYLAND_DISPLAY for a live compositor");
         assert_eq!(shell.backend(), ShellBackend::Wayland);
+        // Hyprland sends no `wl_pointer.enter` for a virtual pointer's first
+        // motion when the cursor is already where it moves to, and the last
+        // test left it where the next one aims. Parked in the far corner of the
+        // second output, which no test aims at; sway enters regardless.
+        if compositor() == Compositor::Hyprland {
+            let corner = (
+                OUTPUT_SIZE.width + SECOND_OUTPUT_SIZE.width - 1,
+                SECOND_OUTPUT_SIZE.height - 1,
+            );
+            assert!(
+                hyprctl_eval(&format!(
+                    "hl.dispatch(hl.dsp.cursor.move({{ x = {}, y = {} }}))",
+                    corner.0, corner.1
+                )),
+                "Hyprland parks the cursor"
+            );
+            assert!(wm_focus_first_output(), "Hyprland focuses the first output");
+        }
         Self {
             shell,
             events: Vec::new(),
@@ -217,18 +235,196 @@ fn desc<'a>(title: &'a str, size: LogicalSize) -> WindowDesc<'a> {
     }
 }
 
+/// Which compositor the harness started: `CRCBL_E2E_COMPOSITOR`, `sway` when
+/// unset. See `tests/run-wayland-e2e.sh`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Compositor {
+    Sway,
+    Hyprland,
+}
+
+fn compositor() -> Compositor {
+    match std::env::var("CRCBL_E2E_COMPOSITOR").as_deref() {
+        Err(_) | Ok("sway") => Compositor::Sway,
+        Ok("hyprland") => Compositor::Hyprland,
+        Ok(other) => panic!("CRCBL_E2E_COMPOSITOR={other:?} names no compositor this suite drives"),
+    }
+}
+
 /// Talks to sway's IPC, so a test can make the *compositor* do something.
 ///
 /// Nothing in `xdg-shell` lets a client resize itself or ask to be closed, so
 /// the only way to test either against a real window manager is to drive the
 /// window manager. Returns `false` when `swaymsg` is unavailable or the command
 /// failed, which the callers turn into an explicit skip rather than a silent
-/// pass.
+/// pass. The `wm_` functions below are what a test calls; this is their sway
+/// half, and called directly only by the tests that read something only sway
+/// has.
 fn swaymsg(args: &[&str]) -> bool {
     crcbl_spawn::command("swaymsg")
         .args(args)
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+/// Runs a Lua chunk in the harness's Hyprland, the half of the `wm_` functions
+/// for it. `hyprctl eval` answers `ok` for a chunk that ran and a `warning:` or
+/// `error:` line for one that failed (a window selector matching nothing is a
+/// warning), so anything but `ok` is a failure.
+fn hyprctl_eval(lua: &str) -> bool {
+    crcbl_spawn::command("hyprctl")
+        .args(["eval", lua])
+        .output()
+        .is_ok_and(|output| output.status.success() && output.stdout.trim_ascii() == b"ok")
+}
+
+/// The anchored, dot-escaped regular expression naming exactly `app_id`. Both
+/// compositors match window criteria as unanchored regular expressions, so a
+/// bare `sh.kryptic.crcbl.e2e` also matches `sh.kryptic.crcbl.e2e.peer`, and
+/// acting on "either of the two windows" is not a test, it is a coin flip.
+fn app_id_pattern(app_id: &str) -> String {
+    format!("^{}$", app_id.replace('.', "\\."))
+}
+
+/// A sway criteria block, or a Hyprland window selector, for `app_id`.
+fn sway_criteria(app_id: &str) -> String {
+    format!("[app_id=\"{}\"]", app_id_pattern(app_id))
+}
+
+fn hyprland_window(app_id: &str) -> String {
+    format!("class:{}", app_id_pattern(app_id).replace('\\', "\\\\"))
+}
+
+/// Whether the window manager has `app_id`'s window in its tree: a mapped
+/// toplevel is, an unmapped one is not.
+fn wm_manages(app_id: &str) -> bool {
+    match compositor() {
+        Compositor::Sway => swaymsg(&[&sway_criteria(app_id), "border", "none"]),
+        Compositor::Hyprland => crcbl_spawn::command("hyprctl")
+            .args(["clients", "-j"])
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .contains(&format!("\"class\": \"{app_id}\""))
+            }),
+    }
+}
+
+/// Fullscreens `app_id`'s window, or takes it out of fullscreen, from outside.
+fn wm_fullscreen(app_id: &str, on: bool) -> bool {
+    match compositor() {
+        Compositor::Sway => swaymsg(&[
+            &sway_criteria(app_id),
+            "fullscreen",
+            if on { "enable" } else { "disable" },
+        ]),
+        Compositor::Hyprland => hyprctl_eval(&format!(
+            "hl.dispatch(hl.dsp.window.fullscreen({{ mode = 'fullscreen', action = '{}', window = '{}' }}))",
+            if on { "set" } else { "unset" },
+            hyprland_window(app_id),
+        )),
+    }
+}
+
+/// Resizes `app_id`'s floating window from outside.
+fn wm_resize(app_id: &str, width: u32, height: u32) -> bool {
+    match compositor() {
+        Compositor::Sway => swaymsg(&[
+            &sway_criteria(app_id),
+            "resize",
+            "set",
+            "width",
+            &width.to_string(),
+            "px",
+            "height",
+            &height.to_string(),
+            "px",
+        ]),
+        Compositor::Hyprland => hyprctl_eval(&format!(
+            "hl.dispatch(hl.dsp.window.resize({{ x = {width}, y = {height}, window = '{}' }}))",
+            hyprland_window(app_id),
+        )),
+    }
+}
+
+/// Asks `app_id`'s window to close, as a user closing it would:
+/// `xdg_toplevel.close`, on both compositors.
+fn wm_close(app_id: &str) -> bool {
+    match compositor() {
+        Compositor::Sway => swaymsg(&[&sway_criteria(app_id), "kill"]),
+        Compositor::Hyprland => hyprctl_eval(&format!(
+            "hl.dispatch(hl.dsp.window.close({{ window = '{}' }}))",
+            hyprland_window(app_id),
+        )),
+    }
+}
+
+/// Gives `app_id`'s window the keyboard.
+fn wm_focus(app_id: &str) -> bool {
+    match compositor() {
+        Compositor::Sway => swaymsg(&[&sway_criteria(app_id), "focus"]),
+        Compositor::Hyprland => hyprctl_eval(&format!(
+            "hl.dispatch(hl.dsp.focus({{ window = '{}' }}))",
+            hyprland_window(app_id),
+        )),
+    }
+}
+
+/// Powers an output off or on (DPMS).
+fn wm_output_power(output: &str, on: bool) -> bool {
+    let state = if on { "on" } else { "off" };
+    match compositor() {
+        Compositor::Sway => swaymsg(&["output", output, "power", state]),
+        Compositor::Hyprland => hyprctl_eval(&format!(
+            "hl.dispatch(hl.dsp.dpms({{ action = '{state}', monitor = '{output}' }}))"
+        )),
+    }
+}
+
+/// Hyprland's `hl.monitor` for one of the harness's two outputs, which it
+/// creates at sway's sizes and positions so the suite's layout constants hold.
+fn hyprland_monitor(output: &str, extra: &str) -> String {
+    let (size, x) = if output == SECOND_OUTPUT_NAME {
+        (SECOND_OUTPUT_SIZE, OUTPUT_SIZE.width)
+    } else {
+        (OUTPUT_SIZE, 0)
+    };
+    format!(
+        "hl.monitor({{ output = '{output}', mode = '{}x{}@60', position = '{x}x0'{extra} }})",
+        size.width, size.height,
+    )
+}
+
+/// Sets an output's scale.
+fn wm_output_scale(output: &str, scale: &str) -> bool {
+    match compositor() {
+        Compositor::Sway => swaymsg(&["output", output, "scale", scale]),
+        Compositor::Hyprland => {
+            hyprctl_eval(&hyprland_monitor(output, &format!(", scale = {scale}")))
+        }
+    }
+}
+
+/// Enables or disables an output, which a client sees as the output being
+/// plugged in or unplugged.
+fn wm_output_enabled(output: &str, on: bool) -> bool {
+    match compositor() {
+        Compositor::Sway => swaymsg(&["output", output, if on { "enable" } else { "disable" }]),
+        Compositor::Hyprland if on => hyprctl_eval(&hyprland_monitor(output, ", scale = 1")),
+        Compositor::Hyprland => hyprctl_eval(&format!(
+            "hl.monitor({{ output = '{output}', disabled = true }})"
+        )),
+    }
+}
+
+/// Focuses the first output, where the suite opens every window.
+fn wm_focus_first_output() -> bool {
+    match compositor() {
+        Compositor::Sway => swaymsg(&["workspace", "1"]),
+        Compositor::Hyprland => hyprctl_eval(&format!(
+            "hl.dispatch(hl.dsp.focus({{ monitor = '{OUTPUT_NAME}' }}))"
+        )),
+    }
 }
 
 /// The headline assertion of the slice: a real compositor confirms the
@@ -334,12 +530,11 @@ fn an_unmapped_window_is_configured_but_not_yet_managed() {
     session.pump_until("the first configure", |session| {
         session.size(window).is_some()
     });
-    let matcher = format!("[app_id=\"{APP_ID}\"]");
 
     // Not in the window manager's tree at all: a criteria command matches
     // nothing, which is why the resize and close tests below have to map first.
     assert!(
-        !swaymsg(&[&matcher, "border", "none"]),
+        !wm_manages(APP_ID),
         "an unmapped toplevel must not be addressable by window-manager criteria"
     );
 
@@ -380,10 +575,7 @@ fn an_unmapped_window_is_configured_but_not_yet_managed() {
         },
     );
     assert_eq!(session.size(window), Some(OUTPUT_SIZE));
-    assert!(
-        swaymsg(&[&matcher, "border", "none"]),
-        "a mapped toplevel is in the tree"
-    );
+    assert!(wm_manages(APP_ID), "a mapped toplevel is in the tree");
 
     session.shell.destroy_window(window).expect("destroy");
 }
@@ -618,9 +810,8 @@ fn a_fullscreen_the_client_never_asked_for_arrives_as_a_resize() {
     );
     session.take_names();
 
-    let matcher = format!("[app_id=\"{APP_ID}\"]");
     assert!(
-        swaymsg(&[&matcher, "fullscreen", "enable"]),
+        wm_fullscreen(APP_ID, true),
         "swaymsg ships with sway; without it there is no way to make the \
          compositor impose a mode",
     );
@@ -656,7 +847,7 @@ fn a_fullscreen_the_client_never_asked_for_arrives_as_a_resize() {
     // And it comes back off the same way, so a game that reconfigured its
     // swapchain for the imposed size gets told to undo it.
     session.take_names();
-    assert!(swaymsg(&[&matcher, "fullscreen", "disable"]));
+    assert!(wm_fullscreen(APP_ID, false));
     session.pump_until("the windowed configure", |session| {
         session
             .shell
@@ -692,17 +883,7 @@ fn a_compositor_resize_arrives_as_a_resized_event() {
     assert!(session.shell.window_state(window).expect("live").focused);
 
     assert!(
-        swaymsg(&[
-            &format!("[app_id=\"{APP_ID}\"]"),
-            "resize",
-            "set",
-            "width",
-            "1024",
-            "px",
-            "height",
-            "768",
-            "px"
-        ]),
+        wm_resize(APP_ID, 1024, 768),
         "swaymsg ships with sway; without it there is no way to make the \
          compositor resize a client, and a skipped assertion here would hide \
          the whole resize path"
@@ -748,10 +929,7 @@ fn a_close_request_is_a_question_and_keep_really_keeps() {
     let window = session.create_mapped(&desc("crcbl e2e close", LogicalSize::new(500.0, 400.0)));
     session.take_names();
 
-    assert!(
-        swaymsg(&[&format!("[app_id=\"{APP_ID}\"]"), "kill"]),
-        "swaymsg kill sends xdg_toplevel.close"
-    );
+    assert!(wm_close(APP_ID), "swaymsg kill sends xdg_toplevel.close");
     session.pump_until("the compositor's close request", |session| {
         session.names().contains(&"CloseRequested")
     });
@@ -787,7 +965,7 @@ fn a_close_request_is_a_question_and_keep_really_keeps() {
     // answering a request the compositor has not sent yet. Clearing first is
     // what makes the probe demand a *new* one.
     session.take_names();
-    assert!(swaymsg(&[&format!("[app_id=\"{APP_ID}\"]"), "kill"]));
+    assert!(wm_close(APP_ID));
     session.pump_until("a second close request", |session| {
         session.names().contains(&"CloseRequested")
     });
@@ -1715,7 +1893,7 @@ struct OutputPower;
 
 impl Drop for OutputPower {
     fn drop(&mut self) {
-        swaymsg(&["output", "HEADLESS-1", "power", "on"]);
+        wm_output_power(OUTPUT_NAME, true);
     }
 }
 
@@ -1739,7 +1917,7 @@ fn a_frame_request_waits_while_the_output_is_off() {
 
     let _restore = OutputPower;
     assert!(
-        swaymsg(&["output", "HEADLESS-1", "power", "off"]),
+        wm_output_power(OUTPUT_NAME, false),
         "sway powers an output off through IPC"
     );
     session.take_names();
@@ -1757,7 +1935,7 @@ fn a_frame_request_waits_while_the_output_is_off() {
         session.names()
     );
 
-    assert!(swaymsg(&["output", "HEADLESS-1", "power", "on"]));
+    assert!(wm_output_power(OUTPUT_NAME, true));
     session.pump_until("the frame once the output is back", |session| {
         frames_for(&session.events, window) > 0
     });
@@ -2392,7 +2570,7 @@ struct FocusedWorkspace;
 
 impl Drop for FocusedWorkspace {
     fn drop(&mut self) {
-        swaymsg(&["workspace", "1"]);
+        wm_focus_first_output();
     }
 }
 
@@ -2402,7 +2580,7 @@ struct OutputScale;
 
 impl Drop for OutputScale {
     fn drop(&mut self) {
-        swaymsg(&["output", "HEADLESS-1", "scale", "1"]);
+        wm_output_scale(OUTPUT_NAME, "1");
     }
 }
 
@@ -2426,7 +2604,7 @@ fn a_fractional_output_scale_reaches_the_window_as_a_non_integer_factor() {
 
     let _restore = OutputScale;
     assert!(
-        swaymsg(&["output", "HEADLESS-1", "scale", "1.5"]),
+        wm_output_scale(OUTPUT_NAME, "1.5"),
         "sway scales an output through IPC"
     );
     session.pump_until("the compositor's preferred scale", |session| {
@@ -2606,9 +2784,8 @@ fn focus_app(app_id: &str) {
     // expressions**, unanchored, so a bare `sh.kryptic.crcbl.e2e` also matches
     // `sh.kryptic.crcbl.e2e.peer` — and focusing "either of the two windows"
     // is not a test, it is a coin flip.
-    let pattern = format!("^{}$", app_id.replace('.', "\\."));
     assert!(
-        swaymsg(&[&format!("[app_id=\"{pattern}\"]"), "focus"]),
+        wm_focus(app_id),
         "swaymsg could not focus {app_id}; the clipboard tests need it and must \
          not quietly pass without it"
     );
@@ -3643,7 +3820,7 @@ fn a_panel_on_a_fractional_output_is_configured_at_its_scale() {
     const HEIGHT: f64 = 30.0;
     let _restore = OutputScale;
     assert!(
-        swaymsg(&["output", "HEADLESS-1", "scale", "1.5"]),
+        wm_output_scale(OUTPUT_NAME, "1.5"),
         "sway scales an output through IPC"
     );
     let mut session = Session::open();
@@ -3894,6 +4071,20 @@ fn an_on_demand_panel_takes_the_keyboard_on_a_click_and_gives_it_back() {
             .window_state(which)
             .is_ok_and(|state| state.focused)
     };
+    // Where the compositors part: sway leaves the keyboard with the tiled
+    // window until the panel is clicked, and Hyprland gives an OnDemand panel
+    // the keyboard as it maps (seen on 0.56.2). From the same state on both —
+    // the tiled window focused — the click and the hand-back are tested alike.
+    if compositor() == Compositor::Hyprland {
+        session.pump_until(
+            "Hyprland to give the mapped panel the keyboard",
+            |session| focused(session, panel_window) && !focused(session, window),
+        );
+        assert!(
+            wm_focus(TILED_APP_ID),
+            "Hyprland focuses a window through IPC"
+        );
+    }
     session.pump_until("the tiled window to have the keyboard", |session| {
         focused(session, window)
     });
@@ -3906,10 +4097,7 @@ fn an_on_demand_panel_takes_the_keyboard_on_a_click_and_gives_it_back() {
         focused(session, panel_window) && !focused(session, window)
     });
 
-    assert!(
-        swaymsg(&[&format!("[app_id=\"{TILED_APP_ID}\"]"), "focus"]),
-        "sway focuses a window through IPC"
-    );
+    assert!(wm_focus(TILED_APP_ID), "sway focuses a window through IPC");
     session.pump_until("the panel to give the keyboard back", |session| {
         !focused(session, panel_window) && focused(session, window)
     });
@@ -3925,10 +4113,10 @@ struct OutputEnabled;
 
 impl Drop for OutputEnabled {
     fn drop(&mut self) {
-        swaymsg(&["output", SECOND_OUTPUT_NAME, "enable"]);
+        wm_output_enabled(SECOND_OUTPUT_NAME, true);
         // An output coming back can take the focus with it, and the suite
         // opens every window on the focused workspace; see the sway config.
-        swaymsg(&["workspace", "1"]);
+        wm_focus_first_output();
     }
 }
 
@@ -3962,7 +4150,7 @@ fn unplugging_a_monitor_names_it_and_asks_its_panels_to_close() {
 
     let _restore = OutputEnabled;
     assert!(
-        swaymsg(&["output", SECOND_OUTPUT_NAME, "disable"]),
+        wm_output_enabled(SECOND_OUTPUT_NAME, false),
         "sway disables an output through IPC, which withdraws its wl_output"
     );
     session.pump_until("the monitor list without the second output", |session| {
@@ -4175,7 +4363,7 @@ struct FirstOutputFocused;
 
 impl Drop for FirstOutputFocused {
     fn drop(&mut self) {
-        swaymsg(&["workspace", "1"]);
+        wm_focus_first_output();
     }
 }
 
