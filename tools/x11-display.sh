@@ -18,7 +18,7 @@
 #   DISPLAY             exported, pointing at the server this started
 #   SCREEN              the geometry it was started with, depth included
 #   RUNTIME_DIR         a private 0700 directory, removed by the trap below
-#   XVFB_PID            the server, for a liveness check
+#   XVFB_PID            the server, for a liveness check (Xorg's, with two heads)
 #   WM_PID              the window manager, unset when there is none
 #   DISPLAY_TIMEOUT_S   the deadline, so a caller's own polls share it
 #   log_tail            prints the server's log tail, and the manager's
@@ -49,6 +49,20 @@
 #   CRCBL_E2E_DISPLAY_TIMEOUT_S  How long to wait for the display, in seconds.
 #   CRCBL_E2E_X11_SCREEN         The `-screen 0` geometry, depth included.
 #   CRCBL_E2E_X11_WM             A window manager command; none by default.
+#   CRCBL_E2E_X11_HEADS          `2` for two heads: see below.
+#
+# # Two heads: Xorg's dummy driver, not Xvfb
+#
+# `Xvfb` drives one CRTC, so a second monitor, and a monitor unplugged, cannot
+# happen on it. With `CRCBL_E2E_X11_HEADS=2` this starts the real `Xorg` with
+# the dummy driver (`xf86-video-dummy` on Arch, `xserver-xorg-video-dummy` on
+# Debian and Ubuntu) instead, unprivileged and through the server binary
+# rather than the console-only `Xorg.wrap`. The dummy driver has sixteen
+# outputs, `DUMMY0` on and the rest disconnected with no modes; this adds
+# `TWO_HEADS_MODE` to `DUMMY1` and `DUMMY2`, so `xrandr` can turn them on and
+# off as a cable would. Which are on is the caller's to set: the suite's
+# two-head tests lay the heads out themselves. `SCREEN` is the screen the
+# server starts with, before any of that.
 
 # How long to wait for the display to answer. Generous, because a cold CI
 # runner starting an X server for the first time is slow — and bounded, because
@@ -57,7 +71,29 @@ DISPLAY_TIMEOUT_S="${CRCBL_E2E_DISPLAY_TIMEOUT_S:-20}"
 POLL_INTERVAL_S=0.1
 SCREEN="${CRCBL_E2E_X11_SCREEN:-1920x1080x24}"
 
-if ! command -v Xvfb >/dev/null 2>&1; then
+# The mode two-head runs add to the outputs that start with none: CVT's
+# 1280x720 at 60, as `cvt 1280 720 60` prints it.
+TWO_HEADS_MODE="1280x720_60"
+TWO_HEADS_MODELINE="74.48 1280 1336 1472 1664 720 721 724 746 -hsync +vsync"
+
+XORG=""
+if [ "${CRCBL_E2E_X11_HEADS:-1}" = 2 ]; then
+    # The server binary, not the `Xorg` on the path: that is `Xorg.wrap`,
+    # which refuses anyone not on a console.
+    for candidate in /usr/lib/Xorg /usr/lib/xorg/Xorg; do
+        if [ -x "$candidate" ]; then
+            XORG="$candidate"
+            break
+        fi
+    done
+    if [ -z "$XORG" ] || ! command -v xrandr >/dev/null 2>&1; then
+        echo "crcbl e2e: two heads need Xorg, its dummy driver and xrandr; one is not installed" >&2
+        exit 1
+    fi
+elif [ "${CRCBL_E2E_X11_HEADS:-1}" != 1 ]; then
+    echo "crcbl e2e: CRCBL_E2E_X11_HEADS is 1 or 2, not ${CRCBL_E2E_X11_HEADS}" >&2
+    exit 1
+elif ! command -v Xvfb >/dev/null 2>&1; then
     echo "crcbl e2e: Xvfb is not installed; install it or run the harness elsewhere" >&2
     exit 1
 fi
@@ -65,6 +101,8 @@ fi
 RUNTIME_DIR="$(mktemp -d -t crcbl-x11-e2e.XXXXXX)"
 chmod 700 "$RUNTIME_DIR"
 XVFB_LOG="${RUNTIME_DIR}/xvfb.log"
+# What Xorg says before its log file is open, a bad configuration among it.
+XORG_STDERR="${RUNTIME_DIR}/xorg.stderr"
 WM_LOG="${RUNTIME_DIR}/wm.log"
 
 # Inherit nothing from an outer session: a developer running this on a live
@@ -75,9 +113,14 @@ unset DISPLAY
 unset XAUTHORITY
 
 log_tail() {
-    echo "--- Xvfb log tail ---" >&2
+    echo "--- X server log tail ---" >&2
     tail -n 40 "$XVFB_LOG" >&2 || true
-    echo "--- end Xvfb log ---" >&2
+    echo "--- end X server log ---" >&2
+    if [ -s "$XORG_STDERR" ]; then
+        echo "--- Xorg stderr ---" >&2
+        tail -n 20 "$XORG_STDERR" >&2 || true
+        echo "--- end Xorg stderr ---" >&2
+    fi
     if [ -s "$WM_LOG" ]; then
         echo "--- window manager log tail ---" >&2
         tail -n 20 "$WM_LOG" >&2 || true
@@ -116,19 +159,65 @@ if [ -z "$DISPLAY_NUM" ]; then
     exit 1
 fi
 
-echo "crcbl e2e: starting Xvfb on :${DISPLAY_NUM} (${SCREEN})"
-# `-nolisten tcp` keeps the server on its Unix socket, so nothing outside this
-# machine can reach it and the suite cannot accidentally talk to a remote
-# display. RANDR and XTEST are what the backend and the harness's peer client
-# need; both are built into Xvfb and are enabled explicitly so a build that
-# defaults them off fails here rather than three tests in.
-Xvfb ":${DISPLAY_NUM}" \
-    -screen 0 "$SCREEN" \
-    -nolisten tcp \
-    +extension RANDR \
-    +extension XTEST \
-    >"$XVFB_LOG" 2>&1 &
-XVFB_PID=$!
+if [ -n "$XORG" ]; then
+    echo "crcbl e2e: starting Xorg with the dummy driver on :${DISPLAY_NUM}"
+    # Xorg reads a configuration by a path relative to its working directory
+    # when it is not root, so the file is written into the run's directory and
+    # the server started there. Input and GPU hotplug are off: the dummy driver
+    # needs neither, and the developer's own devices are none of its business.
+    cat >"${RUNTIME_DIR}/dummy.conf" <<'CONF'
+Section "Device"
+    Identifier "dummy"
+    Driver "dummy"
+    VideoRam 256000
+EndSection
+Section "Monitor"
+    Identifier "monitor"
+    HorizSync 5.0-1000.0
+    VertRefresh 5.0-200.0
+EndSection
+Section "Screen"
+    Identifier "screen"
+    Device "dummy"
+    Monitor "monitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth 24
+        Virtual 4096 2160
+    EndSubSection
+EndSection
+Section "ServerFlags"
+    Option "AutoAddDevices" "false"
+    Option "AutoAddGPU" "false"
+EndSection
+CONF
+    (
+        cd "$RUNTIME_DIR" || exit 1
+        exec "$XORG" ":${DISPLAY_NUM}" \
+            -config dummy.conf \
+            -noreset \
+            -nolisten tcp \
+            -logfile "$XVFB_LOG" \
+            +extension RANDR \
+            +extension XTEST \
+            >"$XORG_STDERR" 2>&1
+    ) &
+    XVFB_PID=$!
+else
+    echo "crcbl e2e: starting Xvfb on :${DISPLAY_NUM} (${SCREEN})"
+    # `-nolisten tcp` keeps the server on its Unix socket, so nothing outside
+    # this machine can reach it and the suite cannot accidentally talk to a
+    # remote display. RANDR and XTEST are what the backend and the harness's
+    # peer client need; both are built into Xvfb and are enabled explicitly so
+    # a build that defaults them off fails here rather than three tests in.
+    Xvfb ":${DISPLAY_NUM}" \
+        -screen 0 "$SCREEN" \
+        -nolisten tcp \
+        +extension RANDR \
+        +extension XTEST \
+        >"$XVFB_LOG" 2>&1 &
+    XVFB_PID=$!
+fi
 
 # Poll for readiness with a deadline and a liveness check on the child. Never a
 # fixed sleep: a sleep long enough for the slowest runner wastes time on every
@@ -140,7 +229,7 @@ XVFB_PID=$!
 DEADLINE=$(( $(date +%s) + DISPLAY_TIMEOUT_S ))
 while [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; do
     if ! kill -0 "$XVFB_PID" 2>/dev/null; then
-        echo "crcbl e2e: Xvfb exited before creating its socket" >&2
+        echo "crcbl e2e: the X server exited before creating its socket" >&2
         log_tail
         exit 1
     fi
@@ -153,6 +242,23 @@ while [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; do
 done
 
 export DISPLAY=":${DISPLAY_NUM}"
+
+if [ -n "$XORG" ]; then
+    # The socket comes before the server answers, so the first RandR request is
+    # the readiness poll, under the same deadline.
+    until xrandr --query >/dev/null 2>&1; do
+        if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+            echo "crcbl e2e: Xorg on ${DISPLAY} did not answer after ${DISPLAY_TIMEOUT_S}s" >&2
+            log_tail
+            exit 1
+        fi
+        sleep "$POLL_INTERVAL_S"
+    done
+    # shellcheck disable=SC2086 # the modeline is its words
+    xrandr --newmode "$TWO_HEADS_MODE" $TWO_HEADS_MODELINE
+    xrandr --addmode DUMMY1 "$TWO_HEADS_MODE"
+    xrandr --addmode DUMMY2 "$TWO_HEADS_MODE"
+fi
 
 if [ -n "${CRCBL_E2E_X11_WM:-}" ]; then
     # Named up front, because the alternative failure is quiet: an unstartable
@@ -184,4 +290,4 @@ else
     echo "crcbl e2e: no window manager (set CRCBL_E2E_X11_WM to add one)"
 fi
 
-echo "crcbl e2e: display up at ${DISPLAY} (Xvfb pid ${XVFB_PID})"
+echo "crcbl e2e: display up at ${DISPLAY} (X server pid ${XVFB_PID})"

@@ -1282,6 +1282,236 @@ fn monitors_are_enumerated_in_one_coordinate_space() {
 }
 
 // ---------------------------------------------------------------------------
+// Two heads
+// ---------------------------------------------------------------------------
+//
+// `Xvfb` drives one CRTC, so these run against `Xorg` and its dummy driver,
+// which `run-x11-heads-e2e.sh` starts and `run-x11-e2e.sh` leaves out. The
+// dummy driver's outputs are named `DUMMY0` onwards, and `xrandr` turns them
+// on and off as a cable would.
+
+/// The first head, and where it is.
+const FIRST_HEAD: (&str, PhysicalRect) = ("DUMMY0", PhysicalRect::new(0, 0, 1920, 1080));
+/// The second head, to the right of the first.
+const SECOND_HEAD: (&str, PhysicalRect) = ("DUMMY1", PhysicalRect::new(1920, 0, 1280, 720));
+/// A third output, off unless a test plugs it in where the second was.
+const THIRD_HEAD: &str = "DUMMY2";
+/// The mode `run-x11-heads-e2e.sh` gives the outputs the dummy driver starts
+/// disconnected, which have none of their own.
+const ADDED_MODE: &str = "1280x720_60";
+
+/// Runs `xrandr` with `args` against the harness's display.
+fn xrandr(args: &[&str]) {
+    let status = crcbl_spawn::command("xrandr")
+        .args(args)
+        .status()
+        .expect("xrandr is installed");
+    assert!(status.success(), "xrandr {args:?} failed: {status}");
+}
+
+/// `rect`'s origin as `xrandr --pos` takes it.
+fn xrandr_pos(rect: PhysicalRect) -> String {
+    format!("{}x{}", rect.x, rect.y)
+}
+
+/// Turns `output` on in [`ADDED_MODE`] at `rect`'s origin.
+fn plug(output: &str, rect: PhysicalRect) {
+    xrandr(&[
+        "--output",
+        output,
+        "--mode",
+        ADDED_MODE,
+        "--pos",
+        &xrandr_pos(rect),
+    ]);
+}
+
+/// Puts the heads where every two-head test starts — [`FIRST_HEAD`] and
+/// [`SECOND_HEAD`] on, [`THIRD_HEAD`] off — on entry and again when dropped,
+/// so a test that fails part-way leaves its layout to nobody.
+struct Heads;
+
+impl Heads {
+    fn apply() -> Self {
+        Self::layout();
+        Self
+    }
+
+    fn layout() {
+        xrandr(&["--output", THIRD_HEAD, "--off"]);
+        xrandr(&[
+            "--output",
+            FIRST_HEAD.0,
+            "--mode",
+            "1920x1080",
+            "--pos",
+            &xrandr_pos(FIRST_HEAD.1),
+            "--primary",
+        ]);
+        plug(SECOND_HEAD.0, SECOND_HEAD.1);
+    }
+}
+
+impl Drop for Heads {
+    fn drop(&mut self) {
+        Self::layout();
+    }
+}
+
+impl Session {
+    /// The monitor called `name`, once the shell lists it.
+    fn head(&mut self, name: &str) -> crcbl_shell::MonitorInfo {
+        self.pump_until(&format!("the shell to list {name}"), |session| {
+            session
+                .shell
+                .monitors()
+                .iter()
+                .any(|monitor| monitor.name == name)
+        });
+        self.shell
+            .monitors()
+            .iter()
+            .find(|monitor| monitor.name == name)
+            .cloned()
+            .expect("listed")
+    }
+
+    /// Pumps until the shell no longer lists `monitor`.
+    fn until_gone(&mut self, monitor: crcbl_shell::MonitorId) {
+        self.pump_until(&format!("{monitor} to leave the list"), |session| {
+            session.shell.monitor(monitor).is_none()
+        });
+    }
+}
+
+/// **Two heads are two monitors, tiled in the screen's one coordinate space**,
+/// each where RandR put it, at its mode's rate, and the primary one primary.
+#[test]
+#[ignore = "needs two X heads; run tests/run-x11-heads-e2e.sh"]
+fn two_heads_are_two_monitors_side_by_side() {
+    let _heads = Heads::apply();
+    let mut session = Session::open();
+    let first = session.head(FIRST_HEAD.0);
+    let second = session.head(SECOND_HEAD.0);
+    assert_eq!(session.shell.monitors().len(), 2);
+    assert_eq!(first.bounds, FIRST_HEAD.1);
+    assert_eq!(second.bounds, SECOND_HEAD.1);
+    assert!(first.is_primary && !second.is_primary);
+    assert_ne!(first.id, second.id);
+    // CVT's 1280x720 at 60: a 74.48 MHz dot clock over 1664 × 746.
+    assert_eq!(second.refresh_millihertz, 59_999);
+}
+
+/// **Unplugging a head names it in a `MonitorRemoved` before the
+/// `MonitorsChanged` whose list no longer has it**, and the head that stayed
+/// keeps its id.
+#[test]
+#[ignore = "needs two X heads; run tests/run-x11-heads-e2e.sh"]
+fn two_heads_unplugging_one_names_it_and_the_other_keeps_its_id() {
+    let _heads = Heads::apply();
+    let mut session = Session::open();
+    let first = session.head(FIRST_HEAD.0);
+    let second = session.head(SECOND_HEAD.0);
+    session.events.clear();
+
+    xrandr(&["--output", SECOND_HEAD.0, "--off"]);
+    session.pump_until("the monitor list without the second head", |session| {
+        session.names().contains(&"MonitorsChanged") && session.shell.monitor(second.id).is_none()
+    });
+    let removed = session
+        .events
+        .iter()
+        .position(|event| *event == ShellEvent::MonitorRemoved { monitor: second.id })
+        .expect("a MonitorRemoved named the second head");
+    let changed = session
+        .events
+        .iter()
+        .rposition(|event| *event == ShellEvent::MonitorsChanged)
+        .expect("a MonitorsChanged");
+    assert!(removed < changed, "the removal comes before the new list");
+    assert_eq!(
+        session.shell.monitor(first.id).map(|monitor| &monitor.name),
+        Some(&first.name),
+        "the head that stayed kept its id"
+    );
+    assert!(matches!(
+        session.shell.create_window(&WindowDesc {
+            mode: DisplayMode::Borderless {
+                monitor: Some(second.id)
+            },
+            ..desc("unplugged")
+        }),
+        Err(ShellError::NoSuchMonitor(id)) if id == second.id.0
+    ));
+}
+
+/// **A monitor that went away never comes back under its old id**: neither a
+/// different output plugged in where it was, driven by the CRTC it freed, nor
+/// the same output plugged back in. A borderless window still naming the old
+/// id is then refused rather than sent to whatever took its place — the
+/// obligation `crcbl_shell::monitor`'s docs put on every backend.
+#[test]
+#[ignore = "needs two X heads; run tests/run-x11-heads-e2e.sh"]
+fn two_heads_a_monitor_that_left_never_returns_under_its_old_id() {
+    let _heads = Heads::apply();
+    let mut session = Session::open();
+    let first = session.head(FIRST_HEAD.0);
+    let second = session.head(SECOND_HEAD.0);
+
+    xrandr(&["--output", SECOND_HEAD.0, "--off"]);
+    session.until_gone(second.id);
+    plug(THIRD_HEAD, SECOND_HEAD.1);
+    let third = session.head(THIRD_HEAD);
+    assert_ne!(
+        third.id, second.id,
+        "another output where it was is another monitor"
+    );
+
+    xrandr(&["--output", THIRD_HEAD, "--off"]);
+    session.until_gone(third.id);
+    plug(SECOND_HEAD.0, SECOND_HEAD.1);
+    let back = session.head(SECOND_HEAD.0);
+    let ids = [first.id, second.id, third.id];
+    assert!(
+        !ids.contains(&back.id),
+        "the same output plugged back in is a new monitor: {:?} reuses one of {ids:?}",
+        back.id
+    );
+}
+
+/// **A borderless window naming the second head is moved onto it**, whether or
+/// not anything then makes it fullscreen: the move is the backend's, through
+/// `ConfigureWindow`, and comes before the request a window manager may refuse.
+#[test]
+#[ignore = "needs two X heads; run tests/run-x11-heads-e2e.sh"]
+fn two_heads_a_borderless_window_naming_the_second_moves_onto_it() {
+    let _heads = Heads::apply();
+    let mut session = Session::open();
+    let second = session.head(SECOND_HEAD.0);
+    let window = session.window(&desc("second head"));
+    let xid = session.xid(window);
+    session
+        .shell
+        .set_mode(
+            window,
+            DisplayMode::Borderless {
+                monitor: Some(second.id),
+            },
+        )
+        .expect("the second head is listed");
+    session.pump_until_reporting(
+        "the window to reach the second head",
+        |session| {
+            session
+                .peer
+                .window_origin(xid)
+                .is_some_and(|(x, y)| second.bounds.contains(x.into(), y.into()))
+        },
+        |session| format!("; origin {:?}", session.peer.window_origin(xid)),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
 

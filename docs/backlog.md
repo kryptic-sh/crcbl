@@ -530,17 +530,17 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    Hyprland 0.56.2, 2026-10-21, an exclusive panel took the keyboard as on sway,
    and an OnDemand panel took it **on map**, where sway waits for a click, kept
    it on a click and gave it back on a click in a tiled window); S7 monitor
-   hot-plug on X11 (Xvfb and `xrandr --setmonitor`), Win32 and AppKit; S9 X11
-   compose through a real server, Win32 pre-edit (`win32-ime-e2e` is not enabled
-   by `run-win32-e2e.ps1`), AppKit dead keys, and AppKit's input method against
-   a real one — whether one in its native mode gives way to the Roman-only
-   restriction `appkit::view::allow_input_methods` sets for a window with no
-   field or a sensitive one, the pre-edit an input method sends, and where its
-   candidate window opens (`appkit_session`'s `text_input` plays the input
-   method itself, through the view's `NSTextInputClient` methods); S3 popup
-   repositioning on Wayland **in CI** (CI's sway offers `xdg_wm_base` below 3,
-   so CI holds only the refusal; the office laptop's sway 1.12 ran the real path
-   green on 2026-10-20); S22 a colour glyph in a GPU golden; S18 FreeBSD beyond
+   hot-plug on Win32 and AppKit; S9 X11 compose through a real server, Win32
+   pre-edit (`win32-ime-e2e` is not enabled by `run-win32-e2e.ps1`), AppKit dead
+   keys, and AppKit's input method against a real one — whether one in its
+   native mode gives way to the Roman-only restriction
+   `appkit::view::allow_input_methods` sets for a window with no field or a
+   sensitive one, the pre-edit an input method sends, and where its candidate
+   window opens (`appkit_session`'s `text_input` plays the input method itself,
+   through the view's `NSTextInputClient` methods); S3 popup repositioning on
+   Wayland **in CI** (CI's sway offers `xdg_wm_base` below 3, so CI holds only
+   the refusal; the office laptop's sway 1.12 ran the real path green on
+   2026-10-20); S22 a colour glyph in a GPU golden; S18 FreeBSD beyond
    `check (freebsd)`'s clippy, in a VM job; S13 cold start to the first
    presented frame, end to end (the D3D12 instance and first device are
    measured; see 11).
@@ -29669,21 +29669,12 @@ are in docs/notes/backends.md.
   keeps the size it asked for. One that shrinks the client, or a tiling manager
   that ignores the request entirely, would break the sandbox passes' extent
   assertions — a real configuration, not exercised.
-- **X11 multi-monitor.** The Wayland suite now declares two outputs and asserts
-  that a fullscreen request naming the second one lands on the second one; the
-  X11 suite still has a single `Xvfb` screen, so `move_to_monitor` and
-  `Borderless { monitor: Some(..) }` are unit-tested only on the backend that
-  can actually honour them. `Xvfb`'s RANDR exposes one CRTC and
-  `xrandr --setmonitor` defines RANDR 1.5 _monitors_, which `crcbl-shell`'s
-  enumeration does not read — it goes through `GetScreenResourcesCurrent` and
-  `GetCrtcInfo`. Two ways forward: read `RRGetMonitors` first and fall back to
-  CRTCs (what GTK and Qt do, and it makes the headless split testable), or run a
-  real `Xorg` with the dummy driver configured for two heads in CI. The first is
-  a backend change with its own slice, and
-  `crates/crcbl-shell/src/x11/monitors.rs`'s module docs already argue against
-  it — RandR 1.5's `GetMonitors` carries no refresh rate, so it would be
-  `GetMonitors` plus a second CRTC walk, and the CRTC walk alone also works on
-  RandR 1.2 including this `Xvfb`; the second is a CI dependency.
+- **X11 multi-monitor under a window manager's own placement.** The two-head
+  tests (`run-x11-heads-e2e.sh`, Xorg's dummy driver) cover enumeration,
+  unplugging, replugging and a borderless window sent to the second head, with
+  and without openbox; CI runs them without. A fullscreen window **granted** on
+  the second head by a window manager, and a window kept on a head that is then
+  unplugged, are not asserted.
 - **Pixels.** Every display-mode assertion on both backends is a summary line, a
   log line, or the compositor's own tree. That a fullscreen frame is _composed_
   at the new extent, rather than merely built at it, is unchecked.

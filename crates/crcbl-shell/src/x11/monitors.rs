@@ -68,6 +68,7 @@ impl X11Shell {
         if crtcs.is_empty() {
             return vec![self.fallback_monitor(scale, work_area)];
         }
+        self.retire_monitor_ids(&crtcs.iter().map(|crtc| crtc.id).collect::<Vec<_>>());
         let primary_output = self.conn.read_primary_output();
 
         let mut monitors = Vec::with_capacity(crtcs.len());
@@ -114,6 +115,7 @@ impl X11Shell {
     /// refresh rate, and [`MonitorInfo::refresh_millihertz`] already defines
     /// zero as "the backend cannot determine it" rather than as 0 Hz.
     fn fallback_monitor(&mut self, scale: f64, work_area: Option<PhysicalRect>) -> MonitorInfo {
+        self.retire_monitor_ids(&[0]);
         let bounds = PhysicalRect::new(
             0,
             0,
@@ -147,6 +149,15 @@ impl X11Shell {
         self.next_monitor_id += 1;
         self.monitor_ids.push((crtc, id));
         id
+    }
+
+    /// Forgets the id of every CRTC not in `live`, so one that drives a
+    /// monitor again — the same output plugged back in, or another output on
+    /// the CRTC the first one freed — is a new monitor with a new id rather
+    /// than the departed one's. Called with every enumeration's CRTCs before
+    /// their ids are looked up.
+    fn retire_monitor_ids(&mut self, live: &[u32]) {
+        self.monitor_ids.retain(|(crtc, _)| live.contains(crtc));
     }
 }
 

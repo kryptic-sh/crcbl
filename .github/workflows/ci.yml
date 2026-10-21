@@ -1206,6 +1206,10 @@ jobs:
       #
       # `dbus` and `at-spi2-core` are for the harness's AT-SPI reader step,
       # which runs on a private session bus from `dbus-run-session`.
+      #
+      # `xserver-xorg-core`, its dummy driver and `x11-xserver-utils`'s
+      # `xrandr` are for the two-head pass, which Xvfb's single CRTC cannot
+      # run.
       - name: Install Xvfb, openbox, the X client libraries and the ALSA headers
         timeout-minutes: 10
         uses: ./.github/actions/apt-packages
@@ -1215,6 +1219,7 @@ jobs:
             libxcb-xtest0 libxcb-xfixes0 libxcb-cursor0 libxcb-shape0
             libxkbcommon0 libxkbcommon-x11-0 libvulkan1 mesa-vulkan-drivers
             vulkan-validationlayers dbus at-spi2-core
+            xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils
       # Starts Xvfb on a private display number, polls for its socket with a
       # deadline and a liveness check on the child, runs the `#[ignore]`d suite
       # with `--features x11-e2e`, and dumps the server log tail on any
@@ -1229,6 +1234,11 @@ jobs:
         run: crates/crcbl-shell/tests/run-x11-e2e.sh
       - name: Run the suite under Xvfb, with openbox managing
         run: CRCBL_E2E_X11_WM=openbox crates/crcbl-shell/tests/run-x11-e2e.sh
+      # Monitor hot-plug: two heads on Xorg's dummy driver, one unplugged and
+      # replugged through `xrandr`. No window manager: what the tests assert is
+      # RandR's and the backend's, and the openbox pass adds nothing to it.
+      - name: Run the two-head tests under Xorg's dummy driver
+        run: crates/crcbl-shell/tests/run-x11-heads-e2e.sh
 
   # The only job that runs a *game* in a real window. Every other sample step on
   # this board is `--headless`, which opens no window at all: the shell a sample

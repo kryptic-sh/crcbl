@@ -45,6 +45,9 @@
 
 set -euo pipefail
 
+# The `two_heads_` tests need a second CRTC, which Xvfb does not have; they are
+# `run-x11-heads-e2e.sh`'s, against Xorg's dummy driver.
+
 CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${CRATE_DIR}/../.." && pwd)"
 
@@ -77,6 +80,7 @@ cargo nextest run \
     --test x11_e2e \
     --run-ignored all \
     --test-threads 1 \
+    -E 'not test(/^two_heads_/)' \
     "$@" 2>&1 | tee "$OUTPUT"
 STATUS=${PIPESTATUS[0]}
 set -e

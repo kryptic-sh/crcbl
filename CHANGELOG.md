@@ -24,6 +24,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   so a stylesheet draws it as `.list-row:checked`, and read as selected by a
   screen reader. `Ui::list` is `selectable_list` with no selection.
 
+### Fixed
+
+- **X11: a monitor unplugged and plugged back in no longer gets its old
+  `MonitorId` back.** Ids were kept per RandR CRTC for the whole session, and a
+  CRTC is reused for whatever output it drives next, so an id the application
+  had seen removed could name a different display again, and a borderless window
+  still asking for it went there instead of failing with `NoSuchMonitor`. An id
+  is now retired when its CRTC stops driving a monitor.
+
 ## [0.8.1] - 2026-10-21
 
 ### Fixed
