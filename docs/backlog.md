@@ -25822,17 +25822,18 @@ whether `crcbl-webgpu` names the adapter it opened is unchecked.
   Chromium's shared-image code fails `Error creating wgpu::Texture` on every
   frame: the canvas reads back black and the demo never ticks. Adding
   `--use-webgpu-power-preference=default-low-power` keeps Dawn on the iGPU the
-  compositor uses, and `web/tools/browser-e2e.mjs` then passes every check but
-  one (run headed inside headless sway with `CRCBL_WEB_E2E_HEADED=1`,
-  `CRCBL_CHROMIUM_FLAGS="--ozone-platform=wayland ..."`):
-  `the breakout::art::SURROUND clear reaches the canvas sRGB-encoded` found the
-  clear on 4.4% of the canvas against a 15% floor, at a 927x435 viewport rather
-  than the gate's usual Xvfb size. Not followed up: whether that check is
-  viewport-dependent or a real encode miss on this adapter. crcbl calls
-  `requestAdapter()` with no `powerPreference`, so it takes the browser's
-  default either way; passing the presenter's preference through was considered
-  and not done, since a game asking for `HighPerformance` would then pick
-  exactly the device that fails here.
+  compositor uses, and `web/tools/browser-e2e.mjs` then passes all 65 checks,
+  the sRGB clear included (rgb(10,10,15) over 24.4% of the canvas against the
+  15% owed). Recipe: headed inside headless sway, with a copy of
+  `wayland-e2e-sway.conf` adding
+  `for_window [app_id="chromium"] floating enable`, and
+  `CRCBL_WEB_E2E_HEADED=1 CRCBL_WEB_E2E_ADAPTER=hardware CRCBL_CHROMIUM_FLAGS="--ozone-platform=wayland --use-webgpu-power-preference=default-low-power"`.
+  Without the floating rule sway tiles the window and the clear check fails on
+  4.4%: the viewport, not the encode. crcbl calls `requestAdapter()` with no
+  `powerPreference`, so it takes the browser's default either way; passing the
+  presenter's preference through was considered and not done, since a game
+  asking for `HighPerformance` would then pick exactly the device that fails
+  here.
 - **The failure mode is recorded, and the surviving backend does not share it.**
   `crcbl-wgpu` surfaced these through `crcbl_wgpu::errors` and `crcbl::web`'s
   `gpu error`, which was better than silence — but the engine kept running for
