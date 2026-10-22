@@ -28353,6 +28353,24 @@ What is still owed:
     running it on DRM would take over this machine's console. A DRM-backed
     session, or the same run under a compositor with commit-timing, is what
     would settle it.
+  - **Under a compositor that offers both protocols, both of the office laptop's
+    drivers still report nothing (2026-10-22).** The release sandbox in
+    `hyprland-session.sh`'s nested Hyprland 0.56.2, which advertises
+    `wp_presentation` v2, `wp_fifo_manager_v1` and `wp_commit_timing_manager_v1`
+    with both outputs at 60 Hz (`wayland-info`), on Intel RPL-U (Mesa 26.2.5,
+    ANV) and the MX550 (NVIDIA 615.78), each exposing `VK_EXT_present_timing`
+    revision 3. A temporary build logged the raw result of
+    `vkGetSwapchainTimingPropertiesEXT` on every one of 180 frames instead of
+    once: `VK_SUCCESS` with `refreshDuration` and `refreshInterval` both 0,
+    every frame, on both drivers — so the one-shot query in
+    `Presenter::settle_pacing` is not what keeps the answer `Unknown`, and
+    `VK_NOT_READY` never occurred. Creating the swapchain with
+    `VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT` (`0x200`) changed nothing.
+    Untried, and the next thing to try: the rest of the extension this crate
+    leaves out, `vkSetSwapchainPresentTimingQueueSizeEXT` and a
+    `VkPresentTimingsInfoEXT` on each present, in case a driver fills the
+    properties only for a swapchain whose presents ask for timing feedback. That
+    is new FFI and a swapchain-creation change, not a measurement.
   - **The four-state reading of `refreshDuration`/`refreshInterval` is taken
     from the proposal text, not from a driver.** In particular the `Stepped`
     case (interval non-zero, not `UINT64_MAX`, not equal to the duration) is a
