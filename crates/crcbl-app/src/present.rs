@@ -586,7 +586,7 @@ impl SharedGpu {
     /// [`PresenterDesc::frames_in_flight`] is zero, if the shared device lacks a
     /// required feature, if the shared adapter cannot present to the window —
     /// one on a display driven by another GPU, say, which wants a presenter of
-    /// its own from [`Presenter::open`] — or if a HAL call fails.
+    /// its own from [`Presenter::request_open`] — or if a HAL call fails.
     pub fn open<S: Shell + ?Sized>(
         &self,
         shell: &S,
