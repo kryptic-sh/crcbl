@@ -262,6 +262,7 @@ impl Shared {
 
     /// Whether anything has been recorded since the last
     /// [`take_events`](Self::take_events).
+    #[cfg(target_os = "windows")]
     pub(super) fn has_events(&self) -> bool {
         !self.events.borrow().is_empty()
     }
