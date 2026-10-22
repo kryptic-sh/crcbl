@@ -694,7 +694,7 @@ struct XWindow {
     /// Whether [`WindowDesc::transparent`] was set: the window is on the
     /// connection's [`Argb`] visual rather than the root's.
     transparent: bool,
-    /// What it was created as when it is a [popup](popup): its parent, the
+    /// What it was created as when it is a [`popup`]: its parent, the
     /// anchor it was last placed against, and its input.
     popup: Option<crate::PopupDesc>,
     /// Whether [`WindowDesc::accept_drops`] was set.

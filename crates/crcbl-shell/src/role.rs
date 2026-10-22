@@ -22,7 +22,7 @@
 use crate::geom::LogicalRect;
 use crate::monitor::MonitorId;
 use crate::window::{WindowDesc, WindowId};
-#[cfg(any(target_os = "windows", target_os = "linux", test))]
+#[cfg(any(target_os = "windows", desktop_unix, test))]
 use crate::{PhysicalRect, PhysicalSize};
 use crate::{ShellBackend, ShellCaps, ShellError};
 
@@ -405,7 +405,7 @@ pub enum PopupPlacement {
 ///
 /// Compiled where its callers are: the backends that place popups
 /// themselves.
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", desktop_unix, test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Placed {
     pub x: f64,
@@ -427,7 +427,7 @@ pub(crate) fn not_a_popup(window: WindowId) -> ShellError {
     ShellError::InvalidDescriptor(format!("reposition_popup: {window:?} is not a popup"))
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", desktop_unix, test))]
 pub(crate) fn place_popup(
     anchor: Placed,
     (width, height): (f64, f64),
@@ -468,7 +468,7 @@ pub(crate) fn place_popup(
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", test))]
+#[cfg(any(target_os = "windows", desktop_unix, test))]
 /// Where a popup of `size` goes against `anchor`, both in desktop pixels:
 /// [`place_popup`]'s placement, flipped or
 /// slid to stay in `area`, in whole pixels.
