@@ -193,6 +193,20 @@ runs:
           exit 0
         fi
         echo "install against the image's package lists failed; refreshing them"
+        # **And from another mirror.** The runner's sources name
+        # `mirror+file:/etc/apt/apt-mirrors.txt`, whose first entry is
+        # `azure.archive.ubuntu.com`, and apt moves down that list only when a
+        # mirror *errors*. One that stalls is never left: on 2026-10-22 and 23
+        # `mesa-vulkan-drivers` stalled from it in every attempt of three jobs
+        # over three runs. So the retry asks Canonical's own archive, which
+        # serves the same suites. The package lists stay valid, because apt
+        # keys them by the `mirror+file` URI, not by the host serving them.
+        if [ -f /etc/apt/apt-mirrors.txt ] &&
+          grep -q 'azure\.archive\.ubuntu\.com' /etc/apt/apt-mirrors.txt; then
+          sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#' \
+            /etc/apt/apt-mirrors.txt
+          echo "retrying from archive.ubuntu.com, since the runner's own mirror did not deliver"
+        fi
         # The refresh is best-effort and **must not gate the retry**. Chaining
         # them with `&&` meant a slow `update` consumed its timeout and
         # short-circuited, so the second install never ran at all — which is how
