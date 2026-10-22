@@ -257,19 +257,16 @@ measurements. What is left:
   (lavapipe)". Measured on main run 39791350330 (`ee8c7dde`): `vk-e2e` took 14.1
   min and `vk-e2e-mesh` 14.5, both green. If either nears 30 min again, the
   sample draws are the next piece to move.
-- **The `rust-cache` key moves with the runner image's own toolchain.** Its
+- **The `rust-cache` key can move with the runner image's own toolchain.** Its
   environment hash covers every installed `rustc`, and on 2026-10-19 runners
   carried 1.99.0 or 1.99.1 beside the pinned 1.98.1, so one scope saved under
-  two keys (`v0-rust-test-Linux-x64-1354b354` for 1.99.0 and `-ba220bad` for
-  1.99.1) and a runner with the other one restored nothing. Of the 5 of 30
-  restores that found no cache in run 39315179951, coverage, wasm32 and the
-  x86_64 Linux build were this split; rustdoc and clippy were evictions (their
-  keys restored in run 39287773047 three to four hours earlier), which main-only
-  saving should stop — unverified until main has run with it for a while. Each
-  miss cost a cold build of a minute or two.
-  `add-rust-environment-hash-key: false` would fix the split and restore stale
-  artifacts after a toolchain bump; uninstalling the image's toolchain first is
-  the other route. Not changed.
+  two keys and a runner with the other restored nothing. **Re-checked
+  2026-10-23, main run 39865952451: 60 restores, 1 miss**
+  (`build x86_64-apple-darwin`, an eviction, not a split), every Linux job on
+  the pinned 1.98.1. Not recurring, so not changed; if it comes back,
+  `add-rust-environment-hash-key: false` with the pinned `rust-toolchain.toml`
+  hashed into the key fixes it without restoring stale artifacts after a
+  toolchain bump.
 
 ## HIGH PRIORITY: what lyr and pikr still need (2026-10-15)
 
