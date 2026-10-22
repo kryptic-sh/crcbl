@@ -29668,12 +29668,12 @@ are in docs/notes/backends.md.
   keeps the size it asked for. One that shrinks the client, or a tiling manager
   that ignores the request entirely, would break the sandbox passes' extent
   assertions — a real configuration, not exercised.
-- **X11 multi-monitor under a window manager's own placement.** The two-head
-  tests (`run-x11-xorg-e2e.sh`, Xorg's dummy driver) cover enumeration,
-  unplugging, replugging and a borderless window sent to the second head, with
-  and without openbox; CI runs them without. A fullscreen window **granted** on
-  the second head by a window manager, and a window kept on a head that is then
-  unplugged, are not asserted.
+- **An X11 window kept on a head that is then unplugged.** The `xorg_` tests
+  (`run-x11-xorg-e2e.sh`, Xorg's dummy driver) cover enumeration, unplugging,
+  replugging, and a borderless window sent to the second head — refused with no
+  window manager, filling exactly that head under openbox — and CI runs them
+  both ways. Where a window manager moves a window whose head goes away, and
+  what the backend reports for it, is not asserted.
 - **Pixels.** Every display-mode assertion on both backends is a summary line, a
   log line, or the compositor's own tree. That a fullscreen frame is _composed_
   at the new extent, rather than merely built at it, is unchecked.

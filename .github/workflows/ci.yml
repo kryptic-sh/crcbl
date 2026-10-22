@@ -1237,10 +1237,12 @@ jobs:
         run: CRCBL_E2E_X11_WM=openbox crates/crcbl-shell/tests/run-x11-e2e.sh
       # Monitor hot-plug, two heads on Xorg's dummy driver with one unplugged
       # and replugged through `xrandr`, and a dead key through the server's
-      # own keymap. No window manager: what the tests assert is RandR's, XKB's
-      # and the backend's, and the openbox pass adds nothing to it.
+      # own keymap. Twice, as above: a borderless window naming the second
+      # head is refused with no window manager and fills that head under one.
       - name: Run the xorg_ tests under Xorg's dummy driver
         run: crates/crcbl-shell/tests/run-x11-xorg-e2e.sh
+      - name: Run the xorg_ tests under Xorg's dummy driver, with openbox
+        run: CRCBL_E2E_X11_WM=openbox crates/crcbl-shell/tests/run-x11-xorg-e2e.sh
 
   # The only job that runs a *game* in a real window. Every other sample step on
   # this board is `--headless`, which opens no window at all: the shell a sample

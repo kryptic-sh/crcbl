@@ -1486,6 +1486,9 @@ fn xorg_two_heads_a_monitor_that_left_never_returns_under_its_old_id() {
 /// **A borderless window naming the second head is moved onto it**, whether or
 /// not anything then makes it fullscreen: the move is the backend's, through
 /// `ConfigureWindow`, and comes before the request a window manager may refuse.
+/// Under a window manager the request is granted, and the window fills the
+/// second head exactly, not the first and not the whole screen; with none it
+/// stays windowed and says so.
 #[test]
 #[ignore = "needs Xorg; run tests/run-x11-xorg-e2e.sh"]
 fn xorg_two_heads_a_borderless_window_naming_the_second_moves_onto_it() {
@@ -1513,6 +1516,37 @@ fn xorg_two_heads_a_borderless_window_naming_the_second_moves_onto_it() {
         },
         |session| format!("; origin {:?}", session.peer.window_origin(xid)),
     );
+    if session.has_window_manager() {
+        session.pump_until_reporting(
+            "the window manager to fill the second head",
+            |session| {
+                let state = session.shell.window_state(window).expect("state");
+                state.mode_request_honoured()
+                    && state.size() == Some(second.size())
+                    && session.peer.window_origin(xid)
+                        == Some((
+                            i16::try_from(second.bounds.x).expect("on screen"),
+                            i16::try_from(second.bounds.y).expect("on screen"),
+                        ))
+            },
+            |session| {
+                let state = session.shell.window_state(window).expect("state");
+                format!(
+                    "; mode {:?}, size {:?}, origin {:?}",
+                    state.effective_mode(),
+                    state.size(),
+                    session.peer.window_origin(xid)
+                )
+            },
+        );
+    } else {
+        let state = session.shell.window_state(window).expect("state");
+        assert!(
+            !state.mode_request_honoured(),
+            "nothing is running that could have honoured it"
+        );
+        assert_eq!(state.effective_mode(), Some(DisplayMode::Windowed));
+    }
 }
 
 // ---------------------------------------------------------------------------
