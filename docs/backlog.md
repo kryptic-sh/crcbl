@@ -26318,13 +26318,22 @@ dispatches CI, and commits the artifact's `dxil/` and `spirv/manifest.txt`.
 
 **Coverage the register change left, stated plainly.** `crcbl_dx12`'s
 `renderer_registers` gate builds `ForwardRenderer` on three device shapes,
-`SpriteRenderer`, `UiRenderer` and `Grid` — 122 distinct pipeline stages. It
-does not build the pipelines made lazily or behind other configuration:
-`debug_draw`, `probe_capture` and `probe_octahedral`, `probe_gather`, `skinning`
-and `wind`. Their containers are still held to their own SPIR-V's bindings by
-`dxil`'s `every_container_declares_each_resource_at_its_binding_and_set`, but
-their layouts are not compared with anything off a device. Adding each is a
-constructor call in that test.
+`SpriteRenderer`, `UiRenderer` and `Grid`, and on each shape also the pipelines
+the renderer makes only on demand, each through its public call: the probe
+gather (`with_scene` with `ProbeUpdate::EveryFrame`), `probe_capture` and
+`probe_octahedral` (`capture_probe_visibility` over a placed cube), `debug_draw`
+(a segment and `begin_frame` with `r_debug_draw` on, which is why `crcbl-dx12`
+takes `crcbl-console` as a dev-dependency) and `skinning` (`Skinning::new` on
+the renderer's vertex pool). Its vacuity check names each by pipeline label. The
+grass pipelines, `grass_gen`'s wind bindings included, were already covered:
+`ForwardRenderer::new` builds them. **Still not covered: `wind.slang`'s compute
+pipeline.** `crcbl-render` never builds it; its only caller is
+`crates/crcbl/tests/render_e2e/wind.rs`, which defines its own layout, so that
+layout is compared with the container only by `crcbl_dx12::pipeline` on a D3D12
+device. Its container is still held to its SPIR-V's bindings by `dxil`'s
+`every_container_declares_each_resource_at_its_binding_and_set`. Covering it off
+a device means moving that layout somewhere both crates can reach, which waits
+for a renderer-side wind pass to exist.
 
 ## DEFERRED — dx12 mesh shading: WARP needs a pixel shader, one AMD driver culls everything
 

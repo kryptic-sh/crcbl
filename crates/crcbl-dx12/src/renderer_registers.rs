@@ -105,6 +105,105 @@ fn open(
     (device, queue)
 }
 
+/// The label [`on_demand`] gives the skinning pass it builds, which names its
+/// pipeline.
+const SKINNING_LABEL: &str = "renderer registers skinning";
+
+/// Every pipeline label that only [`on_demand`] makes the renderer build, so the
+/// test can tell a pipeline that stopped being built from one that agreed.
+///
+/// `forward probes` is the label `crcbl_render::ForwardRenderer` gives its
+/// irradiance-probe gather.
+const ON_DEMAND_LABELS: [&str; 5] = [
+    "forward probes",
+    "probe capture",
+    "probe octahedral",
+    "debug draw",
+    SKINNING_LABEL,
+];
+
+/// A forward renderer and a skinning pass that, between them, have built the
+/// pipelines below, which `crcbl-render` makes only once a caller asks for
+/// them — each through the call a game makes:
+///
+/// - the probe gather, built by `with_scene` for a volume that asks for
+///   [`ProbeUpdate::EveryFrame`](crcbl_render::ProbeUpdate::EveryFrame);
+/// - the probe capture and octahedral resolve, built by
+///   `capture_probe_visibility` over a placed instance;
+/// - the debug-draw pipeline, built by the first `begin_frame` that has a
+///   segment while `r_debug_draw` is on, a switch this function leaves to its
+///   caller;
+/// - the skinning dispatch, built by `Skinning::new` against the renderer's
+///   own vertex pool.
+fn on_demand(
+    device: &dyn crcbl_hal::Device,
+    queue: crcbl_hal::QueueHandle,
+    target: Format,
+    shape: &str,
+) -> (crcbl_render::ForwardRenderer, crcbl_render::Skinning) {
+    use crcbl_render::scene::{DEMO_CUBE, DEMO_UNTINTED};
+    use crcbl_shaders::probe::{GpuProbe, ProbeSteps, ProbeVolume};
+
+    let mut scene = crcbl_render::scene::demo();
+    scene.capacities.probes = 1;
+    scene.probes = crcbl_render::ProbeGrid {
+        volume: ProbeVolume {
+            origin: [0.0; 3],
+            inv_spacing: [1.0; 3],
+            counts: [1, 1, 1],
+            levels: 1,
+            steps: ProbeSteps::default(),
+        },
+        probes: vec![GpuProbe::ZERO],
+        update: crcbl_render::ProbeUpdate::EveryFrame,
+    };
+    let mut forward = crcbl_render::ForwardRenderer::with_scene(device, queue, target, &scene)
+        .unwrap_or_else(|error| panic!("{shape}: a probe-updating renderer builds: {error}"));
+
+    // A capture needs something placed for its maps to be about.
+    forward
+        .add_instance(&crcbl_render::InstanceDesc {
+            mesh: DEMO_CUBE,
+            material: DEMO_UNTINTED,
+            transform: Default::default(),
+        })
+        .unwrap_or_else(|error| panic!("{shape}: the cube is placed: {error}"));
+    forward
+        .capture_probe_visibility(device, queue)
+        .unwrap_or_else(|error| panic!("{shape}: the probe capture runs: {error}"));
+
+    forward
+        .debug_draw()
+        .sphere(Default::default(), 1.0, [1.0; 4]);
+    forward
+        .begin_frame(
+            device,
+            &crcbl_render::Camera::default(),
+            &crcbl_render::DirectionalLight::default(),
+            (64, 48),
+        )
+        .unwrap_or_else(|error| panic!("{shape}: a debug-drawing frame begins: {error}"));
+
+    let skinned = forward
+        .reserve_skinned(DEMO_CUBE)
+        .unwrap_or_else(|error| panic!("{shape}: the cube is reserved for skinning: {error}"));
+    let skinning = crcbl_render::Skinning::new(
+        device,
+        &crcbl_render::SkinningDesc {
+            label: Some(SKINNING_LABEL),
+            frames: crcbl_render::forward::FRAMES_IN_FLIGHT,
+            ranges: 1,
+            joints: 1,
+            bindings: skinned.vertex_count(),
+            vertices: forward.vertex_buffer(),
+            attribute_base: forward.attribute_base(),
+        },
+    )
+    .unwrap_or_else(|error| panic!("{shape}: the skinning pass builds: {error}"));
+    forward.release_skinned(skinned);
+    (forward, skinning)
+}
+
 /// **The renderer's layouts agree with every container they are used with, on
 /// every geometry path.**
 ///
@@ -114,6 +213,10 @@ fn open(
 /// that matters most — its pipeline takes its task and mesh stages from
 /// `mesh_cluster.slang` and its fragment stage from `mesh.slang`, and one root
 /// signature serves all three.
+///
+/// The pipelines the renderer builds only on demand — see [`on_demand`] — are
+/// built on every shape too, so their layouts are held to their containers here
+/// rather than first on a device.
 #[test]
 fn every_renderer_layout_agrees_with_every_container_it_is_used_with() {
     let target = Format::Rgba8UnormSrgb;
@@ -125,6 +228,11 @@ fn every_renderer_layout_agrees_with_every_container_it_is_used_with() {
     ];
     let mut failures = Vec::new();
     let mut checked: Vec<(String, String)> = Vec::new();
+    // Process-global, and nothing else in this crate's tests reads it; put back
+    // below.
+    crcbl_render::debug_draw::r_debug_draw
+        .set(&crcbl_console::Value::Bool(true))
+        .expect("`r_debug_draw` is a writable bool");
     for (shape, features) in shapes {
         let recorder = Recorder::new();
         let (device, queue) = open(&recorder, features);
@@ -137,6 +245,7 @@ fn every_renderer_layout_agrees_with_every_container_it_is_used_with() {
             .unwrap_or_else(|error| panic!("{shape}: the UI renderer builds: {error}"));
         let grid = crcbl_render::grid::Grid::new(device.as_ref(), 2, target, Format::D32Float)
             .unwrap_or_else(|error| panic!("{shape}: the grid builds: {error}"));
+        let (configured, skinning) = on_demand(device.as_ref(), queue, target, shape);
 
         let pipelines = recorder.pipelines_created();
         assert!(!pipelines.is_empty(), "{shape}: no pipeline was recorded");
@@ -159,8 +268,11 @@ fn every_renderer_layout_agrees_with_every_container_it_is_used_with() {
                 ));
             }
         }
-        drop((forward, sprites, ui, grid));
+        drop((forward, sprites, ui, grid, configured, skinning));
     }
+    crcbl_render::debug_draw::r_debug_draw
+        .set(&crcbl_console::Value::Bool(false))
+        .expect("`r_debug_draw` is a writable bool");
 
     // The case this test exists for has to be among what it checked, or a
     // renderer that stopped building its mesh pipeline would pass it vacuously.
@@ -175,6 +287,15 @@ fn every_renderer_layout_agrees_with_every_container_it_is_used_with() {
             checked.iter().any(|(_, checked)| checked == entry_point),
             "no pipeline ran `{entry_point}`, so the geometry paths this test is about went \
              unchecked"
+        );
+    }
+    // Likewise each pipeline built only on demand, or a renderer that stopped
+    // building one on the call `on_demand` makes would pass this vacuously.
+    for label in ON_DEMAND_LABELS {
+        assert!(
+            checked.iter().any(|(checked, _)| checked == label),
+            "no pipeline labelled `{label}` was checked, so a pipeline the renderer \
+             builds only on demand went unchecked"
         );
     }
     assert!(

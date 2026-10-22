@@ -745,6 +745,7 @@ dependencies = [
 name = "crcbl-dx12"
 version = "0.8.1"
 dependencies = [
+ "crcbl-console",
  "crcbl-core",
  "crcbl-hal",
  "crcbl-render",

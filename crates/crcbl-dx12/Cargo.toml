@@ -125,6 +125,11 @@ crcbl-shaders = { path = "../crcbl-shaders" }
 # held to the containers it serves — see `src/renderer_registers.rs`. Test-only
 # and workspace-internal, like `crcbl-shaders` above.
 crcbl-render = { path = "../crcbl-render" }
+# The console switch `crcbl_render::debug_draw::r_debug_draw` is set through,
+# so the same test can make the renderer build its debug-draw pipeline — which
+# it does only once the switch is on and a segment was appended. Test-only and
+# workspace-internal; `crcbl-render` already depends on it.
+crcbl-console = { path = "../crcbl-console" }
 
 [lints]
 workspace = true
