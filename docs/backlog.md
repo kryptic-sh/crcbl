@@ -11,6 +11,68 @@ day with a Wayland event-delivery fix and no API change, so EW should take
 0.8.1. pikr and lyr were told in session; no EW session was running to tell.
 Delete this once EW knows.
 
+## System audio control, asked by lyr for the owner (2026-10-22)
+
+**Not started; waiting on the owner's go-ahead, since the request came through
+lyr's session.** A seam any crcbl app can use to control the system mixer on
+Linux, Windows and macOS: volume, mute, devices, streams. Not playback, which is
+`crcbl-audio` and cpal. lyr moves its audio onto it and drops its own
+per-platform sources (`lyr-sources/src/audio/`: `pactl.rs`, `windows.rs` and
+`win32.rs`, `macos.rs` and `coreaudio.rs`, `level.rs`; model types
+`lyr_core::audio` and `lyr_core::audio_menu`), which are the requirements
+reference and may be taken.
+
+**What it must do, from lyr:**
+
+1. The default output and input: volume as a percent (Linux allows up to 150),
+   muted, name and description, active port and form factor, Bluetooth or not.
+2. Every output and input device (no monitors), and every playing and recording
+   stream, named by its application, with the device it is on.
+3. Settings: cards' profiles and devices' ports where more than one is usable.
+   Linux has these; Windows and macOS report none.
+4. Actions: mute toggle, a relative step (±N %), an absolute level, set the
+   default device, move a stream, choose a card profile or a port. Each on the
+   default device, a named device or a stream.
+5. Change notification with no polling, so lyr's bar idles at zero, and a way to
+   follow device changes alone, without stream churn, which lyr follows only
+   while its menu is open.
+6. A clear "not supported here" for what a platform lacks (Windows has no public
+   API to move a stream).
+
+**Plan, proposed:**
+
+- **A new crate, `crcbl-mixer`**, beside `crcbl-audio` rather than inside it:
+  playback and control share no code, and a bar that controls volume should not
+  link cpal. A snapshot (`MixerState`: defaults, devices, streams, cards), one
+  action enum applied to a target (default, device id, stream id), an error with
+  an `Unsupported` arm per action, and change events with an interest level
+  (devices, or devices and streams).
+- **Linux: the PulseAudio native protocol through `libpulse`, opened with
+  `dlopen`** like `crcbl-shell`'s X11 and Wayland libraries, so no new crate
+  dependency. It speaks to PulseAudio and to PipeWire's `pipewire-pulse`, which
+  is what every desktop PipeWire install runs, and `pa_context_subscribe`'s
+  facility mask is the devices-only interest level directly. Declined: `pactl`
+  (a process and a text parse per query, and polling for changes), and native
+  PipeWire first (its default-device and profile state lives in metadata and the
+  session manager, which is more code for no reach a desktop lacks). The event
+  loop runs on its own thread (`pa_threaded_mainloop`) and hands events to the
+  app through a channel and a waker, so the app's loop idles.
+- **Windows: WASAPI through the `windows` crate**, already a dependency of
+  `crcbl-shell` and `crcbl-dx12`: `IMMDeviceEnumerator`, `IAudioEndpointVolume`,
+  `IAudioSessionManager2` for streams, `IMMNotificationClient` and the volume
+  callbacks for changes. Setting the default needs `IPolicyConfig`, which is
+  undocumented; whether to use it as lyr does is part of the owner's call.
+- **macOS: CoreAudio's `AudioObject` C API**, declared by hand (it is plain C),
+  with property listeners for changes. Streams and moving them are `Unsupported`
+  there, as lyr has them.
+- **Verification:** Linux on the office laptop (PipeWire 1.6.8, a USB headset,
+  the Intel card's HDMI and speaker sinks) against `pactl`'s own answers, and in
+  CI against a PulseAudio null sink; Windows and macOS CI build and unit-test
+  the model and the level maths, and their runtime is checked by lyr on those
+  machines. lyr tests every slice through a local `[patch]` before release.
+- **Order:** the model and the Linux backend first (this machine), then Windows,
+  then macOS, each a slice of its own.
+
 ## NVIDIA's Wayland WSI crashes with a device per window (2026-10-22)
 
 `crcbl_app::present::SharedGpu` is the way round it and is in `[Unreleased]`:
