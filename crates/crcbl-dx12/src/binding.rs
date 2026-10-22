@@ -1294,6 +1294,70 @@ mod tests {
         }
     }
 
+    /// **The root signature and the registers checked against each container
+    /// place every binding alike.** The root signature is built from the
+    /// record's range plans (`register_bindings`), the check at pipeline
+    /// creation from its stored entries (`registers::place_set`); were their
+    /// classes or declared counts to drift apart, a pipeline could be checked
+    /// against registers its root signature does not declare. Every kind of
+    /// binding is here: a root descriptor, a table CBV, read-only and writable
+    /// storage, an array, a sampler and an unbounded range.
+    #[test]
+    fn the_root_signature_and_the_checked_registers_place_every_binding_alike() {
+        let image = BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
+        };
+        let entries = [
+            entry(0, BindingKind::UniformBuffer { dynamic: true }),
+            entry(1, BindingKind::UniformBuffer { dynamic: false }),
+            entry(
+                2,
+                BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                    stride: 4,
+                },
+            ),
+            entry(
+                3,
+                BindingKind::StorageBuffer {
+                    read_only: false,
+                    dynamic: false,
+                    stride: 16,
+                },
+            ),
+            BindGroupLayoutEntry {
+                count: 3,
+                ..entry(4, image)
+            },
+            entry(7, BindingKind::Sampler { comparison: false }),
+            BindGroupLayoutEntry {
+                flags: BindingFlags::VARIABLE_COUNT | BindingFlags::PARTIALLY_BOUND,
+                count: 4096,
+                ..entry(8, image)
+            },
+        ];
+        let record = plan(&entries).expect("a layout of every kind of binding");
+        let by_binding = |mut placed: Vec<root::Binding>| {
+            placed.sort_by_key(|binding| binding.binding);
+            placed
+        };
+        let tables = by_binding(register_bindings(&record));
+        let checked = by_binding(
+            crate::registers::place_set(&record.entries, 0, &caps().limits)
+                .into_iter()
+                .map(|placed| root::Binding {
+                    binding: placed.binding,
+                    class: placed.class,
+                    declared: placed.declared,
+                })
+                .collect(),
+        );
+        assert_eq!(tables.len(), entries.len(), "every binding is placed");
+        assert_eq!(tables, checked);
+    }
+
     /// An unbounded range is `NumDescriptors = u32::MAX` in the root signature
     /// and contributes nothing to the fixed size of a block.
     #[test]
