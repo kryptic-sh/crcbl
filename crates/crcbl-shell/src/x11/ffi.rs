@@ -1312,6 +1312,9 @@ pub mod value {
     pub const NONE: u32 = 0;
     /// `XCB_CURRENT_TIME`.
     pub const CURRENT_TIME: u32 = 0;
+    /// `XCB_INPUT_FOCUS_POINTER_ROOT`: where focus goes when its window
+    /// unmaps.
+    pub const FOCUS_POINTER_ROOT: u8 = 1;
     /// `XCB_GRAB_MODE_ASYNC`.
     pub const GRAB_MODE_ASYNC: u8 = 1;
     /// `XCB_GRAB_STATUS_SUCCESS`.
@@ -1626,6 +1629,9 @@ mod prototype {
     /// `xcb_void_cookie_t xcb_ungrab_pointer(xcb_connection_t *,
     /// xcb_timestamp_t time)`; `xcb_ungrab_keyboard` has the same shape.
     pub type UngrabPointer = unsafe extern "C" fn(*mut Connection, u32) -> Cookie;
+    /// `xcb_void_cookie_t xcb_set_input_focus(xcb_connection_t *,
+    /// uint8_t revert_to, xcb_window_t focus, xcb_timestamp_t time)`
+    pub type SetInputFocus = unsafe extern "C" fn(*mut Connection, u8, u32, u32) -> Cookie;
     /// `xcb_grab_keyboard_cookie_t xcb_grab_keyboard(xcb_connection_t *,
     /// uint8_t owner_events, xcb_window_t grab_window, xcb_timestamp_t time,
     /// uint8_t pointer_mode, uint8_t keyboard_mode)`
@@ -1912,6 +1918,7 @@ pub struct Lib {
     pub grab_pointer_reply: prototype::GrabPointerReplyFn,
     pub ungrab_pointer: prototype::UngrabPointer,
     pub grab_keyboard: prototype::GrabKeyboard,
+    pub set_input_focus: prototype::SetInputFocus,
     pub grab_keyboard_reply: prototype::GrabKeyboardReplyFn,
     pub ungrab_keyboard: prototype::UngrabPointer,
     pub warp_pointer: prototype::WarpPointer,
@@ -2274,6 +2281,7 @@ fn load_uncached() -> Result<Lib, String> {
         grab_pointer_reply: symbol!("xcb_grab_pointer_reply", prototype::GrabPointerReplyFn),
         ungrab_pointer: symbol!("xcb_ungrab_pointer", prototype::UngrabPointer),
         grab_keyboard: symbol!("xcb_grab_keyboard", prototype::GrabKeyboard),
+        set_input_focus: symbol!("xcb_set_input_focus", prototype::SetInputFocus),
         grab_keyboard_reply: symbol!("xcb_grab_keyboard_reply", prototype::GrabKeyboardReplyFn),
         ungrab_keyboard: symbol!("xcb_ungrab_keyboard", prototype::UngrabPointer),
         warp_pointer: symbol!("xcb_warp_pointer", prototype::WarpPointer),

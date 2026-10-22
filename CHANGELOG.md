@@ -15,6 +15,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Panels on X11.** `WindowRole::Panel` and `Shell::set_panel` now work on the
+  X11 backend (`ShellCaps::PANEL`): a panel is a dock window placed on its
+  monitor's edges as layer-shell places one, above or below other windows by its
+  layer, and with `Reserve::OwnExtent` it reserves its edge through
+  `_NET_WM_STRUT_PARTIAL`, which a window manager honours
+  (`ShellCaps::PANEL_RESERVE` is set when one is running). Panels are placed
+  again when the monitors or the work area change, and an `Exclusive` panel
+  takes the keyboard when it maps.
 - **Popups on X11.** `WindowRole::Popup` and `Shell::reposition_popup` now work
   on the X11 backend (`ShellCaps::POPUP` and `POPUP_REPOSITION`): a popup is an
   override-redirect window placed against its anchor, flipped or slid to stay on

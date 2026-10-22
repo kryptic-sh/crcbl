@@ -12,7 +12,7 @@ use super::{
     ShellEvent, SizeConstraints, TRANSFER_POLL, WindowConfiguration, WindowDesc, WindowId,
     WindowState, X11Shell, XWindow, ffi,
 };
-use crate::{LogicalRect, LogicalSize, PopupInput, WindowRole};
+use crate::{LogicalRect, LogicalSize, PanelDesc, PopupInput, WindowRole};
 
 /// Everything a window wants to hear about.
 ///
@@ -296,9 +296,14 @@ impl Shell for X11Shell {
                 "a passthrough popup without SHAPE 1.1 input shapes",
             ));
         }
-        let rect = match popup {
-            Some(popup) => self.popup_rect_for(&popup, desc.size)?,
-            None => {
+        let panel = match desc.role {
+            WindowRole::Panel(panel) => Some(super::panel::Panel::new(&panel, desc.size)),
+            _ => None,
+        };
+        let rect = match (popup, &panel) {
+            (Some(popup), _) => self.popup_rect_for(&popup, desc.size)?,
+            (None, Some(panel)) => self.panel_rect_for(panel)?,
+            (None, None) => {
                 let size = desc.size.to_physical(self.scale_factor);
                 PhysicalRect::new(0, 0, size.width, size.height)
             }
@@ -379,6 +384,7 @@ impl Shell for X11Shell {
             visible: desc.visible,
             transparent: desc.transparent,
             popup,
+            panel: panel.clone(),
             mapped: false,
             map_requested: false,
             close_pending: false,
@@ -392,6 +398,9 @@ impl Shell for X11Shell {
             if popup.input == PopupInput::Passthrough {
                 self.conn.apply_input_shape(xid, Some(&[]));
             }
+        } else if let Some(panel) = &panel {
+            self.write_panel_properties(xid, panel, None, rect, false);
+            self.watch_work_area();
         } else {
             self.write_size_hints(&window);
         }
@@ -586,6 +595,22 @@ impl Shell for X11Shell {
         size: LogicalSize,
     ) -> Result<(), ShellError> {
         self.move_popup(popup, anchor, size)
+    }
+
+    /// Gives a panel a new size and descriptor in place; see
+    /// [`panel`](super::panel).
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle, and what
+    /// [`crate::role::check_set_panel`] refuses.
+    fn set_panel(
+        &mut self,
+        window: WindowId,
+        size: LogicalSize,
+        panel: &PanelDesc<'_>,
+    ) -> Result<(), ShellError> {
+        self.reconfigure_panel(window, size, panel)
     }
 
     fn monitors(&self) -> &[MonitorInfo] {

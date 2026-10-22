@@ -501,6 +501,82 @@ pub(crate) fn popup_rect(
     PhysicalRect::new(narrow(x), narrow(y), size.width, size.height)
 }
 
+#[cfg(any(target_os = "windows", desktop_unix, test))]
+/// Space around a panel, in physical pixels: [`Margins`](crate::Margins)
+/// scaled to the monitor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Insets {
+    /// From the top edge.
+    pub top: i32,
+    /// From the right edge.
+    pub right: i32,
+    /// From the bottom edge.
+    pub bottom: i32,
+    /// From the left edge.
+    pub left: i32,
+}
+
+#[cfg(any(target_os = "windows", desktop_unix, test))]
+/// Where a panel of `size` goes in `area`: `insets` away from each edge it is
+/// anchored to, stretched between two opposite anchored edges, and centred on
+/// an axis anchored to neither. That is `wlr-layer-shell`'s placement, which
+/// [`PanelDesc`](crate::PanelDesc) is written in.
+#[must_use]
+pub(crate) fn panel_rect(
+    area: PhysicalRect,
+    anchor: PanelAnchor,
+    size: PhysicalSize,
+    insets: Insets,
+) -> PhysicalRect {
+    let (x, width) = place_on_axis(
+        (area.x, area.width),
+        (
+            anchor.contains(PanelAnchor::LEFT),
+            anchor.contains(PanelAnchor::RIGHT),
+        ),
+        (insets.left, insets.right),
+        size.width,
+    );
+    let (y, height) = place_on_axis(
+        (area.y, area.height),
+        (
+            anchor.contains(PanelAnchor::TOP),
+            anchor.contains(PanelAnchor::BOTTOM),
+        ),
+        (insets.top, insets.bottom),
+        size.height,
+    );
+    PhysicalRect::new(x, y, width, height)
+}
+
+/// One axis of [`panel_rect`]: where a panel of `length` starts along an
+/// area's `(start, length)`, and how long it is, given which ends it is
+/// anchored to and its insets from them.
+#[cfg(any(target_os = "windows", desktop_unix, test))]
+fn place_on_axis(
+    (area_start, area_length): (i32, u32),
+    (at_start, at_end): (bool, bool),
+    (inset_start, inset_end): (i32, i32),
+    length: u32,
+) -> (i32, u32) {
+    let area_length = i64::from(area_length);
+    let length = i64::from(length);
+    let (offset, length) = match (at_start, at_end) {
+        (true, true) => (
+            i64::from(inset_start),
+            (area_length - i64::from(inset_start) - i64::from(inset_end)).max(1),
+        ),
+        (true, false) => (i64::from(inset_start), length),
+        (false, true) => (area_length - i64::from(inset_end) - length, length),
+        (false, false) => ((area_length - length) / 2, length),
+    };
+    let start = i64::from(area_start) + offset;
+    (
+        i32::try_from(start).unwrap_or(if start < 0 { i32::MIN } else { i32::MAX }),
+        u32::try_from(length).unwrap_or(u32::MAX),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -547,6 +623,49 @@ mod tests {
             super::popup_rect(button, tall, PopupPlacement::Below, area).y,
             130,
             "fits neither side, so it stays on its own"
+        );
+    }
+
+    #[test]
+    fn a_panel_is_placed_as_layer_shell_places_one() {
+        let area = PhysicalRect::new(100, 40, 1920, 1040);
+        let bar = PhysicalSize::new(0, 30);
+        let insets = super::Insets {
+            top: 4,
+            right: 8,
+            bottom: 12,
+            left: 16,
+        };
+        let across_the_top = PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT;
+        assert_eq!(
+            super::panel_rect(area, across_the_top, bar, super::Insets::default()),
+            PhysicalRect::new(100, 40, 1920, 30),
+            "stretched between the sides, at its own height"
+        );
+        assert_eq!(
+            super::panel_rect(area, across_the_top, bar, insets),
+            PhysicalRect::new(116, 44, 1920 - 16 - 8, 30),
+        );
+        let dock = PhysicalSize::new(64, 500);
+        assert_eq!(
+            super::panel_rect(area, PanelAnchor::RIGHT, dock, insets),
+            PhysicalRect::new(100 + 1920 - 8 - 64, 40 + (1040 - 500) / 2, 64, 500),
+            "held off the right edge, centred down it"
+        );
+        assert_eq!(
+            super::panel_rect(area, PanelAnchor::BOTTOM | PanelAnchor::LEFT, dock, insets),
+            PhysicalRect::new(116, 40 + 1040 - 12 - 500, 64, 500),
+            "in the corner"
+        );
+        let launcher = PhysicalSize::new(600, 400);
+        assert_eq!(
+            super::panel_rect(area, PanelAnchor::empty(), launcher, insets),
+            PhysicalRect::new(100 + (1920 - 600) / 2, 40 + (1040 - 400) / 2, 600, 400),
+            "centred, and an unanchored panel's insets do nothing"
+        );
+        assert_eq!(
+            super::panel_rect(area, PanelAnchor::all(), launcher, insets),
+            PhysicalRect::new(116, 44, 1920 - 24, 1040 - 16),
         );
     }
 

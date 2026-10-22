@@ -434,6 +434,12 @@ impl X11Shell {
         if event.atom == self.conn.atoms.crcbl_timestamp {
             self.timestamp_probe_seen = true;
         }
+        // The window manager moved the work area: another panel reserved or
+        // gave back an edge. Selected on the root once a panel exists.
+        if event.window == self.conn.root && event.atom == self.conn.atoms.net_workarea {
+            self.handle_monitors_changed();
+            return;
+        }
 
         // Not a selection at all: the window manager rewriting `_NET_WM_STATE`
         // is how a fullscreen request is *answered*, and it arrives here

@@ -705,7 +705,18 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    surface, so its refusal stays.
 3. **Refused today, to build:** S14 accessibility on AppKit (`accesskit_macos`),
    M (Wayland and X11 are built, through `accesskit_unix`; see S14 below); X11
-   panels (`_NET_WM_WINDOW_TYPE_DOCK`, `_NET_WM_STRUT_PARTIAL`), M. X11 popups
+   panels are built too (2026-10-23, `x11::panel`): `_NET_WM_WINDOW_TYPE_DOCK`
+   windows placed by `role::panel_rect`, in their layer by `_NET_WM_STATE_ABOVE`
+   or `_BELOW`, reserving with `_NET_WM_STRUT_PARTIAL` (so `PANEL_RESERVE`
+   follows the window manager), placed again when RandR or the work area
+   changes, an `Exclusive` one given the focus on map. Three `x11_e2e` tests
+   cover the bar, its reservation and a non-reserving panel moving with the work
+   area, `set_panel`, and the keyboard, each failing with its behaviour removed,
+   on Xvfb with and without openbox. **Not done:** a strut is measured from the
+   root's edges, so a panel on an inner monitor edge reserves nothing; a
+   reserving panel is placed on the whole monitor, so two on one edge overlap;
+   `PANEL_EXCLUSIVE_KEYBOARD` stays clear and no `FocusRefused` is sent, since
+   X11 lets the user click focus away and gives no refusal to report. X11 popups
    are built (2026-10-23, `x11::popup`): override-redirect windows placed by
    `role::popup_rect`, as Win32's are; a passthrough popup has an empty input
    shape (and is refused without SHAPE 1.1); a grabbing one grabs the pointer
@@ -2665,7 +2676,7 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   | --------------------------------------------- | ------------------------------- | ------------------------------------------------- | ----------------------------- |
   | `request_frame` / `FrameReady`                | CI, laptop                      | CI                                                | n/a                           |
   | Presenter frame gating                        | CI, laptop (sandbox)            | CI (no frame callback: answered at the next pump) | laptop                        |
-  | `set_panel` in place                          | CI, laptop; lyr on Hyprland     | refused (no X11 panels)                           | n/a                           |
+  | `set_panel` in place                          | CI, laptop; lyr on Hyprland     | CI test, laptop (Xvfb, openbox)                   | n/a                           |
   | `set_input_region`                            | CI, laptop                      | CI                                                | n/a                           |
   | Cursor shapes                                 | CI, laptop                      | CI (libxcb-cursor)                                | n/a                           |
   | Escape dismisses a `Grab` popup               | CI, laptop                      | CI test, laptop (Xvfb, openbox)                   | n/a                           |

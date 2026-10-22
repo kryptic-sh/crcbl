@@ -697,6 +697,8 @@ struct XWindow {
     /// What it was created as when it is a [`popup`]: its parent, the
     /// anchor it was last placed against, and its input.
     popup: Option<crate::PopupDesc>,
+    /// What it was created as when it is a [`panel`].
+    panel: Option<panel::Panel>,
     /// Whether [`WindowDesc::accept_drops`] was set.
     ///
     /// Recorded as well as advertised. `XdndAware` is a *window* property that
@@ -771,6 +773,9 @@ pub struct X11Shell {
     caps: ShellCaps,
     /// Whether a window manager was running at startup.
     has_window_manager: bool,
+    /// Whether `PropertyChange` is selected on the root, which the first
+    /// panel does; see [`panel`].
+    watching_root: bool,
     /// Whether the last drain stopped at its per-pump cap with libxcb's own
     /// event queue possibly still holding decoded events.
     ///
@@ -957,6 +962,7 @@ impl X11Shell {
             time: TimeBase::now(),
             caps: ShellCaps::empty(),
             has_window_manager,
+            watching_root: false,
             undrained_events: false,
             wake: None,
             frames: crate::frame::FrameRequests::default(),
@@ -1010,6 +1016,10 @@ impl X11Shell {
         // Override-redirect windows this backend places itself, which need no
         // window manager; see [`popup`].
         caps.insert(ShellCaps::POPUP | ShellCaps::POPUP_REPOSITION);
+        // Dock windows this backend places itself; only a window manager
+        // reads a strut, so only one can reserve an edge. See [`panel`].
+        caps.insert(ShellCaps::PANEL);
+        caps.set(ShellCaps::PANEL_RESERVE, self.has_window_manager);
 
         // Both of these need a window manager, and a window manager is a
         // separate program that may simply not be running — the finding this
@@ -1158,6 +1168,7 @@ mod connect;
 mod cursor;
 mod input;
 mod monitors;
+mod panel;
 mod popup;
 mod shell;
 mod window;

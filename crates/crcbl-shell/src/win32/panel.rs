@@ -5,7 +5,7 @@
 //! | field | Win32 |
 //! | --- | --- |
 //! | `layer` | `WS_EX_TOPMOST` for `Top` and `Overlay`, which share the one topmost band; the bottom of the z-order for `Bottom` and `Background`, which is above the desktop and no lower |
-//! | `anchor`, `margins`, the size | a rectangle on the monitor, from [`geometry::panel_rect`] |
+//! | `anchor`, `margins`, the size | a rectangle on the monitor, from [`role::panel_rect`](crate::role::panel_rect) |
 //! | `reserve` | `None` places the panel inside the monitor's work area, clear of the taskbar and every appbar; `IgnoreOthers` places it on the whole monitor; `OwnExtent` makes it an appbar — see below |
 //! | `keyboard` | `None` is `WS_EX_NOACTIVATE`, and the panel is shown without activating, so clicking and hovering it leave the keyboard where it was. `OnDemand` activates on a click. `Exclusive` takes the foreground when shown, with [`FocusRefused`](crate::ShellEvent::FocusRefused) when the system refuses it; the user can click it away, so [`PANEL_EXCLUSIVE_KEYBOARD`](crate::ShellCaps::PANEL_EXCLUSIVE_KEYBOARD) is clear |
 //! | `monitor` | the one asked for, else the one under the pointer |
@@ -53,9 +53,10 @@ use crate::{
 };
 
 use super::ffi::{self, AppBarData, Handle, Point, appbar, msg, style, value};
-use super::geometry::{self, Insets};
+use super::geometry;
 use super::shell::Win32Shell;
 use super::window::{Created, class_name};
+use crate::role::Insets;
 
 /// What a panel was created with, kept so it can be placed again.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,7 +140,7 @@ impl Panel {
             Reserve::None | Reserve::OwnExtent => monitor.work_area,
         };
         let scale = monitor.scale_factor;
-        geometry::panel_rect(
+        crate::role::panel_rect(
             area,
             self.anchor,
             self.size.to_physical(scale),
@@ -468,7 +469,7 @@ impl Win32Shell {
             data.rc = geometry::with_depth(data.rc, edge, depth);
             ffi::SHAppBarMessage(appbar::SET_POS, &raw mut data);
         }
-        let rect = geometry::panel_rect(
+        let rect = crate::role::panel_rect(
             geometry::desktop_rect(data.rc),
             panel.anchor,
             panel.size.to_physical(scale),

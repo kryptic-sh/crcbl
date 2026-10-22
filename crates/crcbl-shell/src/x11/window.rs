@@ -188,28 +188,12 @@ impl X11Shell {
     /// it because the two answer different questions.
     pub(super) fn apply_fullscreen(&self, window: &XWindow, fullscreen: bool) {
         if window.map_requested {
-            let message = ffi::ClientMessageEvent {
-                response_type: ffi::event::CLIENT_MESSAGE,
-                format: 32,
-                sequence: 0,
-                window: window.id,
-                type_: self.conn.atoms.net_wm_state,
-                data: keys::net_wm_state_message(
-                    if fullscreen {
-                        WmStateAction::Add
-                    } else {
-                        WmStateAction::Remove
-                    },
-                    self.conn.atoms.net_wm_state_fullscreen,
-                    0,
-                ),
+            let action = if fullscreen {
+                WmStateAction::Add
+            } else {
+                WmStateAction::Remove
             };
-            // The message goes to the **root**, with the substructure masks the
-            // window manager selected on it — sending it to our own window
-            // delivers it to us and to nobody else.
-            /// `SubstructureNotify | SubstructureRedirect`.
-            const SUBSTRUCTURE: u32 = (1 << 19) | (1 << 20);
-            self.conn.send_event(self.conn.root, SUBSTRUCTURE, &message);
+            self.request_wm_state(window.id, action, self.conn.atoms.net_wm_state_fullscreen);
         } else if fullscreen {
             let state = [self.conn.atoms.net_wm_state_fullscreen];
             self.conn.set_property(
@@ -223,6 +207,26 @@ impl X11Shell {
             self.conn
                 .delete_property(window.id, self.conn.atoms.net_wm_state);
         }
+    }
+
+    /// Asks the window manager to add or remove one `_NET_WM_STATE` atom on
+    /// the managed window `xid`; see [`apply_fullscreen`](Self::apply_fullscreen)
+    /// for why a managed window's state is a request and not a write.
+    pub(super) fn request_wm_state(&self, xid: u32, action: WmStateAction, state: u32) {
+        let message = ffi::ClientMessageEvent {
+            response_type: ffi::event::CLIENT_MESSAGE,
+            format: 32,
+            sequence: 0,
+            window: xid,
+            type_: self.conn.atoms.net_wm_state,
+            data: keys::net_wm_state_message(action, state, 0),
+        };
+        // The message goes to the **root**, with the substructure masks the
+        // window manager selected on it — sending it to our own window
+        // delivers it to us and to nobody else.
+        /// `SubstructureNotify | SubstructureRedirect`.
+        const SUBSTRUCTURE: u32 = (1 << 19) | (1 << 20);
+        self.conn.send_event(self.conn.root, SUBSTRUCTURE, &message);
     }
 
     /// Moves a window onto a monitor, for borderless-on-a-named-display.

@@ -489,6 +489,7 @@ impl X11Shell {
             // A window's effective mode can only be read once a window manager
             // has had the chance to set it, and mapping is that chance.
             self.refresh_effective_mode(window);
+            self.focus_exclusive_panel(window);
         }
     }
 
@@ -541,7 +542,7 @@ impl X11Shell {
     /// Asks the app whether `window` may close, unless a request is already
     /// waiting for its answer: the window manager's `WM_DELETE_WINDOW`, and a
     /// grabbing popup's dismissal.
-    fn request_close(&mut self, window: WindowId) {
+    pub(super) fn request_close(&mut self, window: WindowId) {
         if let Ok(state) = self.window_mut(window) {
             if state.close_pending {
                 return;
@@ -620,17 +621,19 @@ impl X11Shell {
         });
     }
 
-    /// RandR says the monitor layout changed.
-    fn handle_monitors_changed(&mut self) {
+    /// RandR says the monitor layout changed, or the window manager rewrote
+    /// the work area.
+    pub(super) fn handle_monitors_changed(&mut self) {
         let monitors = self.enumerate_monitors();
         if monitors == self.monitors {
             // RandR is chatty: a screen-change and a CRTC-change arrive for one
             // physical event, and a consumer told twice re-queries twice.
             return;
         }
-        crate::monitor::queue_removed(&self.monitors, &monitors, &mut self.queue);
+        let removed = crate::monitor::queue_removed(&self.monitors, &monitors, &mut self.queue);
         self.monitors = monitors;
         self.queue.push_back(ShellEvent::MonitorsChanged);
+        self.place_panels(&removed);
     }
 
     /// The modifiers currently in effect.

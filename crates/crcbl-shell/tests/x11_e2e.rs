@@ -41,10 +41,10 @@ use crcbl_shell::x11_test_support::{
 };
 use crcbl_shell::{
     ButtonState, ClipboardContent, ClipboardOffer, CloseReply, CursorIcon, DisplayMode, KeyCode,
-    LogicalPoint, LogicalRect, LogicalSize, MimeType, Modifiers, PhysicalPoint, PhysicalRect,
-    PhysicalSize, PointerButton, PointerMode, PopupDesc, PopupInput, PopupPlacement, ScrollDelta,
-    Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints, SurfaceTarget,
-    WindowDesc, WindowId, WindowRole,
+    LogicalPoint, LogicalRect, LogicalSize, MimeType, Modifiers, PanelAnchor, PanelDesc,
+    PanelKeyboard, PhysicalPoint, PhysicalRect, PhysicalSize, PointerButton, PointerMode,
+    PopupDesc, PopupInput, PopupPlacement, Reserve, ScrollDelta, Shell, ShellBackend, ShellCaps,
+    ShellError, ShellEvent, SizeConstraints, SurfaceTarget, WindowDesc, WindowId, WindowRole,
 };
 
 /// X11 keycodes, which are evdev codes plus eight. Spelled out rather than
@@ -690,6 +690,15 @@ fn the_capability_set_is_x11_shaped() {
     assert!(
         caps.contains(ShellCaps::POPUP) && caps.contains(ShellCaps::POPUP_REPOSITION),
         "override-redirect windows this backend places itself, with no window manager"
+    );
+    assert!(
+        caps.contains(ShellCaps::PANEL),
+        "dock windows this backend places"
+    );
+    assert_eq!(
+        caps.contains(ShellCaps::PANEL_RESERVE),
+        session.has_window_manager(),
+        "only a window manager reads a strut"
     );
     assert!(
         !caps.contains(ShellCaps::TRANSPARENT),
@@ -4179,4 +4188,156 @@ fn a_popup_follows_a_new_anchor_and_goes_with_its_parent() {
         session.shell.window_state(calendar).is_err(),
         "the popup is gone"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Panels
+// ---------------------------------------------------------------------------
+
+/// A bar across the top of the screen: 30 high, as wide as the monitor.
+const ACROSS_THE_TOP: PanelAnchor = PanelAnchor::TOP
+    .union(PanelAnchor::LEFT)
+    .union(PanelAnchor::RIGHT);
+
+impl Session {
+    /// A panel of logical `size`, configured.
+    fn panel(&mut self, title: &str, size: LogicalSize, panel: PanelDesc<'_>) -> WindowId {
+        self.window(&WindowDesc {
+            title,
+            app_id: "sh.kryptic.crcbl.e2e",
+            size,
+            role: WindowRole::Panel(panel),
+            ..WindowDesc::default()
+        })
+    }
+
+    /// The top of the window manager's work area, from `_NET_WORKAREA`.
+    fn work_area_top(&mut self) -> Option<u32> {
+        let root = self.peer.root();
+        let bytes = self.peer.window_property(root, "_NET_WORKAREA")?;
+        let word = bytes.get(4..8)?;
+        Some(u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
+    }
+
+    /// The window's size as the app was told it.
+    fn size_of(&self, window: WindowId) -> Option<PhysicalSize> {
+        self.shell.window_state(window).ok()?.size()
+    }
+}
+
+/// **A bar is a dock window on its edge, as wide as its monitor**, and under
+/// a window manager it reserves that edge: the work area starts below it,
+/// a non-reserving panel opened after it is placed clear of it, and when
+/// the bar goes the work area comes back and that panel moves up again.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_bar_sits_on_its_edge_and_reserves_it_under_a_window_manager() {
+    let mut session = Session::open();
+    let bar = session.panel(
+        "bar",
+        LogicalSize::new(0.0, 30.0),
+        PanelDesc {
+            anchor: ACROSS_THE_TOP,
+            reserve: Reserve::OwnExtent,
+            ..PanelDesc::default()
+        },
+    );
+    let xid = session.xid(bar);
+    assert_eq!(
+        session.size_of(bar),
+        Some(PhysicalSize::new(SCREEN.width, 30))
+    );
+    session.pump_until("the bar at the top-left", |session| {
+        session.peer.window_origin(xid) == Some((0, 0))
+    });
+    let dock = session.peer.atom("_NET_WM_WINDOW_TYPE_DOCK");
+    assert_eq!(
+        session.peer.window_property(xid, "_NET_WM_WINDOW_TYPE"),
+        Some(dock.to_ne_bytes().to_vec()),
+        "a dock"
+    );
+    if !session.has_window_manager() {
+        return;
+    }
+
+    session.pump_until("the work area to start below the bar", |session| {
+        session.work_area_top() == Some(30)
+    });
+    let strip = session.panel(
+        "strip",
+        LogicalSize::new(0.0, 20.0),
+        PanelDesc {
+            anchor: ACROSS_THE_TOP,
+            ..PanelDesc::default()
+        },
+    );
+    let strip_xid = session.xid(strip);
+    session.pump_until("the strip below the bar", |session| {
+        session.peer.window_origin(strip_xid) == Some((0, 30))
+    });
+
+    session.shell.destroy_window(bar).expect("destroy the bar");
+    session.pump_until("the work area back and the strip moved up", |session| {
+        session.work_area_top() == Some(0) && session.peer.window_origin(strip_xid) == Some((0, 0))
+    });
+}
+
+/// **`set_panel` resizes a panel in place**: the same window, a new size.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_panel_is_resized_in_place() {
+    let mut session = Session::open();
+    let bar_desc = PanelDesc {
+        anchor: ACROSS_THE_TOP,
+        reserve: Reserve::IgnoreOthers,
+        ..PanelDesc::default()
+    };
+    let bar = session.panel("growing bar", LogicalSize::new(0.0, 30.0), bar_desc);
+    let xid = session.xid(bar);
+    session
+        .shell
+        .set_panel(bar, LogicalSize::new(0.0, 60.0), &bar_desc)
+        .expect("set_panel");
+    session.pump_until("the bar at its new height", |session| {
+        session.size_of(bar) == Some(PhysicalSize::new(SCREEN.width, 60))
+    });
+    assert_eq!(session.xid(bar), xid, "the same window");
+    let window = session.window(&desc("not a panel"));
+    assert!(
+        session
+            .shell
+            .set_panel(window, LogicalSize::new(0.0, 60.0), &bar_desc)
+            .is_err(),
+        "only a panel takes set_panel"
+    );
+}
+
+/// **An `Exclusive` panel takes the keyboard when it maps**, and its keys
+/// are its own: a launcher typed into the moment it opens.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn an_exclusive_panel_takes_the_keyboard_when_it_maps() {
+    let mut session = Session::open();
+    let launcher = session.panel(
+        "launcher",
+        LogicalSize::new(400.0, 300.0),
+        PanelDesc {
+            keyboard: PanelKeyboard::Exclusive,
+            ..PanelDesc::default()
+        },
+    );
+    session.pump_until("the launcher to have the keyboard", |session| {
+        session.events.iter().any(|event| {
+            matches!(event, ShellEvent::Focus { window, focused: true } if *window == launcher)
+        })
+    });
+    session.events.clear();
+    session.peer.key(keycode::A, true);
+    session.peer.key(keycode::A, false);
+    session.pump_until("the key on the launcher", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::Key { window, .. } if *window == launcher))
+    });
 }
