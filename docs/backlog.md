@@ -32902,15 +32902,9 @@ verdict on the flake — five occurrences in one evening against one clean run �
 but it is the difference between a test that can fail and a test that is not
 there.
 
-**`draw_gen_e2e`, `hal_seam_e2e`, `gltf_e2e` and the tiling suite are
-golden-free on the same measurement** and could follow the same way. Measured on
-Linux lavapipe on 2026-08-20 so the follow-up needs no new investigation: 12/12,
-19/19, 1/1 and 1/1 respectively. That would take this job from **2 suites to
-6**; for scale, Linux vk runs 11, dx12/WARP 9 and Metal 8, and this job being
-the thinnest by far is what let the `depth_probe` coverage loss go unnoticed for
-six days.
-
-The remaining three — `render_e2e`, `sprite_e2e`, `mesh_e2e` — **do** call
+`draw_gen_e2e`, `hal_seam_e2e`, `gltf_e2e` and the tiling suite, golden-free on
+the same measurement, joined it on 2026-10-22, each as its own step. The
+remaining three — `render_e2e`, `sprite_e2e`, `mesh_e2e` — **do** call
 `crcbl_golden::compare`, and this job's header warns its Mesa build differs from
 the one the references were blessed on. Those need the re-blessing question
 answered first and are a different decision.

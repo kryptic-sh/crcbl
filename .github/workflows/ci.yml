@@ -2809,9 +2809,8 @@ jobs:
       # `Tolerance`, so the "references blessed against another Mesa build" risk
       # this job's header names does not reach it. It is 13 counted-property
       # checks, and they pass on lavapipe — measured on Linux lavapipe before this
-      # step was written. `draw_gen_e2e`, `hal_seam_e2e`, `gltf_e2e` and the
-      # tiling suite are golden-free on the same measurement and could follow;
-      # they are left out of this change so that a failure here names one thing.
+      # step was written. The four steps after it are golden-free on the same
+      # measurement and follow it for the same reason.
       # **The validation gate the Linux job sets on every step is not set
       # here.** Not because this leg deserves less: the layer build on this
       # runner is not one any machine in this project can install, so whether it
@@ -2823,6 +2822,34 @@ jobs:
         env:
           CRCBL_GPU: vk
         run: crates/crcbl/tests/run-forward-e2e.sh
+      # **The other golden-free suites, one step each** so a red names which.
+      # Each reads images through `crcbl_golden`'s helpers and compares none
+      # against a reference, so the Mesa-build caveat above does not reach them
+      # either; each passed on Linux lavapipe, measured 2026-08-20. Until
+      # these, this job ran the fewest suites of any GPU leg, which is what let
+      # `depth_probe`'s loss go unnoticed. `render_e2e`, `sprite_e2e` and
+      # `mesh_e2e` do compare against references and stay out until the
+      # re-blessing question is answered (`docs/backlog.md`).
+      - name: Check draw generation on lavapipe
+        shell: bash
+        env:
+          CRCBL_GPU: vk
+        run: crates/crcbl/tests/run-draw-gen-e2e.sh
+      - name: Check the HAL seam on lavapipe
+        shell: bash
+        env:
+          CRCBL_GPU: vk
+        run: crates/crcbl/tests/run-hal-seam-e2e.sh
+      - name: Check a glTF import on lavapipe
+        shell: bash
+        env:
+          CRCBL_GPU: vk
+        run: crates/crcbl/tests/run-gltf-e2e.sh
+      - name: Check physical texture tiling on lavapipe
+        shell: bash
+        env:
+          CRCBL_GPU: vk
+        run: crates/crcbl/tests/run-tiling-e2e.sh
       # **The windowed swapchain, on Win32.** Every other step on this job
       # presents to an offscreen ring, and until `crcbl-vk` wired
       # `VK_KHR_win32_surface` a Win32 window could not be given a Vulkan
