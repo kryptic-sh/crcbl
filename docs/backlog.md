@@ -29259,10 +29259,13 @@ wrong-size swapchain.
 What exists, by test name (2026-09-24): `win32_e2e.rs` has a resize storm that
 must arrive as one event; the Wayland and X11 suites each switch mode and resize
 from outside once per test; `seam_from_outside.rs` drives a resize storm, a
-scale change and a mode switch against `HeadlessShell` only. **Owed:** a
-repeated mode-flip and resize loop against a real backend, a mid-session scale
-change against a real compositor with a swapchain attached, and any letterbox
-golden (there is no engine letterbox to photograph yet).
+scale change and a mode switch against `HeadlessShell` only. **Done on Wayland
+(2026-10-22):** `run-wayland-e2e.sh`'s `run_sandbox_soak` puts one sandbox
+through four F11 round trips, eight resizes from outside and the output's scale
+set to 2 and back, each reaching the swapchain as a reconfigure at the size it
+implies, and the run closes clean (green on the office laptop's Intel iGPU under
+headless sway). **Owed:** the same loop on X11, and any letterbox golden (there
+is no engine letterbox to photograph yet).
 
 ## What the Win32 backend has and has not been run against
 

@@ -794,6 +794,111 @@ run_sandbox_resize() {
 reconfigured at each size, nothing left alive, validation silent"
 }
 
+# Polls a file until `pattern` appears in it `count` times, or fails naming
+# what never arrived.
+wait_for_count() {
+    local what="$1" file="$2" pattern="$3" count="$4"
+    local deadline=$(( $(date +%s) + SWAY_SESSION_TIMEOUT_S ))
+    while [ "$(grep -c "$pattern" "$file" 2>/dev/null || true)" -lt "$count" ]; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "crcbl e2e: timed out after ${SWAY_SESSION_TIMEOUT_S}s waiting for $what" >&2
+            tail -n 40 "$file" >&2 || true
+            sway_log_tail
+            exit 1
+        fi
+        sleep "$SWAY_SESSION_POLL_S"
+    done
+}
+
+# `run_sandbox_soak <backend>`
+#
+# One running sandbox put through what `run_sandbox_toggle`, `run_sandbox_resize`
+# and the fractional-scale tests each do once, repeatedly and back to back: the
+# soak the shell plan asked for. F11 there and back `SOAK_FLIPS` times, then
+# `SOAK_RESIZES` resizes from outside, then the output's scale set to 2 and back
+# to 1 under it — a monitor drag's scale change, mid-session, with a swapchain
+# attached. Every change must reach the swapchain as a reconfigure at the size
+# it implies, counted off the debug log's reconfigure lines, and the run must
+# close at the last size with nothing left alive and validation silent. The
+# engine logs a mode only when a request becomes honoured, so a flip back to
+# windowed is counted by its swapchain rather than by that line.
+SOAK_FLIPS=4
+SOAK_RESIZES=8
+run_sandbox_soak() {
+    local backend="$1"
+    local log="${SWAY_RUNTIME_DIR}/sandbox-soak.log"
+    local keys_in="${SWAY_RUNTIME_DIR}/soak-keys.fifo"
+    local keys_log="${SWAY_RUNTIME_DIR}/soak-keys.log"
+    local reconfigure="hal: reconfiguring the swapchain to"
+    echo "crcbl e2e: soaking the sandbox on $backend: F11, resizes and a scale change"
+
+    rm -f "$keys_in"
+    mkfifo "$keys_in"
+    "${BIN_DIR}/crcbl-e2e-wayland-key" <"$keys_in" >"$keys_log" 2>&1 &
+    local keys_pid=$!
+    exec 9>"$keys_in"
+    wait_for_line "the key sender to plug in a keyboard" "$keys_log" "crcbl-e2e-wayland-key: ready"
+
+    CRCBL_SHELL=wayland \
+    CRCBL_VK_VALIDATION=1 \
+    CRCBL_LOG=debug \
+        "${BIN_DIR}/sandbox" --backend "$backend" --title "crcbl e2e sandbox" \
+        >"$log" 2>&1 &
+    local sandbox_pid=$!
+    wait_for_sandbox_window "$log"
+    wait_for_line "the sandbox to report itself windowed" "$log" "shell: the window is windowed"
+
+    local flip
+    for flip in $(seq 1 "$SOAK_FLIPS"); do
+        echo "$KEY_F11" >&9
+        wait_for_count "flip $flip to borderless" "$log" \
+            "$reconfigure ${SANDBOX_BORDERLESS}" "$flip"
+        echo "$KEY_F11" >&9
+        wait_for_count "flip $flip back to windowed" "$log" \
+            "$reconfigure ${SANDBOX_WINDOWED}" "$flip"
+    done
+
+    local resize size
+    for resize in $(seq 1 "$SOAK_RESIZES"); do
+        if [ $((resize % 2)) -eq 1 ]; then size=900x500; else size=640x360; fi
+        swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" resize set "${size%x*}" "${size#*x}" >/dev/null
+        wait_for_count "resize $resize to $size" "$log" "$reconfigure $size" $(((resize + 1) / 2))
+    done
+
+    # The window is 640x360 logical now; at scale 2 its buffer is twice that.
+    local at_two before
+    at_two="$(grep -c "$reconfigure 1280x720" "$log" || true)"
+    swaymsg output HEADLESS-1 scale 2 >/dev/null
+    wait_for_count "the swapchain at scale 2" "$log" "$reconfigure 1280x720" $((at_two + 1))
+    before="$(grep -c "$reconfigure 640x360" "$log" || true)"
+    swaymsg output HEADLESS-1 scale 1 >/dev/null
+    wait_for_count "the swapchain back at scale 1" "$log" "$reconfigure 640x360" $((before + 1))
+
+    swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" kill >/dev/null
+    local status=0
+    wait "$sandbox_pid" || status=$?
+    exec 9>&-
+    wait "$keys_pid" || true
+    rm -f "$keys_in"
+    if [ "$status" -ne 0 ]; then
+        echo "crcbl e2e: the sandbox failed during the soak on $backend (exit $status)" >&2
+        tail -n 40 "$log" >&2
+        sway_log_tail
+        exit "$status"
+    fi
+    if ! grep -qE "at 640x360, windowed \([^)]*CloseRequested\)" "$log"; then
+        echo "crcbl e2e: the soaked sandbox did not end windowed at 640x360" >&2
+        tail -n 40 "$log" >&2
+        sway_log_tail
+        exit 1
+    fi
+    assert_nothing_left_alive "$log" "the soaked sandbox"
+    assert_validation_saw_nothing "$log" "the soaked sandbox"
+    echo "crcbl e2e: the sandbox took $SOAK_FLIPS F11 round trips, $SOAK_RESIZES resizes and a \
+scale change to 2 and back on wayland/$backend, each reconfigured, nothing left alive, \
+validation silent"
+}
+
 # `run_sandbox_dark <backend>`
 #
 # The output powered off (DPMS) under a running game. The compositor withholds
@@ -937,6 +1042,8 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     run_sandbox_resize vk
     # And with its output powered off for a while, then back on.
     run_sandbox_dark vk
+    # And all of those again and again in one session, with a scale change.
+    run_sandbox_soak vk
     # And a game rather than the sandbox, held to the same closed loop.
     run_game horde
     # One more windowed run, this time required to fail. After the passes above
