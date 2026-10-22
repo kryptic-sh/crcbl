@@ -14,13 +14,13 @@ Delete this once EW knows.
 ## System audio control, asked by lyr for the owner (2026-10-22)
 
 **Not started; waiting on the owner's go-ahead, since the request came through
-lyr's session.** A seam any crcbl app can use to control the system mixer on
-Linux, Windows and macOS: volume, mute, devices, streams. Not playback, which is
-`crcbl-audio` and cpal. lyr moves its audio onto it and drops its own
-per-platform sources (`lyr-sources/src/audio/`: `pactl.rs`, `windows.rs` and
-`win32.rs`, `macos.rs` and `coreaudio.rs`, `level.rs`; model types
-`lyr_core::audio` and `lyr_core::audio_menu`), which are the requirements
-reference and may be taken.
+lyr's session, and on the in-house-or-crate choice below.** A seam any crcbl app
+can use to control the system mixer on Linux, Windows and macOS: volume, mute,
+devices, streams. Not playback, which is `crcbl-audio` and cpal. lyr moves its
+audio onto it and drops its own per-platform sources (`lyr-sources/src/audio/`:
+`pactl.rs`, `windows.rs` and `win32.rs`, `macos.rs` and `coreaudio.rs`,
+`level.rs`; model types `lyr_core::audio` and `lyr_core::audio_menu`), which are
+the requirements reference and may be taken.
 
 **What it must do, from lyr:**
 
@@ -47,16 +47,26 @@ reference and may be taken.
   action enum applied to a target (default, device id, stream id), an error with
   an `Unsupported` arm per action, and change events with an interest level
   (devices, or devices and streams).
-- **Linux: the PulseAudio native protocol through `libpulse`, opened with
-  `dlopen`** like `crcbl-shell`'s X11 and Wayland libraries, so no new crate
-  dependency. It speaks to PulseAudio and to PipeWire's `pipewire-pulse`, which
-  is what every desktop PipeWire install runs, and `pa_context_subscribe`'s
-  facility mask is the devices-only interest level directly. Declined: `pactl`
-  (a process and a text parse per query, and polling for changes), and native
-  PipeWire first (its default-device and profile state lives in metadata and the
-  session manager, which is more code for no reach a desktop lacks). The event
-  loop runs on its own thread (`pa_threaded_mainloop`) and hands events to the
-  app through a channel and a waker, so the app's loop idles.
+- **Owner's constraint (relayed by lyr the same day):** "mostly inhouse, or rust
+  crates", "so that users don't need to install other apps to use the seam". So
+  no `pactl`, `wpctl`, `amixer` or any other program, and on Linux no C client
+  library either (`libpulse` is not guaranteed on a PipeWire-only system): the
+  seam speaks to the sound server over its socket from Rust.
+- **Linux: the PulseAudio native protocol over its Unix socket, from Rust.**
+  `pipewire-pulse` serves it on every desktop PipeWire install and PulseAudio
+  serves it natively, so one client reaches both. The protocol is a framed
+  tagstruct stream: authenticate with the cookie, `SET_CLIENT_NAME`, the
+  `GET_*_INFO_LIST` queries, the `SET_*_VOLUME`/`SET_*_MUTE`/`SET_DEFAULT_*`/
+  `MOVE_*`/`SET_CARD_PROFILE`/`SET_*_PORT` commands, and `SUBSCRIBE` with a
+  facility mask, which is the devices-only interest level directly. Events
+  arrive on the socket, so the app's loop waits on it and idles. **Two ways to
+  have the client, the owner's call:** written in-house (the framing, tagstruct
+  types and the commands above, a few thousand lines, tested against a real
+  server here and a PulseAudio null sink in CI), or the pure-Rust `pulseaudio`
+  crate, a native-protocol client, as a new dependency. Declined: `pactl`
+  (another program), `libpulse` by `dlopen` or `libpulse-binding` (a C library
+  the user may lack), and native PipeWire first (defaults and profiles live in
+  the session manager's metadata, more code for no reach a desktop lacks).
 - **Windows: WASAPI through the `windows` crate**, already a dependency of
   `crcbl-shell` and `crcbl-dx12`: `IMMDeviceEnumerator`, `IAudioEndpointVolume`,
   `IAudioSessionManager2` for streams, `IMMNotificationClient` and the volume
