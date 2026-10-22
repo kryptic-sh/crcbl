@@ -13,13 +13,16 @@ Delete this once EW knows.
 
 ## System audio control, asked by lyr for the owner (2026-10-22)
 
-**Not started; waiting on the owner's go-ahead to build it as below.** A seam
-any crcbl app can use to control the system mixer on Linux, Windows and macOS:
-volume, mute, devices, streams. Not playback, which is `crcbl-audio` and cpal.
-lyr moves its audio onto it and drops its own per-platform sources
-(`lyr-sources/src/audio/`: `pactl.rs`, `windows.rs` and `win32.rs`, `macos.rs`
-and `coreaudio.rs`, `level.rs`; model types `lyr_core::audio` and
-`lyr_core::audio_menu`), which are the requirements reference and may be taken.
+**Approved by the owner on 2026-10-22, in progress.** PipeWire and PulseAudio
+are both spoken natively: PipeWire's own protocol when its socket is there,
+PulseAudio's when it is not (the owner runs PipeWire and wants it supported
+natively, not through `pipewire-pulse`). A seam any crcbl app can use to control
+the system mixer on Linux, Windows and macOS: volume, mute, devices, streams.
+Not playback, which is `crcbl-audio` and cpal. lyr moves its audio onto it and
+drops its own per-platform sources (`lyr-sources/src/audio/`: `pactl.rs`,
+`windows.rs` and `win32.rs`, `macos.rs` and `coreaudio.rs`, `level.rs`; model
+types `lyr_core::audio` and `lyr_core::audio_menu`), which are the requirements
+reference and may be taken.
 
 **What it must do, from lyr:**
 
@@ -51,6 +54,16 @@ and `coreaudio.rs`, `level.rs`; model types `lyr_core::audio` and
   no `pactl`, `wpctl`, `amixer` or any other program, and on Linux no C client
   library either (`libpulse` is not guaranteed on a PipeWire-only system): the
   seam speaks to the sound server over its socket from Rust.
+- **Linux: PipeWire's native protocol first, PulseAudio's as the fallback, both
+  from Rust in-house.** At open, the seam connects to PipeWire's socket
+  (`$PIPEWIRE_RUNTIME_DIR` or `$XDG_RUNTIME_DIR`, `pipewire-0`) and, when there
+  is none, to PulseAudio's (`$PULSE_SERVER` or `$XDG_RUNTIME_DIR/pulse/native`).
+  On PipeWire: the core's `Hello`, the registry's globals for nodes, devices and
+  the `default` metadata; a node's `Props` param for volume and mute, a device's
+  `Route` and `Profile` params (and their `Enum` forms) for ports, profiles and
+  a device-level volume, and the metadata's `default.audio.sink` and
+  `default.audio.source` for the defaults and `target.object` to move a stream.
+  Changes arrive as registry and param events on the socket.
 - **Linux: the PulseAudio native protocol over its Unix socket, from Rust.**
   `pipewire-pulse` serves it on every desktop PipeWire install and PulseAudio
   serves it natively, so one client reaches both. The protocol is a framed
