@@ -753,6 +753,7 @@ pub(super) unsafe extern "system" fn window_proc(
                 // always set, and reading it there reports every release as a
                 // repeat.
                 repeat: pressed && keys::was_already_down(l_param),
+                modifiers: input::modifiers_now(),
                 millis,
             });
             if message == msg::SYS_KEY_DOWN || message == msg::SYS_KEY_UP {
@@ -930,6 +931,7 @@ pub(super) unsafe extern "system" fn window_proc(
                 state,
                 x,
                 y,
+                modifiers: input::modifiers_now(),
                 millis,
             });
             if message == msg::X_BUTTON_DOWN || message == msg::X_BUTTON_UP {
@@ -972,6 +974,7 @@ pub(super) unsafe extern "system" fn window_proc(
                 ticks: high_word(w_param) as u16 as i16,
                 x: position.x,
                 y: position.y,
+                modifiers: input::modifiers_now(),
                 millis,
             });
             0

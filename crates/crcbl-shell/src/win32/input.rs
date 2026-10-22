@@ -518,24 +518,29 @@ fn absolute_screen(flags: u16) -> (i32, i32) {
     (width.max(1), height.max(1))
 }
 
-impl Win32Shell {
-    /// The modifiers in effect for the message being translated.
-    ///
-    /// `GetKeyboardState` rather than `GetAsyncKeyState`: the former is the
-    /// snapshot that belongs to the message currently being processed, and the
-    /// latter reads the hardware *now*. The difference shows up exactly when it
-    /// matters — a batch of events drained after the user let go of Shift would
-    /// every one of them report Shift as up.
-    pub(super) fn modifiers_now() -> Modifiers {
-        let mut state = [0u8; 256];
-        // SAFETY: `state` is a live, initialised array of exactly the 256 bytes
-        // `GetKeyboardState` documents that it writes.
-        if unsafe { ffi::GetKeyboardState(state.as_mut_ptr()) } == 0 {
-            return Modifiers::empty();
-        }
-        keys::modifiers(&state)
+/// The modifiers in effect for the message the window procedure is handling.
+///
+/// `GetKeyboardState` rather than `GetAsyncKeyState`: the former is the
+/// snapshot that belongs to the message currently being processed, and the
+/// latter reads the hardware *now*.
+///
+/// **Only true inside the window procedure.** The thread's key state moves on
+/// with every message retrieved, so read when the pump translates a batch it
+/// describes the batch's end: a chord whose modifier went up in the same batch
+/// — Control down, V, Control up, injected in one go — reported its V with no
+/// Control. So the procedure reads it with each key, button and wheel message
+/// and the raw event carries it.
+pub(super) fn modifiers_now() -> Modifiers {
+    let mut state = [0u8; 256];
+    // SAFETY: `state` is a live, initialised array of exactly the 256 bytes
+    // `GetKeyboardState` documents that it writes.
+    if unsafe { ffi::GetKeyboardState(state.as_mut_ptr()) } == 0 {
+        return Modifiers::empty();
     }
+    keys::modifiers(&state)
+}
 
+impl Win32Shell {
     /// The symbol a key produces in the current layout.
     ///
     /// Two sources, and the split is [`keys::named_keysym`]'s: a key whose
@@ -591,6 +596,7 @@ impl Win32Shell {
                 virtual_key,
                 state,
                 repeat,
+                modifiers,
                 millis,
                 ..
             } => {
@@ -615,7 +621,7 @@ impl Win32Shell {
                     keysym: Self::keysym_of(key_code, virtual_key),
                     state,
                     repeat,
-                    modifiers: Self::modifiers_now(),
+                    modifiers,
                 };
                 let popup = self
                     .window(window)
@@ -690,6 +696,7 @@ impl Win32Shell {
                 state,
                 x,
                 y,
+                modifiers,
                 millis,
                 ..
             } => {
@@ -702,7 +709,7 @@ impl Win32Shell {
                     button,
                     state,
                     position: self.position_or_none(window, x, y),
-                    modifiers: Self::modifiers_now(),
+                    modifiers,
                 });
             }
 
@@ -711,6 +718,7 @@ impl Win32Shell {
                 ticks,
                 x,
                 y,
+                modifiers,
                 millis,
                 ..
             } => {
@@ -722,7 +730,7 @@ impl Win32Shell {
                     time,
                     delta: pointer::wheel(horizontal, ticks),
                     position: self.position_or_none(window, x, y),
-                    modifiers: Self::modifiers_now(),
+                    modifiers,
                 });
             }
 

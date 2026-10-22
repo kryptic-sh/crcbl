@@ -62,7 +62,7 @@
 //! belongs to a *later* message — the whole point of a timestamp is that it is
 //! not the moment the queue was drained.
 
-use crcbl_core::input::{ButtonState, PointerButton, TouchPhase};
+use crcbl_core::input::{ButtonState, Modifiers, PointerButton, TouchPhase};
 
 use crate::PhysicalSize;
 
@@ -128,6 +128,9 @@ pub enum RawEvent {
         state: ButtonState,
         /// Whether `lParam` said the key was already held — an auto-repeat.
         repeat: bool,
+        /// The modifiers held when the window procedure handled the message,
+        /// read there — see [`input::modifiers_now`](super::input::modifiers_now).
+        modifiers: Modifiers,
         /// `GetMessageTime` milliseconds.
         millis: u32,
     },
@@ -187,6 +190,9 @@ pub enum RawEvent {
         x: i32,
         /// Client y.
         y: i32,
+        /// The modifiers held when the window procedure handled the message,
+        /// read there — see [`input::modifiers_now`](super::input::modifiers_now).
+        modifiers: Modifiers,
         /// `GetMessageTime` milliseconds.
         millis: u32,
     },
@@ -203,6 +209,9 @@ pub enum RawEvent {
         x: i32,
         /// Client y.
         y: i32,
+        /// The modifiers held when the window procedure handled the message,
+        /// read there — see [`input::modifiers_now`](super::input::modifiers_now).
+        modifiers: Modifiers,
         /// `GetMessageTime` milliseconds.
         millis: u32,
     },
@@ -532,6 +541,7 @@ mod tests {
                 state: ButtonState::Pressed,
                 x: 11,
                 y: 12,
+                modifiers: Modifiers::empty(),
                 millis: 1_008,
             },
             RawEvent::Button {
@@ -540,6 +550,7 @@ mod tests {
                 state: ButtonState::Released,
                 x: 11,
                 y: 12,
+                modifiers: Modifiers::empty(),
                 millis: 1_060,
             },
             RawEvent::Button {
@@ -548,6 +559,7 @@ mod tests {
                 state: ButtonState::Pressed,
                 x: 11,
                 y: 12,
+                modifiers: Modifiers::empty(),
                 millis: 1_140,
             },
             RawEvent::Key {
@@ -556,6 +568,7 @@ mod tests {
                 virtual_key: 0x57,
                 state: ButtonState::Pressed,
                 repeat: false,
+                modifiers: Modifiers::empty(),
                 millis: 1_200,
             },
             RawEvent::Key {
@@ -564,6 +577,7 @@ mod tests {
                 virtual_key: 0x57,
                 state: ButtonState::Pressed,
                 repeat: true,
+                modifiers: Modifiers::empty(),
                 millis: 1_500,
             },
             RawEvent::RawMotion {
@@ -654,6 +668,7 @@ mod tests {
             state: ButtonState::Pressed,
             x: 4,
             y: 4,
+            modifiers: Modifiers::empty(),
             millis: 9,
         };
         enqueue(&mut queue, resize(A, 800));
@@ -686,6 +701,7 @@ mod tests {
                 virtual_key: 0x1B,
                 state: ButtonState::Released,
                 repeat: false,
+                modifiers: Modifiers::empty(),
                 millis: 0,
             }
             .hwnd(),
@@ -728,6 +744,7 @@ mod tests {
                 state: ButtonState::Pressed,
                 x: 0,
                 y: 0,
+                modifiers: Modifiers::empty(),
                 millis: 0,
             }
             .hwnd(),
@@ -740,6 +757,7 @@ mod tests {
                 ticks: 120,
                 x: 0,
                 y: 0,
+                modifiers: Modifiers::empty(),
                 millis: 0,
             }
             .hwnd(),
