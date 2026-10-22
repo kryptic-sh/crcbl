@@ -2416,6 +2416,62 @@ fn a_bare_alt_tap_leaves_the_keyboard_with_the_window() {
     );
 }
 
+/// **An unsided Control injected by virtual key holds Ctrl for the next key.**
+/// Some automation tools and remote-input stacks send `VK_CONTROL` itself with
+/// scan code 0, not `VK_LCONTROL` or a scan code; pikr's report was that
+/// `Ctrl+V` sent that way reached the app as a plain `v`. The key after it has
+/// to carry `CTRL`.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn an_unsided_control_sent_by_virtual_key_holds_ctrl_for_the_next_key() {
+    /// `VK_CONTROL`, the unsided one.
+    const VK_CONTROL: u32 = 0x11;
+
+    let mut session = Session::open();
+    let window = session.window("unsided");
+    session.foreground(window);
+    session.take_names();
+
+    let mut sender = Sender::start();
+    sender.send(&format!("vkdown {VK_CONTROL}"));
+    sender.send(&format!("key {}", scancode::A));
+    sender.send(&format!("vkup {VK_CONTROL}"));
+    session.pump_until("the A release", |session| {
+        session.events.iter().any(|event| {
+            matches!(
+                event,
+                ShellEvent::Key {
+                    scancode,
+                    state: ButtonState::Released,
+                    ..
+                } if scancode.0 == scancode::A
+            )
+        })
+    });
+    let modifiers = session.events.iter().find_map(|event| match event {
+        ShellEvent::Key {
+            scancode,
+            state: ButtonState::Pressed,
+            modifiers,
+            ..
+        } if scancode.0 == scancode::A => Some(*modifiers),
+        _ => None,
+    });
+    let modifiers = modifiers.unwrap_or_else(|| {
+        panic!(
+            "no A press; the shell raised {:?}, the sender said {:?}",
+            session.take_names(),
+            sender.lines()
+        )
+    });
+    assert!(
+        modifiers.contains(crcbl_shell::Modifiers::CTRL),
+        "the A pressed under an unsided Control carries CTRL: {modifiers:?}; the sender said \
+         {:?}",
+        sender.lines()
+    );
+}
+
 /// An extended key keeps its `E0` prefix, which is its identity rather than a
 /// flag beside it.
 ///

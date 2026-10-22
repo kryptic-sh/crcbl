@@ -44,6 +44,8 @@
 //! key <scancode>          a press and its release
 //! down <scancode>         a press on its own
 //! up <scancode>           a release on its own
+//! vkdown <vk>             a press of a virtual key, with scan code 0
+//! vkup <vk>               its release
 //! move <dx> <dy>          relative pointer motion, in mickeys
 //! abs <x> <y>             an absolute move, normalized 0..=65535 over the
 //!                         primary monitor
@@ -512,6 +514,11 @@ fn run(command: &str, fingers: &mut Fingers) -> Result<(), String> {
                 _ => key(scancode, true).and_then(|()| key(scancode, false)),
             }
         }
+        "vkdown" | "vkup" => {
+            let vk = number(words.next(), "virtual key")?;
+            let vk = u16::try_from(vk).map_err(|_| format!("{vk} is not a virtual key"))?;
+            virtual_key(vk, verb == "vkdown")
+        }
         "move" => {
             let dx = number(words.next(), "dx")?;
             let dy = number(words.next(), "dy")?;
@@ -790,6 +797,26 @@ fn key(scancode: u32, pressed: bool) -> Result<(), String> {
                 // test for.
                 vk: 0,
                 scan: (scancode & 0xFF) as u16,
+                flags,
+                ..win32::KeybdInput::default()
+            },
+        },
+    })
+}
+
+/// Presses or releases one key by its **virtual key**, with a scan code of
+/// zero — what some automation tools and remote-input stacks send, and the
+/// case where an unsided modifier such as `VK_CONTROL` reaches the system with
+/// no side to it.
+#[cfg(target_os = "windows")]
+fn virtual_key(vk: u16, pressed: bool) -> Result<(), String> {
+    let flags = if pressed { 0 } else { win32::KEYEVENTF_KEY_UP };
+    send(win32::Input {
+        kind: win32::INPUT_KEYBOARD,
+        body: win32::InputBody {
+            keyboard: win32::KeybdInput {
+                vk,
+                scan: 0,
                 flags,
                 ..win32::KeybdInput::default()
             },
