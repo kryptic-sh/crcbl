@@ -12,9 +12,8 @@
 //! install, so no command-line tool and no C client library:
 //!
 //! * **Linux:** the sound server's own protocol over its socket, written here.
-//!   PipeWire's when it is running; PulseAudio's, for a system without
-//!   PipeWire, is planned and not built yet (`docs/backlog.md`, "System audio
-//!   control").
+//!   PipeWire's when it is running, PulseAudio's native protocol when it is
+//!   not.
 //! * **Windows and macOS:** WASAPI and CoreAudio, planned and not built yet;
 //!   [`Mixer::open`] reports [`MixerError::Unsupported`] there.
 //!

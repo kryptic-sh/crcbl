@@ -37,8 +37,17 @@ switches; wait for the old nodes to go. Two server behaviours found and handled:
 a node lists `Props` as more than one object, the volume in the first; and a
 card's subscription does not resend a changed param, so the client re-enumerates
 a param when the card's info flips its serial bit, and a re-enumeration numbers
-its values by place among all of them (routes arrive as 2, 3, 5). Next: lyr's
-run through a local `[patch]`, then the PulseAudio backend. PipeWire and
+its values by place among all of them (routes arrive as 2, 3, 5). **Slice 2, the
+PulseAudio backend, is on main** (`src/linux/pulse/`): the native protocol
+(tagstruct, descriptor framing, auth with the cookie, the info lists, subscribe,
+and the set, default, move, port and profile commands), chosen when no PipeWire
+socket is there, or with `CRCBL_MIXER_BACKEND=pulse`. Verified on the office
+laptop through `pipewire-pulse`, by the same three live tests under
+`CRCBL_MIXER_BACKEND=pulse`: every device, active port and stream agrees with
+`pactl`, volume and mute round trip on HDMI1 and HDMI3, and a stream's life
+wakes a streams app 6 times and a devices-only app none. **Not run against a
+real PulseAudio daemon** (this laptop runs PipeWire), so its cookie check is
+untested. Next: Windows (WASAPI), then macOS (CoreAudio). PipeWire and
 PulseAudio are both spoken natively: PipeWire's own protocol when its socket is
 there, PulseAudio's when it is not (the owner runs PipeWire and wants it
 supported natively, not through `pipewire-pulse`). A seam any crcbl app can use

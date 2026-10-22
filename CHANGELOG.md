@@ -22,10 +22,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   profiles; `Mixer::apply` sets volume or mute, steps the volume, makes a device
   the default, moves a stream, and selects a port or a profile; a waker is
   called on every change, with `Interest::Devices` to ignore stream churn. On
-  Linux it speaks PipeWire's own protocol over its socket, written in the crate,
-  with no C library and no tool such as `pactl`. PulseAudio without PipeWire,
-  Windows and macOS are planned; `Mixer::open` reports `MixerError::NoServer` or
-  `Unsupported` there.
+  Linux it speaks PipeWire's own protocol over its socket, or PulseAudio's
+  native protocol where PipeWire is not running, both written in the crate, with
+  no C library and no tool such as `pactl`. Windows and macOS are planned;
+  `Mixer::open` reports `MixerError::Unsupported` there.
 - **`crcbl_hal::null::Recorder::bind_group_updates` and
   `Recorder::buffer_label`.** The null backend's recorder now counts successful
   `update_bind_group` calls, which no `Event` records, and names the buffer
