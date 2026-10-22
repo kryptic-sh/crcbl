@@ -13,14 +13,13 @@ Delete this once EW knows.
 
 ## System audio control, asked by lyr for the owner (2026-10-22)
 
-**Not started; waiting on the owner's go-ahead, since the request came through
-lyr's session, and on the in-house-or-crate choice below.** A seam any crcbl app
-can use to control the system mixer on Linux, Windows and macOS: volume, mute,
-devices, streams. Not playback, which is `crcbl-audio` and cpal. lyr moves its
-audio onto it and drops its own per-platform sources (`lyr-sources/src/audio/`:
-`pactl.rs`, `windows.rs` and `win32.rs`, `macos.rs` and `coreaudio.rs`,
-`level.rs`; model types `lyr_core::audio` and `lyr_core::audio_menu`), which are
-the requirements reference and may be taken.
+**Not started; waiting on the owner's go-ahead to build it as below.** A seam
+any crcbl app can use to control the system mixer on Linux, Windows and macOS:
+volume, mute, devices, streams. Not playback, which is `crcbl-audio` and cpal.
+lyr moves its audio onto it and drops its own per-platform sources
+(`lyr-sources/src/audio/`: `pactl.rs`, `windows.rs` and `win32.rs`, `macos.rs`
+and `coreaudio.rs`, `level.rs`; model types `lyr_core::audio` and
+`lyr_core::audio_menu`), which are the requirements reference and may be taken.
 
 **What it must do, from lyr:**
 
@@ -59,14 +58,19 @@ the requirements reference and may be taken.
   `GET_*_INFO_LIST` queries, the `SET_*_VOLUME`/`SET_*_MUTE`/`SET_DEFAULT_*`/
   `MOVE_*`/`SET_CARD_PROFILE`/`SET_*_PORT` commands, and `SUBSCRIBE` with a
   facility mask, which is the devices-only interest level directly. Events
-  arrive on the socket, so the app's loop waits on it and idles. **Two ways to
-  have the client, the owner's call:** written in-house (the framing, tagstruct
-  types and the commands above, a few thousand lines, tested against a real
-  server here and a PulseAudio null sink in CI), or the pure-Rust `pulseaudio`
-  crate, a native-protocol client, as a new dependency. Declined: `pactl`
-  (another program), `libpulse` by `dlopen` or `libpulse-binding` (a C library
-  the user may lack), and native PipeWire first (defaults and profiles live in
-  the session manager's metadata, more code for no reach a desktop lacks).
+  arrive on the socket, so the app's loop waits on it and idles. **In-house, per
+  the owner** ("needs to be native in the crate"): the framing, the tagstruct
+  types and the commands above, tested against a real server here and a
+  PulseAudio null sink in CI. The pure-Rust `pulseaudio` crate is declined for
+  that reason. Asked whether the kernel (ALSA's `/dev/snd` ioctls) could be
+  spoken to instead: it reaches only a card's hardware mixer controls, while
+  streams, the default device, Bluetooth devices, profiles and the volume users
+  see are the sound server's, so a kernel seam would serve a machine with no
+  sound server and little else; a hardware-volume fallback for such a machine
+  could be a later slice. Declined: `pactl` (another program), `libpulse` by
+  `dlopen` or `libpulse-binding` (a C library the user may lack), and native
+  PipeWire first (defaults and profiles live in the session manager's metadata,
+  more code for no reach a desktop lacks).
 - **Windows: WASAPI through the `windows` crate**, already a dependency of
   `crcbl-shell` and `crcbl-dx12`: `IMMDeviceEnumerator`, `IAudioEndpointVolume`,
   `IAudioSessionManager2` for streams, `IMMNotificationClient` and the volume
