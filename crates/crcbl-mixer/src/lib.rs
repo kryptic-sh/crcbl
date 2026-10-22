@@ -14,8 +14,11 @@
 //! * **Linux:** the sound server's own protocol over its socket, written here.
 //!   PipeWire's when it is running, PulseAudio's native protocol when it is
 //!   not.
-//! * **Windows and macOS:** WASAPI and CoreAudio, planned and not built yet;
-//!   [`Mixer::open`] reports [`MixerError::Unsupported`] there.
+//! * **Windows:** WASAPI, the system's own audio API, through the `windows`
+//!   crate. It reports no cards and no ports, cannot move a stream, and has no
+//!   boost past 100 %.
+//! * **macOS:** CoreAudio, planned and not built yet; [`Mixer::open`] reports
+//!   [`MixerError::Unsupported`] there.
 //!
 //! # Changes without polling
 //!
@@ -32,16 +35,20 @@
 
 pub mod level;
 mod model;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod visible;
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 use linux as platform;
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use self::windows as platform;
+#[cfg(not(any(target_os = "linux", windows)))]
 mod unsupported;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 use unsupported as platform;
 
 use std::fmt;
@@ -65,10 +72,13 @@ pub enum Target {
 pub enum Action {
     SetMute(bool),
     ToggleMute,
-    /// Sets the volume to this percent, held to [`level::MAX_PERCENT`].
+    /// Sets the volume to this percent, held to [`level::MAX_PERCENT`] on
+    /// Linux and to [`level::SCALAR_MAX_PERCENT`] on Windows, which has no
+    /// boost.
     SetVolume(u32),
     /// Moves the volume by this many percent, up or down, held to
-    /// `0..=`[`level::MAX_PERCENT`].
+    /// `0..=`[`level::MAX_PERCENT`] on Linux and to
+    /// `0..=`[`level::SCALAR_MAX_PERCENT`] on Windows.
     Step(i32),
     /// Makes the target device the default for its direction.
     MakeDefault,

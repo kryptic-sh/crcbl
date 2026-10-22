@@ -1,5 +1,5 @@
-//! A platform the mixer has no backend for yet: Windows and macOS until
-//! theirs land (`docs/backlog.md`, "System audio control").
+//! A platform the mixer has no backend for yet: macOS until its backend
+//! lands (`docs/backlog.md`, "System audio control").
 //!
 //! [`Backend`] has no values, so a [`Mixer`](crate::Mixer) cannot exist here:
 //! [`open`] is the one function that answers, and it answers
@@ -13,7 +13,7 @@ pub(crate) enum Backend {}
 
 pub(crate) fn open(_waker: Box<dyn Fn() + Send + Sync>) -> Result<Backend, MixerError> {
     Err(MixerError::Unsupported(
-        "the mixer has a Linux backend only so far; Windows and macOS are planned",
+        "the mixer has Linux and Windows backends only so far; macOS is planned",
     ))
 }
 

@@ -855,6 +855,8 @@ name = "crcbl-mixer"
 version = "0.8.1"
 dependencies = [
  "crcbl-spawn",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]

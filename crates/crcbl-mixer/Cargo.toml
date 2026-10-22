@@ -10,12 +10,39 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
-# No dependencies, by the owner's rule for this crate: it reaches the sound
-# server through its protocol, written here, rather than through a C client
-# library a user might not have, or a tool such as `pactl`. Windows and macOS
-# will add the platform crates the workspace already uses (`windows`, `objc2`)
-# when their backends land.
+# No dependencies on Linux, by the owner's rule for this crate: it reaches the
+# sound server through its protocol, written here, rather than through a C
+# client library a user might not have, or a tool such as `pactl`. Each other
+# platform takes the binding to its own audio API that the workspace already
+# uses: `windows` on Windows; macOS will add `objc2`'s when its backend lands.
 [dependencies]
+
+# WASAPI, the audio API every Windows install has (`src/windows/`), at the
+# version `crcbl-dx12` and `cpal` already resolve. `windows-core` is named
+# beside it because `#[implement]` and `#[interface]` expand to paths in it.
+# The features, each for what it brings:
+#
+# * `Win32_Media_Audio` and `Win32_Media_Audio_Endpoints`: the device
+#   enumerator, endpoint and session volumes, and their callbacks.
+# * `Win32_Devices_FunctionDiscovery`: the friendly-name and bus property keys.
+# * `Win32_Foundation`: handles, property keys and Win32 error codes.
+# * `Win32_System_Com`, `Win32_System_Com_StructuredStorage`,
+#   `Win32_System_Variant` and `Win32_UI_Shell_PropertiesSystem`: COM itself,
+#   and an endpoint's property store and the values it holds.
+# * `Win32_System_Threading`: a session's process image name.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+  "Win32_Devices_FunctionDiscovery",
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Threading",
+  "Win32_System_Variant",
+  "Win32_UI_Shell_PropertiesSystem",
+] }
+windows-core = "0.62.2"
 
 # The live test runs `pactl` as its witness, through the workspace's spawner.
 [dev-dependencies]

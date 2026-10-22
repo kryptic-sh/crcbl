@@ -32,11 +32,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   called on every change, with `Interest::Devices` to ignore stream churn. On
   Linux it speaks PipeWire's own protocol over its socket, or PulseAudio's
   native protocol where PipeWire is not running, both written in the crate, with
-  no C library and no tool such as `pactl`. Windows and macOS are planned;
-  `Mixer::open` reports `MixerError::Unsupported` there. When the sound server
-  goes away, as it does when it restarts, the waker is called once more,
-  `Mixer::is_connected` turns false and `apply` answers
-  `MixerError::Disconnected`, so an app knows to open a new mixer.
+  no C library and no tool such as `pactl`. On Windows it uses WASAPI through
+  the `windows` crate: every active endpoint and audio session, the console
+  role's default, volume as the scalar percent the volume flyout shows (held to
+  100 %, `level::SCALAR_MAX_PERCENT`, as Windows has no boost), and
+  `MakeDefault` through the undocumented `IPolicyConfig` interface; Windows
+  reports no cards or ports, and `MoveTo`, `SetPort` and `SetProfile` answer
+  `MixerError::Unsupported`. macOS is planned; `Mixer::open` reports
+  `MixerError::Unsupported` there. When the sound server goes away, as it does
+  when it restarts, the waker is called once more, `Mixer::is_connected` turns
+  false and `apply` answers `MixerError::Disconnected`, so an app knows to open
+  a new mixer.
 - **`crcbl_hal::null::Recorder::bind_group_updates` and
   `Recorder::buffer_label`.** The null backend's recorder now counts successful
   `update_bind_group` calls, which no `Event` records, and names the buffer

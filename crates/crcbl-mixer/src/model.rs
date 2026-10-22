@@ -15,8 +15,10 @@ pub enum Direction {
 
 /// A device's identity within one [`Mixer`](crate::Mixer) session.
 ///
-/// The sound server's own id for the object, so it is stable while the device
-/// stays connected and means nothing to another session.
+/// The sound server's own id for the object on Linux, and on Windows one the
+/// mixer hands out the first time it sees the endpoint (Windows names
+/// endpoints by string). Either way it is stable while the device stays
+/// connected and means nothing to another session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DeviceId(pub u32);
 
@@ -51,7 +53,7 @@ pub struct Device {
     pub description: String,
     /// Percent of the device's nominal level: 100 is unity, and above it is a
     /// software boost where the platform allows one (see
-    /// [`MAX_PERCENT`](crate::level::MAX_PERCENT)).
+    /// [`MAX_PERCENT`](crate::level::MAX_PERCENT)); Windows allows none.
     pub volume: u32,
     pub muted: bool,
     /// Whether this is the default device for its direction.
@@ -63,6 +65,8 @@ pub struct Device {
     /// none, which Windows and macOS do.
     pub ports: Vec<Choice>,
     /// The form factor the server reports, such as `headset` or `speaker`.
+    /// On Windows, the endpoint's form factor in the same words (see the
+    /// Windows backend's `form_factor`).
     pub form_factor: Option<String>,
     /// Whether the device is a Bluetooth one.
     pub bluetooth: bool,
