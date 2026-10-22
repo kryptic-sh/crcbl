@@ -1484,7 +1484,7 @@ impl Shell for Win32Shell {
         self.drop_clipboard_answers(window);
         self.forget_input(window);
         if removed.panel.is_some_and(|panel| panel.appbar) {
-            Self::remove_appbar(removed.raw());
+            self.remove_appbar(removed.raw());
         }
         if removed.app_id {
             super::app_id::clear(removed.raw());
@@ -2242,7 +2242,7 @@ impl Drop for Win32Shell {
         // The work area an appbar reserved outlives its window otherwise.
         for (_, window) in self.windows.iter() {
             if window.panel.is_some_and(|panel| panel.appbar) {
-                Self::remove_appbar(window.raw());
+                self.remove_appbar(window.raw());
             }
             if window.app_id {
                 super::app_id::clear(window.raw());

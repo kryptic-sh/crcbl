@@ -224,6 +224,9 @@ pub(super) struct Shared {
     /// The popups the pointer passes through, answered `HTTRANSPARENT` in
     /// `WM_NCHITTEST`.
     passthrough: RefCell<Vec<isize>>,
+    /// The panels the shell accepted as appbars, which owe it a message when
+    /// they are activated or move; see `panel::owed_to_shell`.
+    appbars: RefCell<Vec<isize>>,
     /// The window `TrackMouseEvent` is currently armed for, or zero.
     ///
     /// Also the answer to "is the pointer inside?", which is the only way to
@@ -321,6 +324,7 @@ impl Shared {
             .borrow_mut()
             .retain(|&(known, _)| known != hwnd);
         self.passthrough.borrow_mut().retain(|&known| known != hwnd);
+        self.appbars.borrow_mut().retain(|&known| known != hwnd);
         if self.tracked.get() == hwnd {
             self.tracked.set(0);
         }
@@ -349,6 +353,22 @@ impl Shared {
     /// Makes the pointer pass through `hwnd`; see [`passthrough`](Self).
     pub(super) fn set_passthrough(&self, hwnd: isize) {
         self.passthrough.borrow_mut().push(hwnd);
+    }
+
+    /// Records whether `hwnd` is registered as an appbar.
+    #[cfg(any(target_os = "windows", test))]
+    pub(super) fn set_appbar(&self, hwnd: isize, registered: bool) {
+        let mut appbars = self.appbars.borrow_mut();
+        appbars.retain(|&known| known != hwnd);
+        if registered {
+            appbars.push(hwnd);
+        }
+    }
+
+    /// Whether `hwnd` is registered as an appbar.
+    #[cfg(any(target_os = "windows", test))]
+    fn is_appbar(&self, hwnd: isize) -> bool {
+        self.appbars.borrow().contains(&hwnd)
     }
 
     /// A window's limits, by value so no borrow outlives the lookup.
@@ -640,6 +660,15 @@ pub(super) unsafe extern "system" fn window_proc(
     // answers for the message this thread is currently dispatching — which is
     // the one that called us.
     let millis = unsafe { ffi::GetMessageTime() } as u32;
+
+    // Told before the message's own arm, which still runs: the shell only
+    // reorders autohide appbars on the same edge, and nothing below depends on
+    // that.
+    if let Some(notice) = super::panel::owed_to_shell(message)
+        && shared.is_appbar(window)
+    {
+        super::panel::tell_shell(hwnd, notice);
+    }
 
     match message {
         msg::SIZE => {
@@ -1316,6 +1345,21 @@ mod tests {
             shared.take_events().is_empty(),
             "a dead window loses nothing"
         );
+    }
+
+    #[test]
+    fn an_appbar_is_known_until_removed_or_forgotten() {
+        let shared = Shared::default();
+        shared.set_appbar(0x10, true);
+        shared.set_appbar(0x20, true);
+        shared.set_appbar(0x20, true);
+        assert!(shared.is_appbar(0x10) && shared.is_appbar(0x20));
+        shared.set_appbar(0x20, false);
+        assert!(!shared.is_appbar(0x20), "a removed appbar owes nothing");
+        shared.forget(0x10);
+        assert!(!shared.is_appbar(0x10), "nor does a dead one");
+        shared.set_appbar(0x10, true);
+        assert_eq!(*shared.appbars.borrow(), [0x10], "registered once each");
     }
 
     #[test]

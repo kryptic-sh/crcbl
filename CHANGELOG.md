@@ -123,6 +123,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   drain produced — a pointer leave posted just after a pump, for one — stayed
   undelivered until something else woke the loop, which kept a bar's tooltip up
   for seconds after the pointer left. The wait now returns at once instead.
+- **A reserving Win32 panel tells Explorer when it is activated or moves**: the
+  appbar documentation asks an appbar to send `ABM_ACTIVATE` on `WM_ACTIVATE`
+  and `ABM_WINDOWPOSCHANGED` on `WM_WINDOWPOSCHANGED`, which is how the system
+  keeps autohide appbars on the same edge in their z-order. A
+  `Reserve::OwnExtent` panel sent neither; it now sends both.
 - **SSAO's "no bent direction" sentinel is the same byte on every driver.** The
   occlusion shaders wrote it as `0.5`, which an `Rgba8Unorm` target stores at
   the tie between 127 and 128, and Vulkan lets a driver round either way:

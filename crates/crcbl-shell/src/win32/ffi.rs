@@ -1008,6 +1008,10 @@ pub mod appbar {
     pub const QUERY_POS: u32 = 0x0000_0002;
     /// `ABM_SETPOS`: reserves the rectangle.
     pub const SET_POS: u32 = 0x0000_0003;
+    /// `ABM_ACTIVATE`: the appbar was activated or deactivated.
+    pub const ACTIVATE: u32 = 0x0000_0006;
+    /// `ABM_WINDOWPOSCHANGED`: the appbar's window moved.
+    pub const WINDOW_POS_CHANGED: u32 = 0x0000_0009;
 
     /// `ABE_LEFT`.
     pub const EDGE_LEFT: u32 = 0;
@@ -1060,6 +1064,10 @@ pub mod msg {
     pub const GET_OBJECT: u32 = 0x003D;
     /// `WM_DISPLAYCHANGE`.
     pub const DISPLAY_CHANGE: u32 = 0x007E;
+    /// `WM_WINDOWPOSCHANGED` — the window's size, position or place in the
+    /// z-order changed. The default handler is what sends `WM_SIZE` and
+    /// `WM_MOVE` from it.
+    pub const WINDOW_POS_CHANGED: u32 = 0x0047;
     /// `WM_SETTINGCHANGE` — a system parameter changed. With
     /// [`SPI_SET_WORK_AREA`](super::value::SPI_SET_WORK_AREA) it is a monitor's
     /// work area moving: the taskbar, or an appbar coming or going.

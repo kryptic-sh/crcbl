@@ -1210,13 +1210,16 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      regression in the shell's half into a pass on those runners. Unverified:
      that the quiet period is the whole cause; a failure with any other state
      would say otherwise.
-   - Still to do: `ABM_ACTIVATE` and `ABM_WINDOWPOSCHANGED`, which the appbar
-     documentation asks for and which matter to auto-hide appbars; and a
-     crash-safe `ABM_REMOVE`, because a process killed without it keeps the work
-     area reserved until Explorer restarts (a panic is covered, through `Drop`).
-     `PanelLayer::Overlay` and `Top` share the topmost band, and `Background`
-     cannot go below the desktop icons; both are platform limits, written down
-     in `win32/panel.rs`.
+   - `ABM_ACTIVATE` and `ABM_WINDOWPOSCHANGED` are sent from the window
+     procedure for every registered appbar (`panel::owed_to_shell`,
+     `Shared::set_appbar`). Unverified: what Explorer does with them. Both
+     always answer `TRUE`, and their only documented effect is the z-order of
+     autohide appbars on the same edge, which no test here sets up.
+   - Still to do: a crash-safe `ABM_REMOVE`, because a process killed without it
+     keeps the work area reserved until Explorer restarts (a panic is covered,
+     through `Drop`). `PanelLayer::Overlay` and `Top` share the topmost band,
+     and `Background` cannot go below the desktop icons; both are platform
+     limits, written down in `win32/panel.rs`.
    - Transparency (lyr item 11, pikr item 7) is on, 2026-10-17:
      `ShellCaps::TRANSPARENT` is set. A transparent toplevel, panel or popup is
      created with `WS_EX_NOREDIRECTIONBITMAP` (`geometry::with_transparency`),

@@ -25,7 +25,10 @@
 //! from the strip's sides. When the shell sends `ABN_POSCHANGED` — the
 //! taskbar moved, another appbar came, the display changed — the panel asks
 //! again. `ABM_REMOVE` gives the space back when the panel is destroyed and
-//! when the shell is dropped.
+//! when the shell is dropped. In between, the window procedure sends
+//! `ABM_ACTIVATE` on every `WM_ACTIVATE` and `ABM_WINDOWPOSCHANGED` on every
+//! `WM_WINDOWPOSCHANGED`, as the appbar documentation asks, so the shell can
+//! keep autohide appbars on the same edge above it; see [`owed_to_shell`].
 //!
 //! **A process that dies without `ABM_REMOVE` leaves the space reserved**
 //! until Explorer restarts, and nothing here can run after a hard crash. A
@@ -227,7 +230,7 @@ impl Win32Shell {
             )));
         }
         if let Some(edge) = panel.edge {
-            panel.appbar = Self::register_appbar(hwnd);
+            panel.appbar = self.register_appbar(hwnd);
             if panel.appbar {
                 Self::place_appbar(hwnd, panel, &monitor, edge);
             }
@@ -375,10 +378,10 @@ impl Win32Shell {
         panel.appbar = match (old.appbar, panel.edge.is_some()) {
             (true, true) => true,
             (true, false) => {
-                Self::remove_appbar(hwnd);
+                self.remove_appbar(hwnd);
                 false
             }
-            (false, true) => Self::register_appbar(hwnd),
+            (false, true) => self.register_appbar(hwnd),
             (false, false) => false,
         };
         let styles = geometry::with_transparency(
@@ -430,7 +433,7 @@ impl Win32Shell {
 
     /// Registers `hwnd` as an appbar, with [`msg::APP_BAR`] for its
     /// notifications. `false`, with a warning, if the shell refuses.
-    fn register_appbar(hwnd: Handle) -> bool {
+    fn register_appbar(&self, hwnd: Handle) -> bool {
         let mut data = AppBarData::new(hwnd);
         data.callback_message = msg::APP_BAR;
         // SAFETY: `data` is a live, self-describing `APPBARDATA` for this
@@ -441,6 +444,7 @@ impl Win32Shell {
                 "win32: the shell refused a reserving panel as an appbar; it reserves nothing"
             );
         }
+        self.shared().set_appbar(super::proc::key(hwnd), registered);
         registered
     }
 
@@ -485,7 +489,8 @@ impl Win32Shell {
     }
 
     /// Gives an appbar's space back.
-    pub(super) fn remove_appbar(hwnd: Handle) {
+    pub(super) fn remove_appbar(&self, hwnd: Handle) {
+        self.shared().set_appbar(super::proc::key(hwnd), false);
         let mut data = AppBarData::new(hwnd);
         // SAFETY: `data` is a live, self-describing `APPBARDATA` for this
         // shell's own appbar.
@@ -513,6 +518,27 @@ pub(super) enum AppBarNotice {
 /// window was not brought to the foreground.
 pub(super) fn foreground_granted(hwnd: Handle, answered: ffi::Bool32, foreground: Handle) -> bool {
     answered != 0 && ptr::eq(foreground, hwnd)
+}
+
+/// The `ABM_*` message an appbar owes the shell when its window procedure
+/// receives `message`, or `None` for every message that owes nothing.
+pub(super) const fn owed_to_shell(message: u32) -> Option<u32> {
+    match message {
+        msg::ACTIVATE => Some(appbar::ACTIVATE),
+        msg::WINDOW_POS_CHANGED => Some(appbar::WINDOW_POS_CHANGED),
+        _ => None,
+    }
+}
+
+/// Sends `notice`, from [`owed_to_shell`], for the appbar `hwnd`.
+///
+/// Both messages read only the size and the window, and always answer `TRUE`,
+/// so there is no answer to read.
+pub(super) fn tell_shell(hwnd: Handle, notice: u32) {
+    let mut data = AppBarData::new(hwnd);
+    // SAFETY: `data` is a live, self-describing `APPBARDATA` for a window this
+    // shell registered as an appbar.
+    unsafe { ffi::SHAppBarMessage(notice, &raw mut data) };
 }
 
 /// Decodes the `ABN_*` code and `lParam` of an appbar's callback message, or
@@ -571,6 +597,18 @@ mod tests {
             (before.x, before.y, before.width),
             (taller.x, taller.y, taller.width)
         );
+    }
+
+    #[test]
+    fn an_appbar_owes_the_shell_its_activation_and_its_moves() {
+        assert_eq!(owed_to_shell(msg::ACTIVATE), Some(appbar::ACTIVATE));
+        assert_eq!(
+            owed_to_shell(msg::WINDOW_POS_CHANGED),
+            Some(appbar::WINDOW_POS_CHANGED)
+        );
+        for message in [msg::ACTIVATE_APP, msg::SET_FOCUS, msg::MOVE, msg::SIZE] {
+            assert_eq!(owed_to_shell(message), None, "{message:#x}");
+        }
     }
 
     #[test]
