@@ -502,7 +502,7 @@ pub(crate) fn popup_rect(
 }
 
 #[cfg(any(target_os = "windows", desktop_unix, test))]
-/// Space around a panel, in physical pixels: [`Margins`](crate::Margins)
+/// Space around a panel, in physical pixels: [`Margins`]
 /// scaled to the monitor.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Insets {
@@ -520,7 +520,7 @@ pub(crate) struct Insets {
 /// Where a panel of `size` goes in `area`: `insets` away from each edge it is
 /// anchored to, stretched between two opposite anchored edges, and centred on
 /// an axis anchored to neither. That is `wlr-layer-shell`'s placement, which
-/// [`PanelDesc`](crate::PanelDesc) is written in.
+/// [`PanelDesc`] is written in.
 #[must_use]
 pub(crate) fn panel_rect(
     area: PhysicalRect,

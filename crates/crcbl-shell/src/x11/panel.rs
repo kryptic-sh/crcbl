@@ -13,8 +13,9 @@
 //!
 //! Every panel is a `_NET_WM_WINDOW_TYPE_DOCK` window, which a window manager
 //! leaves undecorated and out of its task list, on every desktop
-//! (`_NET_WM_STATE_STICKY`), at the position `WM_NORMAL_HINTS` gives with
-//! `USPosition`.
+//! (`_NET_WM_DESKTOP` all ones, and `_NET_WM_STATE_STICKY`; a window manager
+//! that applies a strut per desktop applies it only where its window is), at
+//! the position `WM_NORMAL_HINTS` gives with `USPosition`.
 //!
 //! # A reserving panel writes a strut
 //!
@@ -209,6 +210,13 @@ impl X11Shell {
             }
             self.request_wm_state(xid, WmStateAction::Add, band(desc.layer));
         } else {
+            self.conn.set_property(
+                xid,
+                atoms.net_wm_desktop,
+                ffi::value::ATOM_CARDINAL,
+                32,
+                &words_to_bytes(&[u32::MAX]),
+            );
             self.conn.set_property(
                 xid,
                 atoms.net_wm_state,

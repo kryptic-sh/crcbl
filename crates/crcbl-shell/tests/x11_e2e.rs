@@ -4260,9 +4260,32 @@ fn a_bar_sits_on_its_edge_and_reserves_it_under_a_window_manager() {
         return;
     }
 
-    session.pump_until("the work area to start below the bar", |session| {
-        session.work_area_top() == Some(30)
+    let root = session.peer.root();
+    let listed = |session: &mut Session, xid: u32| {
+        session
+            .peer
+            .window_property(root, "_NET_CLIENT_LIST")
+            .unwrap_or_default()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|word| u32::from_ne_bytes(*word) == xid)
+    };
+    session.pump_until("the window manager to manage the bar", |session| {
+        listed(session, xid)
     });
+    session.pump_until_reporting(
+        "the work area to start below the bar",
+        |session| session.work_area_top() == Some(30),
+        |session| {
+            format!(
+                "; _NET_WORKAREA {:?}, the bar's strut {:?} and desktop {:?}",
+                session.peer.window_property(root, "_NET_WORKAREA"),
+                session.peer.window_property(xid, "_NET_WM_STRUT_PARTIAL"),
+                session.peer.window_property(xid, "_NET_WM_DESKTOP"),
+            )
+        },
+    );
     let strip = session.panel(
         "strip",
         LogicalSize::new(0.0, 20.0),
