@@ -13,6 +13,9 @@ mod backend_walk;
 // Frame requests pacing the presents.
 mod frame_gate;
 
+// Several windows on one device.
+mod shared;
+
 /// A headless shell and one window on it.
 fn shell() -> (HeadlessShell, WindowId) {
     let mut shell = HeadlessShell::new();

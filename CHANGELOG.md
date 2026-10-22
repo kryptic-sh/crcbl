@@ -15,6 +15,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_app::present::SharedGpu`: several windows on one device.**
+  `Presenter::shared()` returns a cloneable handle on the presenter's instance
+  and device, and `SharedGpu::open(shell, window, extent, desc)` opens another
+  window's presenter on them, with a surface, swapchain and frames in flight of
+  its own. The device lives until the last presenter and handle are gone, so a
+  program whose windows come and go (a bar per monitor, popups, toasts) can
+  close any of them. On the office laptop each further window cost about 110 ms
+  and 25 MiB with a device of its own on NVIDIA's 615 driver, and 16 ms and
+  under 1 MiB on Mesa's ANV. It is also the way round an NVIDIA crash: with a
+  device per window, that driver segfaults in the second window's swapchain
+  teardown under Wayland once the first window's device is gone.
 - **`Ui::set_accessible_label(key, label)`** (the `accesskit` feature) names a
   node for screen readers this frame: the text spans directly inside it are not
   read on their own, and a block left holding nothing else reads as one `Label`.

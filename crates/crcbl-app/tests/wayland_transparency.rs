@@ -54,20 +54,30 @@ struct Solid {
 }
 
 impl Solid {
-    fn open(shell: &mut dyn Shell, desc: &WindowDesc<'_>, colour: [f32; 4]) -> Self {
+    /// A window with a presenter of its own, or one on `beside`'s device.
+    fn open(
+        shell: &mut dyn Shell,
+        desc: &WindowDesc<'_>,
+        colour: [f32; 4],
+        beside: Option<&Self>,
+    ) -> Self {
         let window = shell.create_window(desc).expect("create_window");
         let extent = wait_for_configure(shell, window, &mut |_| {}).expect("a configure");
-        let presenter = Presenter::open(
-            shell,
-            window,
-            extent,
-            &PresenterDesc {
-                label: desc.title,
-                backend: Some(GpuBackend::Vulkan),
-                ..PresenterDesc::default()
-            },
-        )
-        .expect("a Vulkan presenter");
+        let presenter_desc = PresenterDesc {
+            label: desc.title,
+            backend: Some(GpuBackend::Vulkan),
+            ..PresenterDesc::default()
+        };
+        let presenter = match beside {
+            Some(other) => other
+                .presenter
+                .shared()
+                .open(shell, window, extent, &presenter_desc)
+                .expect("a presenter on the shared device"),
+            None => {
+                Presenter::open(shell, window, extent, &presenter_desc).expect("a Vulkan presenter")
+            }
+        };
         Self {
             window,
             presenter,
@@ -190,7 +200,12 @@ fn a_transparent_window_is_blended_premultiplied_by_the_compositor() {
             ..WindowDesc::default()
         },
         [1.0, 0.0, 0.0, 1.0],
+        None,
     );
+    // On the backdrop's device: two windows each with a device of their own
+    // crash NVIDIA's driver in the second one's teardown (see
+    // `crcbl_app::present::SharedGpu`), and one device is how a program with
+    // two windows should run anyway.
     let mut glass = Solid::open(
         shell.as_mut(),
         &WindowDesc {
@@ -201,6 +216,7 @@ fn a_transparent_window_is_blended_premultiplied_by_the_compositor() {
             ..WindowDesc::default()
         },
         WINDOW,
+        Some(&backdrop),
     );
     assert_eq!(
         glass.presenter.composite_alpha(),

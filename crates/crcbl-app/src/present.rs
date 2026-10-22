@@ -111,6 +111,7 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crcbl_hal::{
@@ -520,6 +521,139 @@ impl SwapchainConfig {
     }
 }
 
+/// The swapchain a [`Presenter`] creates on a surface offering `caps`: the
+/// preferred format, the present mode `pacing` asks for, one image more than
+/// the minimum.
+///
+/// # Errors
+///
+/// [`PresentError::Unusable`] if the surface offers no format.
+fn swapchain_config(
+    caps: &crcbl_hal::SurfaceCaps,
+    extent: (u32, u32),
+    pacing: Pacing,
+    composite_alpha: CompositeAlpha,
+) -> Result<SwapchainConfig, PresentError> {
+    let format = caps
+        .preferred_format()
+        .ok_or(PresentError::Unusable("the surface offers no format"))?;
+    Ok(SwapchainConfig {
+        label: "crcbl swapchain",
+        format,
+        extent,
+        image_count: caps
+            .min_image_count
+            .saturating_add(1)
+            .min(caps.max_image_count),
+        present_mode: caps.choose_present_mode(pacing.preferences()),
+        composite_alpha,
+    })
+}
+
+/// One instance and device, shared by every [`Presenter`] opened on it.
+///
+/// From [`Presenter::shared`]; cloning it is cheap, and the device is torn down
+/// only when every presenter on it and every handle are gone. A program with
+/// windows that come and go — a bar per monitor, popups, toasts — keeps one of
+/// these and opens each window with [`open`](Self::open), so no window's close
+/// takes the device from the others. See
+/// [`Presenter`'s docs](Presenter#one-device-for-several-windows) for why.
+#[derive(Clone, Debug)]
+pub struct SharedGpu {
+    instance: Arc<dyn Instance>,
+    device: Arc<dyn Device>,
+    adapter: crcbl_hal::AdapterId,
+}
+
+impl SharedGpu {
+    /// A presenter for `window` on this handle's instance and device; see
+    /// [`Presenter`'s docs](Presenter#one-device-for-several-windows).
+    ///
+    /// Only the window's own half of `desc` is read: the label, the pacing,
+    /// [`PresenterDesc::frames_in_flight`] and
+    /// [`PresenterDesc::transparency`]. The backend, the adapter and its
+    /// choice, and the optional features are the shared device's already; a
+    /// [`PresenterDesc::required_features`] the shared device lacks is refused
+    /// rather than ignored. Blocking needs no polling here, because the device
+    /// already exists.
+    ///
+    /// The window must stay alive until the returned presenter is destroyed,
+    /// as [`Presenter::request_open`] requires.
+    ///
+    /// # Errors
+    ///
+    /// [`PresentError`] if the window went away, if
+    /// [`PresenterDesc::frames_in_flight`] is zero, if the shared device lacks a
+    /// required feature, if the shared adapter cannot present to the window —
+    /// one on a display driven by another GPU, say, which wants a presenter of
+    /// its own from [`Presenter::open`] — or if a HAL call fails.
+    pub fn open<S: Shell + ?Sized>(
+        &self,
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        desc: &PresenterDesc<'_>,
+    ) -> Result<Presenter, PresentError> {
+        let granted = self.device.caps().features;
+        if !granted.contains(desc.required_features) {
+            return Err(PresentError::Unusable(
+                "the shared device lacks a feature this window requires",
+            ));
+        }
+        let target = Presenter::target(shell, window)?;
+        let mut open = PendingPresenter::new(OpenStage::Done, target, extent, desc)?;
+        open.window = Some(window);
+
+        // SAFETY: as in `start_device` — `target` came from the caller's shell
+        // for a window that must outlive the presenter, which is this
+        // function's documented obligation, and `destroy` tears the swapchain
+        // and surface down before the caller may destroy the window.
+        let surface = unsafe { self.instance.create_surface(&open.target) }?;
+        let caps = match self.instance.surface_caps(surface, self.adapter) {
+            Ok(caps) if caps.preferred_format().is_some() => caps,
+            Ok(_) | Err(_) => {
+                self.instance.destroy_surface(surface);
+                return Err(PresentError::Unusable(
+                    "the shared adapter cannot present to that window",
+                ));
+            }
+        };
+        let composite_alpha = match composite_alpha_for(
+            open.target.transparent(),
+            &caps.composite_alpha,
+        ) {
+            Some(alpha) => alpha,
+            None if open.transparency == Transparency::Preferred => {
+                log::warn!(
+                    "hal: the shared adapter offers no premultiplied alpha for this transparent \
+                     window; presenting it opaque, as Transparency::Preferred allows"
+                );
+                CompositeAlpha::Opaque
+            }
+            None => {
+                self.instance.destroy_surface(surface);
+                return Err(PresentError::Unusable(NO_PREMULTIPLIED_ALPHA));
+            }
+        };
+        let config = match swapchain_config(&caps, extent, open.pacing, composite_alpha) {
+            Ok(config) => config,
+            Err(error) => {
+                self.instance.destroy_surface(surface);
+                return Err(error);
+            }
+        };
+        log::info!("hal: {:?} opened on a shared device", open.label);
+        Presenter::finish(
+            Arc::clone(&self.instance),
+            surface,
+            self.adapter,
+            config,
+            Arc::clone(&self.device),
+            &open,
+        )
+    }
+}
+
 /// Why an adapter whose surface offers no premultiplied alpha cannot present a
 /// transparent window. See [`composite_alpha_for`].
 const NO_PREMULTIPLIED_ALPHA: &str =
@@ -664,10 +798,22 @@ impl Default for PresenterDesc<'_> {
 /// [`crate::backend`] for one **by value** and everything after it is
 /// `dyn Instance` / `dyn Device` — which is what made the swap from the null
 /// backend to `crcbl-vk` a change to one argument.
+///
+/// # One device for several windows
+///
+/// [`SharedGpu::open`] opens a second window's presenter on the first
+/// one's instance and device, which both then hold: each window keeps its own
+/// surface, swapchain and frames in flight, and the device goes when the last
+/// of them does. Cheaper per window than a device each — measured on 2026-10-22
+/// at about 110 ms and 25 MiB a window on NVIDIA's 615 driver, and 16 ms and
+/// under 1 MiB on Mesa's ANV — and the only way to have two windows on NVIDIA
+/// under Wayland that survives one of them closing: that driver crashes in the
+/// second window's swapchain teardown once the first window's own device and
+/// instance are gone.
 #[derive(Debug)]
 pub struct Presenter {
-    instance: Box<dyn Instance>,
-    device: Box<dyn Device>,
+    instance: Arc<dyn Instance>,
+    device: Arc<dyn Device>,
     queue: QueueHandle,
     surface: SurfaceHandle,
     /// The adapter the surface was matched against, kept so a pacing change can
@@ -921,8 +1067,15 @@ impl PendingPresenter {
                         if !absent.is_empty() {
                             log::info!("hal: this device does not have {absent}");
                         }
-                        return Presenter::finish(instance, surface, adapter, config, device, self)
-                            .map(Some);
+                        return Presenter::finish(
+                            Arc::from(instance),
+                            surface,
+                            adapter,
+                            config,
+                            Arc::from(device),
+                            self,
+                        )
+                        .map(Some);
                     }
                 },
                 OpenStage::Done => {
@@ -1093,6 +1246,18 @@ impl Presenter {
         pending.window = Some(window);
         pending.stage = Self::start_device(instance, &pending)?;
         Ok(pending)
+    }
+
+    /// A handle on this presenter's instance and device, for opening more
+    /// windows on them with [`SharedGpu::open`]. See [the type's
+    /// docs](Self#one-device-for-several-windows).
+    #[must_use]
+    pub fn shared(&self) -> SharedGpu {
+        SharedGpu {
+            instance: Arc::clone(&self.instance),
+            device: Arc::clone(&self.device),
+            adapter: self.adapter,
+        }
     }
 
     /// The surface target `shell` describes `window` with.
@@ -1312,23 +1477,7 @@ impl Presenter {
                  using the shell's size"
             );
         }
-        let format = caps
-            .preferred_format()
-            .ok_or(PresentError::Unusable("the surface offers no format"))?;
-        let present_mode = caps.choose_present_mode(pacing.preferences());
-        let image_count = caps
-            .min_image_count
-            .saturating_add(1)
-            .min(caps.max_image_count);
-
-        let config = SwapchainConfig {
-            label: "crcbl swapchain",
-            format,
-            extent,
-            image_count,
-            present_mode,
-            composite_alpha,
-        };
+        let config = swapchain_config(&caps, extent, pacing, composite_alpha)?;
 
         // The one call that may take more than an instant. On the web it is a
         // promise; here it is a `PendingDevice` the caller polls.
@@ -1357,11 +1506,11 @@ impl Presenter {
     /// parameters, because the next thing start-up learns early and uses late
     /// would be one more.
     fn finish(
-        instance: Box<dyn Instance>,
+        instance: Arc<dyn Instance>,
         surface: SurfaceHandle,
         adapter: crcbl_hal::AdapterId,
         config: SwapchainConfig,
-        device: Box<dyn Device>,
+        device: Arc<dyn Device>,
         open: &PendingPresenter,
     ) -> Result<Self, PresentError> {
         let (extent, pacing, frames_in_flight) = (open.extent, open.pacing, open.frames_in_flight);

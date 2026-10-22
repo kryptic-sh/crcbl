@@ -11,40 +11,26 @@ day with a Wayland event-delivery fix and no API change, so EW should take
 0.8.1. pikr and lyr were told in session; no EW session was running to tell.
 Delete this once EW knows.
 
-## Two presenters crash NVIDIA's Wayland WSI on teardown (2026-10-22)
+## NVIDIA's Wayland WSI crashes with a device per window (2026-10-22)
 
-**On the NVIDIA MX550 (driver 615.78) under headless sway, a process with two
-`Presenter`s segfaults tearing down the second.** The first `Presenter::destroy`
-completes; the second's `vkDestroySwapchainKHR` calls a null function pointer
-inside `libnvidia-eglcore.so.615.78.08` (gdb backtrace, with and without the
-validation layer). Intel (ANV) and lavapipe tear the same down cleanly.
+`crcbl_app::present::SharedGpu` is the way round it and is in `[Unreleased]`:
+windows opened on one shared device no longer crash on the MX550 (615.78), the
+`wayland_transparency` test opens its second window that way and passes there,
+with and without validation. What is still open:
 
-- **Repro:** `crates/crcbl-app/tests/wayland_transparency.rs` opens two
-  presenters, a backdrop panel and a transparent window, so
-  `run-wayland-e2e.sh`'s transparency step fails on this laptop whenever
-  headless sway composites on the MX550 (wlroots picks its render node; with
-  `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128` the whole harness passes on
-  Intel). Two ordinary windows reproduce it in either close order. One window,
-  transparent or opaque, does not.
-- **Narrowed to the first presenter's GPU teardown:** forgetting the first
-  window entirely lets the second close cleanly, while destroying only the first
-  presenter and keeping its window does not. Each presenter owns its own
-  `VkInstance` and device, so the evidence points at NVIDIA's per-process
-  Wayland state going with the first instance or device, which is legal usage
-  and so a driver bug. Not split further: device teardown versus instance
-  teardown.
-- **Who it hits:** any crcbl program with two presenters whose display GPU is
-  NVIDIA under Wayland, on closing the second window — lyr's bar per monitor, on
-  a monitor unplugged. Not this laptop under Hyprland, whose presenters pick the
-  Intel display GPU. **Confirmed by lyr the same day:** with
-  `CRCBL_ADAPTER=discrete`, a bar on each of two outputs of a nested Hyprland,
-  removing one output killed lyr with SIGSEGV at PC 0x0; on the default Intel
-  GPU nothing happens. lyr records it as the owner's call and would adopt a
-  shared `VkInstance` if crcbl ships one.
-- **Owner's call, options:** (a) one `VkInstance` per process, shared by every
-  presenter, which would also cut the per-window instance cost; (b) report it to
-  NVIDIA and keep the per-presenter instance; (c) both. Not reported upstream
-  yet.
+- **Two presenters each with a device of their own still crash there**: the
+  second's `vkDestroySwapchainKHR` calls a null pointer inside
+  `libnvidia-eglcore.so.615.78.08` once the first presenter's device and
+  instance are gone; keeping them alive (a temporary build that leaked them)
+  avoided it. Legal usage, so a driver bug. **Not reported to NVIDIA.**
+- **lyr has not adopted it.** It opens a `Presenter` per surface (bars, popups,
+  toasts, through `lyr_render::surface::Surface::open`), reproduced the crash
+  with `CRCBL_ADAPTER=discrete` and a bar on each of two outputs, and will hold
+  one `SharedGpu` in its `App` once a release carries it; it offered to run a
+  local `[patch]` build first.
+- **Not shared:** windows on displays driven by different GPUs.
+  `SharedGpu::open` refuses a window its adapter cannot present to, and the
+  caller opens that one with `Presenter::open`.
 
 ## pikr waits on a release after 0.8.1 (2026-10-22)
 
