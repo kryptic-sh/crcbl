@@ -74,8 +74,9 @@ and `coreaudio.rs`, `level.rs`; model types `lyr_core::audio` and
 - **Windows: WASAPI through the `windows` crate**, already a dependency of
   `crcbl-shell` and `crcbl-dx12`: `IMMDeviceEnumerator`, `IAudioEndpointVolume`,
   `IAudioSessionManager2` for streams, `IMMNotificationClient` and the volume
-  callbacks for changes. Setting the default needs `IPolicyConfig`, which is
-  undocumented; whether to use it as lyr does is part of the owner's call.
+  callbacks for changes. Setting the default uses `IPolicyConfig`, which is
+  undocumented, as lyr does: the owner chose that over reporting set-default
+  unsupported on Windows (2026-10-22).
 - **macOS: CoreAudio's `AudioObject` C API**, declared by hand (it is plain C),
   with property listeners for changes. Streams and moving them are `Unsupported`
   there, as lyr has them.
