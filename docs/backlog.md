@@ -2714,6 +2714,15 @@ window (the Wayland read-back passes on NVIDIA); and the per-user `/tmp` quota
 fills with other sessions' scratch files, which killed a sandbox log write once
 (`TMPDIR` elsewhere avoids it).
 
+**Behaviour, not a crcbl bug: openbox claims the display before it manages
+windows** (2026-10-23). It sets `_NET_SUPPORTING_WM_CHECK` before it redirects
+maps, so on a loaded CI runner a window mapped in between sits on the root,
+unmanaged, for good: `_NET_CLIENT_LIST` stayed empty for the reserving-bar test
+in run 39855784676, the first test that needed management to run first. Not
+reproduced locally, with Arch's or Ubuntu 24.04's openbox and Xvfb. `x11_e2e`'s
+`Session::open` now waits for openbox to list a probe window before any test
+runs.
+
 **Behaviour, not a crcbl bug: Hyprland keeps a panel's exclusive keyboard under
 its own grabbing popup** (lyr, 2026-10-21, Hyprland 0.56.2). With a layer panel
 holding `keyboard_interactivity = exclusive` and an `xdg_popup` grab open from
