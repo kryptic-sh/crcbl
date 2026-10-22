@@ -50,6 +50,10 @@ pub(super) enum Wake {
     /// it. Correct behaviour, and indistinguishable from a broken wait unless
     /// the queue is known to have been empty.
     Message,
+    /// The drain before the wait dispatched a message the window procedure
+    /// made an event of, so the wait returned without sleeping: that event is
+    /// the work the caller is waiting for.
+    Recorded,
     /// `WAIT_FAILED`. Returns at once and sleeps not at all.
     Failed {
         /// `GetLastError` immediately afterwards.
@@ -725,6 +729,15 @@ impl Win32Shell {
         // records here is delivered by the next `pump`, exactly as if the
         // messages had been drained there.
         self.drain_messages();
+        // **And the wait does not start while that is owed.** A message the
+        // drain dispatched may have been made an event of — a posted
+        // `WM_MOUSELEAVE` arriving just after the pump, found by lyr: the leave
+        // was recorded and then sat behind a sleep nothing ended, so a tooltip
+        // stayed up until an unrelated wake. The next `pump` is what delivers
+        // it, so the caller is sent there now.
+        if self.shared.has_events() {
+            return Wake::Recorded;
+        }
         // **A timed wait sleeps on the high-resolution timer, not on its own
         // timeout.** `MsgWaitForMultipleObjectsEx`'s millisecond timeout expires
         // on the system clock tick, 15.6 ms by default, and nothing in this
@@ -1709,7 +1722,7 @@ impl Shell for Win32Shell {
         // Nothing can be done about it here — the caller has no alternative to
         // offer — so it is reported and the loop continues.
         match self.wait(timeout) {
-            Wake::TimedOut | Wake::Woken | Wake::Message => {}
+            Wake::TimedOut | Wake::Woken | Wake::Message | Wake::Recorded => {}
             Wake::Failed { error } => {
                 crcbl_core::log::warn!(
                     "MsgWaitForMultipleObjectsEx failed with error {error}; not sleeping"

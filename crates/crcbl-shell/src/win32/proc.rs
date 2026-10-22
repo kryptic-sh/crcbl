@@ -260,6 +260,12 @@ impl Shared {
         enqueue(&mut self.events.borrow_mut(), event);
     }
 
+    /// Whether anything has been recorded since the last
+    /// [`take_events`](Self::take_events).
+    pub(super) fn has_events(&self) -> bool {
+        !self.events.borrow().is_empty()
+    }
+
     /// Takes everything recorded since the last call.
     ///
     /// Takes rather than drains, so the borrow ends before the caller starts

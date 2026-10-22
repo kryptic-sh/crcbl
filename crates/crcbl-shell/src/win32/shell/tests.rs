@@ -2044,6 +2044,47 @@ fn a_waker_ends_a_wait_from_another_thread_and_rings_coalesce() {
     );
 }
 
+/// **A leave the wait's own drain dispatches ends the wait.** lyr's stuck
+/// tooltip: the pointer left, the posted `WM_MOUSELEAVE` arrived just after a
+/// pump, the drain at the top of the next wait dispatched it and recorded the
+/// leave, and the wait then slept on with the event undelivered.
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_leave_dispatched_by_the_waits_own_drain_ends_the_wait() {
+    const LONG: Duration = Duration::from_secs(20);
+    let mut shell = shell();
+    let window = window(&mut shell);
+    let hwnd = hwnd_of(&shell, window);
+    shell.pump(&mut |_| {});
+    // Put the derived "is the pointer inside?" state on a known edge, then
+    // enter: the leave posted next is one this window is tracked for.
+    send_leave(hwnd);
+    send_mouse(hwnd, msg::MOUSE_MOVE, 0, 40, 30);
+    shell.pump(&mut |_| {});
+
+    // SAFETY: a pointer-crossing message posted to this shell's own window,
+    // with the zero parameters `winuser.h` documents for it.
+    let posted = unsafe { ffi::PostMessageW(hwnd, msg::MOUSE_LEAVE, 0, 0) };
+    assert_ne!(posted, 0, "the leave is posted");
+    let start = Instant::now();
+    let woke = shell.wait(Some(LONG));
+    let waited = start.elapsed();
+    assert_eq!(
+        woke,
+        Wake::Recorded,
+        "the drain recorded the leave, so the wait must not sleep (returned after {waited:?})"
+    );
+    let mut left = false;
+    shell.pump(&mut |event| {
+        left |= matches!(
+            event,
+            ShellEvent::PointerFocus { window: w, entered: false, .. } if w == window
+        );
+    });
+    assert!(left, "the next pump delivers the leave");
+    shell.destroy_window(window).expect("destroy");
+}
+
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn wait_events_genuinely_blocks() {

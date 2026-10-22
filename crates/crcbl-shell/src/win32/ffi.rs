@@ -1671,6 +1671,11 @@ unsafe extern "system" {
     // makes the constraint path testable at all.
     #[cfg(test)]
     pub fn SendMessageW(hwnd: Handle, message: u32, w_param: Wparam, l_param: Lparam) -> Lresult;
+    // Test-only: a message *posted* rather than sent is the one a wait's own
+    // drain dispatches, which is the case `Win32Shell::wait` returns
+    // `Wake::Recorded` for.
+    #[cfg(test)]
+    pub fn PostMessageW(hwnd: Handle, message: u32, w_param: Wparam, l_param: Lparam) -> Bool32;
     pub fn MsgWaitForMultipleObjectsEx(
         count: u32,
         handles: *const Handle,
