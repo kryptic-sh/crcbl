@@ -32,6 +32,7 @@ use tagstruct::{Reader, Writer};
 use crate::model::{
     Card, CardId, Choice, Device, DeviceId, Direction, MixerState, Stream, StreamId,
 };
+use crate::visible::Visible;
 use crate::{Action, Interest, MixerError, Target, level};
 
 /// How long [`Pulse::open`] waits for the server's first full picture.
@@ -84,25 +85,6 @@ struct Inner {
     /// out.
     settle: Option<u32>,
     reported: Option<Visible>,
-}
-
-/// The part of the state an app with `interest` watches; see the PipeWire
-/// backend's type of the same name.
-#[derive(Debug, PartialEq)]
-struct Visible {
-    devices: Vec<Device>,
-    cards: Vec<Card>,
-    streams: Option<Vec<Stream>>,
-}
-
-impl Visible {
-    fn of(state: MixerState, interest: Interest) -> Self {
-        Self {
-            devices: state.devices,
-            cards: state.cards,
-            streams: (interest == Interest::DevicesAndStreams).then_some(state.streams),
-        }
-    }
 }
 
 struct Shared {

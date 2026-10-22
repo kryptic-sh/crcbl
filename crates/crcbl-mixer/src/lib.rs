@@ -32,6 +32,8 @@
 
 pub mod level;
 mod model;
+#[cfg(target_os = "linux")]
+mod visible;
 
 #[cfg(target_os = "linux")]
 mod linux;

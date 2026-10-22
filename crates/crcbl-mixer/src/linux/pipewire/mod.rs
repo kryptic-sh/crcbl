@@ -34,6 +34,7 @@ use pod::{Builder, Object, Value};
 use wire::{Message, Reader, Writer};
 
 use crate::model::{CardId, Direction, MixerState};
+use crate::visible::Visible;
 use crate::{Action, Interest, MixerError, Target, level};
 
 /// How long [`PipeWire::open`] waits for the server's first full picture.
@@ -79,25 +80,6 @@ struct Inner {
     settle: Option<i32>,
     /// What the app last saw, as its interest filters it.
     reported: Option<Visible>,
-}
-
-/// The part of the state an app with `interest` watches: the streams only
-/// when it asked for them.
-#[derive(Debug, PartialEq)]
-struct Visible {
-    devices: Vec<crate::model::Device>,
-    cards: Vec<crate::model::Card>,
-    streams: Option<Vec<crate::model::Stream>>,
-}
-
-impl Visible {
-    fn of(state: MixerState, interest: Interest) -> Self {
-        Self {
-            devices: state.devices,
-            cards: state.cards,
-            streams: (interest == Interest::DevicesAndStreams).then_some(state.streams),
-        }
-    }
 }
 
 struct Shared {
