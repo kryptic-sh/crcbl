@@ -529,10 +529,14 @@ fn handle(shared: &Shared, payload: &[u8]) -> Result<Handled, MixerError> {
                 // answer from the state; anything else is a broken connection.
                 Some(Asked::Action) | None => Ok(Handled::Nothing),
                 Some(_) => {
-                    let code = reader.u32_tag().unwrap_or_default();
-                    Err(MixerError::Protocol(format!(
-                        "PulseAudio refused the client: error {code}"
-                    )))
+                    let code = reader.u32_tag().map_err(decode)?;
+                    Err(MixerError::Protocol(if code == proto::ERR_ACCESS {
+                        "PulseAudio denied access: the cookie (`$PULSE_COOKIE` or \
+                         `~/.config/pulse/cookie`) is not the server's"
+                            .to_owned()
+                    } else {
+                        format!("PulseAudio refused the client: error {code}")
+                    }))
                 }
             }
         }

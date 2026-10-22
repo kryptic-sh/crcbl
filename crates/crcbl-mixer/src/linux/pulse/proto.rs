@@ -46,6 +46,10 @@ pub(crate) const SET_SOURCE_OUTPUT_MUTE: u32 = 99;
 /// server's.
 pub(crate) const VERSION: u32 = 35;
 
+/// `PA_ERR_ACCESS`, the error a server answers a client it does not admit
+/// with: one whose cookie does not match and whose user is not its own.
+pub(crate) const ERR_ACCESS: u32 = 1;
+
 /// `PA_INVALID_INDEX`: no index.
 pub(crate) const NO_INDEX: u32 = u32::MAX;
 

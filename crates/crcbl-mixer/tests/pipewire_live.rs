@@ -11,72 +11,9 @@
 
 use crcbl_mixer::{Direction, Mixer};
 
-/// One `pactl` sink or source: index, name, mean volume percent, mute.
-#[derive(Debug)]
-struct Witness {
-    index: u32,
-    name: String,
-    volume: u32,
-    muted: bool,
-    active_port: Option<String>,
-}
-
-/// `pactl list short`-free parsing: `pactl list sinks` prints blocks of
-/// `Sink #N`, `Name:`, `Mute:` and `Volume:` lines, which is all this reads.
-fn pactl(kind: &str) -> Vec<Witness> {
-    let output = crcbl_spawn::command("pactl")
-        .args(["list", kind])
-        .env("LC_ALL", "C")
-        .output()
-        .expect("pactl runs");
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut found = Vec::new();
-    let mut current: Option<Witness> = None;
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(index) = line
-            .strip_prefix("Sink #")
-            .or_else(|| line.strip_prefix("Source #"))
-        {
-            found.extend(current.take());
-            current = Some(Witness {
-                index: index.parse().expect("an index"),
-                name: String::new(),
-                volume: 0,
-                muted: false,
-                active_port: None,
-            });
-        } else if let Some(witness) = current.as_mut() {
-            if let Some(name) = line.strip_prefix("Name: ") {
-                witness.name = name.to_owned();
-            } else if let Some(port) = line.strip_prefix("Active Port: ") {
-                witness.active_port = Some(port.to_owned());
-            } else if let Some(mute) = line.strip_prefix("Mute: ") {
-                witness.muted = mute == "yes";
-            } else if let Some(volume) = line.strip_prefix("Volume: ") {
-                let percents: Vec<u32> = volume
-                    .split_whitespace()
-                    .filter_map(|word| word.strip_suffix('%')?.parse().ok())
-                    .collect();
-                let count = u32::try_from(percents.len()).unwrap().max(1);
-                witness.volume = (percents.iter().sum::<u32>() + count / 2) / count;
-            }
-        }
-    }
-    found.extend(current);
-    found
-        .into_iter()
-        .filter(|witness| !witness.name.ends_with(".monitor"))
-        .collect()
-}
-
-fn default(kind: &str) -> String {
-    let output = crcbl_spawn::command("pactl")
-        .arg(format!("get-default-{kind}"))
-        .output()
-        .expect("pactl runs");
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
-}
+#[path = "support/pactl.rs"]
+mod pactl;
+use pactl::{default, pactl, sink_inputs, until};
 
 /// **Every device `pactl` reports, the mixer reports with the same id, name,
 /// volume and mute, and the same default**, for both directions. The id is the
@@ -125,6 +62,14 @@ fn the_mixer_agrees_with_pactl_on_every_device() {
             assert_eq!(device.active_port, witness.active_port, "{}", witness.name);
         }
     }
+    for (input, sink) in sink_inputs() {
+        let stream = state
+            .streams
+            .iter()
+            .find(|stream| stream.id.0 == input)
+            .unwrap_or_else(|| panic!("the mixer has no stream {input}"));
+        assert_eq!(stream.device.map(|device| device.0), Some(sink));
+    }
     let sink = default("sink");
     assert_eq!(
         state
@@ -132,18 +77,6 @@ fn the_mixer_agrees_with_pactl_on_every_device() {
             .map(|device| device.name.as_str()),
         Some(sink.as_str())
     );
-}
-
-/// Polls `mixer` until `ready` holds or two seconds pass.
-fn until(mixer: &Mixer, ready: impl Fn(&crcbl_mixer::MixerState) -> bool) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while std::time::Instant::now() < deadline {
-        if ready(&mixer.state()) {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    false
 }
 
 /// **Volume and mute reach the server on both of a device's paths**, a card

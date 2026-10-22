@@ -37,33 +37,48 @@ socket is there, or with `CRCBL_MIXER_BACKEND=pulse`. Verified on the office
 laptop through `pipewire-pulse`, by the same three live tests under
 `CRCBL_MIXER_BACKEND=pulse`: every device, active port and stream agrees with
 `pactl`, volume and mute round trip on HDMI1 and HDMI3, and a stream's life
-wakes a streams app 6 times and a devices-only app none. **Not run against a
-real PulseAudio daemon** (this laptop runs PipeWire), so its cookie check is
-untested. lyr confirmed it at `8744e4b7` with its own live tests under both
-backends, and confirmed the disconnect signal against a private `pipewire`
-daemon it killed and restarted twice: lyr saw each loss at once and reconnected
-within its backoff. A reopen in the instant after the loss answered
-`Protocol("…Connection reset by peer")`; a socket that resets, refuses or closes
-before the first full picture now answers `NoServer`. **Slice 3, the Windows
-backend, is on branch `mixer-windows`** (`src/windows/`, not yet on main):
-WASAPI through the `windows` crate, one COM thread (multithreaded apartment)
-owning every audio object, callbacks that only signal, actions marshalled to
-that thread, session-stable ids handed out per endpoint id string and session
-instance identifier (`windows/ids.rs`), the console role's default, volume as
-the scalar percent held to 100 (`level::SCALAR_MAX_PERCENT`), and `MakeDefault`
-through `IPolicyConfig` for the console and multimedia roles, declared from
-AudioDeviceCmdlets' declaration. Verified on the Windows 11 development machine
-by `tests/wasapi_live.rs`, run by hand: all six active endpoints (a USB DAC's
-speakers and microphone, a USB headset's headphones and microphone, two digital
-outputs) agree with WASAPI asked directly on id string, friendly name, volume,
-mute and default; every stream is on an endpoint the mixer has; on the default
-output a set to 37 %, a mute toggle and a step of −2 reached WASAPI and woke the
-app, and the original scalar and mute were put back bit-exactly. **Not verified
-on Windows:** a Bluetooth endpoint (none here; the `PKEY_Device_EnumeratorName`
-rule is lyr's, never seen to match a real device); the audio service stopping or
-restarting (the `DisconnectReasonServerShutdown` and
-`AUDCLNT_E_SERVICE_NOT_RUNNING` paths are written but not exercised, and with no
-session open nothing reports the stop until the next read or action);
+wakes a streams app 6 times and a devices-only app none. **Run against a real
+PulseAudio daemon (17.0, Debian) on 2026-10-22**, in a rootless podman container
+so the laptop's PipeWire stays as it is: `tests/pulse_live.rs` sets volume and
+mute on a null sink and a null source, switches the default output and back, and
+moves a `pacat` stream between sinks, with `pactl` agreeing after each; and
+`the_mixer_agrees_with_pactl_on_every_device` agrees there too. The cookie is
+checked: a zero cookie is refused with a message naming it, the real one
+admitted. **The daemon must run as a user other than the client's** to test
+that, or PulseAudio admits the client by its user and never reads the cookie.
+Not covered there: ports and profiles (a null sink has neither). The recipe: a
+`debian:stable-slim` image with `pulseaudio` and `pulseaudio-utils`, run with
+`--user 1000:1000`, a bind-mounted directory as `HOME`, and
+`pulseaudio -n -F custom.pa --exit-idle-time=-1 --daemonize=no`, where
+`custom.pa` loads
+`module-native-protocol-unix socket=/shared/native auth-cookie-enabled=1 auth-anonymous=0`,
+two `module-null-sink`s and a `module-null-source`; copy the cookie out with
+`podman exec … cat`, and reach the socket through a short symlink, since a Unix
+socket's path is capped near 108 bytes. lyr confirmed it at `8744e4b7` with its
+own live tests under both backends, and confirmed the disconnect signal against
+a private `pipewire` daemon it killed and restarted twice: lyr saw each loss at
+once and reconnected within its backoff. A reopen in the instant after the loss
+answered `Protocol("…Connection reset by peer")`; a socket that resets, refuses
+or closes before the first full picture now answers `NoServer`. **Slice 3, the
+Windows backend, is on branch `mixer-windows`** (`src/windows/`, not yet on
+main): WASAPI through the `windows` crate, one COM thread (multithreaded
+apartment) owning every audio object, callbacks that only signal, actions
+marshalled to that thread, session-stable ids handed out per endpoint id string
+and session instance identifier (`windows/ids.rs`), the console role's default,
+volume as the scalar percent held to 100 (`level::SCALAR_MAX_PERCENT`), and
+`MakeDefault` through `IPolicyConfig` for the console and multimedia roles,
+declared from AudioDeviceCmdlets' declaration. Verified on the Windows 11
+development machine by `tests/wasapi_live.rs`, run by hand: all six active
+endpoints (a USB DAC's speakers and microphone, a USB headset's headphones and
+microphone, two digital outputs) agree with WASAPI asked directly on id string,
+friendly name, volume, mute and default; every stream is on an endpoint the
+mixer has; on the default output a set to 37 %, a mute toggle and a step of −2
+reached WASAPI and woke the app, and the original scalar and mute were put back
+bit-exactly. **Not verified on Windows:** a Bluetooth endpoint (none here; the
+`PKEY_Device_EnumeratorName` rule is lyr's, never seen to match a real device);
+the audio service stopping or restarting (the `DisconnectReasonServerShutdown`
+and `AUDCLNT_E_SERVICE_NOT_RUNNING` paths are written but not exercised, and
+with no session open nothing reports the stop until the next read or action);
 `MakeDefault` (no test changes the owner's default device); whether Windows
 Settings also moves the communications role when it sets a default (the mixer
 leaves that role alone, as the Sound control panel's "Default Device" does); and
