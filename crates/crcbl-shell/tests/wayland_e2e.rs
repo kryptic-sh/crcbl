@@ -4528,7 +4528,7 @@ mod atspi;
 #[cfg(feature = "accesskit")]
 #[test]
 #[ignore = "needs a Wayland compositor and a private AT-SPI bus; run tests/run-wayland-e2e.sh"]
-fn a_reader_finds_the_button_and_presses_it() {
+fn a_reader_presses_the_button_and_reads_the_field() {
     let bus = atspi::private_bus();
     let mut session = Session::open();
     assert!(session.shell.caps().contains(ShellCaps::ACCESSIBILITY));
@@ -4559,5 +4559,22 @@ fn a_reader_finds_the_button_and_presses_it() {
             .iter()
             .any(|event| atspi::is_press(event, window))
     });
+    let deadline = Instant::now() + WAIT;
+    let field = loop {
+        match atspi::read_the_field(&address) {
+            Ok(field) => break field,
+            Err(error) => assert!(
+                Instant::now() < deadline,
+                "the reader never read the field: {error}"
+            ),
+        }
+        session.pump();
+        session.shell.wait_events(Some(Duration::from_millis(50)));
+    };
+    assert_eq!(
+        field,
+        (atspi::FIELD_TEXT.to_owned(), atspi::FIELD_CARET),
+        "the reader hears the field's text, its caret in characters"
+    );
     session.shell.destroy_window(window).expect("destroy");
 }

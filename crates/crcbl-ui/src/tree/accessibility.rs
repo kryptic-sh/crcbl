@@ -46,19 +46,36 @@
 //! when a label is drawn as runs to accent part of it — and a block left with
 //! nothing else to hold is read as one [`Role::Label`].
 //!
+//! [`Ui::set_accessible_text_input`] says a block a caller drew itself — its
+//! own caret, its own pre-edit — is an editable text field: it reads as a
+//! [`Role::TextInput`] holding the value given, not as its spans.
+//!
+//! # Text fields
+//!
+//! A text field, [`Ui::text_input`]'s or one a caller marked, holds one
+//! [`Role::TextRun`] child with its value, a character per `char`, and carries
+//! its caret and selection as a [`TextSelection`] on that run: what a reader
+//! needs to say where the caret is and what is selected, and what a platform's
+//! text interface (UI Automation's `TextPattern`, AT-SPI's `Text`) is built
+//! from. The run's key is derived from the field's under a rule no built node
+//! uses, so it never collides with one.
+//!
 //! # Actions
 //!
 //! A focusable node offers [`Action::Focus`], the focused node
 //! [`Action::Blur`], and a node with a focus role that is not disabled
 //! [`Action::Click`]; [`Ui::accessibility_action`] acts on those three.
 
+use std::ops::Range;
+
 use accesskit::{
-    Action, ActionRequest, Node, NodeId, Rect, Role, Toggled, TreeId, TreeInfo, TreeUpdate,
+    Action, ActionRequest, Node, NodeId, Rect, Role, TextPosition, TextSelection, Toggled, TreeId,
+    TreeInfo, TreeUpdate,
 };
 
 use super::focus::{self, Scope};
 use super::widgets::{MASK, WidgetKind, WidgetState};
-use super::{Content, NodeKey, ROOT_KEY, Ui};
+use super::{Content, KeySource, NodeKey, ROOT_KEY, Ui};
 use crate::style::PseudoClasses;
 
 impl Ui {
@@ -135,6 +152,41 @@ impl Ui {
     /// node is built; a key not built this frame is ignored.
     pub fn set_accessible_label(&mut self, key: NodeKey, label: &str) {
         self.accessible_labels.insert(key, label.to_owned());
+    }
+
+    /// Says the node `key` is an editable text field holding `value`, for
+    /// screen readers this frame: for a field a caller draws itself, with its
+    /// own caret and pre-edit, which would otherwise read as the spans it was
+    /// drawn in. `selection` is the selected bytes of `value` with the caret at
+    /// its end; an empty range is a caret alone. The field's spans are not read
+    /// on their own, and [`Ui::set_accessible_label`] on the same key names it.
+    /// Set it each frame the node is built; a key not built this frame is
+    /// ignored.
+    ///
+    /// # Panics
+    ///
+    /// If either end of `selection` is past the end of `value` or inside a
+    /// character, as slicing `value` with it would.
+    pub fn set_accessible_text_input(
+        &mut self,
+        key: NodeKey,
+        value: &str,
+        selection: Range<usize>,
+    ) {
+        let char_at = |byte: usize| {
+            assert!(
+                value.is_char_boundary(byte),
+                "byte {byte} of a {}-byte value is not between characters",
+                value.len()
+            );
+            value[..byte].chars().count()
+        };
+        let field = TextField {
+            value: value.to_owned(),
+            anchor: char_at(selection.start),
+            focus: char_at(selection.end),
+        };
+        self.accessible_text_inputs.insert(key, field);
     }
 
     /// The node a screen reader clicked since the last frame, now reporting
@@ -228,6 +280,7 @@ impl Ui {
         }
 
         let label = self.accessible_labels.get(&frame.key);
+        let marked = self.accessible_text_inputs.get(&frame.key);
         if is_whole(kind) {
             self.name_from_contents(index, kind, &mut node);
         } else {
@@ -238,19 +291,24 @@ impl Ui {
                     self.nodes[child].content,
                     Content::Text { .. } | Content::Run { .. }
                 );
-                if label.is_none() || !is_text {
+                if (label.is_none() && marked.is_none()) || !is_text {
                     self.push_accessible(child, &mut node, out);
                     held = true;
                 }
                 next = self.nodes[child].next_sibling;
             }
             if label.is_some()
+                && marked.is_none()
                 && !held
                 && frame.content == Content::Block
                 && kind == WidgetKind::None
             {
                 node.set_role(Role::Label);
             }
+        }
+        if let Some(field) = marked {
+            node.set_role(Role::TextInput);
+            node.set_value(field.value.as_str());
         }
         // Where the name goes is the role's: AccessKit names a `Label` from
         // its value, as it does every text span, and everything else from its
@@ -262,7 +320,32 @@ impl Ui {
                 node.set_label(label.as_str());
             }
         }
+        let field = marked
+            .cloned()
+            .or_else(|| self.built_field(frame.key, kind));
+        if let Some(field) = field {
+            push_text_run(frame.key, &field, &mut node, out);
+        }
         out.push((id, node));
+    }
+
+    /// What [`Ui::text_input`]'s field `key`, built as `kind`, holds, as its
+    /// node's value shows it: masked for a password.
+    fn built_field(&self, key: NodeKey, kind: WidgetKind) -> Option<TextField> {
+        let WidgetKind::TextInput { masked } = kind else {
+            return None;
+        };
+        let line = self.edits.get(&key)?.line();
+        let value = if masked {
+            String::from_iter(std::iter::repeat_n(MASK, line.len()))
+        } else {
+            line.text().to_owned()
+        };
+        Some(TextField {
+            value,
+            anchor: line.anchor(),
+            focus: line.caret(),
+        })
     }
 
     /// Names the widget at frame node `index`, one node with no children in
@@ -329,6 +412,43 @@ impl Ui {
             next = node.next_sibling;
         }
     }
+}
+
+/// A text field's value, and its selection in `char`s; see the module docs.
+#[derive(Clone, Debug)]
+pub(super) struct TextField {
+    value: String,
+    /// Where the selection began: the caret itself when nothing is selected.
+    anchor: usize,
+    /// The caret.
+    focus: usize,
+}
+
+/// Gives the text field `node`, keyed `key`, its one text run holding
+/// `field`'s value, pushed onto `out`, and its selection on that run.
+fn push_text_run(key: NodeKey, field: &TextField, node: &mut Node, out: &mut Vec<(NodeId, Node)>) {
+    let id = NodeId(Ui::key_under(key, KeySource::TextRun).0);
+    let mut run = Node::new(Role::TextRun);
+    run.set_value(field.value.as_str());
+    let lengths: Vec<u8> = field
+        .value
+        .chars()
+        .map(|c| u8::try_from(c.len_utf8()).expect("a char is at most four bytes"))
+        .collect();
+    run.set_character_lengths(lengths);
+    if let Some(bounds) = node.bounds() {
+        run.set_bounds(bounds);
+    }
+    let at = |character_index| TextPosition {
+        node: id,
+        character_index,
+    };
+    node.set_text_selection(TextSelection {
+        anchor: at(field.anchor),
+        focus: at(field.focus),
+    });
+    node.push_child(id);
+    out.push((id, run));
 }
 
 /// Whether a node that behaves as `behavior` takes a click a reader asks for:

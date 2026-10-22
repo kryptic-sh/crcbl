@@ -1856,7 +1856,7 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       three handlers run on the adapter's executor thread and cross on a mutex
       queue that rings the shell's waker. AT-SPI says when the last reader
       leaves, so `AccessibilityDeactivated` is raised here, unlike Win32.
-      Verified by `a_reader_finds_the_button_and_presses_it` in both
+      Verified by `a_reader_presses_the_button_and_reads_the_field` in both
       `wayland_e2e` and `x11_e2e`: a `busctl` client on a private
       `dbus-run-session` bus switches AT-SPI on, finds the window and its button
       by name through the registry and calls `DoAction`, which must arrive as an

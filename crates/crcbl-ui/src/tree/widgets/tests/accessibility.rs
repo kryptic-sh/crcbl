@@ -1,9 +1,12 @@
 //! The tree as a screen reader reads it, and the actions a reader asks for.
 
-use accesskit::{Action, ActionRequest, Node, NodeId, Rect, Role, Toggled, TreeId, TreeUpdate};
+use accesskit::{
+    Action, ActionRequest, Node, NodeId, Rect, Role, TextPosition, TextSelection, Toggled, TreeId,
+    TreeUpdate,
+};
 
 use super::*;
-use crate::tree::Response;
+use crate::tree::{Response, TextInputOptions};
 
 /// The keys of [`form`]'s widgets.
 #[derive(Clone, Copy)]
@@ -369,4 +372,137 @@ fn a_selectable_lists_selected_row_reads_as_selected() {
     ui.add_stylesheet("rows.css", "#rows { height: 100px; }");
     assert_eq!(selections(&mut ui, Some(1)), [None, Some(true), None]);
     assert_eq!(selections(&mut ui, None), [None, None, None]);
+}
+
+/// The text run `field`'s node holds, and its id.
+fn text_run<'a>(update: &'a TreeUpdate, field: &Node) -> (NodeId, &'a Node) {
+    let [run] = field.children() else {
+        panic!("a text field holds one run, not {:?}", field.children());
+    };
+    let node = update
+        .nodes
+        .iter()
+        .find(|(id, _)| id == run)
+        .map(|(_, node)| node)
+        .expect("the run is in the tree");
+    assert_eq!(node.role(), Role::TextRun);
+    (*run, node)
+}
+
+/// **A block a caller drew as a text field reads as one, with the value,
+/// caret and selection it was given and not its spans**: "héllo" drawn as a
+/// typed run and a pre-edit run is one `TextInput` whose run counts "é" as
+/// one character, and a byte offset becomes the character it falls before.
+#[test]
+fn a_block_marked_as_a_text_input_reads_as_its_value_and_caret() {
+    let field = |ui: &mut Ui, selection: std::ops::Range<usize>| {
+        frame(ui, idle(), NavInput::default(), |ui| {
+            let mut spans = Vec::new();
+            let query = ui.block(".query", &[], |ui| {
+                spans.push(ui.span(".typed", "hé", &[]).key);
+                spans.push(ui.span(".preedit", "llo", &[]).key);
+            });
+            ui.set_accessible_text_input(query.key, "héllo", selection);
+            ui.set_accessible_label(query.key, "Search");
+            (query.key, spans)
+        })
+    };
+    let mut ui = Ui::new();
+
+    let (query, spans) = field(&mut ui, 3..3);
+    let update = ui.accessibility_update();
+    let input = node(&update, query);
+    assert_eq!(input.role(), Role::TextInput);
+    assert_eq!(input.value(), Some("héllo"));
+    assert_eq!(input.label(), Some("Search"), "the label names it");
+    for span in spans {
+        assert!(
+            update.nodes.iter().all(|(id, _)| *id != NodeId(span.0)),
+            "{span:?} is drawn, not read"
+        );
+    }
+    let (run_id, run) = text_run(&update, input);
+    assert_eq!(run.value(), Some("héllo"));
+    assert_eq!(run.character_lengths(), [1, 2, 1, 1, 1]);
+    assert_eq!(run.bounds(), input.bounds());
+    let caret = TextPosition {
+        node: run_id,
+        character_index: 2,
+    };
+    assert_eq!(
+        input.text_selection(),
+        Some(&TextSelection {
+            anchor: caret,
+            focus: caret
+        }),
+        "byte 3 is after \"hé\", two characters in"
+    );
+
+    let (query, _) = field(&mut ui, 0..6);
+    let update = ui.accessibility_update();
+    let input = node(&update, query);
+    let (again, _) = text_run(&update, input);
+    assert_eq!(again, run_id, "the run keeps its id across frames");
+    let selection = input.text_selection().expect("a selection");
+    assert_eq!(
+        (
+            selection.anchor.character_index,
+            selection.focus.character_index
+        ),
+        (0, 5),
+        "all of it selected, the caret at the end"
+    );
+}
+
+/// **A byte inside a character is refused loudly**, as slicing at it would be.
+#[test]
+#[should_panic(expected = "is not between characters")]
+fn a_text_inputs_caret_inside_a_character_panics() {
+    let mut ui = Ui::new();
+    frame(&mut ui, idle(), NavInput::default(), |ui| {
+        let query = ui.block(".query", &[], |_| {});
+        ui.set_accessible_text_input(query.key, "é", 1..1);
+    });
+}
+
+/// **`text_input`'s own field carries its caret and selection too**, from
+/// its line: the run holds what the field shows — dots for a password — and
+/// the selection is the line's anchor and caret.
+#[test]
+fn a_built_text_input_reads_its_caret_and_selection() {
+    let mut ui = Ui::new();
+    let (mut agree, mut name) = (true, String::from("Ada"));
+    let widgets = form(&mut ui, idle(), &mut agree, &mut name);
+    let update = ui.accessibility_update();
+    let input = node(&update, widgets.name.key);
+    let (run_id, run) = text_run(&update, input);
+    assert_eq!(run.value(), Some("Ada"));
+    assert_eq!(run.character_lengths(), [1, 1, 1]);
+    let line = ui.edits[&widgets.name.key].line();
+    let selection = input.text_selection().expect("a selection");
+    assert_eq!(selection.anchor.node, run_id);
+    assert_eq!(
+        (
+            selection.anchor.character_index,
+            selection.focus.character_index
+        ),
+        (line.anchor(), line.caret())
+    );
+
+    let password = frame(&mut ui, idle(), NavInput::default(), |ui| {
+        let options = TextInputOptions {
+            masked: true,
+            ..TextInputOptions::default()
+        };
+        ui.text_input_with("#secret", &mut String::from("pw"), options)
+    });
+    let update = ui.accessibility_update();
+    let input = node(&update, password.key);
+    let (_, run) = text_run(&update, input);
+    assert_eq!(
+        run.value(),
+        input.value(),
+        "the run shows what the field does"
+    );
+    assert_ne!(run.value(), Some("pw"), "a password is not read out");
 }

@@ -469,6 +469,10 @@ enum KeySource<'a> {
     Popup(u64),
     /// A tooltip's root, by its anchor's key.
     Tooltip(u64),
+    /// The text run a screen reader reads a text field's value from, under
+    /// the field's key; never a node the tree builds.
+    #[cfg(feature = "accesskit")]
+    TextRun,
 }
 
 fn hash_of(value: impl Hash) -> u64 {
@@ -580,6 +584,10 @@ pub struct Ui {
     /// see [`Ui::set_accessible_label`].
     #[cfg(feature = "accesskit")]
     accessible_labels: HashMap<NodeKey, String>,
+    /// This frame's blocks a caller drew as text fields; see
+    /// [`Ui::set_accessible_text_input`].
+    #[cfg(feature = "accesskit")]
+    accessible_text_inputs: HashMap<NodeKey, accessibility::TextField>,
     /// Every paragraph as the last layout broke it into lines; see
     /// `paragraph.rs`.
     paragraphs: Vec<paragraph::LaidOut>,
@@ -607,6 +615,8 @@ impl Ui {
         self.nodes.clear();
         #[cfg(feature = "accesskit")]
         self.accessible_labels.clear();
+        #[cfg(feature = "accesskit")]
+        self.accessible_text_inputs.clear();
         self.children.clear();
         self.text.clear();
         self.cut.clear();

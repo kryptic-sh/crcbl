@@ -214,6 +214,12 @@ impl EditState {
         self.line.text()
     }
 
+    /// The line, its caret and its selection.
+    #[cfg(feature = "accesskit")]
+    pub(in crate::tree) const fn line(&self) -> &LineEdit {
+        &self.line
+    }
+
     /// Replaces the line with `text`, all of it selected, the caret shown.
     pub(super) fn select_all_of(&mut self, text: &str) {
         self.line.set_text(text);

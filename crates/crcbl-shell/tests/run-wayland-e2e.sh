@@ -101,7 +101,7 @@ CRCBL_E2E_PRIVATE_BUS=1 dbus-run-session -- cargo nextest run \
     --test wayland_e2e \
     --run-ignored all \
     --test-threads 1 \
-    -E 'test(=a_reader_finds_the_button_and_presses_it)' 2>&1 | tee "$ACCESS_LOG"
+    -E 'test(=a_reader_presses_the_button_and_reads_the_field)' 2>&1 | tee "$ACCESS_LOG"
 STATUS=${PIPESTATUS[0]}
 set -e
 # Colour-stripped first: CI's `CARGO_TERM_COLOR: always` splits the summary

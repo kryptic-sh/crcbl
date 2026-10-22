@@ -15,6 +15,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Ui::set_accessible_text_input`, for a text field an app draws itself.**
+  With the `accesskit` feature, a block marked with a value and a byte-range
+  selection reads to screen readers as an editable `TextInput` holding that
+  value, with its caret and selection, instead of as the spans it was drawn in.
+  `Ui::text_input`'s own fields now report their caret and selection too. Both
+  carry the text as one `TextRun`, which is what UI Automation's `TextPattern`
+  and AT-SPI's `Text` interface are built from: a reader can say where the caret
+  is and what is selected.
 - **`crcbl-mixer`, a new crate: control of the system's audio mixer.** Reads
   every output and input device (volume as the percent desktop mixers show,
   mute, default, active port and ports, form factor, Bluetooth, card), every
