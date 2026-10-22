@@ -47,15 +47,21 @@ laptop through `pipewire-pulse`, by the same three live tests under
 `pactl`, volume and mute round trip on HDMI1 and HDMI3, and a stream's life
 wakes a streams app 6 times and a devices-only app none. **Not run against a
 real PulseAudio daemon** (this laptop runs PipeWire), so its cookie check is
-untested. Next: Windows (WASAPI), then macOS (CoreAudio). PipeWire and
-PulseAudio are both spoken natively: PipeWire's own protocol when its socket is
-there, PulseAudio's when it is not (the owner runs PipeWire and wants it
-supported natively, not through `pipewire-pulse`). A seam any crcbl app can use
-to control the system mixer on Linux, Windows and macOS: volume, mute, devices,
-streams. Not playback, which is `crcbl-audio` and cpal. lyr moves its audio onto
-it and drops its own per-platform sources (`lyr-sources/src/audio/`: `pactl.rs`,
-`windows.rs` and `win32.rs`, `macos.rs` and `coreaudio.rs`, `level.rs`; model
-types `lyr_core::audio` and `lyr_core::audio_menu`), which are the requirements
+untested. lyr confirmed it at `8744e4b7` with its own live tests under both
+backends, and confirmed the disconnect signal against a private `pipewire`
+daemon it killed and restarted twice: lyr saw each loss at once and reconnected
+within its backoff. A reopen in the instant after the loss answered
+`Protocol("…Connection reset by peer")`; a socket that resets, refuses or closes
+before the first full picture now answers `NoServer`. Next: Windows (WASAPI),
+then macOS (CoreAudio). PipeWire and PulseAudio are both spoken natively:
+PipeWire's own protocol when its socket is there, PulseAudio's when it is not
+(the owner runs PipeWire and wants it supported natively, not through
+`pipewire-pulse`). A seam any crcbl app can use to control the system mixer on
+Linux, Windows and macOS: volume, mute, devices, streams. Not playback, which is
+`crcbl-audio` and cpal. lyr moves its audio onto it and drops its own
+per-platform sources (`lyr-sources/src/audio/`: `pactl.rs`, `windows.rs` and
+`win32.rs`, `macos.rs` and `coreaudio.rs`, `level.rs`; model types
+`lyr_core::audio` and `lyr_core::audio_menu`), which are the requirements
 reference and may be taken.
 
 **What it must do, from lyr:**
