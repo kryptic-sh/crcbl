@@ -860,6 +860,60 @@ frame answers in ${DARK_S}s" >&2
 and resumed, nothing left alive, validation silent"
 }
 
+# `run_game <sample>`
+#
+# A game, not the sandbox, closing the present loop. `run_sandbox` is the only
+# other pass that asks whether the engine paced on `vkWaitForPresentKHR`, and
+# the samples' own tests only hold their `optional_features` to the engine's,
+# which says the feature was asked for and not that a present was waited on.
+# So one sample runs windowed under sway on vk, and when the device enabled
+# present feedback the same two lines `run_sandbox` reads have to be in its
+# log: the loop took the branch, and the driver was asked. A driver without
+# the extensions says so, as there. The extent is not asserted: sway tiles a
+# window its config does not float, and the size is `run-samples-windowed.sh`'s
+# question, not this one.
+GAME_FRAMES=60
+run_game() {
+    local sample="$1"
+    local log="${SWAY_RUNTIME_DIR}/${sample}.log"
+    echo "crcbl e2e: running ${sample} windowed against sway on vk"
+    set +e
+    CRCBL_SHELL=wayland \
+    CRCBL_VK_VALIDATION=1 \
+        cargo run --locked --quiet --package "$sample" -- \
+        --backend vk --frames "$GAME_FRAMES" 2>&1 | tee "$log"
+    local status=${PIPESTATUS[0]}
+    set -e
+    if [ "$status" -ne 0 ]; then
+        echo "crcbl e2e: ${sample} failed against sway on vk (exit $status)" >&2
+        sway_log_tail
+        exit "$status"
+    fi
+    if ! grep -qE "${GAME_FRAMES} frames.* on the wayland shell at [0-9]+x[0-9]+, windowed " "$log"; then
+        echo "crcbl e2e: ${sample} did not report ${GAME_FRAMES} frames windowed on the wayland shell" >&2
+        tail -n 20 "$log" >&2
+        sway_log_tail
+        exit 1
+    fi
+    if grep -q "crcbl-vk: present feedback enabled" "$log"; then
+        if ! grep -q "hal: pacing on presents" "$log" \
+            || ! grep -q "crcbl-vk: vkWaitForPresentKHR on present" "$log"; then
+            echo "crcbl e2e: ${sample} enabled present feedback and did not wait on a present" >&2
+            tail -n 40 "$log" >&2
+            sway_log_tail
+            exit 1
+        fi
+        echo "crcbl e2e: ${sample} paced its frames on vkWaitForPresentKHR"
+    else
+        echo "crcbl e2e: no VK_KHR_present_wait on this driver — ${sample}'s present-wait \
+path was NOT exercised, only the absent-capability path" >&2
+    fi
+    assert_nothing_left_alive "$log" "$sample"
+    assert_validation_saw_nothing "$log" "$sample"
+    echo "crcbl e2e: ${sample} presented ${GAME_FRAMES} frames windowed on wayland/vk, \
+nothing left alive, validation silent"
+}
+
 if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
     || ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
     run_sandbox vk windowed
@@ -883,6 +937,8 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     run_sandbox_resize vk
     # And with its output powered off for a while, then back on.
     run_sandbox_dark vk
+    # And a game rather than the sandbox, held to the same closed loop.
+    run_game horde
     # One more windowed run, this time required to fail. After the passes above
     # rather than instead of any of them: each of those was still graded by the
     # ordinary checks with nothing injected.

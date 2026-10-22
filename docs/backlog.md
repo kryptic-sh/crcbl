@@ -11,6 +11,37 @@ day with a Wayland event-delivery fix and no API change, so EW should take
 0.8.1. pikr and lyr were told in session; no EW session was running to tell.
 Delete this once EW knows.
 
+## Two presenters crash NVIDIA's Wayland WSI on teardown (2026-10-22)
+
+**On the NVIDIA MX550 (driver 615.78) under headless sway, a process with two
+`Presenter`s segfaults tearing down the second.** The first `Presenter::destroy`
+completes; the second's `vkDestroySwapchainKHR` calls a null function pointer
+inside `libnvidia-eglcore.so.615.78.08` (gdb backtrace, with and without the
+validation layer). Intel (ANV) and lavapipe tear the same down cleanly.
+
+- **Repro:** `crates/crcbl-app/tests/wayland_transparency.rs` opens two
+  presenters, a backdrop panel and a transparent window, so
+  `run-wayland-e2e.sh`'s transparency step fails on this laptop whenever
+  headless sway composites on the MX550 (wlroots picks its render node; with
+  `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128` the whole harness passes on
+  Intel). Two ordinary windows reproduce it in either close order. One window,
+  transparent or opaque, does not.
+- **Narrowed to the first presenter's GPU teardown:** forgetting the first
+  window entirely lets the second close cleanly, while destroying only the first
+  presenter and keeping its window does not. Each presenter owns its own
+  `VkInstance` and device, so the evidence points at NVIDIA's per-process
+  Wayland state going with the first instance or device, which is legal usage
+  and so a driver bug. Not split further: device teardown versus instance
+  teardown.
+- **Who it hits:** any crcbl program with two presenters whose display GPU is
+  NVIDIA under Wayland, on closing the second window — lyr's bar per monitor, on
+  a monitor unplugged. Not this laptop under Hyprland, whose presenters pick the
+  Intel display GPU.
+- **Owner's call, options:** (a) one `VkInstance` per process, shared by every
+  presenter, which would also cut the per-window instance cost; (b) report it to
+  NVIDIA and keep the per-presenter instance; (c) both. Not reported upstream
+  yet.
+
 ## pikr waits on a release after 0.8.1 (2026-10-22)
 
 `[Unreleased]` holds `Ui::set_accessible_label` and `Ui::selectable_list`, which
@@ -33805,13 +33836,6 @@ left:
   the extension is there and the query answers `Unknown`. The feedback half is
   live and proven (`vkWaitForPresentKHR on present 1; the loop is closed`). Not
   investigated; it is `crcbl-vk`/engine territory.
-- **Nothing automated asserts that a _game_ closes the present loop.**
-  `crates/crcbl-shell/tests/run-wayland-e2e.sh` makes that assertion for
-  `apps/sandbox` only. The four samples' new tests are **drift guards** — they
-  assert `optional_features` equals the engine's — which is not the same as
-  asserting pacing happened; that was verified by hand against a private
-  headless sway session. Extending the wayland harness to cover a game is the
-  fix.
 - **`--headless --hardware` is the browser-gate flag pair that works here, and
   it is the silent-pass pair on a machine without a GPU.**
   `web/run-browser-e2e.sh`'s own header argues for Xvfb over `--headless` for
