@@ -200,16 +200,16 @@ measurements. What is left:
   at 17.6 s, so execution got slower; whether two macOS-15 jobs at once contend
   for something is unknown. Also untried: more nextest threads on the 3-vCPU
   runner — nobody has measured whether these suites are CPU- or GPU-bound.
-- **`vk e2e (lavapipe)` is the next critical path, and its time is the
-  runner's.** It took 16.1–28.0 min across main runs 39088257372 to 39315179951
-  and in dispatched run 39337376757, with the same suites each time. Between
-  39088257372 (20.9 min) and 39287773047 (27.6 min) every step slowed by about
-  the same third, compilation included (the render suite built in 16.9 s against
-  23.9 s), on the same runner image `20261012.334.1`, in Azure `eastus` against
-  `westus2`. Nothing in the repository explains it. If it stays the critical
-  path, split it the way `mtl-e2e` was: the sample goldens and the viewer's
-  suite took 7.7–10.2 min of it in runs 39088257372, 39287773047
-  and 39337376757.
+- **`vk e2e (lavapipe)` is split in two, like `mtl-e2e`.** As one job it took
+  16.1–28.0 min across main runs, every step slowing by about a third between
+  run 39088257372 (20.9 min) and 39287773047 (27.6 min) with nothing in the
+  repository to explain it, and on 2026-10-22 run 39779495825 crossed its
+  30-minute cap when the package install alone took 4.6 min; the viewer's suite
+  was cancelled. The ForwardRenderer, forward-pass and lit-mesh steps (13 of
+  27.6 min at `3a24c12f`) now run in `vk-e2e-mesh`, "vk e2e forward + mesh
+  (lavapipe)". **Not yet measured:** the two halves' times on main, which the
+  next push run gives; if either nears 30 min again, the sample draws are the
+  next piece to move.
 - **The `rust-cache` key moves with the runner image's own toolchain.** Its
   environment hash covers every installed `rustc`, and on 2026-10-19 runners
   carried 1.99.0 or 1.99.1 beside the pinned 1.98.1, so one scope saved under

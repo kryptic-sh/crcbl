@@ -1847,31 +1847,6 @@ jobs:
           CRCBL_VK_VALIDATION: '1'
           CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl-vk/tests/run-vk-e2e.sh
-      # **The Vulkan arm of `crates/crcbl/tests/render_e2e.rs`, and the reason
-      # its goldens can be trusted.** That test draws the cube, sprite and UI
-      # scenes through the engine's own renderers on whichever backend
-      # `CRCBL_GPU` names, and it exists for the Metal arm in the `mtl-e2e` job
-      # — but a golden only stays honest while something keeps re-deriving it,
-      # and the Metal arm currently cannot (see that job for why). This step is
-      # what keeps them from rotting: the references were blessed on lavapipe,
-      # so this comparison is bit-identical and any drift is loud rather than
-      # absorbed by the rasteriser tolerance.
-      #
-      # `CRCBL_VK_ICD`, not `VK_DRIVER_FILES` written out here. This step first
-      # exported Debian's `lvp_icd.x86_64.json` directly and failed with
-      # `ERROR_INCOMPATIBLE_DRIVER`, which the loader also says for a manifest
-      # naming a driver it cannot use — so the message named neither the file
-      # nor the mistake. `run-render-e2e.sh` now resolves the name through the
-      # same `crcbl_pin_vk_icd` this job's other steps use, which is what makes
-      # the two spellings a non-issue instead of a runner-specific guess.
-      - name: Draw a frame through ForwardRenderer on lavapipe
-        env:
-          CRCBL_GPU: vk
-          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-          CRCBL_VK_VALIDATION: '1'
-          CRCBL_VK_SYNC_VALIDATION: '1'
-          CRCBL_VK_VALIDATION_FATAL: '1'
-        run: crates/crcbl/tests/run-render-e2e.sh
 
       # The same HAL-seam behaviours on this backend, from the one agnostic
       # binary. It replaces per-backend copies that had drifted apart; without
@@ -1951,21 +1926,6 @@ jobs:
           CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl/tests/run-draw-gen-e2e.sh
 
-      # The forward pass's own state — the froxel grid, the shadow atlas as
-      # depth, the reflectivity attachment, reversed-Z against a conventional
-      # control. This is the Vulkan arm of the suite `vk_e2e`'s `lights.rs`,
-      # `shadow.rs` and `depth_probe.rs` became: the same checks the step above
-      # this job's `run-vk-e2e.sh` used to make, now made from a binary that
-      # names no backend so the other three jobs make them too.
-      - name: Check the forward pass on lavapipe
-        env:
-          CRCBL_GPU: vk
-          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-          CRCBL_VK_VALIDATION: '1'
-          CRCBL_VK_SYNC_VALIDATION: '1'
-          CRCBL_VK_VALIDATION_FATAL: '1'
-        run: crates/crcbl/tests/run-forward-e2e.sh
-
       # The sprite pass, the nine-slice, the button skin and the shared menu.
       # This is the Vulkan arm of the suite `vk_e2e`'s `sprite/` subtree,
       # `menu.rs`, `nine_slice.rs` and `button_skin.rs` became: the same checks
@@ -1982,28 +1942,6 @@ jobs:
           CRCBL_VK_SYNC_VALIDATION: '1'
           CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl/tests/run-sprite-e2e.sh
-
-      # The lit mesh, its four goldens, its HDR scene target, its resize storm
-      # and the uniform level-of-detail cut. This is the Vulkan arm of
-      # `crates/crcbl/tests/mesh_e2e/`, the backend-agnostic half of
-      # `vk_e2e/mesh.rs` — the last of the five clusters to move and the only one
-      # whose migration was a redesign, because half of that file demands
-      # `MESH_SHADER | TASK_SHADER` and asserts on the path selected. That half
-      # stayed and still runs in this job's `run-vk-e2e.sh` above.
-      #
-      # **The four references are blessed on Vulkan**, so this is the arm that
-      # would notice a change in the renderer itself rather than a driver
-      # disagreement — the same standing the sprite step above has.
-      # `mesh_clusters.png` is the loosest reference in the tree and its measured
-      # headroom is in `docs/backlog.md`.
-      - name: Draw the lit mesh on lavapipe
-        env:
-          CRCBL_GPU: vk
-          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-          CRCBL_VK_VALIDATION: '1'
-          CRCBL_VK_SYNC_VALIDATION: '1'
-          CRCBL_VK_VALIDATION_FATAL: '1'
-        run: crates/crcbl/tests/run-mesh-e2e.sh
 
       # `crates/crcbl/tests/tiling_e2e.rs`, which until this step existed had
       # never run in CI at all: its own header claimed `run-render-e2e.sh`
@@ -2347,6 +2285,116 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: golden-diff-lavapipe
+          path: target/golden-diff/
+          if-no-files-found: ignore
+
+  # **The forward renderer and the lit mesh on lavapipe, beside `vk-e2e`
+  # rather than in it**, as `mtl-e2e-mesh` is beside `mtl-e2e`. As one job its
+  # green runs on main took 21 to 28 min against the 30-minute cap, and on
+  # 2026-10-22 (run 39779495825, at `5f275419`) a 4.6-minute package install
+  # pushed it over and the viewer's suite was cancelled. These three steps took
+  # 13 of the job's 27.6 min at `3a24c12f`, so each half now finishes with room
+  # under the cap. The suites' time is the software
+  # rasteriser's, not compilation, so a second runner halves the wall time for a
+  # minute of setup.
+  vk-e2e-mesh:
+    name: vk e2e forward + mesh (lavapipe)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',vk-e2e-mesh,')
+    runs-on: ubuntu-latest
+    # `vk-e2e`'s cap, for the reason given there.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: test
+      - uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-nextest@0.9.146
+      # `vk-e2e`'s packages, for the reasons given there.
+      - name: Install the Vulkan loader, lavapipe and the validation layers
+        timeout-minutes: 10
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: >-
+            libvulkan1 mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
+            libasound2-dev
+
+      # **The Vulkan arm of `crates/crcbl/tests/render_e2e.rs`, and the reason
+      # its goldens can be trusted.** That test draws the cube, sprite and UI
+      # scenes through the engine's own renderers on whichever backend
+      # `CRCBL_GPU` names, and it exists for the Metal arm in the `mtl-e2e` job
+      # — but a golden only stays honest while something keeps re-deriving it,
+      # and the Metal arm currently cannot (see that job for why). This step is
+      # what keeps them from rotting: the references were blessed on lavapipe,
+      # so this comparison is bit-identical and any drift is loud rather than
+      # absorbed by the rasteriser tolerance.
+      #
+      # `CRCBL_VK_ICD`, not `VK_DRIVER_FILES` written out here. This step first
+      # exported Debian's `lvp_icd.x86_64.json` directly and failed with
+      # `ERROR_INCOMPATIBLE_DRIVER`, which the loader also says for a manifest
+      # naming a driver it cannot use — so the message named neither the file
+      # nor the mistake. `run-render-e2e.sh` now resolves the name through the
+      # same `crcbl_pin_vk_icd` the other lavapipe steps use, which is what makes
+      # the two spellings a non-issue instead of a runner-specific guess.
+      - name: Draw a frame through ForwardRenderer on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
+        run: crates/crcbl/tests/run-render-e2e.sh
+
+      # The forward pass's own state — the froxel grid, the shadow atlas as
+      # depth, the reflectivity attachment, reversed-Z against a conventional
+      # control. This is the Vulkan arm of the suite `vk_e2e`'s `lights.rs`,
+      # `shadow.rs` and `depth_probe.rs` became: the same checks `vk-e2e`'s
+      # `run-vk-e2e.sh` used to make, now made from a binary that
+      # names no backend so the other three jobs make them too.
+      - name: Check the forward pass on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
+        run: crates/crcbl/tests/run-forward-e2e.sh
+
+      # The lit mesh, its four goldens, its HDR scene target, its resize storm
+      # and the uniform level-of-detail cut. This is the Vulkan arm of
+      # `crates/crcbl/tests/mesh_e2e/`, the backend-agnostic half of
+      # `vk_e2e/mesh.rs` — the last of the five clusters to move and the only one
+      # whose migration was a redesign, because half of that file demands
+      # `MESH_SHADER | TASK_SHADER` and asserts on the path selected. That half
+      # stayed and still runs in `vk-e2e`'s `run-vk-e2e.sh`.
+      #
+      # **The four references are blessed on Vulkan**, so this is the arm that
+      # would notice a change in the renderer itself rather than a driver
+      # disagreement — the same standing `vk-e2e`'s sprite step has.
+      # `mesh_clusters.png` is the loosest reference in the tree and its measured
+      # headroom is in `docs/backlog.md`.
+      - name: Draw the lit mesh on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
+        run: crates/crcbl/tests/run-mesh-e2e.sh
+
+      # `vk-e2e`'s upload, for this job's goldens.
+      - name: Upload golden-image diffs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-diff-lavapipe-mesh
           path: target/golden-diff/
           if-no-files-found: ignore
 
@@ -3799,6 +3847,7 @@ jobs:
         dx12-e2e,
         cli-e2e,
         vk-e2e,
+        vk-e2e-mesh,
         vk-e2e-windows,
         mtl-hardware-e2e,
         mtl-e2e,
