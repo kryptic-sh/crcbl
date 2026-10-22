@@ -8384,13 +8384,17 @@ green local run.
   `crates/crcbl/tests/run-{render,hal-seam,draw-gen,forward,mesh,gltf,sprite,tiling}-e2e.sh`.
   Without `CRCBL_VK_ICD` the loader picks the hardware adapter, which is not the
   run CI makes.
-- **On the NVIDIA GeForce MX550 (615.78)** `run-forward-e2e.sh` and
-  `run-mesh-e2e.sh` pass in full, with validation on (2026-10-22): forward 53 of
-  53 there, on the Intel iGPU and on lavapipe, mesh 120 of 120. The two
-  occlusion tests that read 127 for `BENT_NORMAL_NONE` were the shaders writing
-  the zero direction as `0.5`, a rounding tie at `127.5` Vulkan leaves to the
-  driver; they now write 128/255. The two `mesh_e2e` exposure failures recorded
-  on 615.71 did not reproduce.
+- **On the office laptop's two GPUs, every suite above passes** (2026-10-22,
+  NVIDIA GeForce MX550 on 615.78 and Intel RPL-U on Mesa 26.2.5, each pinned
+  with `CRCBL_ADAPTER`, validation and synchronisation validation fatal): vk 69,
+  render 104 (goldens included), forward 53, mesh 120 (MX550), hal-seam 32,
+  draw-gen 19, sprite 19, gltf 3 and tiling 2. The two occlusion tests that read
+  127 for `BENT_NORMAL_NONE` on the MX550 were the shaders writing the zero
+  direction as `0.5`, a rounding tie at `127.5` Vulkan leaves to the driver;
+  they now write 128/255. The two `mesh_e2e` exposure failures recorded on
+  615.71 did not reproduce. `CRCBL_VK_ICD=hardware` drops the pin in every suite
+  (`crcbl_pin_vk_icd`), not only `run-vk-e2e.sh`, whose null-backend step now
+  runs without a developer's `CRCBL_ADAPTER`.
 - **lavapipe runs commands in the order they were recorded, which hides a
   missing barrier.** `crcbl-vk` records explicit pipeline barriers
   (`vkCmdPipelineBarrier2`), and a driver may run commands that declare no

@@ -420,9 +420,11 @@ echo "crcbl vk e2e: the sandbox presented 30 frames through the Vulkan backend"
 
 # And the null backend still works, on the same binary, selected at runtime.
 # The "does it repro on the other backend?" triage
-# only exists if both are reachable without a rebuild.
+# only exists if both are reachable without a rebuild. Without `CRCBL_ADAPTER`:
+# a developer's pin names one of this machine's GPUs, the null backend has none
+# of them, and the pin is rightly refused rather than ignored.
 echo "crcbl vk e2e: running the sandbox headless against the null backend"
-if ! cargo run --locked --quiet --package sandbox -- \
+if ! env -u CRCBL_ADAPTER cargo run --locked --quiet --package sandbox -- \
     --headless --backend null --frames 10 | grep -q "10 frames"; then
     echo "crcbl vk e2e: the null backend is no longer reachable at runtime" >&2
     exit 1

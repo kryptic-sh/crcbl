@@ -27,10 +27,18 @@
 #
 # Unset means "let the loader choose", which is a legitimate way to run against
 # real hardware — the caller says so, since only it knows what its own green run
-# would then be worth. Set-but-unresolvable is a hard failure: a pinned ICD that
-# quietly fell back to whatever was installed would defeat the pinning.
+# would then be worth. `hardware` means the same, spelled out: it is how
+# `run-vk-e2e.sh`, which pins lavapipe when unset, is told not to, and it means
+# the same in every harness that sources this. Set-but-unresolvable is a hard
+# failure: a pinned ICD that quietly fell back to whatever was installed would
+# defeat the pinning.
 crcbl_pin_vk_icd() {
     local label="${1:-crcbl}"
+    if [ "${CRCBL_VK_ICD:-}" = hardware ]; then
+        unset CRCBL_VK_ICD
+        echo "${label}: CRCBL_VK_ICD=hardware, so the loader chooses the driver"
+        return 0
+    fi
     [ -n "${CRCBL_VK_ICD:-}" ] || return 0
 
     if [ ! -f "$CRCBL_VK_ICD" ]; then
