@@ -74,6 +74,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `GetFrameLatencyWaitableObject` returns is the caller's to close, and one was
   left open per swapchain created. It is now closed when the swapchain is
   destroyed, or after a present wait still holding it finishes.
+- **A Win32 wait no longer sleeps on an event it has just recorded**:
+  `wait_events` drains the message queue before it sleeps, and an event the
+  drain produced — a pointer leave posted just after a pump, for one — stayed
+  undelivered until something else woke the loop, which kept a bar's tooltip up
+  for seconds after the pointer left. The wait now returns at once instead.
 - **SSAO's "no bent direction" sentinel is the same byte on every driver.** The
   occlusion shaders wrote it as `0.5`, which an `Rgba8Unorm` target stores at
   the tie between 127 and 128, and Vulkan lets a driver round either way:

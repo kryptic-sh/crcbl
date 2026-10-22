@@ -283,6 +283,16 @@ SVG text shaping and the Unicode text work have shipped; what is left:
    `VK_CONTROL` in place of `VK_LCONTROL` for the unsided-modifier fix, which is
    unit-tested only. pikr adopts `TextLayout::caret` for its right-to-left query
    caret in the same release.
+3. **An editable accessibility role for a field the app draws itself** (asked by
+   pikr, 2026-10-22, from a UI Automation read of its window on Windows 11,
+   crcbl 0.7.0). pikr draws its query with `Ui` text spans, not
+   `Ui::text_input`, because it owns its caret, IME pre-edit and vim modes, so
+   the block is announced as text with no value pattern; only
+   `WidgetKind::TextInput` maps to `Role::TextInput` (`tree/accessibility.rs`).
+   Wanted: a way to mark a block as an editable text input with its value, and
+   ideally its caret and selection, such as
+   `Ui::set_accessible_text_input(value, caret_byte)`. Cross-platform `crcbl-ui`
+   work, offered to the session that built `Ui::set_accessible_label`.
 
 **Behaviour, not a bug: an injected Win32 arrow key needs
 `KEYEVENTF_EXTENDEDKEY`** (seen by lyr, 2026-10-20). Without it, `keybd_event`
@@ -409,28 +419,19 @@ driver to an ICD manifest, L-sized).
   `win32/input.rs`, `self.consumed.clear()` deleted in `win32/shell.rs`,
   `if dismissed && repeat` in the Win32 key arm, `MAPVK_VK_TO_CHAR` in
   `layout_scancode`, and `if dismissed && !pressed` in Wayland's `key_event`.
-- **Win32 popup leave (lyr): still not reproduced; one real defect fixed on the
-  way.** lyr re-checked on 0.7.0 (2026-10-20): its top `Panel` bar opens a
-  `Passthrough` tooltip below a module after a hover delay, the pointer is moved
-  far off both by `SetCursorPos` from another process, and the bar never gets
-  `PointerFocus { entered: false }`.
-  `win32_e2e::a_passthrough_popup_does_not_disarm_its_panels_pointer_leave` runs
-  that geometry (a `TOP | LEFT | RIGHT` panel, no foreground call, a popup below
-  a module, a warp to a free corner) and **passed on CI's desktop without any
-  fix** (run 39388509964), as the toplevel-parent test did before it; so CI does
-  not show lyr's bug. Differences left between the two: lyr's tooltip and bar
-  draw through a swapchain, the e2e windows draw nothing; lyr waits a hover
-  delay with the pointer still; lyr moves the pointer from another process. The
-  defect fixed while looking, in `proc.rs`: `Shared::enter` moved the tracked
-  window to a newly entered one without reporting a leave of the old, whose own
-  `WM_MOUSELEAVE` was then dropped as stale by `Shared::leave`, so a crossing
-  between two of the thread's windows left the first entered for good
-  (`the_pointer_enters_once_per_arrival_and_a_stale_leave_is_ignored`, red
-  without the queued leave). Whether that is lyr's case is not known. Next: lyr
-  re-runs its check on 0.8.0 and, if the tooltip still sticks, sends a trace log
-  of `crcbl_shell` around the warp: `proc.rs` logs each arrival in a window and
-  each `WM_MOUSELEAVE` at trace, stale ones included, so the log says whether
-  the bar's leave came at all and whether the tooltip ever took a movement.
+- **Win32 popup leave (lyr): the cause was the wait, fixed; verified on CI's
+  desktop only.** lyr's trace on 0.8.1 (2026-10-22, `RUST_LOG=crcbl_shell=trace`
+  with a probe logging every event its bar received): the leave was recorded 8
+  ms after the warp (`WM_MOUSELEAVE for … (reported)`) and reached lyr 2.3 s
+  later, at an unrelated wake; the tooltip never took a movement. The posted
+  `WM_MOUSELEAVE` arrived just after a pump, `Win32Shell::wait`'s drain before
+  sleeping dispatched it, and the wait then slept with the event recorded and
+  undelivered. `wait` now returns `Wake::Recorded` at once when its drain
+  recorded anything (`a_leave_dispatched_by_the_waits_own_drain_ends_the_wait`,
+  a desktop test). The `Shared::enter` change made while looking (an arrival
+  queues the last window's leave) is a real defect too, but was not lyr's. Not
+  yet re-run in lyr's bar with the fix; lyr re-checks on the release that
+  carries it.
 - **AppKit input method: mutants not run.** The `appkit_session` additions went
   red on CI for removing the pre-edit gate in `record_preedit` and the
   end-of-pre-edit block in `insert_text`. Cancelled unrun: the
