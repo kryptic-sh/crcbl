@@ -3859,6 +3859,17 @@ does the same through `sync::fence_reading`, proven on a removed device by
   nor is any Linux driver. Eight is far enough under twenty to hold if the limit
   is somewhat lower elsewhere; a machine whose limit is under eight would need
   its own number.
+- **Linux, measured 2026-10-22 on the office laptop**, one process opening
+  devices on one adapter until something gave, each new device running an empty
+  submit and `wait_idle`, release build, validation off. Mesa's ANV (Intel
+  RPL-U, 26.2.5) and lavapipe each held 64 devices, the probe's cap, with every
+  one still answering `wait_idle` at the end. NVIDIA 615.78 (MX550) opened 42,
+  and on the 43rd **`vkCreateDevice` segfaulted** inside
+  `libnvidia-glcore.so.615.78.08` (gdb, three runs out of three) rather than
+  returning an error. So no Linux driver here loses a device by count: ANV and
+  lavapipe have no limit at 64, and NVIDIA's limit takes the process down with
+  it. The lost-device paths above therefore still have no way to be reached on
+  this machine. Eight stays well under NVIDIA's 42.
 - **The Vulkan runs finish in lockstep, unexplained.** With N copies of the cube
   test running, every copy exited together after about N × 0.13 s (20 at 2.5 s,
   32 at 4.1 s, 48 at 6.3 s), and the render suite's test times at `-j 16` and
