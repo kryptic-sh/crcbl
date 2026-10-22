@@ -396,11 +396,11 @@ impl Default for MonitorInfoExW {
 
 /// `DEVMODEW`, flattened.
 ///
-/// The two unions in the real structure are replaced by byte-equivalent arrays,
-/// because this backend reads exactly one field out of it —
-/// [`dm_display_frequency`](Self::dm_display_frequency) — and a union whose
-/// display arm we never touch is layout, not meaning. The layout assertion in
-/// this module's tests is what makes that safe: get the padding wrong and every
+/// The two unions in the real structure are each replaced by their display
+/// arm, because this backend reads exactly one field out of it —
+/// [`dm_display_frequency`](Self::dm_display_frequency) — and an arm only a
+/// printer driver writes is layout, not meaning. The layout assertions in this
+/// module's tests are what make that safe: get the padding wrong and every
 /// field after the mistake is read from the wrong offset, which produces a
 /// plausible number rather than a crash.
 #[repr(C)]
@@ -418,9 +418,15 @@ pub struct DevModeW {
     pub dm_driver_extra: u16,
     /// Which fields are meaningful.
     pub dm_fields: u32,
-    /// The printer/display union: `POINTL dmPosition` and two `DWORD`s in the
-    /// display arm.
-    pub dm_union_position: [u32; 4],
+    /// Where the display sits on the virtual desktop: `dmPosition`, the start
+    /// of the printer/display union's display arm. The printer arm,
+    /// `dmOrientation` to `dmPrintQuality`, covers the same bytes as this
+    /// field and the two after it.
+    pub dm_position: Point,
+    /// `DMDO_*` rotation.
+    pub dm_display_orientation: u32,
+    /// `DMDFO_*` scaling, for a fixed-resolution output.
+    pub dm_display_fixed_output: u32,
     /// Colour.
     pub dm_color: i16,
     /// Duplex.
@@ -441,7 +447,7 @@ pub struct DevModeW {
     pub dm_pels_width: u32,
     /// Height in pixels.
     pub dm_pels_height: u32,
-    /// The display-flags/n-up union.
+    /// The display-flags/n-up union, both of whose arms are a `DWORD`.
     pub dm_display_flags: u32,
     /// **Refresh rate in whole hertz.** The only field this backend reads.
     pub dm_display_frequency: u32,
@@ -474,7 +480,9 @@ impl Default for DevModeW {
             dm_size: size_of::<Self>() as u16,
             dm_driver_extra: 0,
             dm_fields: 0,
-            dm_union_position: [0; 4],
+            dm_position: Point::default(),
+            dm_display_orientation: 0,
+            dm_display_fixed_output: 0,
             dm_color: 0,
             dm_duplex: 0,
             dm_y_resolution: 0,
@@ -575,7 +583,7 @@ pub struct DisplayConfigVideoSignalInfo {
     /// bits, `vSyncFreqDivider` in bits 16-21.
     pub additional_signal_info: u32,
     /// `DISPLAYCONFIG_SCANLINE_ORDERING`.
-    pub scan_line_ordering: u32,
+    pub scan_line_ordering: i32,
 }
 
 /// `DISPLAYCONFIG_TARGET_MODE` — the mode a target (a display) is driving.
@@ -596,7 +604,7 @@ pub struct DisplayConfigTargetMode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DisplayConfigModeInfo {
     /// `DISPLAYCONFIG_MODE_INFO_TYPE`: target, source or desktop image.
-    pub info_type: u32,
+    pub info_type: i32,
     /// The adapter's id for this mode.
     pub id: u32,
     /// The adapter this mode belongs to.
@@ -633,15 +641,15 @@ pub struct DisplayConfigPathTargetInfo {
     /// 16 bits, the desktop-mode index in the low 16.
     pub mode_info_idx: u32,
     /// `DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY`.
-    pub output_technology: u32,
+    pub output_technology: i32,
     /// `DISPLAYCONFIG_ROTATION`.
-    pub rotation: u32,
+    pub rotation: i32,
     /// `DISPLAYCONFIG_SCALING`.
-    pub scaling: u32,
+    pub scaling: i32,
     /// The path's own refresh; the target mode's signal carries the exact one.
     pub refresh_rate: DisplayConfigRational,
     /// `DISPLAYCONFIG_SCANLINE_ORDERING`.
-    pub scan_line_ordering: u32,
+    pub scan_line_ordering: i32,
     /// Whether the target is present.
     pub target_available: Bool32,
     /// `DISPLAYCONFIG_TARGET_IN_USE` and friends.
@@ -681,7 +689,7 @@ pub struct DisplayConfigPathInfo {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DisplayConfigDeviceInfoHeader {
     /// `DISPLAYCONFIG_DEVICE_INFO_TYPE`: which request this is.
-    pub kind: u32,
+    pub kind: i32,
     /// Size of the request structure, which the system validates.
     pub size: u32,
     /// The adapter the request is about.
@@ -1232,10 +1240,10 @@ pub mod value {
     pub const QDC_ONLY_ACTIVE_PATHS: u32 = 0x0000_0002;
     /// `DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME` — the
     /// `DisplayConfigGetDeviceInfo` request that names a path's source.
-    pub const DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME: u32 = 1;
+    pub const DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME: i32 = 1;
     /// `DISPLAYCONFIG_MODE_INFO_TYPE_TARGET` — a mode array entry describing a
     /// target (a display) rather than a source.
-    pub const DISPLAYCONFIG_MODE_INFO_TYPE_TARGET: u32 = 2;
+    pub const DISPLAYCONFIG_MODE_INFO_TYPE_TARGET: i32 = 2;
     /// `DISPLAYCONFIG_PATH_TARGET_MODE_IDX_INVALID` — the "no mode" sentinel in
     /// the high 16 bits of `DisplayConfigPathTargetInfo::mode_info_idx`.
     pub const DISPLAYCONFIG_PATH_TARGET_MODE_IDX_INVALID: u32 = 0xffff;
@@ -2060,6 +2068,11 @@ mod tests {
     /// same-width fields declared in the wrong order: the size is unchanged,
     /// and each would read the other's value.
     ///
+    /// A field of the right width and the wrong type — `u32` where the SDK has
+    /// `LONG` — passes here. On Windows, `sdk_layout` checks every field's type,
+    /// down the arms of each union flattened here, against the `windows`
+    /// crate's declarations, which are generated from Windows' own metadata.
+    ///
     /// These run on the host as well as on Windows, because every field is a
     /// fixed-width type or a pointer and 64-bit Linux lays them out
     /// identically — which is the point: a padding mistake in [`DevModeW`]
@@ -2147,9 +2160,12 @@ mod tests {
             dm_size: 68, 2;
             dm_driver_extra: 70, 2;
             dm_fields: 72, 4;
-            // The printer/display union, `dmOrientation` to `dmPrintQuality`
-            // or `dmPosition` to `dmDisplayFixedOutput`.
-            dm_union_position: 76, 16;
+            // The printer/display union's display arm. The probe printed the
+            // union's extent, 76 for 16 bytes; these rows split it at the
+            // arm's members, which `sdk_layout` checks against the SDK.
+            dm_position: 76, 8;
+            dm_display_orientation: 84, 4;
+            dm_display_fixed_output: 88, 4;
             dm_color: 92, 2;
             dm_duplex: 94, 2;
             dm_y_resolution: 96, 2;
@@ -2507,3 +2523,6 @@ mod tests {
         assert_eq!(without.target_mode_index(), None);
     }
 }
+
+#[cfg(all(test, target_os = "windows"))]
+mod sdk_layout;

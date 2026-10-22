@@ -920,6 +920,42 @@ mod desktop {
     }
 }
 
+// `Witnessed` is read only by a `nested` row, and the only ones here are
+// `CompositionForm`'s, which is behind the input-method feature.
+#[cfg_attr(not(feature = "win32-ime-e2e"), allow(dead_code))]
+#[path = "../src/win32/sdk_witness.rs"]
+mod sdk_witness;
+
+/// The structures [`desktop`] declares against the `windows` crate's
+/// declarations of them; see `sdk_witness` for the rows. Not `#[ignore]`d:
+/// they open nothing, and only read two sets of types.
+mod sdk_layout {
+    #[cfg(feature = "win32-ime-e2e")]
+    use super::desktop::CompositionForm;
+    use super::desktop::{Point, Rect};
+    use super::sdk_witness::{Witnessed, witness};
+    use windows::Win32::Foundation::{POINT, RECT};
+    #[cfg(feature = "win32-ime-e2e")]
+    use windows::Win32::UI::Input::Ime::COMPOSITIONFORM;
+
+    witness!(point_matches_the_sdk: struct Point => POINT {
+        x: is x;
+        y: is y;
+    });
+    witness!(rect_matches_the_sdk: struct Rect => RECT {
+        left: is left;
+        top: is top;
+        right: is right;
+        bottom: is bottom;
+    });
+    #[cfg(feature = "win32-ime-e2e")]
+    witness!(composition_form_matches_the_sdk: struct CompositionForm => COMPOSITIONFORM {
+        style: is dwStyle;
+        position: nested ptCurrentPos;
+        area: nested rcArea;
+    });
+}
+
 // ---------------------------------------------------------------------------
 // The session
 // ---------------------------------------------------------------------------

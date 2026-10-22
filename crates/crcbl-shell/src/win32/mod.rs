@@ -246,6 +246,8 @@ mod monitors;
 mod panel;
 #[cfg(target_os = "windows")]
 mod popup;
+#[cfg(all(test, target_os = "windows"))]
+mod sdk_witness;
 #[cfg(target_os = "windows")]
 mod shell;
 #[cfg(target_os = "windows")]

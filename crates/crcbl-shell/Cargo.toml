@@ -163,9 +163,12 @@ accesskit_windows = { version = "0.35.1", optional = true }
 # A UI Automation *client*, for the desktop test that reads a window's tree and
 # invokes a button the way a screen reader would. Test-only: the shell itself
 # is the provider side and never calls these. Already in the lock file through
-# `accesskit_windows`, so it adds no crate.
+# `accesskit_windows`, so it adds no crate. It is also the independent witness
+# the hand-declared Win32 structures are checked against
+# (`src/win32/sdk_witness.rs`), which is what the `Devices`, `Graphics` and
+# `UI_Input`/`UI_WindowsAndMessaging` features are for.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_EnhancedStorage", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
+windows = { version = "0.62", features = ["Win32_Devices_Display", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_EnhancedStorage", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Accessibility", "Win32_UI_Input", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
 
 # The Wayland and X11 backends' accessibility adapter, behind the `accesskit`
 # feature: it serves the tree over AT-SPI on the session bus and turns Orca's

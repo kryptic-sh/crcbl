@@ -29400,20 +29400,25 @@ under the same heading, and it binds any Windows test written from now on.
 
 ### Unverified, in the order it would hurt
 
-- **The hand-declared Win32 structure layouts are checked for width, not type.**
-  `crates/crcbl-shell/src/win32/ffi.rs`'s `the_structures_match_the_c_layout`
-  (and the const blocks in `crates/crcbl-shell/tests/bin/send_input_win32.rs`
-  and `crates/crcbl-shell/tests/win32_e2e.rs`'s `desktop`) assert every field's
-  offset and width against numbers printed by a C probe built against the SDK,
-  so a missing, reordered or narrowed field fails. Still not caught: a field of
-  the right width and the wrong **signedness** (`u32` where the SDK has `LONG`
-  would turn a negative raw delta into a huge one), and the individual arms of a
-  C union the Rust side flattens into one field (`DevModeW::dm_union_position`,
-  `dm_display_flags`) — only the union's extent is checked. The numbers are x64
-  only, and pasted rather than generated: the C probe is not in the tree, so a
-  new structure needs one written again (print `sizeof` and every field's
-  `offsetof`/`sizeof` from `windows.h`, build with `cl` for x64). No Windows
-  target other than x64 is built by CI.
+- **The hand-declared Win32 structure layouts are witnessed on x64 only.**
+  `crates/crcbl-shell/src/win32/ffi/sdk_layout.rs`, and the `sdk_layout` modules
+  of `crates/crcbl-shell/tests/bin/send_input_win32.rs` and
+  `crates/crcbl-shell/tests/win32_e2e.rs`, check every structure declared there
+  against the `windows` crate's declaration of it, which is generated from
+  Windows' own metadata (the rows are explained in
+  `crates/crcbl-shell/src/win32/sdk_witness.rs`): size, alignment, every field's
+  offset, and every field's type — signedness included, with a newtype compared
+  by its inner primitive — down each arm of a union the Rust side flattens. The
+  C-probe numbers stay for offsets and widths: `ffi`'s
+  `the_structures_match_the_c_layout`, which runs on every host, and the test
+  programs' const blocks. Still not checked: any Windows target other than x64,
+  since CI builds no other (`APPBARDATA` is `pack(1)` on x86 in the SDK);
+  `WndClassExW::lpfn_wnd_proc` beyond its offset and width, because the SDK
+  spells the procedure's signature in newtypes; an arm the Rust side leaves out
+  (`RAWHID`, `HARDWAREINPUT`, `DEVMODEW`'s printer arm), which only the union's
+  size covers; and the `windows` crate's own metadata, which the witness trusts.
+  `DropFiles` is 4-aligned against the SDK's `pack(1)` on purpose, and the
+  witness asserts that difference rather than equality.
 - **`WM_INPUT`'s absolute path has only met injected reports.** On 2026-09-22,
   on the RX 7900 XTX desktop, a `SendInput` move with
   `MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE` arrived as a raw report with

@@ -317,7 +317,7 @@ mod win32 {
     #[derive(Clone, Copy)]
     pub struct PointerInfo {
         /// `PT_TOUCH` for everything this program injects.
-        pub pointer_type: u32,
+        pub pointer_type: i32,
         /// This program's name for the finger.
         pub pointer_id: u32,
         /// Filled in by the system.
@@ -347,7 +347,7 @@ mod win32 {
         /// Zero means "stamp it with the system's own counter".
         pub performance_count: u64,
         /// Unused when injecting.
-        pub button_change_type: u32,
+        pub button_change_type: i32,
     }
 
     /// `POINTER_TOUCH_INFO`.
@@ -425,7 +425,7 @@ mod win32 {
     };
 
     /// `PT_TOUCH`.
-    pub const PT_TOUCH: u32 = 2;
+    pub const PT_TOUCH: i32 = 2;
     /// `TOUCH_FEEDBACK_NONE` — no ripple drawn on the desktop under the point.
     pub const TOUCH_FEEDBACK_NONE: u32 = 0x3;
     /// How many fingers `InitializeTouchInjection` is told to expect.
@@ -847,4 +847,87 @@ fn say(what: &str) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "crcbl-e2e-win32-input: {what}");
     let _ = out.flush();
+}
+
+// The `windows` crate is a dev-dependency, so it reaches only this program's
+// test build: the const blocks above check offsets and widths on every build,
+// and these check each field's type against the SDK's as well.
+#[cfg(all(test, target_os = "windows"))]
+#[path = "../../src/win32/sdk_witness.rs"]
+mod sdk_witness;
+
+/// Every structure in [`win32`] against the `windows` crate's declaration of
+/// it; see `sdk_witness` for the rows.
+#[cfg(all(test, target_os = "windows"))]
+mod sdk_layout {
+    use crate::sdk_witness::{Witnessed, witness};
+    use crate::win32::{
+        Input, InputBody, KeybdInput, MouseInput, Point, PointerInfo, PointerTouchInfo, Rect,
+    };
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, KEYBDINPUT, MOUSEINPUT};
+    use windows::Win32::UI::Input::Pointer::{POINTER_INFO, POINTER_TOUCH_INFO};
+
+    witness!(mouse_input_matches_the_sdk: struct MouseInput => MOUSEINPUT {
+        dx: is dx;
+        dy: is dy;
+        mouse_data: is mouseData;
+        flags: is dwFlags.0;
+        time: is time;
+        extra_info: is dwExtraInfo;
+    });
+    witness!(keybd_input_matches_the_sdk: struct KeybdInput => KEYBDINPUT {
+        vk: is wVk.0;
+        scan: is wScan;
+        flags: is dwFlags.0;
+        time: is time;
+        extra_info: is dwExtraInfo;
+    });
+    // `HARDWAREINPUT`, the arm left out, is smaller than both; the size check
+    // is what says leaving it out changed nothing.
+    witness!(input_body_matches_the_sdk: union InputBody => INPUT_0 {
+        mouse: nested mi;
+        keyboard: nested ki;
+    });
+    witness!(input_matches_the_sdk: struct Input => INPUT {
+        kind: is r#type.0;
+        body: nested Anonymous;
+    });
+    witness!(point_matches_the_sdk: struct Point => POINT {
+        x: is x;
+        y: is y;
+    });
+    witness!(rect_matches_the_sdk: struct Rect => RECT {
+        left: is left;
+        top: is top;
+        right: is right;
+        bottom: is bottom;
+    });
+    witness!(pointer_info_matches_the_sdk: struct PointerInfo => POINTER_INFO {
+        pointer_type: is pointerType.0;
+        pointer_id: is pointerId;
+        frame_id: is frameId;
+        pointer_flags: is pointerFlags.0;
+        source_device: is sourceDevice.0;
+        hwnd_target: is hwndTarget.0;
+        pixel_location: nested ptPixelLocation;
+        himetric_location: nested ptHimetricLocation;
+        pixel_location_raw: nested ptPixelLocationRaw;
+        himetric_location_raw: nested ptHimetricLocationRaw;
+        time: is dwTime;
+        history_count: is historyCount;
+        input_data: is InputData;
+        key_states: is dwKeyStates;
+        performance_count: is PerformanceCount;
+        button_change_type: is ButtonChangeType.0;
+    });
+    witness!(pointer_touch_info_matches_the_sdk: struct PointerTouchInfo => POINTER_TOUCH_INFO {
+        pointer_info: nested pointerInfo;
+        touch_flags: is touchFlags;
+        touch_mask: is touchMask;
+        contact: nested rcContact;
+        contact_raw: nested rcContactRaw;
+        orientation: is orientation;
+        pressure: is pressure;
+    });
 }
