@@ -190,7 +190,7 @@ impl Session {
             std::thread::sleep(Duration::from_millis(50));
         };
         assert_eq!(shell.backend(), ShellBackend::X11);
-        let session = Self {
+        let mut session = Self {
             shell,
             peer: Peer::new().expect("libxcb-xtest and a second connection"),
             events: Vec::new(),
@@ -215,7 +215,63 @@ impl Session {
             i16::try_from(SCREEN.width / 2).expect("half a screen fits in an i16"),
             i16::try_from(SCREEN.height / 2).expect("half a screen fits in an i16"),
         );
+        if expect_wm {
+            session.wait_for_a_managing_window_manager(deadline);
+        }
         session
+    }
+
+    /// Waits until the window manager manages windows, not merely until it
+    /// has claimed the display.
+    ///
+    /// **`openbox` sets `_NET_SUPPORTING_WM_CHECK` before it redirects
+    /// maps**, and on a loaded CI runner the gap is long enough to land a
+    /// test's first window in: mapped straight onto the root, never managed,
+    /// and absent from `_NET_CLIENT_LIST` for good (seen on 2026-10-23, run
+    /// 39855784676, by the first test that needed management). So a probe is
+    /// mapped and the manager must list it; one mapped in the gap is
+    /// withdrawn and another tried.
+    fn wait_for_a_managing_window_manager(&mut self, deadline: Instant) {
+        let root = self.peer.root();
+        let listed = |peer: &mut Peer, xid: u32| {
+            peer.window_property(root, "_NET_CLIENT_LIST")
+                .unwrap_or_default()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|word| u32::from_ne_bytes(*word) == xid)
+        };
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "the window manager claimed the display but never managed a window"
+            );
+            let probe = self
+                .shell
+                .create_window(&desc("window manager probe"))
+                .expect("create the probe");
+            let xid = self.xid(probe);
+            let tried = Instant::now() + Duration::from_secs(1);
+            let mut managed = false;
+            while Instant::now() < tried && !managed {
+                self.pump();
+                managed = listed(&mut self.peer, xid);
+                self.shell.wait_events(Some(Duration::from_millis(10)));
+            }
+            let _ = self.shell.set_visible(probe, false);
+            let _ = self.shell.destroy_window(probe);
+            // Delivers the probe's `WindowDestroyed`, so it is cleared below
+            // rather than handed to the test as its own.
+            self.pump();
+            while listed(&mut self.peer, xid) && Instant::now() < deadline {
+                self.pump();
+                self.shell.wait_events(Some(Duration::from_millis(10)));
+            }
+            self.events.clear();
+            if managed {
+                return;
+            }
+        }
     }
 
     /// A point inside `window`, given in coordinates relative to its top-left.
