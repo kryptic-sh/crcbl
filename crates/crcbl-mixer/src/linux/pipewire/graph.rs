@@ -132,12 +132,6 @@ pub(crate) fn role(class: &str, props: &BTreeMap<String, String>) -> Option<Role
 }
 
 impl Graph {
-    /// Whether global `id` is a node the mixer reports as a stream.
-    pub(crate) fn is_stream(&self, id: u32) -> bool {
-        self.node_role(id)
-            .is_some_and(|role| matches!(role, Role::Stream(_)))
-    }
-
     fn node_role(&self, id: u32) -> Option<Role> {
         let node = self.nodes.get(&id)?;
         role(node.props.get("media.class")?, &node.props)
@@ -210,10 +204,13 @@ impl Graph {
             volume,
             muted,
             default,
+            // The active route's port, else the first port the device has, as
+            // `collect_port_info` answers for a device with no route yet.
             active_port: route
                 .and_then(|route| route.get(spa::ROUTE_NAME))
                 .and_then(|name| name.as_str())
-                .map(str::to_owned),
+                .map(str::to_owned)
+                .or_else(|| ports.first().map(|port| port.name.clone())),
             ports,
             form_factor: lookup("device.form-factor"),
             bluetooth: lookup("device.api").is_some_and(|api| api == "bluez5"),
@@ -279,26 +276,34 @@ fn available(object: &Object, key: u32) -> bool {
         .is_none_or(|available| available != spa::AVAILABILITY_NO)
 }
 
+/// Whether `route`'s array field `key` holds `value`.
+fn route_lists(route: &Object, key: u32, value: i32) -> bool {
+    matches!(route.get(key), Some(super::pod::Value::Array(values))
+        if values.iter().any(|item| item.as_int() == Some(value)))
+}
+
 /// The ports of route-device `device` in the `direction` given, from the
-/// card's `EnumRoute`.
+/// card's `EnumRoute`: the routes of that direction that the card's active
+/// profile offers for that device, as `collect_port_info` filters them.
 fn ports_of(card: &CardInfo, device: i32, direction: Direction) -> Vec<Choice> {
     let want = match direction {
         Direction::Output => spa::DIRECTION_OUTPUT,
         Direction::Input => spa::DIRECTION_INPUT,
     };
+    let profile = card
+        .params
+        .get(&spa::PARAM_PROFILE)
+        .and_then(|active| active.first())
+        .and_then(|active| active.get(spa::PROFILE_INDEX))
+        .and_then(|index| index.as_int());
     card.params
         .get(&spa::PARAM_ENUM_ROUTE)
         .into_iter()
         .flatten()
         .filter(|route| route.get(spa::ROUTE_DIRECTION).and_then(|v| v.as_id()) == Some(want))
+        .filter(|route| route_lists(route, spa::ROUTE_DEVICES, device))
         .filter(|route| {
-            route
-                .get(spa::ROUTE_DEVICES)
-                .and_then(|devices| match devices {
-                    super::pod::Value::Array(values) => Some(values.as_slice()),
-                    _ => None,
-                })
-                .is_some_and(|devices| devices.iter().any(|d| d.as_int() == Some(device)))
+            profile.is_some_and(|profile| route_lists(route, spa::ROUTE_PROFILES, profile))
         })
         .filter_map(|route| {
             choice(
@@ -419,6 +424,24 @@ mod tests {
         }
     }
 
+    fn enum_route(name: &str, description: &str, device: i32, profile: i32) -> Object {
+        object(
+            spa::OBJECT_PARAM_ROUTE,
+            spa::PARAM_ENUM_ROUTE,
+            vec![
+                (spa::ROUTE_DIRECTION, Value::Id(spa::DIRECTION_OUTPUT)),
+                (spa::ROUTE_NAME, Value::String(name.into())),
+                (spa::ROUTE_DESCRIPTION, Value::String(description.into())),
+                (
+                    spa::ROUTE_AVAILABLE,
+                    Value::Id(if device == 1 { spa::AVAILABILITY_NO } else { 2 }),
+                ),
+                (spa::ROUTE_DEVICES, Value::Array(vec![Value::Int(device)])),
+                (spa::ROUTE_PROFILES, Value::Array(vec![Value::Int(profile)])),
+            ],
+        )
+    }
+
     fn volume_props(linear: f32, mute: bool) -> Object {
         object(
             spa::OBJECT_PROPS,
@@ -483,21 +506,22 @@ mod tests {
                         )],
                     ),
                     (
-                        spa::PARAM_ENUM_ROUTE,
+                        spa::PARAM_PROFILE,
                         vec![object(
-                            spa::OBJECT_PARAM_ROUTE,
-                            spa::PARAM_ENUM_ROUTE,
-                            vec![
-                                (spa::ROUTE_DIRECTION, Value::Id(spa::DIRECTION_OUTPUT)),
-                                (
-                                    spa::ROUTE_NAME,
-                                    Value::String("analog-output-headphones".into()),
-                                ),
-                                (spa::ROUTE_DESCRIPTION, Value::String("Headphones".into())),
-                                (spa::ROUTE_AVAILABLE, Value::Id(spa::AVAILABILITY_NO)),
-                                (spa::ROUTE_DEVICES, Value::Array(vec![Value::Int(1)])),
-                            ],
+                            spa::OBJECT_PARAM_PROFILE,
+                            spa::PARAM_PROFILE,
+                            vec![(spa::PROFILE_INDEX, Value::Int(1))],
                         )],
+                    ),
+                    (
+                        spa::PARAM_ENUM_ROUTE,
+                        vec![
+                            enum_route("analog-output-headphones", "Headphones", 1, 1),
+                            // Offered by another profile only: not a port now.
+                            enum_route("analog-output-speaker", "Speaker", 1, 2),
+                            // Device 2's, for the node with no active route.
+                            enum_route("hdmi-output-0", "HDMI", 2, 1),
+                        ],
                     ),
                 ]),
             },
@@ -541,6 +565,19 @@ mod tests {
                 params: vec![volume_props(0.125, false)],
             },
         );
+        graph.nodes.insert(
+            55,
+            Node {
+                batch: None,
+                props: props(&[
+                    ("media.class", "Audio/Sink"),
+                    ("node.name", "alsa_output.usb.hdmi"),
+                    ("device.id", "40"),
+                    ("card.profile.device", "2"),
+                ]),
+                params: vec![volume_props(1.0, false)],
+            },
+        );
         graph.links.insert(80, (70, 50));
 
         let state = graph.state();
@@ -548,8 +585,19 @@ mod tests {
         assert_eq!((usb.volume, usb.muted), (50, true), "the route's props");
         assert!(usb.default);
         assert_eq!(usb.active_port.as_deref(), Some("analog-output-headphones"));
-        assert_eq!(usb.ports.len(), 1);
+        assert_eq!(usb.ports.len(), 1, "the speaker route is another profile's");
         assert!(!usb.ports[0].available);
+        let hdmi = state.device(DeviceId(55)).unwrap();
+        assert_eq!(
+            hdmi.active_port.as_deref(),
+            Some("hdmi-output-0"),
+            "no active route: the first port, as pactl reports"
+        );
+        assert_eq!(
+            (hdmi.volume, hdmi.muted),
+            (100, false),
+            "no route: its own props"
+        );
         assert_eq!(usb.card, Some(CardId(40)));
         let bluetooth = state.device(DeviceId(60)).unwrap();
         assert_eq!(

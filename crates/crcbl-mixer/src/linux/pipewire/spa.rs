@@ -51,6 +51,8 @@ pub(crate) const ROUTE_NAME: u32 = 4;
 pub(crate) const ROUTE_DESCRIPTION: u32 = 5;
 /// `SPA_PARAM_ROUTE_available`.
 pub(crate) const ROUTE_AVAILABLE: u32 = 7;
+/// `SPA_PARAM_ROUTE_profiles`.
+pub(crate) const ROUTE_PROFILES: u32 = 9;
 /// `SPA_PARAM_ROUTE_props`.
 pub(crate) const ROUTE_PROPS: u32 = 10;
 /// `SPA_PARAM_ROUTE_devices`.

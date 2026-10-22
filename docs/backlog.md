@@ -19,11 +19,22 @@ office laptop (PipeWire 1.6.9) by `tests/pipewire_live.rs`, run by hand: every
 sink and source agrees with `pactl` on id (the object serial), name, volume,
 mute and the default; volume and mute set on a card's active route (HDMI1) and
 on a node's own props (HDMI3) reach the server, `pactl` sees them, the waker
-fires, and both are put back. **Written and not yet run against a server:**
-make-default, move-a-stream, set-port and set-profile (each changes the owner's
-live audio, so they wait for a test that restores it safely or for lyr's run),
-and the `Interest::Devices` filter. Two server behaviours found and handled: a
-node lists `Props` as more than one object, the volume in the first; and a
+fires, and both are put back. **Run against the live server by lyr (2026-10-22,
+at `14babf1f`):** move-a-stream (a silent `pw-play` stream to HDMI3 and back),
+make-default on an input (Mic1 and back), set-profile on the Intel card both
+ways, each agreeing with `pactl`. **Not yet run:** make-default on an output (it
+would move the owner's music) and set-port to a different port. **Fixed from
+lyr's run:** a device with no active route now reports its first port as active,
+and ports are only the routes its card's active profile offers
+(`collect_port_info`'s rules), so `pactl` and the mixer agree on every active
+port; an unknown port or profile name is `Invalid`; and wakes are coalesced to
+one per server round trip and made only when what the app's interest shows has
+changed — a stream's life wakes a streams app 4 times (it was about 20) and a
+devices-only app none (`tests/pipewire_live.rs`). **Do not switch a card's
+profile back within a moment in a live test**: lyr's 40 ms round trip left
+WirePlumber naming the card's new nodes with a `.2` suffix, which outlived later
+switches; wait for the old nodes to go. Two server behaviours found and handled:
+a node lists `Props` as more than one object, the volume in the first; and a
 card's subscription does not resend a changed param, so the client re-enumerates
 a param when the card's info flips its serial bit, and a re-enumeration numbers
 its values by place among all of them (routes arrive as 2, 3, 5). Next: lyr's

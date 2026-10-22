@@ -73,6 +73,30 @@ struct Inner {
     next_sync: i32,
     phase: Phase,
     interest: Interest,
+    /// The sync whose `done` settles the changes since the last wake, while
+    /// one is out; see [`read_loop`].
+    settle: Option<i32>,
+    /// What the app last saw, as its interest filters it.
+    reported: Option<Visible>,
+}
+
+/// The part of the state an app with `interest` watches: the streams only
+/// when it asked for them.
+#[derive(Debug, PartialEq)]
+struct Visible {
+    devices: Vec<crate::model::Device>,
+    cards: Vec<crate::model::Card>,
+    streams: Option<Vec<crate::model::Stream>>,
+}
+
+impl Visible {
+    fn of(state: MixerState, interest: Interest) -> Self {
+        Self {
+            devices: state.devices,
+            cards: state.cards,
+            streams: (interest == Interest::DevicesAndStreams).then_some(state.streams),
+        }
+    }
 }
 
 struct Shared {
@@ -120,6 +144,8 @@ impl PipeWire {
                 next_sync: 1,
                 phase: Phase::Ready,
                 interest: Interest::DevicesAndStreams,
+                settle: None,
+                reported: None,
             }),
             waker,
         });
@@ -175,7 +201,12 @@ impl PipeWire {
     }
 
     pub(crate) fn set_interest(&self, interest: Interest) {
-        lock(&self.shared.inner).interest = interest;
+        let mut inner = lock(&self.shared.inner);
+        inner.interest = interest;
+        // What the app has seen, re-taken in the new interest's shape: the
+        // next comparison would otherwise set a view with streams against one
+        // without, and wake for nothing.
+        inner.reported = Some(Visible::of(inner.graph.state(), interest));
     }
 
     /// Writes `action` on `target` to the server. The change arrives back as
@@ -264,6 +295,16 @@ fn global_of<T>(
 }
 
 /// The reader thread: every message until the socket closes.
+///
+/// **One wake per burst, and only for a change the app can see.** A stream
+/// starting is a score of messages — its node, ports, links, params and the
+/// sink's own info — and waking for each would redraw a bar a score of times.
+/// So a change only sends a core `sync`, if one is not already out, and the
+/// wake waits for its `done`, which the server sends after everything before
+/// it. Then the state is compared with what the app last saw, as its
+/// [`Interest`] filters it, and the app is woken only if that differs: a
+/// sink's info changing state when a stream starts on it moves nothing a
+/// devices-only app shows.
 fn read_loop(shared: &Shared, mut reader: Reader, ready: &mpsc::Sender<Result<(), MixerError>>) {
     let mut opening = Some(ready.clone());
     loop {
@@ -279,14 +320,31 @@ fn read_loop(shared: &Shared, mut reader: Reader, ready: &mpsc::Sender<Result<()
         let outcome = handle(shared, &message);
         match outcome {
             Ok(Handled::Opened) => {
+                let mut inner = lock(&shared.inner);
+                let interest = inner.interest;
+                inner.reported = Some(Visible::of(inner.graph.state(), interest));
+                drop(inner);
                 if let Some(ready) = opening.take() {
                     let _ = ready.send(Ok(()));
                 }
             }
-            Ok(Handled::Changed { devices }) => {
-                let inner = lock(&shared.inner);
-                let wake = inner.phase == Phase::Ready
-                    && (devices || inner.interest == Interest::DevicesAndStreams);
+            Ok(Handled::Changed) => {
+                let mut writer = lock(&shared.writer);
+                let mut inner = lock(&shared.inner);
+                if inner.phase == Phase::Ready && inner.settle.is_none() {
+                    // A socket that failed here fails the next read too,
+                    // which is where the reader stops.
+                    if let Ok(seq) = sync(&mut writer, &mut inner) {
+                        inner.settle = Some(seq);
+                    }
+                }
+            }
+            Ok(Handled::Settled) => {
+                let mut inner = lock(&shared.inner);
+                let interest = inner.interest;
+                let now = Visible::of(inner.graph.state(), interest);
+                let wake = inner.reported.as_ref() != Some(&now);
+                inner.reported = Some(now);
                 drop(inner);
                 if wake {
                     (shared.waker)();
@@ -308,11 +366,10 @@ enum Handled {
     Nothing,
     /// The first full picture is in.
     Opened,
-    /// The picture changed; `devices` when a device or card was part of it,
-    /// rather than only streams.
-    Changed {
-        devices: bool,
-    },
+    /// The picture changed.
+    Changed,
+    /// The `sync` sent after a change came back: everything before it is in.
+    Settled,
 }
 
 fn handle(shared: &Shared, message: &Message) -> Result<Handled, MixerError> {
@@ -334,6 +391,10 @@ fn handle(shared: &Shared, message: &Message) -> Result<Handled, MixerError> {
                 Phase::Objects(want) if want == seq => {
                     inner.phase = Phase::Ready;
                     Ok(Handled::Opened)
+                }
+                Phase::Ready if inner.settle == Some(seq) => {
+                    inner.settle = None;
+                    Ok(Handled::Settled)
                 }
                 _ => Ok(Handled::Nothing),
             }
@@ -367,7 +428,6 @@ fn handle(shared: &Shared, message: &Message) -> Result<Handled, MixerError> {
         (REGISTRY_ID, spa::REGISTRY_EVENT_GLOBAL_REMOVE) => {
             let id = int(0).unwrap_or_default().cast_unsigned();
             let mut inner = lock(&shared.inner);
-            let stream = inner.graph.is_stream(id) || inner.graph.links.contains_key(&id);
             let known = inner.graph.nodes.remove(&id).is_some()
                 | inner.graph.cards.remove(&id).is_some()
                 | inner.graph.links.remove(&id).is_some();
@@ -375,7 +435,7 @@ fn handle(shared: &Shared, message: &Message) -> Result<Handled, MixerError> {
                 inner.proxies.remove(&proxy);
             }
             Ok(if known {
-                Handled::Changed { devices: !stream }
+                Handled::Changed
             } else {
                 Handled::Nothing
             })
@@ -388,7 +448,6 @@ fn handle(shared: &Shared, message: &Message) -> Result<Handled, MixerError> {
                     // error, then the props dict.
                     let props = fields.get(8).map(dict).unwrap_or_default();
                     let mut inner = lock(&shared.inner);
-                    let devices = !inner.graph.is_stream(global);
                     inner
                         .graph
                         .nodes
@@ -396,7 +455,7 @@ fn handle(shared: &Shared, message: &Message) -> Result<Handled, MixerError> {
                         .or_default()
                         .props
                         .extend(props);
-                    Ok(Handled::Changed { devices })
+                    Ok(Handled::Changed)
                 }
                 (Some(Bound::Card(global)), spa::EVENT_INFO) => {
                     card_info(shared, id, global, fields)
@@ -477,7 +536,7 @@ fn global(shared: &Shared, fields: &[Value]) -> Result<Handled, MixerError> {
             let end = |key: &str| props.get(key).and_then(|node| node.parse::<u32>().ok());
             if let (Some(output), Some(input)) = (end("link.output.node"), end("link.input.node")) {
                 inner.graph.links.insert(id, (output, input));
-                return Ok(Handled::Changed { devices: false });
+                return Ok(Handled::Changed);
             }
             return Ok(Handled::Nothing);
         }
@@ -501,8 +560,7 @@ fn global(shared: &Shared, fields: &[Value]) -> Result<Handled, MixerError> {
             b.id_array(subscribe);
         })?;
     }
-    let devices = !matches!(bound, Bound::Node(node) if inner.graph.is_stream(node));
-    Ok(Handled::Changed { devices })
+    Ok(Handled::Changed)
 }
 
 /// The params a card's subscription follows.
@@ -565,7 +623,7 @@ fn card_info(
             b.int(seq).id(id).int(0).int(0).none();
         })?;
     }
-    Ok(Handled::Changed { devices: true })
+    Ok(Handled::Changed)
 }
 
 /// A param event: seq, param id, index, next, and the param.
@@ -579,7 +637,6 @@ fn param(shared: &Shared, bound: Bound, fields: &[Value]) -> Result<Handled, Mix
     let mut inner = lock(&shared.inner);
     match bound {
         Bound::Node(global) => {
-            let devices = !inner.graph.is_stream(global);
             if id == spa::PARAM_PROPS {
                 let node = inner.graph.nodes.entry(global).or_default();
                 if graph::Batch::starts_afresh(&mut node.batch, seq, index) {
@@ -587,7 +644,7 @@ fn param(shared: &Shared, bound: Bound, fields: &[Value]) -> Result<Handled, Mix
                 }
                 node.params.push(object);
             }
-            Ok(Handled::Changed { devices })
+            Ok(Handled::Changed)
         }
         Bound::Card(global) => {
             let card = inner.graph.cards.entry(global).or_default();
@@ -599,7 +656,7 @@ fn param(shared: &Shared, bound: Bound, fields: &[Value]) -> Result<Handled, Mix
                 list.clear();
             }
             list.push(object);
-            Ok(Handled::Changed { devices: true })
+            Ok(Handled::Changed)
         }
         Bound::Metadata => Ok(Handled::Nothing),
     }
@@ -621,7 +678,7 @@ fn metadata(shared: &Shared, fields: &[Value]) -> Result<Handled, MixerError> {
         "default.audio.source" => inner.graph.default_source = name,
         _ => return Ok(Handled::Nothing),
     }
-    Ok(Handled::Changed { devices: true })
+    Ok(Handled::Changed)
 }
 
 /// A volume or mute change on node `node`, or a default or a move: written
@@ -802,7 +859,7 @@ fn set_port(writer: &mut Writer, inner: &Inner, node: u32, name: &str) -> Result
         .flatten()
         .find(|route| route.get(spa::ROUTE_NAME).and_then(Value::as_str) == Some(name))
         .and_then(|route| route.get(spa::ROUTE_INDEX).and_then(Value::as_int))
-        .ok_or(MixerError::NoSuchTarget)?;
+        .ok_or(MixerError::Invalid("the device has no port of that name"))?;
     let proxy = *inner.by_global.get(&card).ok_or(MixerError::NoSuchTarget)?;
     send(writer, proxy, spa::SET_PARAM, |b| {
         b.id(spa::PARAM_ROUTE)
@@ -834,7 +891,7 @@ fn set_profile(
         .flatten()
         .find(|profile| profile.get(spa::PROFILE_NAME).and_then(Value::as_str) == Some(name))
         .and_then(|profile| profile.get(spa::PROFILE_INDEX).and_then(Value::as_int))
-        .ok_or(MixerError::NoSuchTarget)?;
+        .ok_or(MixerError::Invalid("the card has no profile of that name"))?;
     let proxy = *inner
         .by_global
         .get(&global)

@@ -18,6 +18,7 @@ struct Witness {
     name: String,
     volume: u32,
     muted: bool,
+    active_port: Option<String>,
 }
 
 /// `pactl list short`-free parsing: `pactl list sinks` prints blocks of
@@ -43,10 +44,13 @@ fn pactl(kind: &str) -> Vec<Witness> {
                 name: String::new(),
                 volume: 0,
                 muted: false,
+                active_port: None,
             });
         } else if let Some(witness) = current.as_mut() {
             if let Some(name) = line.strip_prefix("Name: ") {
                 witness.name = name.to_owned();
+            } else if let Some(port) = line.strip_prefix("Active Port: ") {
+                witness.active_port = Some(port.to_owned());
             } else if let Some(mute) = line.strip_prefix("Mute: ") {
                 witness.muted = mute == "yes";
             } else if let Some(volume) = line.strip_prefix("Volume: ") {
@@ -118,6 +122,7 @@ fn the_mixer_agrees_with_pactl_on_every_device() {
             assert_eq!(device.id.0, witness.index, "{}", witness.name);
             assert_eq!(device.volume, witness.volume, "{}", witness.name);
             assert_eq!(device.muted, witness.muted, "{}", witness.name);
+            assert_eq!(device.active_port, witness.active_port, "{}", witness.name);
         }
     }
     let sink = default("sink");
@@ -164,7 +169,7 @@ fn volume_and_mute_reach_the_server_on_both_paths() {
         let device = state
             .devices
             .iter()
-            .find(|device| device.name.ends_with(suffix))
+            .find(|device| device.name.contains(suffix))
             .unwrap_or_else(|| panic!("this laptop has an {suffix}"))
             .clone();
         let target = crcbl_mixer::Target::Device(device.id);
@@ -216,4 +221,72 @@ fn volume_and_mute_reach_the_server_on_both_paths() {
             device.volume
         );
     }
+}
+
+/// A second of silence as a WAV file, for a stream that plays nothing.
+fn silence(path: &std::path::Path) {
+    let rate: u32 = 48_000;
+    let data = vec![0u8; rate as usize * 2];
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // the fmt chunk's size
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    wav.extend(data);
+    std::fs::write(path, wav).expect("the silence is written");
+}
+
+/// **A stream starting and stopping wakes a streams app a few times and a
+/// devices-only app not at all.** A second of silence played to HDMI3, which
+/// nothing is plugged into, with `pw-play` as the stream's source.
+#[test]
+#[ignore = "needs a running PipeWire with this laptop's HDMI3 sink, and pw-play"]
+fn a_stream_wakes_a_streams_app_a_few_times_and_a_devices_app_never() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let path = std::env::temp_dir().join(format!("crcbl-mixer-silence-{}.wav", std::process::id()));
+    silence(&path);
+    let watch = |interest| {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&wakes);
+        let mixer = Mixer::open(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("PipeWire is running");
+        mixer.set_interest(interest);
+        let hdmi3 = mixer
+            .state()
+            .devices
+            .into_iter()
+            .find(|device| device.name.contains("HDMI3__sink"))
+            .expect("this laptop has an HDMI3")
+            .name;
+        let status = crcbl_spawn::command("pw-play")
+            .args(["--target", &hdmi3])
+            .arg(&path)
+            .status()
+            .expect("pw-play runs");
+        assert!(status.success());
+        // The stream's removal is the last change; give it a moment to land.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        wakes.load(Ordering::SeqCst)
+    };
+    let streams = watch(crcbl_mixer::Interest::DevicesAndStreams);
+    let devices = watch(crcbl_mixer::Interest::Devices);
+    std::fs::remove_file(&path).expect("the silence is removed");
+    println!("a stream's life woke a streams app {streams} times, a devices app {devices}");
+    assert!(
+        (1..=6).contains(&streams),
+        "{streams} wakes for one stream's life"
+    );
+    assert_eq!(devices, 0, "a devices-only app never saw the stream");
 }
