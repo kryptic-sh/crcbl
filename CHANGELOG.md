@@ -15,6 +15,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Menu::set_stylesheet`, a game's stylesheet over a menu's default look.** A
+  `crcbl_ui::menu::Menu` given a sheet is measured and drawn with it after
+  `default.css`'s menu rules, so a game can recolour its pause and settings
+  screens to its own palette, and `border-image: none` swaps the pixel-art
+  frames for flat fills. Lengths stay `MenuStyle`'s. A sheet with errors is
+  refused with its diagnostics, and a menu without a sheet draws as before.
 - **`Ui::set_accessible_text_input`, for a text field an app draws itself.**
   With the `accesskit` feature, a block marked with a value and a byte-range
   selection reads to screen readers as an editable `TextInput` holding that

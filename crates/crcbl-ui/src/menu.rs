@@ -105,13 +105,14 @@
 //! out of view is neither drawn nor hit.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use glam::Vec2;
 
 use crate::draw_list::{DrawCommand, DrawList};
 use crate::font::Font;
 use crate::image::{AtlasImage, NineSliceImage};
-use crate::style::{Declaration, PseudoClasses, Sides};
+use crate::style::{Declaration, Diagnostic, PseudoClasses, Severity, SheetId, Sides, Stylesheet};
 use crate::text::FontAtlas;
 #[cfg(test)]
 use crate::text::LINE_HEIGHT;
@@ -754,6 +755,9 @@ pub struct Menu {
     /// every keyboard move and cleared by [`Menu::scroll_wheel`]: a wheel
     /// snapped back to the selection every frame could never move the list.
     follow_selection: bool,
+    /// A game's stylesheet over `default.css`'s menu rules; see
+    /// [`Menu::set_stylesheet`].
+    stylesheet: Option<Arc<str>>,
 }
 
 impl Menu {
@@ -771,7 +775,40 @@ impl Menu {
             dragging: None,
             scroll: 0.0,
             follow_selection: true,
+            stylesheet: None,
         }
+    }
+
+    /// Draws this menu with `css` over `default.css`'s menu rules, or with
+    /// those rules alone for `None`.
+    ///
+    /// The sheet cascades as an app sheet does: after `default.css`, whatever
+    /// either's selectors, and under what the menu sets inline — every length,
+    /// borders' widths among them, which are [`MenuStyle`]'s: a flat 1 px
+    /// border is a style whose [`MenuStyle::panel`] and [`MenuStyle::button`]
+    /// are 1 px, laid out with [`Menu::layout_with`]. So a sheet sets
+    /// the colours, the frames (`border-image: none` drops one, for a flat
+    /// `background-color` and `border-color` in its place) and the text's
+    /// family, and it is used for measuring as well as drawing, so a layout
+    /// and the render it feeds agree. [`MenuStyle`]'s colours keep restating
+    /// `default.css`'s, not this sheet's.
+    ///
+    /// # Errors
+    ///
+    /// The sheet's errors, when it has any; the menu keeps the sheet it had.
+    pub fn set_stylesheet(&mut self, css: Option<&str>) -> Result<(), Vec<Diagnostic>> {
+        if let Some(css) = css {
+            let (_, diagnostics) = Stylesheet::parse(GAME_SHEET, css);
+            let errors: Vec<Diagnostic> = diagnostics
+                .into_iter()
+                .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                .collect();
+            if !errors.is_empty() {
+                return Err(errors);
+            }
+        }
+        self.stylesheet = css.map(Arc::from);
+        Ok(())
     }
 
     /// The items, in the order they are drawn.
@@ -1635,16 +1672,18 @@ impl Menu {
             &MEASURED_TREE
         };
         tree.with(|tree| {
-            let mut ui = tree.borrow_mut();
+            let mut tree = tree.borrow_mut();
+            tree.use_sheet(self.stylesheet.as_ref());
+            let ui = &mut tree.ui;
             ui.begin_frame(PointerInput::hovering(OFF_SCREEN));
             if let Some(font) = &setup.font {
                 ui.register_font(MENU_FONT, font)
                     .expect("the menu's family name is not reserved");
             }
-            let built = self.build(&mut ui, screen, style, skin, setup);
+            let built = self.build(ui, screen, style, skin, setup);
             let available = screen.map_or(AvailableSpace::MAX_CONTENT, AvailableSpace::definite);
             ui.layout(Vec2::ZERO, available, atlas);
-            read(&ui, &built)
+            read(ui, &built)
         })
     }
 
@@ -1896,14 +1935,48 @@ impl Menu {
     }
 }
 
+/// A thread's menu tree, and the game sheet it holds.
+#[derive(Default)]
+struct MenuTree {
+    ui: Ui,
+    /// The slot a game's sheet is in, once a menu has brought one: an empty
+    /// sheet while the menu drawn now has none.
+    slot: Option<SheetId>,
+    /// What the slot holds now.
+    sheet: Option<Arc<str>>,
+}
+
+impl MenuTree {
+    /// Holds `sheet` in the game slot, if it is not already what it holds: a
+    /// change re-resolves the whole tree, so menus sharing a sheet, or none,
+    /// keep resolving from their last frame.
+    fn use_sheet(&mut self, sheet: Option<&Arc<str>>) {
+        if self.sheet.as_ref() == sheet {
+            return;
+        }
+        let css = sheet.map_or("", |sheet| sheet);
+        match self.slot {
+            Some(slot) => self
+                .ui
+                .replace_stylesheet(slot, css)
+                .expect("Menu::set_stylesheet refused a sheet with errors"),
+            None => self.slot = Some(self.ui.add_stylesheet(GAME_SHEET, css)),
+        }
+        self.sheet = sheet.cloned();
+    }
+}
+
+/// The name a game's sheet goes by in diagnostics.
+const GAME_SHEET: &str = "game";
+
 thread_local! {
     /// The tree [`Menu::laid_out`] places and draws menus in; see there.
-    static PLACED_TREE: std::cell::RefCell<Ui> = std::cell::RefCell::new(Ui::new());
+    static PLACED_TREE: std::cell::RefCell<MenuTree> = std::cell::RefCell::default();
     /// The tree [`Menu::panel_size`] measures in: apart from
     /// [`PLACED_TREE`], because [`Menu::layout`] measures at scale 1 and
     /// places at the scale it chose, and one tree alternating between the two
     /// would resolve and lay out every node from nothing on every call.
-    static MEASURED_TREE: std::cell::RefCell<Ui> = std::cell::RefCell::new(Ui::new());
+    static MEASURED_TREE: std::cell::RefCell<MenuTree> = std::cell::RefCell::default();
 }
 
 /// Where [`Menu::laid_out`]'s pointer is: above and left of every rectangle a
@@ -2945,6 +3018,88 @@ mod tests {
         };
         assert_eq!(colour("PROGRESS WILL BE LOST"), red);
         assert_eq!(colour("ARROWS MOVE"), style.hint_color);
+    }
+
+    /// A game's sheet in EW's shape: flat panels and buttons in its own
+    /// colours, the frames dropped with `border-image: none`.
+    const FLAT_SHEET: &str = "\
+        menu { border-image: none; background-color: color(srgb-linear 0 0 1); }
+        menu-item { border-image: none; background-color: color(srgb-linear 0 1 0); }
+        .menu-title { color: color(srgb-linear 1 0 0); }
+        .menu-label { color: color(srgb-linear 1 0 1); }";
+
+    /// The colours of the rectangles `dl` holds, and how many pictures.
+    fn fills_and_pictures(dl: &DrawList) -> (Vec<[f32; 4]>, usize) {
+        let mut fills = Vec::new();
+        let mut pictures = 0;
+        for command in dl.commands() {
+            match command {
+                DrawCommand::Rect { color, .. } => fills.push(*color),
+                DrawCommand::Image { .. } => pictures += 1,
+                _ => {}
+            }
+        }
+        (fills, pictures)
+    }
+
+    /// The colour `wanted` is drawn in.
+    fn text_colour_in(dl: &DrawList, wanted: &str) -> [f32; 4] {
+        texts(dl)
+            .into_iter()
+            .find_map(|(text, _, colour)| (text == wanted).then_some(colour))
+            .unwrap_or_else(|| panic!("{wanted} is not drawn"))
+    }
+
+    /// **A game's sheet draws over `default.css`'s menu rules**: its colours,
+    /// and `border-image: none` drops the frames for its flat fills. **A menu
+    /// without one, drawn after it on the same thread, is drawn as it always
+    /// was**, so the sheet stays with the menu that was given it.
+    #[test]
+    fn a_menus_own_stylesheet_draws_over_the_default() {
+        let atlas = atlas();
+        let skin = skin();
+        let plain = slider_menu();
+        let mut themed = plain.clone();
+        themed
+            .set_stylesheet(Some(FLAT_SHEET))
+            .expect("the sheet has no errors");
+
+        let layout = themed.layout((960, 720), &atlas);
+        let mut dl = DrawList::new();
+        themed.render(&mut dl, &layout, &skin);
+        assert_eq!(text_colour_in(&dl, "OPTIONS"), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(text_colour_in(&dl, "BACK"), [1.0, 0.0, 1.0, 1.0]);
+        let (fills, pictures) = fills_and_pictures(&dl);
+        assert_eq!(
+            pictures, 1,
+            "border-image: none drops every frame, leaving the scrim"
+        );
+        assert!(fills.contains(&[0.0, 0.0, 1.0, 1.0]), "the panel's fill");
+        assert!(fills.contains(&[0.0, 1.0, 0.0, 1.0]), "a button's fill");
+
+        let layout = plain.layout((960, 720), &atlas);
+        let mut dl = DrawList::new();
+        plain.render(&mut dl, &layout, &skin);
+        assert_eq!(text_colour_in(&dl, "OPTIONS"), layout.style().title_color);
+        assert_eq!(text_colour_in(&dl, "BACK"), layout.style().label_color);
+        let (fills, pictures) = fills_and_pictures(&dl);
+        assert!(pictures > 1, "the frames are drawn again");
+        assert!(!fills.contains(&[0.0, 0.0, 1.0, 1.0]));
+    }
+
+    /// **A sheet with errors is refused, and the menu keeps the one it had**;
+    /// `None` takes the sheet away.
+    #[test]
+    fn a_sheet_with_errors_is_refused() {
+        let mut menu = slider_menu();
+        menu.set_stylesheet(Some(FLAT_SHEET)).expect("no errors");
+        let errors = menu
+            .set_stylesheet(Some(".menu-label + .menu-hint { color: red; }"))
+            .expect_err("a combinator the parser refuses");
+        assert!(!errors.is_empty());
+        assert_eq!(menu.stylesheet.as_deref(), Some(FLAT_SHEET));
+        menu.set_stylesheet(None).expect("no sheet has no errors");
+        assert_eq!(menu.stylesheet, None);
     }
 
     /// A menu of captions and no rows has nothing to select or fire, and lays

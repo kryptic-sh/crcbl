@@ -2734,23 +2734,6 @@ revisions independently; engine acceptance belongs in the ordinary engine test
 suite and the Linux/macOS/Windows CI matrix, using synthetic fixtures rather
 than EW assets or an EW checkout.
 
-- **A game's own stylesheet over `crcbl_ui::menu`'s (asked by EW, 2026-10-22).**
-  EW draws its game panels from one palette (EW `728a5ee8`, `src/ui_theme.rs`)
-  except the screens built with `crcbl_ui::menu::Menu` (pause, settings,
-  controls, the restart confirmation): `Menu::render` and the `render_art` path
-  lay out in the thread-local `PLACED_TREE`, a fresh `Ui::new()` carrying only
-  `default.css`, and `Menu::build`, which
-  `a_stylesheet_rule_sets_the_warning_colour` uses with `ui.add_stylesheet`, is
-  private. Wanted, the shape crcbl's call: game sheets handed to the menu tree
-  (`Menu::render_with(dl, layout, skin, &[("game", css)])`, or carried by
-  `MenuStyle`), or `Menu::build` public. EW's sheet overrides `menu-screen`,
-  `.menu-scrim`, `menu`, `.menu-title`, `menu-item` and its `:hover`/`:active`,
-  `.menu-label`, `.menu-hint`, `.menu-caption`, `.menu-caption-warning`,
-  `.menu-groove`/`.menu-slider`, with flat backgrounds and 1 px borders, so it
-  needs a later sheet's `border-image: none` to drop the `url(menu-panel)` and
-  `url(menu-button-*)` frames — confirm that cascade. EW's check: a menu with a
-  game sheet emits the sheet's colours, and without one emits what it does
-  today.
 - **Skeletal ragdoll support for EW corpses remains the highest priority.** The
   adoption caller is EW's `WorldScene::sync_range` in
   `ew:src/rendering_world_sync.rs`. Extend the existing **Ragdolls** entry and
