@@ -109,6 +109,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Win32 key, button and wheel events carry the modifiers held when they
+  arrived**: they read the keyboard state when the pump translated them, after
+  the whole batch had been dispatched, so a chord whose modifier was released in
+  the same batch — an injected `Ctrl+V`, or a quick real one — reported its key
+  with no modifier.
 - **D3D12 closes each swapchain's frame-latency waitable object**: the handle
   `GetFrameLatencyWaitableObject` returns is the caller's to close, and one was
   left open per swapchain created. It is now closed when the swapchain is

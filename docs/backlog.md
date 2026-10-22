@@ -3255,18 +3255,24 @@ validation before a reusable port can be specified. GPU residency likewise needs
 measured pressure and a proven game-local policy. Keep those decisions in EW's
 backlog; do not create speculative engine implementations for them.
 
-## Win32 unsided modifier keys: unit-tested only (2026-10-20)
+## Win32 modifiers: what an injected chord showed (2026-10-22)
 
-`keys::modifiers` (`crcbl-shell/src/win32/keys.rs`) now counts the unsided
-`VK_CONTROL`, `VK_MENU` and `VK_SHIFT` where no sided key that would decide is
-down, so a key injected by the unsided virtual key with scan code 0 no longer
-loses its modifier. Verified only by
-`an_unsided_modifier_counts_where_no_sided_one_is_down` over synthesized
-`GetKeyboardState` arrays, each of its six hand mutants failing it. **Not
-verified**: that an injected unsided `VK_CONTROL` actually leaves `VK_LCONTROL`
-clear in `GetKeyboardState` on Windows 11 (the premise of the report); no
-desktop test injects one. A `SendInput` of `VK_CONTROL` with `wScan` 0 followed
-by `V`, read through `Win32Shell::modifiers_now`, would settle it.
+pikr's report (an injected `Ctrl+V` reaching the app as a plain `v`) was first
+put down to the unsided `VK_CONTROL` and fixed in 0.7.0 (`keys::modifiers`
+counts an unsided modifier where no sided key that would decide is down). The
+desktop test written to prove it,
+`win32_e2e::an_unsided_control_sent_by_virtual_key_holds_ctrl_for_the_next_key`
+(the injector's new `vkdown`/`vkup` send a virtual key with scan code 0), went
+red on CI's desktop with **no** modifier at all: the real cause was that a key,
+button or wheel event read `GetKeyboardState` when the pump translated it, by
+which time the thread's key state had moved on to the end of the batch, and a
+Control released in the same batch was gone. The window procedure now reads it
+with each message (`input::modifiers_now`, carried on `RawEvent::Key`, `Button`
+and `Wheel`). On CI (2026-10-22): the fix passed; the old late read failed the
+test; and with the unsided counting disabled the test still passed, so on
+Windows 11 an injected `VK_CONTROL` also sets the sided key's state and the
+0.7.0 change was not what pikr needed. It stays: harmless, and right for a stack
+that does leave the sided bit clear, which nothing here has shown.
 
 **Decided without the owner**: the unsided Control never makes AltGr. AltGr is
 Windows' sided synthesis (left Control with right Alt), so an injected unsided
