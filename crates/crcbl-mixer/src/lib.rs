@@ -144,7 +144,10 @@ impl Mixer {
     /// Connects to the system mixer and reads its whole state.
     ///
     /// `waker` is called from the mixer's thread after each change, without
-    /// arguments: read [`state`](Self::state) then. It must not block.
+    /// arguments: read [`state`](Self::state) then. It must not block, and
+    /// must not call [`apply`](Self::apply): on Windows an action from the
+    /// mixer's own thread answers [`MixerError::Unsupported`], because the
+    /// thread it would wait on is the one running the waker.
     ///
     /// # Errors
     ///
