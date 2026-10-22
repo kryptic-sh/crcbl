@@ -24464,13 +24464,17 @@ What else is open:
   face, its landing then sits on the edge's curve, and `is_walkable` refuses
   that normal. A `TriangleMesh` step, whose edges were always rounded, likely
   fails the same way; nothing tests it. **Decision needed (EW's, since it is
-  gameplay feel):** a perch rule, as Unreal's `PerchRadiusThreshold`: an edge
-  contact is footing when it lies within `radius - perch_margin` of the
-  capsule's axis horizontally. EW's case is 0.29 of a 0.30 radius and must stay
-  refused, while a step landing is about 0.25 out, so the margin sits between
-  those and wants EW's numbers; or step landings sweep with the advance carried
-  far enough past the edge to land on the face. Then the four character tests
-  pass again and the digest is re-pinned with the reason.
+  gameplay feel); a perch rule alone is ruled out (measured 2026-10-23):**
+  instrumented on the branch, the step landings `try_step_up` refuses on the
+  rounded edge meet it from 0.25 to 0.29 m from the axis of a 0.30-radius
+  capsule, 0.26 for most and up to 0.29 on the highest steps
+  `the_step_the_controller_stops_climbing…` ramps through. EW's refused case is
+  0.29, so no perch margin separates standing on air from landing on a step.
+  What remains: carry the step-up's advance far enough past the edge that the
+  landing meets the top face (more travel than the tick asked, on the step tick
+  only), or hold a character that rose onto an edge raised until a later tick's
+  advance reaches the face. Then the four character tests pass again and the
+  digest is re-pinned with the reason.
 
 ### What puppet's locomotion blend leaves for the rest of milestone 2
 
