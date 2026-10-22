@@ -8734,8 +8734,18 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
     from recording, so the record column would be CPU alone, and printing
     `draw-args` and `draw-starts` among the test's `PRICED` passes (added only
     temporarily to measure this).
-  - **Not measured** on lavapipe, radv or any Vulkan device without mesh shaders
-    — the devices that take the ranged tail by default.
+  - **Measured on a device without mesh shaders** (2026-10-22): the office
+    laptop's Intel RPL-U on Mesa 26.2.5's ANV, which takes `IndirectCount` by
+    default, release build, 240 priced frames, `CRCBL_ADAPTER=integrated`. At
+    938 buckets, one mode: a call per bucket records 9392 calls in 17.29 ms
+    (`IndirectCount`) and 15.29 ms (`IndirectPerBatch`), with the shadow pass at
+    11.61 and 9.64 ms of GPU; ranged, 22 calls in 2.44 and 2.50 ms, shadow 0.90
+    and 0.89 ms, against 1.98 and 1.95 ms at two buckets. Two material modes
+    double the per-bucket rows (18772 calls, 31.10 and 27.15 ms record, shadow
+    22.57 and 19.40 ms) and leave the ranged ones at 32 calls, 2.84 and 2.81 ms.
+    The record column includes the GPU wait, as the entry above says. Still not
+    measured: radv, and lavapipe, which now reports mesh shaders and so takes
+    the mesh tail by default rather than this one.
   - **`forward_e2e::shadow::the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from`
     goes red on `CRCBL_GPU=vk` on the 7900 XTX with this change** (band reading
     47.0), the `mesh.slang` edit sensitivity recorded under "What fixed view
