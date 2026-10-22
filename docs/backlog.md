@@ -711,9 +711,9 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    compositing manager owning `_NET_WM_CM_S<n>` — since a bare X server draws
    alpha as opaque (`x11::connect::setup_argb`). `crcbl-app`'s
    `wayland_transparency` reads an Xwayland window back with `grim` as it does a
-   Wayland one, in `run-wayland-e2e.sh`. Not run: a compositing manager on a
-   plain X server (picom, say), whose `_NET_WM_CM_S0` path is written but
-   untested.
+   Wayland one, in `run-wayland-e2e.sh`, green in main CI run 39815909663 on
+   llvmpipe. Not run: a compositing manager on a plain X server (picom, say),
+   whose `_NET_WM_CM_S0` path is written but untested.
 4. **Implemented, untested:** S17 panel focus on Win32 and AppKit, and on
    Hyprland in CI (a job of its own, M to L; on the office laptop's nested
    Hyprland 0.56.2, 2026-10-21, an exclusive panel took the keyboard as on sway,
@@ -2658,7 +2658,7 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   | Popup reposition                              | refusal in CI; real path laptop | refused                                           | n/a                           |
   | Panel at fractional scale (S21)               | laptop + CI test                | n/a                                               | n/a                           |
   | Fractional scale without the integer step     | unit test; pikr on Hyprland     | n/a                                               | n/a                           |
-  | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)       | laptop (Xwayland, `grim`)                         | laptop                        |
+  | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)       | CI, laptop (Xwayland, `grim`)                     | laptop                        |
   | `display_adapter`                             | laptop (iGPU only)              | laptop (Xwayland, DRI3)                           | laptop                        |
   | `Presenter::resize` with frames in flight     | CI, laptop                      | CI, laptop (`run_sandbox_resize`)                 | laptop                        |
   | `push_opacity` groups                         | n/a                             | n/a                                               | CI (lavapipe), laptop (Intel) |
