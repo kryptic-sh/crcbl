@@ -694,6 +694,9 @@ struct XWindow {
     /// Whether [`WindowDesc::transparent`] was set: the window is on the
     /// connection's [`Argb`] visual rather than the root's.
     transparent: bool,
+    /// What it was created as when it is a [popup](popup): its parent, the
+    /// anchor it was last placed against, and its input.
+    popup: Option<crate::PopupDesc>,
     /// Whether [`WindowDesc::accept_drops`] was set.
     ///
     /// Recorded as well as advertised. `XdndAware` is a *window* property that
@@ -1004,6 +1007,9 @@ impl X11Shell {
         caps.set(ShellCaps::INPUT_REGION, self.conn.shape.is_some());
         // A 32-bit visual, and something that blends by its alpha.
         caps.set(ShellCaps::TRANSPARENT, self.conn.argb.is_some());
+        // Override-redirect windows this backend places itself, which need no
+        // window manager; see [`popup`].
+        caps.insert(ShellCaps::POPUP | ShellCaps::POPUP_REPOSITION);
 
         // Both of these need a window manager, and a window manager is a
         // separate program that may simply not be running — the finding this
@@ -1152,6 +1158,7 @@ mod connect;
 mod cursor;
 mod input;
 mod monitors;
+mod popup;
 mod shell;
 mod window;
 mod xdnd;

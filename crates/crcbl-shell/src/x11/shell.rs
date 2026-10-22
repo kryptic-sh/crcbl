@@ -12,6 +12,7 @@ use super::{
     ShellEvent, SizeConstraints, TRANSFER_POLL, WindowConfiguration, WindowDesc, WindowId,
     WindowState, X11Shell, XWindow, ffi,
 };
+use crate::{LogicalRect, LogicalSize, PopupInput, WindowRole};
 
 /// Everything a window wants to hear about.
 ///
@@ -284,40 +285,57 @@ impl Shell for X11Shell {
         CString::new(desc.app_id)
             .map_err(|_| ShellError::InvalidDescriptor("app_id contains a NUL byte".to_string()))?;
 
-        let size = desc.size.to_physical(self.scale_factor);
-        if size.is_empty() {
+        let popup = match desc.role {
+            WindowRole::Popup(popup) => Some(popup),
+            _ => None,
+        };
+        if popup.is_some_and(|popup| popup.input == PopupInput::Passthrough)
+            && self.conn.shape.is_none()
+        {
+            return Err(Self::unsupported(
+                "a passthrough popup without SHAPE 1.1 input shapes",
+            ));
+        }
+        let rect = match popup {
+            Some(popup) => self.popup_rect_for(&popup, desc.size)?,
+            None => {
+                let size = desc.size.to_physical(self.scale_factor);
+                PhysicalRect::new(0, 0, size.width, size.height)
+            }
+        };
+        if rect.width == 0 || rect.height == 0 {
             return Err(ShellError::InvalidDescriptor(
                 "size rounds to zero physical pixels".to_string(),
             ));
         }
         let xid = self.conn.generate_id();
-        // The value list is read in **mask-bit order**, one word per set bit:
-        // `BACK_PIXEL` is bit 1, `BORDER_PIXEL` bit 3, `EVENT_MASK` bit 11 and
-        // `COLORMAP` bit 13, so they go in that order. Getting the order wrong
-        // makes the event mask the background colour, which produces a window
-        // that receives nothing.
-        //
         // A transparent window is on the 32-bit visual, which is not its
         // parent's, so it takes that visual's depth, a border pixel and a
         // colormap of its own; the parent's would be `BadMatch`. Its background
-        // is zero, transparent black, until the first frame.
-        let (depth, visual, mask, values) = match self.conn.argb.filter(|_| desc.transparent) {
-            Some(argb) => (
-                32,
-                argb.visual,
-                ffi::cw::BACK_PIXEL
-                    | ffi::cw::BORDER_PIXEL
-                    | ffi::cw::EVENT_MASK
-                    | ffi::cw::COLORMAP,
-                vec![0u32, 0, WINDOW_EVENT_MASK, argb.colormap],
-            ),
-            None => (
-                ffi::value::COPY_FROM_PARENT as u8,
-                self.conn.root_visual,
-                ffi::cw::BACK_PIXEL | ffi::cw::EVENT_MASK,
-                vec![0u32, WINDOW_EVENT_MASK],
-            ),
-        };
+        // is zero, transparent black, until the first frame. A popup is
+        // override-redirect: placed here, not by a window manager.
+        let argb = self.conn.argb.filter(|_| desc.transparent);
+        let mut attributes = vec![
+            (ffi::cw::BACK_PIXEL, 0),
+            (ffi::cw::EVENT_MASK, WINDOW_EVENT_MASK),
+        ];
+        if let Some(argb) = argb {
+            attributes.push((ffi::cw::BORDER_PIXEL, 0));
+            attributes.push((ffi::cw::COLORMAP, argb.colormap));
+        }
+        if popup.is_some() {
+            attributes.push((ffi::cw::OVERRIDE_REDIRECT, 1));
+        }
+        // The value list is read in **mask-bit order**, one word per set bit.
+        // Getting the order wrong makes the event mask the background colour,
+        // which produces a window that receives nothing.
+        attributes.sort_by_key(|(bit, _)| *bit);
+        let mask = attributes.iter().fold(0, |mask, (bit, _)| mask | bit);
+        let values: Vec<u32> = attributes.iter().map(|(_, value)| *value).collect();
+        let (depth, visual) = argb.map_or(
+            (ffi::value::COPY_FROM_PARENT as u8, self.conn.root_visual),
+            |argb| (32, argb.visual),
+        );
         // SAFETY: the connection is live, `xid` is fresh from
         // `xcb_generate_id`, the parent is the root of the screen this
         // connection selected, `visual` is the root's or one of its 32-bit
@@ -329,10 +347,10 @@ impl Shell for X11Shell {
                 depth,
                 xid,
                 self.conn.root,
-                0,
-                0,
-                u16::try_from(size.width).unwrap_or(u16::MAX),
-                u16::try_from(size.height).unwrap_or(u16::MAX),
+                i16::try_from(rect.x).unwrap_or(i16::MAX),
+                i16::try_from(rect.y).unwrap_or(i16::MAX),
+                u16::try_from(rect.width).unwrap_or(u16::MAX),
+                u16::try_from(rect.height).unwrap_or(u16::MAX),
                 0,
                 ffi::value::INPUT_OUTPUT,
                 visual,
@@ -360,6 +378,7 @@ impl Shell for X11Shell {
             focused: false,
             visible: desc.visible,
             transparent: desc.transparent,
+            popup,
             mapped: false,
             map_requested: false,
             close_pending: false,
@@ -368,7 +387,14 @@ impl Shell for X11Shell {
 
         self.write_title(xid, desc.title);
         self.write_identity(xid, desc.app_id);
-        self.write_size_hints(&window);
+        if let Some(popup) = &popup {
+            self.write_popup_properties(xid, popup);
+            if popup.input == PopupInput::Passthrough {
+                self.conn.apply_input_shape(xid, Some(&[]));
+            }
+        } else {
+            self.write_size_hints(&window);
+        }
         if desc.accept_drops {
             // Before the map, so a source that reads the property the instant
             // the window appears finds it — see `set_xdnd_aware`.
@@ -400,6 +426,18 @@ impl Shell for X11Shell {
             ));
         }
         let id: WindowId = self.windows.insert(window).cast();
+        // After the map, which the server handles first: a grab needs a
+        // viewable window.
+        if desc.visible
+            && popup.is_some_and(|popup| popup.input == PopupInput::Grab)
+            && let Err(error) = self.grab_for_popup(id)
+        {
+            self.windows.remove(id.cast());
+            self.conn.destroy_x_window(xid);
+            self.conn.flush();
+            return Err(error);
+        }
+        self.conn.flush();
         #[cfg(feature = "accesskit")]
         {
             let waker = self.waker();
@@ -409,10 +447,21 @@ impl Shell for X11Shell {
     }
 
     fn destroy_window(&mut self, window: WindowId) -> Result<(), ShellError> {
+        self.window(window)?;
+        // A parent takes its popups with it, each reported before it.
+        for popup in self.popups_of(window) {
+            self.destroy_window(popup)?;
+        }
         let removed = self
             .windows
             .remove(window.cast())
             .ok_or_else(|| ShellError::invalid_window(window))?;
+        if removed
+            .popup
+            .is_some_and(|popup| popup.input == PopupInput::Grab)
+        {
+            self.release_popup_grab();
+        }
         self.forget_selection_state(window, removed.id);
         self.conn.destroy_x_window(removed.id);
         self.conn.flush();
@@ -521,6 +570,22 @@ impl Shell for X11Shell {
         self.write_size_hints(state);
         self.conn.flush();
         Ok(())
+    }
+
+    /// Moves a popup against a new anchor, placed as at creation; see
+    /// [`popup`](super::popup).
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle or a parent gone, and
+    /// [`ShellError::InvalidDescriptor`] for a window that is not a popup.
+    fn reposition_popup(
+        &mut self,
+        popup: WindowId,
+        anchor: LogicalRect,
+        size: LogicalSize,
+    ) -> Result<(), ShellError> {
+        self.move_popup(popup, anchor, size)
     }
 
     fn monitors(&self) -> &[MonitorInfo] {
@@ -740,56 +805,9 @@ impl Shell for X11Shell {
         } else {
             ffi::value::NONE
         };
-        // SAFETY: the connection, window and cursor are live. `owner_events =
-        // 1` keeps our own windows receiving events normally; both grab modes
-        // are `Async`, which is what a game wants — a synchronous grab freezes
-        // event processing until the client replays each event.
-        let reply = unsafe {
-            let cookie = (self.conn.lib.grab_pointer)(
-                self.conn.raw(),
-                1,
-                xid,
-                GRAB_EVENT_MASK,
-                ffi::value::GRAB_MODE_ASYNC,
-                ffi::value::GRAB_MODE_ASYNC,
-                xid,
-                cursor,
-                ffi::value::CURRENT_TIME,
-            );
-            (self.conn.lib.grab_pointer_reply)(self.conn.raw(), cookie, core::ptr::null_mut())
-        };
-        if reply.is_null() {
-            return Err(ShellError::Backend(
-                "the X server did not answer GrabPointer".to_string(),
-            ));
-        }
-        // SAFETY: `reply` is a live reply this call owns.
-        let status = unsafe { (*reply).status };
-        // SAFETY: freed exactly once.
-        unsafe { ffi::free_reply(reply) };
-        if status != ffi::value::GRAB_SUCCESS {
-            // Nothing was released to get here, so nothing has to be put back:
-            // whatever capture this shell held is still held, and the recorded
-            // `pointer_mode` still describes it.
-            return Err(ShellError::Backend(format!(
-                "another client holds the pointer (GrabPointer status {status})"
-            )));
-        }
-
-        // The grab replaced any previous one, so no other window of this shell
-        // still holds a capture.
-        let previous: Vec<WindowId> = self
-            .windows
-            .iter()
-            .filter(|(_, state)| state.pointer_mode.is_captured())
-            .map(|(handle, _)| handle.cast())
-            .filter(|held| *held != window)
-            .collect();
-        for held in previous {
-            if let Ok(state) = self.window_mut(held) {
-                state.pointer_mode = PointerMode::Free;
-            }
-        }
+        // `owner_events` keeps our own windows receiving events normally.
+        self.grab_pointer(xid, true, xid, cursor)?;
+        self.forget_captures_except(window);
         self.window_mut(window)?.pointer_mode = mode;
         if mode == PointerMode::Locked
             && let Some(size) = self.window(window)?.configuration.map(|config| config.size)
@@ -1051,5 +1069,77 @@ impl Drop for X11Shell {
         // disconnected exactly once, here, after every resource created on it
         // has been released. `NonNull` guarantees it is not null.
         unsafe { (self.conn.lib.disconnect)(self.conn.raw()) };
+    }
+}
+
+/// The pointer grab, which [`set_pointer_mode`](Shell::set_pointer_mode) and a
+/// grabbing [popup](super::popup) share.
+impl X11Shell {
+    /// Grabs the pointer to the window `xid`, confined to `confine_to` (or
+    /// nowhere, for `NONE`) and showing `cursor`. Both modes are `Async`, which
+    /// is what a game and a menu want: a synchronous grab freezes event
+    /// processing until the client replays each event. A grab this client held
+    /// already is replaced; a failed one leaves it as it was.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Backend`] if another client holds the pointer.
+    pub(super) fn grab_pointer(
+        &self,
+        xid: u32,
+        owner_events: bool,
+        confine_to: u32,
+        cursor: u32,
+    ) -> Result<(), ShellError> {
+        // SAFETY: the connection, window and cursor are live.
+        let reply = unsafe {
+            let cookie = (self.conn.lib.grab_pointer)(
+                self.conn.raw(),
+                u8::from(owner_events),
+                xid,
+                GRAB_EVENT_MASK,
+                ffi::value::GRAB_MODE_ASYNC,
+                ffi::value::GRAB_MODE_ASYNC,
+                confine_to,
+                cursor,
+                ffi::value::CURRENT_TIME,
+            );
+            (self.conn.lib.grab_pointer_reply)(self.conn.raw(), cookie, core::ptr::null_mut())
+        };
+        if reply.is_null() {
+            return Err(ShellError::Backend(
+                "the X server did not answer GrabPointer".to_string(),
+            ));
+        }
+        // SAFETY: `reply` is a live reply this call owns.
+        let status = unsafe { (*reply).status };
+        // SAFETY: freed exactly once.
+        unsafe { ffi::free_reply(reply) };
+        if status != ffi::value::GRAB_SUCCESS {
+            // Nothing was released to get here, so nothing has to be put back:
+            // whatever capture this shell held is still held, and the recorded
+            // `pointer_mode` still describes it.
+            return Err(ShellError::Backend(format!(
+                "another client holds the pointer (GrabPointer status {status})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// A grab for `window` replaced any other this client held, so no other
+    /// window of this shell still holds a capture.
+    pub(super) fn forget_captures_except(&mut self, window: WindowId) {
+        let previous: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, state)| state.pointer_mode.is_captured())
+            .map(|(handle, _)| handle.cast())
+            .filter(|held| *held != window)
+            .collect();
+        for held in previous {
+            if let Ok(state) = self.window_mut(held) {
+                state.pointer_mode = PointerMode::Free;
+            }
+        }
     }
 }

@@ -4,7 +4,7 @@
 //! A [`WindowRole::Popup`](crate::WindowRole::Popup) is a `WS_POPUP` window
 //! **owned** by its parent, which is what keeps it above the parent and takes
 //! it along when the parent is minimised. Its rectangle is worked out here —
-//! Win32 has no positioner to ask — by [`geometry::popup_rect`]: the
+//! Win32 has no positioner to ask — by [`role::popup_rect`](crate::role::popup_rect): the
 //! [`PopupDesc::anchor`] turned into desktop pixels at the parent's scale, the
 //! popup put on the [`PopupPlacement`](crate::PopupPlacement) side of it, and
 //! flipped or slid to stay in the work area of the monitor the parent is on.
@@ -76,7 +76,7 @@ impl Win32Shell {
             .or_else(|| self.monitors.iter().find(|monitor| monitor.is_primary))
             .or_else(|| self.monitors.first())
             .map_or(WHOLE_DESKTOP, |monitor| monitor.work_area);
-        Ok(geometry::popup_rect(
+        Ok(crate::role::popup_rect(
             anchor,
             size.to_physical(scale),
             popup.placement,

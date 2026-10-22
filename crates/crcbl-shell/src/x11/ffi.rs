@@ -1260,6 +1260,9 @@ pub mod gc {
 pub mod cw {
     /// `XCB_CW_BACK_PIXEL`.
     pub const BACK_PIXEL: u32 = 1 << 1;
+    /// `XCB_CW_OVERRIDE_REDIRECT`: a window the window manager neither
+    /// reparents nor places, as a popup is.
+    pub const OVERRIDE_REDIRECT: u32 = 1 << 9;
     /// `XCB_CW_BORDER_PIXEL`. A window on a visual other than its parent's
     /// must set it, or `CreateWindow` fails with `BadMatch`: the default, the
     /// parent's border pixmap, is in the parent's depth.
@@ -1279,15 +1282,12 @@ pub mod config_window {
     pub const Y: u16 = 1 << 1;
     /// `XCB_CONFIG_WINDOW_WIDTH`.
     ///
-    /// Only the harness resizes a window it does not own — the backend asks a
-    /// window manager through `_NET_WM_STATE` and is told the answer, and a
-    /// client that resized itself behind the window manager's back would be
-    /// fighting it. Feature-gated rather than left dead so that the reason is
-    /// visible at the definition.
-    #[cfg(feature = "x11-e2e")]
+    /// The backend sizes only its popups this way: they are override-redirect,
+    /// so no window manager is there to ask, while a managed window's size is
+    /// asked of the window manager through `_NET_WM_STATE` and hints. The
+    /// harness resizes the windows it tests.
     pub const WIDTH: u16 = 1 << 2;
     /// `XCB_CONFIG_WINDOW_HEIGHT`; see [`WIDTH`].
-    #[cfg(feature = "x11-e2e")]
     pub const HEIGHT: u16 = 1 << 3;
 }
 
@@ -1324,8 +1324,12 @@ pub mod value {
     pub const ATOM_INTEGER: u32 = 19;
     /// `XCB_ATOM_STRING` — Latin-1, which is why `UTF8_STRING` exists.
     pub const ATOM_STRING: u32 = 31;
+    /// `XCB_ATOM_WINDOW`.
+    pub const ATOM_WINDOW: u32 = 33;
     /// `XCB_ATOM_WM_NAME`.
     pub const ATOM_WM_NAME: u32 = 39;
+    /// `XCB_ATOM_WM_TRANSIENT_FOR`: the window a popup belongs to.
+    pub const ATOM_WM_TRANSIENT_FOR: u32 = 68;
     /// `XCB_ATOM_WM_NORMAL_HINTS`.
     pub const ATOM_WM_NORMAL_HINTS: u32 = 40;
     /// `XCB_ATOM_WM_SIZE_HINTS`.
@@ -1620,8 +1624,19 @@ mod prototype {
         *mut *mut GenericError,
     ) -> *mut GrabPointerReply;
     /// `xcb_void_cookie_t xcb_ungrab_pointer(xcb_connection_t *,
-    /// xcb_timestamp_t time)`
+    /// xcb_timestamp_t time)`; `xcb_ungrab_keyboard` has the same shape.
     pub type UngrabPointer = unsafe extern "C" fn(*mut Connection, u32) -> Cookie;
+    /// `xcb_grab_keyboard_cookie_t xcb_grab_keyboard(xcb_connection_t *,
+    /// uint8_t owner_events, xcb_window_t grab_window, xcb_timestamp_t time,
+    /// uint8_t pointer_mode, uint8_t keyboard_mode)`
+    pub type GrabKeyboard = unsafe extern "C" fn(*mut Connection, u8, u32, u32, u8, u8) -> Cookie;
+    /// `xcb_grab_keyboard_reply_t *xcb_grab_keyboard_reply(…)`, whose reply
+    /// is laid out as `GrabPointer`'s.
+    pub type GrabKeyboardReplyFn = unsafe extern "C" fn(
+        *mut Connection,
+        Cookie,
+        *mut *mut GenericError,
+    ) -> *mut GrabPointerReply;
     /// `xcb_void_cookie_t xcb_warp_pointer(xcb_connection_t *,
     /// xcb_window_t src_window, xcb_window_t dst_window, int16_t src_x,
     /// int16_t src_y, uint16_t src_width, uint16_t src_height, int16_t dst_x,
@@ -1896,6 +1911,9 @@ pub struct Lib {
     pub grab_pointer: prototype::GrabPointer,
     pub grab_pointer_reply: prototype::GrabPointerReplyFn,
     pub ungrab_pointer: prototype::UngrabPointer,
+    pub grab_keyboard: prototype::GrabKeyboard,
+    pub grab_keyboard_reply: prototype::GrabKeyboardReplyFn,
+    pub ungrab_keyboard: prototype::UngrabPointer,
     pub warp_pointer: prototype::WarpPointer,
     pub query_pointer: prototype::DrawableRequest,
     pub query_pointer_reply: prototype::QueryPointerReplyFn,
@@ -2255,6 +2273,9 @@ fn load_uncached() -> Result<Lib, String> {
         grab_pointer: symbol!("xcb_grab_pointer", prototype::GrabPointer),
         grab_pointer_reply: symbol!("xcb_grab_pointer_reply", prototype::GrabPointerReplyFn),
         ungrab_pointer: symbol!("xcb_ungrab_pointer", prototype::UngrabPointer),
+        grab_keyboard: symbol!("xcb_grab_keyboard", prototype::GrabKeyboard),
+        grab_keyboard_reply: symbol!("xcb_grab_keyboard_reply", prototype::GrabKeyboardReplyFn),
+        ungrab_keyboard: symbol!("xcb_ungrab_keyboard", prototype::UngrabPointer),
         warp_pointer: symbol!("xcb_warp_pointer", prototype::WarpPointer),
         query_pointer: symbol!("xcb_query_pointer", prototype::DrawableRequest),
         query_pointer_reply: symbol!("xcb_query_pointer_reply", prototype::QueryPointerReplyFn),

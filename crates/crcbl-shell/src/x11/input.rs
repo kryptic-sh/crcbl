@@ -246,7 +246,7 @@ impl X11Shell {
             self.held.retain(|held| *held != event.detail);
         }
 
-        self.queue.push_back(ShellEvent::Key {
+        let key = ShellEvent::Key {
             window,
             device: KEYBOARD_DEVICE,
             time,
@@ -260,10 +260,20 @@ impl X11Shell {
             },
             repeat,
             modifiers,
-        });
+        };
+        let popup = self
+            .window(window)
+            .ok()
+            .and_then(|state| state.popup)
+            .map(|popup| popup.input);
+        let dismisses = crate::role::escape_dismisses(popup, &key);
+        self.queue.push_back(key);
         if let Some(text) = text {
             self.queue
                 .push_back(ShellEvent::TextCommit { window, time, text });
+        }
+        if dismisses {
+            self.request_close(window);
         }
     }
 
@@ -279,6 +289,14 @@ impl X11Shell {
         let time = self.time.event_time(event.time);
         let modifiers = self.modifiers();
         let position = self.position_of(window, &event);
+        // A grabbing popup hears every press, its own coordinates on it: one
+        // outside it is the click that dismisses it, and is no one's press.
+        if self.outside_grabbing_popup(window, position) {
+            if pressed {
+                self.request_close(window);
+            }
+            return;
+        }
 
         match keys::button(event.detail, pressed) {
             keys::Button::Press(button) => self.queue.push_back(ShellEvent::Button {
@@ -339,6 +357,11 @@ impl X11Shell {
             return;
         }
         let position = self.position_of(window, &event);
+        // Motion outside a grabbing popup is reported to it, but is not over
+        // it, and over no other window of ours either.
+        if self.outside_grabbing_popup(window, position) {
+            return;
+        }
         self.queue.push_back(ShellEvent::PointerMotion {
             window,
             device: POINTER_DEVICE,
@@ -512,6 +535,13 @@ impl X11Shell {
         }
         // ICCCM: the window is **still open**. This is a question, and the
         // answer is `reply_close_request` — which is why the seam has one.
+        self.request_close(window);
+    }
+
+    /// Asks the app whether `window` may close, unless a request is already
+    /// waiting for its answer: the window manager's `WM_DELETE_WINDOW`, and a
+    /// grabbing popup's dismissal.
+    fn request_close(&mut self, window: WindowId) {
         if let Ok(state) = self.window_mut(window) {
             if state.close_pending {
                 return;

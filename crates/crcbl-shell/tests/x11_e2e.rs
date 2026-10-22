@@ -41,9 +41,10 @@ use crcbl_shell::x11_test_support::{
 };
 use crcbl_shell::{
     ButtonState, ClipboardContent, ClipboardOffer, CloseReply, CursorIcon, DisplayMode, KeyCode,
-    LogicalSize, MimeType, Modifiers, PhysicalPoint, PhysicalRect, PhysicalSize, PointerButton,
-    PointerMode, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
-    SizeConstraints, SurfaceTarget, WindowDesc, WindowId,
+    LogicalPoint, LogicalRect, LogicalSize, MimeType, Modifiers, PhysicalPoint, PhysicalRect,
+    PhysicalSize, PointerButton, PointerMode, PopupDesc, PopupInput, PopupPlacement, ScrollDelta,
+    Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints, SurfaceTarget,
+    WindowDesc, WindowId, WindowRole,
 };
 
 /// X11 keycodes, which are evdev codes plus eight. Spelled out rather than
@@ -686,6 +687,14 @@ fn the_capability_set_is_x11_shaped() {
         "XDND is implemented, receiving"
     );
 
+    assert!(
+        caps.contains(ShellCaps::POPUP) && caps.contains(ShellCaps::POPUP_REPOSITION),
+        "override-redirect windows this backend places itself, with no window manager"
+    );
+    assert!(
+        !caps.contains(ShellCaps::TRANSPARENT),
+        "nothing composites Xvfb, so a transparent window would be drawn opaque"
+    );
     assert!(caps.contains(ShellCaps::CLIPBOARD));
     assert!(caps.contains(ShellCaps::MULTI_WINDOW));
     assert!(caps.contains(ShellCaps::EVENT_WAIT));
@@ -3926,4 +3935,248 @@ fn a_reader_presses_the_button_and_reads_the_field() {
         "the reader hears the field's text, its caret in characters"
     );
     session.shell.destroy_window(window).expect("destroy");
+}
+
+// ---------------------------------------------------------------------------
+// Popups
+// ---------------------------------------------------------------------------
+
+/// A popup's size, in logical units: Xvfb's scale is one, so pixels too.
+const POPUP: LogicalSize = LogicalSize::new(100.0, 50.0);
+
+/// The anchor the popup tests place against: a 30x10 button at (10, 20) in
+/// the parent.
+const BUTTON: LogicalRect =
+    LogicalRect::new(LogicalPoint::new(10.0, 20.0), LogicalSize::new(30.0, 10.0));
+
+impl Session {
+    /// A popup of `parent`, configured, and its origin on the root.
+    fn popup(
+        &mut self,
+        parent: WindowId,
+        anchor: LogicalRect,
+        placement: PopupPlacement,
+        input: PopupInput,
+    ) -> (WindowId, (i16, i16)) {
+        let window = self.window(&WindowDesc {
+            title: "popup",
+            app_id: "sh.kryptic.crcbl.e2e",
+            size: POPUP,
+            role: WindowRole::Popup(PopupDesc {
+                parent,
+                anchor,
+                placement,
+                input,
+            }),
+            ..WindowDesc::default()
+        });
+        let origin = self
+            .peer
+            .window_origin(self.xid(window))
+            .expect("the popup is on the root");
+        (window, origin)
+    }
+
+    /// Whether a `CloseRequested` for `window` has arrived.
+    fn close_requested(&self, window: WindowId) -> bool {
+        self.events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::CloseRequested { window: w } if *w == window))
+    }
+}
+
+/// **A popup opens on its side of the anchor, and flips when that side is
+/// off the screen**: below a button its left edge is the button's and its top
+/// the button's bottom; against the screen's bottom it opens above instead.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_popup_opens_against_its_anchor_and_flips_at_the_screen_edge() {
+    let mut session = Session::open();
+    let parent = session.window(&desc("popup parent"));
+    let (x, y) = session.point_in(parent, 0, 0);
+
+    let (_, below) = session.popup(parent, BUTTON, PopupPlacement::Below, PopupInput::Pointer);
+    assert_eq!(
+        below,
+        (x + 10, y + 30),
+        "under the button, left edges aligned"
+    );
+
+    // A button whose bottom is ten pixels above the screen's: the popup does
+    // not fit below it, so it opens above.
+    let top = f64::from(i32::try_from(SCREEN.height).unwrap() - 20 - i32::from(y));
+    let low = LogicalRect::new(LogicalPoint::new(10.0, top), BUTTON.size);
+    let (_, flipped) = session.popup(parent, low, PopupPlacement::Below, PopupInput::Pointer);
+    let button_top = y + i16::try_from(top as i32).unwrap();
+    assert_eq!(
+        flipped,
+        (x + 10, button_top - 50),
+        "above the button instead"
+    );
+}
+
+/// **A grabbing popup takes the keyboard and the pointer**: `Escape` arrives
+/// as its key and then asks it to close; a click inside it is its own; and a
+/// click outside it asks it to close and is no window's press.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_grabbing_popup_closes_on_escape_and_on_a_click_outside() {
+    let mut session = Session::open();
+    let parent = session.window(&desc("menu parent"));
+    let (x, y) = session.point_in(parent, 0, 0);
+    let (menu, origin) = session.popup(parent, BUTTON, PopupPlacement::Below, PopupInput::Grab);
+    session.settle();
+    session.events.clear();
+
+    session.peer.key(keycode::ESCAPE, true);
+    session.peer.key(keycode::ESCAPE, false);
+    session.pump_until("Escape to ask the menu to close", |session| {
+        session.close_requested(menu)
+    });
+    let escape = session.events.iter().position(|event| {
+        matches!(event, ShellEvent::Key { window, state: ButtonState::Pressed, .. } if *window == menu)
+    });
+    let close = session
+        .events
+        .iter()
+        .position(|event| matches!(event, ShellEvent::CloseRequested { .. }));
+    assert!(
+        escape.is_some() && escape < close,
+        "the menu hears Escape, then the request: {:?}",
+        session.names()
+    );
+    session
+        .shell
+        .reply_close_request(menu, CloseReply::Keep)
+        .expect("kept open");
+    session.events.clear();
+
+    session.peer.motion(origin.0 + 20, origin.1 + 20);
+    session.peer.button(1, true);
+    session.peer.button(1, false);
+    session.pump_until("the click on the menu", |session| {
+        session.events.iter().any(|event| {
+            matches!(event, ShellEvent::Button { window, state: ButtonState::Released, .. } if *window == menu)
+        })
+    });
+    assert!(
+        !session.close_requested(menu),
+        "a click inside keeps it open"
+    );
+    session.events.clear();
+
+    session.peer.motion(x + 300, y + 300);
+    session.peer.button(1, true);
+    session.peer.button(1, false);
+    session.pump_until("the click outside to ask the menu to close", |session| {
+        session.close_requested(menu)
+    });
+    session.settle();
+    assert!(
+        !session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::Button { .. })),
+        "the dismissing click is no window's press: {:?}",
+        session.names()
+    );
+}
+
+/// **A passthrough popup takes no pointer**: motion over it is the parent's,
+/// as a tooltip's bar keeps the hover.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_passthrough_popup_leaves_the_pointer_to_the_window_beneath() {
+    let mut session = Session::open();
+    let parent = session.window(&desc("tooltip parent"));
+    let (tooltip, origin) = session.popup(
+        parent,
+        BUTTON,
+        PopupPlacement::Below,
+        PopupInput::Passthrough,
+    );
+    session.settle();
+    session.events.clear();
+
+    session.peer.motion(origin.0 + 20, origin.1 + 20);
+    session.peer.motion(origin.0 + 30, origin.1 + 25);
+    session.pump_until("motion over the tooltip", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::PointerMotion { .. }))
+    });
+    assert!(
+        session.events.iter().all(|event| match event {
+            ShellEvent::PointerMotion { window, .. } => *window == parent,
+            _ => true,
+        }),
+        "every motion is the parent's"
+    );
+    assert!(
+        !session.events.iter().any(|event| matches!(
+            event,
+            ShellEvent::PointerFocus { window, entered: true, .. } if *window == tooltip
+        )),
+        "the pointer never enters the tooltip"
+    );
+}
+
+/// **A popup moves when repositioned, and goes with its parent**: the new
+/// anchor places it anew, and destroying the parent reports the popup
+/// destroyed first.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_popup_follows_a_new_anchor_and_goes_with_its_parent() {
+    let mut session = Session::open();
+    let parent = session.window(&desc("calendar parent"));
+    let (x, y) = session.point_in(parent, 0, 0);
+    let (calendar, _) = session.popup(parent, BUTTON, PopupPlacement::Below, PopupInput::Pointer);
+
+    let moved = LogicalRect::new(LogicalPoint::new(200.0, 40.0), BUTTON.size);
+    session
+        .shell
+        .reposition_popup(calendar, moved, LogicalSize::new(120.0, 60.0))
+        .expect("a popup repositions");
+    let xid = session.xid(calendar);
+    session.pump_until("the popup at its new anchor", |session| {
+        session.peer.window_origin(xid) == Some((x + 200, y + 50))
+    });
+    session.pump_until("the popup's new size", |session| {
+        session
+            .shell
+            .window_state(calendar)
+            .is_ok_and(|state| state.size() == Some(PhysicalSize::new(120, 60)))
+    });
+    assert!(
+        session
+            .shell
+            .reposition_popup(parent, moved, POPUP)
+            .is_err(),
+        "only a popup repositions"
+    );
+
+    session.events.clear();
+    session
+        .shell
+        .destroy_window(parent)
+        .expect("destroy the parent");
+    session.pump();
+    let destroyed: Vec<WindowId> = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::WindowDestroyed { window } => Some(*window),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        destroyed,
+        [calendar, parent],
+        "the popup first, then its parent"
+    );
+    assert!(
+        session.shell.window_state(calendar).is_err(),
+        "the popup is gone"
+    );
 }

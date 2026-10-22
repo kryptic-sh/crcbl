@@ -15,6 +15,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Popups on X11.** `WindowRole::Popup` and `Shell::reposition_popup` now work
+  on the X11 backend (`ShellCaps::POPUP` and `POPUP_REPOSITION`): a popup is an
+  override-redirect window placed against its anchor, flipped or slid to stay on
+  its monitor as on Win32. A `Passthrough` popup lets the pointer through to the
+  window beneath, and a `Grab` popup takes the pointer and the keyboard, so a
+  click outside it or `Escape` asks it to close. Destroying a window destroys
+  its popups first.
 - **Transparent windows on X11.** `WindowDesc::transparent` now works on the X11
   backend wherever something composites the screen (Xwayland, or a compositing
   manager owning `_NET_WM_CM_S<n>`): the window is created on the screen's

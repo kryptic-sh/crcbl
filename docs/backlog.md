@@ -650,10 +650,11 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      by the CI-only
      `escape_on_a_grabbing_popup_is_delivered_then_asks_it_to_close` e2e test,
      Win32's by the desktop test of the same name, and the decision by unit
-     tests in `role` and `headless`. X11 builds no popups (`POPUP` is clear), so
-     it has nothing to dismiss. Also unverified anywhere: that AppKit delivers
-     `keyDown:` for Escape to a key `NSPanel`'s view rather than answering it as
-     `cancelOperation:` first.
+     tests in `role` and `headless`. X11's by
+     `a_grabbing_popup_closes_on_escape_and_on_a_click_outside` on Xvfb, with
+     and without openbox (2026-10-23). Also unverified anywhere: that AppKit
+     delivers `keyDown:` for Escape to a key `NSPanel`'s view rather than
+     answering it as `cancelOperation:` first.
    - **Decided 2026-10-17: `ShellCaps::TEXT_IME` is split**, keeping the name
      for a real input method end to end (pre-edit as `TextPreedit`, commits,
      `set_text_input` and `set_text_input_area` acted on) and adding
@@ -704,16 +705,26 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    surface, so its refusal stays.
 3. **Refused today, to build:** S14 accessibility on AppKit (`accesskit_macos`),
    M (Wayland and X11 are built, through `accesskit_unix`; see S14 below); X11
-   panels and popups (`_NET_WM_WINDOW_TYPE_DOCK`, `_NET_WM_STRUT_PARTIAL`,
-   override-redirect popups with a grab), M to L together. X11 transparency is
-   built (2026-10-23): a window on the screen's 32-bit ARGB visual with a
-   colormap of its own, offered only when something composites — Xwayland, or a
-   compositing manager owning `_NET_WM_CM_S<n>` — since a bare X server draws
-   alpha as opaque (`x11::connect::setup_argb`). `crcbl-app`'s
-   `wayland_transparency` reads an Xwayland window back with `grim` as it does a
-   Wayland one, in `run-wayland-e2e.sh`, green in main CI run 39815909663 on
-   llvmpipe. Not run: a compositing manager on a plain X server (picom, say),
-   whose `_NET_WM_CM_S0` path is written but untested.
+   panels (`_NET_WM_WINDOW_TYPE_DOCK`, `_NET_WM_STRUT_PARTIAL`), M. X11 popups
+   are built (2026-10-23, `x11::popup`): override-redirect windows placed by
+   `role::popup_rect`, as Win32's are; a passthrough popup has an empty input
+   shape (and is refused without SHAPE 1.1); a grabbing one grabs the pointer
+   and the keyboard, so a press outside it and a fresh `Escape` ask it to close,
+   and a parent takes its popups with it. Four `x11_e2e` tests cover placement
+   and the flip, the grab's dismissals, passthrough and repositioning, each
+   shown failing with its behaviour removed, on Xvfb with and without openbox.
+   **Not done:** a popup does not follow its parent when the parent moves (X11
+   relates no two windows' positions); a grabbing popup takes over a
+   pointer-mode capture and does not hand it back when it closes; and nested
+   grabbing popups are untested. X11 transparency is built (2026-10-23): a
+   window on the screen's 32-bit ARGB visual with a colormap of its own, offered
+   only when something composites — Xwayland, or a compositing manager owning
+   `_NET_WM_CM_S<n>` — since a bare X server draws alpha as opaque
+   (`x11::connect::setup_argb`). `crcbl-app`'s `wayland_transparency` reads an
+   Xwayland window back with `grim` as it does a Wayland one, in
+   `run-wayland-e2e.sh`, green in main CI run 39815909663 on llvmpipe. Not run:
+   a compositing manager on a plain X server (picom, say), whose `_NET_WM_CM_S0`
+   path is written but untested.
 4. **Implemented, untested:** S17 panel focus on Win32 and AppKit, and on
    Hyprland in CI (a job of its own, M to L; on the office laptop's nested
    Hyprland 0.56.2, 2026-10-21, an exclusive panel took the keyboard as on sway,
@@ -2654,8 +2665,8 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   | `set_panel` in place                          | CI, laptop; lyr on Hyprland     | refused (no X11 panels)                           | n/a                           |
   | `set_input_region`                            | CI, laptop                      | CI                                                | n/a                           |
   | Cursor shapes                                 | CI, laptop                      | CI (libxcb-cursor)                                | n/a                           |
-  | Escape dismisses a `Grab` popup               | CI, laptop                      | refused (no X11 popups)                           | n/a                           |
-  | Popup reposition                              | refusal in CI; real path laptop | refused                                           | n/a                           |
+  | Escape dismisses a `Grab` popup               | CI, laptop                      | CI test, laptop (Xvfb, openbox)                   | n/a                           |
+  | Popup reposition                              | refusal in CI; real path laptop | CI test, laptop (Xvfb, openbox)                   | n/a                           |
   | Panel at fractional scale (S21)               | laptop + CI test                | n/a                                               | n/a                           |
   | Fractional scale without the integer step     | unit test; pikr on Hyprland     | n/a                                               | n/a                           |
   | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)       | CI, laptop (Xwayland, `grim`)                     | laptop                        |

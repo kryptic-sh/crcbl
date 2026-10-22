@@ -38,7 +38,7 @@
 use super::ffi::{Point, Rect, dwm, style, value};
 use crate::{
     AspectRatio, DisplayMode, PanelAnchor, PanelKeyboard, PanelLayer, PhysicalRect, PhysicalSize,
-    PopupInput, PopupPlacement, SizeConstraints,
+    PopupInput, SizeConstraints,
 };
 
 /// On every window this backend makes: without them the system may draw over
@@ -257,38 +257,6 @@ pub fn with_depth(rect: Rect, edge: PanelAnchor, depth: i32) -> Rect {
         _ => rect.bottom = rect.top.saturating_add(depth),
     }
     rect
-}
-
-/// Where a popup of `size` goes against `anchor`, both in desktop pixels:
-/// [`role::place_popup`](crate::role::place_popup)'s placement, flipped or
-/// slid to stay in `area`, in whole pixels.
-#[must_use]
-pub fn popup_rect(
-    anchor: PhysicalRect,
-    size: PhysicalSize,
-    placement: PopupPlacement,
-    area: PhysicalRect,
-) -> PhysicalRect {
-    let placed = |rect: PhysicalRect| crate::role::Placed {
-        x: f64::from(rect.x),
-        y: f64::from(rect.y),
-        width: f64::from(rect.width),
-        height: f64::from(rect.height),
-    };
-    let (x, y) = crate::role::place_popup(
-        placed(anchor),
-        (f64::from(size.width), f64::from(size.height)),
-        placement,
-        placed(area),
-    );
-    // Whole pixels in, whole pixels out: every input is an integer, so the
-    // arithmetic is exact and the cast only narrows the range.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "clamped into i32's range before the cast"
-    )]
-    let narrow = |value: f64| value.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
-    PhysicalRect::new(narrow(x), narrow(y), size.width, size.height)
 }
 
 /// Where a panel of `size` goes in `area`: `insets` away from each edge it is
@@ -728,45 +696,6 @@ mod tests {
             popup_styles(PopupInput::Grab, true).ex_style & style::EX_TOPMOST,
             0,
             "above the topmost bar that opened it"
-        );
-    }
-
-    #[test]
-    fn a_popup_opens_on_its_side_and_flips_or_slides_to_stay_on_screen() {
-        let area = PhysicalRect::new(0, 0, 1920, 1040);
-        let button = PhysicalRect::new(100, 100, 80, 30);
-        let menu = PhysicalSize::new(200, 300);
-        assert_eq!(
-            popup_rect(button, menu, PopupPlacement::Below, area),
-            PhysicalRect::new(100, 130, 200, 300),
-            "below, left edges aligned"
-        );
-        assert_eq!(
-            popup_rect(button, menu, PopupPlacement::Above, area),
-            PhysicalRect::new(100, 130, 200, 300),
-            "no room above, so flipped below"
-        );
-        assert_eq!(
-            popup_rect(button, menu, PopupPlacement::Right, area),
-            PhysicalRect::new(180, 100, 200, 300),
-            "a submenu, top edges aligned"
-        );
-        assert_eq!(
-            popup_rect(button, menu, PopupPlacement::Left, area),
-            PhysicalRect::new(180, 100, 200, 300),
-            "no room to the left, so flipped right"
-        );
-        let low = PhysicalRect::new(1850, 1000, 60, 30);
-        assert_eq!(
-            popup_rect(low, menu, PopupPlacement::Below, area),
-            PhysicalRect::new(1720, 700, 200, 300),
-            "flipped above, and slid back onto the screen"
-        );
-        let tall = PhysicalSize::new(200, 2000);
-        assert_eq!(
-            popup_rect(button, tall, PopupPlacement::Below, area).y,
-            130,
-            "fits neither side, so it stays on its own"
         );
     }
 

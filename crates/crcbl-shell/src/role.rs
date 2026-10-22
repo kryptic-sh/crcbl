@@ -22,6 +22,8 @@
 use crate::geom::LogicalRect;
 use crate::monitor::MonitorId;
 use crate::window::{WindowDesc, WindowId};
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+use crate::{PhysicalRect, PhysicalSize};
 use crate::{ShellBackend, ShellCaps, ShellError};
 
 /// What kind of window to create — see the [module docs](self).
@@ -401,9 +403,9 @@ pub enum PopupPlacement {
 /// A rectangle in a backend's own Y-down space — desktop pixels on Win32,
 /// flipped screen points on AppKit — for [`place_popup`].
 ///
-/// Compiled where its callers are: the two backends that place popups
+/// Compiled where its callers are: the backends that place popups
 /// themselves.
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Placed {
     pub x: f64,
@@ -425,7 +427,7 @@ pub(crate) fn not_a_popup(window: WindowId) -> ShellError {
     ShellError::InvalidDescriptor(format!("reposition_popup: {window:?} is not a popup"))
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", test))]
 pub(crate) fn place_popup(
     anchor: Placed,
     (width, height): (f64, f64),
@@ -466,6 +468,39 @@ pub(crate) fn place_popup(
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+/// Where a popup of `size` goes against `anchor`, both in desktop pixels:
+/// [`place_popup`]'s placement, flipped or
+/// slid to stay in `area`, in whole pixels.
+#[must_use]
+pub(crate) fn popup_rect(
+    anchor: PhysicalRect,
+    size: PhysicalSize,
+    placement: PopupPlacement,
+    area: PhysicalRect,
+) -> PhysicalRect {
+    let placed = |rect: PhysicalRect| Placed {
+        x: f64::from(rect.x),
+        y: f64::from(rect.y),
+        width: f64::from(rect.width),
+        height: f64::from(rect.height),
+    };
+    let (x, y) = place_popup(
+        placed(anchor),
+        (f64::from(size.width), f64::from(size.height)),
+        placement,
+        placed(area),
+    );
+    // Whole pixels in, whole pixels out: every input is an integer, so the
+    // arithmetic is exact and the cast only narrows the range.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "clamped into i32's range before the cast"
+    )]
+    let narrow = |value: f64| value.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+    PhysicalRect::new(narrow(x), narrow(y), size.width, size.height)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -474,6 +509,46 @@ mod tests {
     use crate::{
         HeadlessShell, LogicalRect, MonitorId, Shell, ShellCaps, ShellError, ShellEvent, WindowDesc,
     };
+    use crate::{PhysicalRect, PhysicalSize};
+
+    #[test]
+    fn a_popup_opens_on_its_side_and_flips_or_slides_to_stay_on_screen() {
+        let area = PhysicalRect::new(0, 0, 1920, 1040);
+        let button = PhysicalRect::new(100, 100, 80, 30);
+        let menu = PhysicalSize::new(200, 300);
+        assert_eq!(
+            super::popup_rect(button, menu, PopupPlacement::Below, area),
+            PhysicalRect::new(100, 130, 200, 300),
+            "below, left edges aligned"
+        );
+        assert_eq!(
+            super::popup_rect(button, menu, PopupPlacement::Above, area),
+            PhysicalRect::new(100, 130, 200, 300),
+            "no room above, so flipped below"
+        );
+        assert_eq!(
+            super::popup_rect(button, menu, PopupPlacement::Right, area),
+            PhysicalRect::new(180, 100, 200, 300),
+            "a submenu, top edges aligned"
+        );
+        assert_eq!(
+            super::popup_rect(button, menu, PopupPlacement::Left, area),
+            PhysicalRect::new(180, 100, 200, 300),
+            "no room to the left, so flipped right"
+        );
+        let low = PhysicalRect::new(1850, 1000, 60, 30);
+        assert_eq!(
+            super::popup_rect(low, menu, PopupPlacement::Below, area),
+            PhysicalRect::new(1720, 700, 200, 300),
+            "flipped above, and slid back onto the screen"
+        );
+        let tall = PhysicalSize::new(200, 2000);
+        assert_eq!(
+            super::popup_rect(button, tall, PopupPlacement::Below, area).y,
+            130,
+            "fits neither side, so it stays on its own"
+        );
+    }
 
     #[test]
     fn only_a_fresh_escape_press_on_a_grabbing_popup_dismisses_it() {
