@@ -161,7 +161,7 @@ run_sample() {
     shift 2
     local log="${RUNTIME_DIR}/${sample}.log"
 
-    echo "crcbl e2e: running ${sample} windowed against Xvfb on the vk GPU backend"
+    echo "crcbl e2e: running ${sample} windowed against ${X_SERVER_NAME} on the vk GPU backend"
     set +e
     CRCBL_SHELL=x11 \
     CRCBL_VK_VALIDATION=1 \
@@ -171,7 +171,7 @@ run_sample() {
     local status=${PIPESTATUS[0]}
     set -e
     if [ "$status" -ne 0 ]; then
-        echo "crcbl e2e: ${sample} failed against Xvfb on vk (exit $status)" >&2
+        echo "crcbl e2e: ${sample} failed against ${X_SERVER_NAME} on vk (exit $status)" >&2
         log_tail
         exit "$status"
     fi
@@ -559,7 +559,7 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
         read -r -a fields <<<"$entry"
         run_sample "${fields[@]}"
     done
-    echo "crcbl e2e: ${#SAMPLES[@]} samples ran windowed against Xvfb on ${DISPLAY}"
+    echo "crcbl e2e: ${#SAMPLES[@]} samples ran windowed against ${X_SERVER_NAME} on ${DISPLAY}"
     # One more run of the first sample, this time required to fail. It runs
     # after the loop, not instead of any of it: every sample above was still
     # graded by the ordinary passes with nothing injected.

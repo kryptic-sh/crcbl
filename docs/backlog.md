@@ -27956,15 +27956,19 @@ What it does **not** reach, stated rather than left to be discovered:
 - **Nothing `viewer` is actually for is exercised.** No orbit, no `I` listing,
   no `W`/`N` views, no F11, no re-export watch: it runs the same fixed frame
   count every other sample in the gate does and exits.
-- **The adapter is still lavapipe, not a real one.** Under Xvfb Mesa reports no
-  DRI3, RADV refuses to present and the run falls back to `llvmpipe` — locally
-  and on CI alike — and the gate deliberately asserts nothing about which
-  adapter was chosen. Runtime is not the risk it looked like: with the binaries
-  already built, the whole eight-sample pass takes 12.6s of wall time against
-  `lvp_icd.json` locally, so what the job's 30-minute budget actually buys is
-  the cold compile.
-- **A windowed present on the real adapter is still unreached by anything.** It
-  needs a real X server with DRI3, which no automated harness here has.
+- **In CI the adapter is still lavapipe, not a real one.** Under Xvfb Mesa
+  reports no DRI3, a hardware driver refuses to present and the run falls back
+  to `llvmpipe`, and the gate deliberately asserts nothing about which adapter
+  was chosen. On a developer machine, `CRCBL_E2E_X11_SERVER=xwayland` (see
+  `tools/x11-display.sh`) puts the gate on Xwayland under headless sway, which
+  has DRI3 through glamor: on the office laptop (2026-10-22) all 23 samples, 25
+  runs with the autoexec pair, presented their frames windowed on the Intel
+  RPL-U (`CRCBL_ADAPTER=integrated`, `WLR_RENDER_DRM_DEVICE` its render node)
+  and again on the MX550 (`CRCBL_ADAPTER=discrete`), nothing left alive and
+  validation silent, every run naming the adapter asked for. Runtime is not the
+  risk it looked like: with the binaries already built, the whole eight-sample
+  pass takes 12.6s of wall time against `lvp_icd.json` locally, so what the
+  job's 30-minute budget actually buys is the cold compile.
 
 ## What the deleted WebGPU plan left behind (2026-08-22)
 
@@ -30343,9 +30347,11 @@ deleted rather than annotated.
   opening a window fails a job now — but the follow camera, the sprite pass, the
   three menus and the HUD layout are still checked only by test, by argument,
   and by the browser gate's canvas capture. **And Xvfb is not a GPU:** it
-  advertises no DRI3, so RADV refuses to present and the run above fell back to
-  `llvmpipe`. A windowed present on the real adapter needs a real X server,
-  which no automated harness here has. The same gap covers every sample.
+  advertises no DRI3, so a hardware driver refuses to present and CI's run falls
+  back to `llvmpipe`. A windowed present on a real adapter is made only by a
+  developer running the gate with `CRCBL_E2E_X11_SERVER=xwayland`, which the
+  office laptop did on both its GPUs on 2026-10-22; no runner has a GPU to do
+  it.
 
 - **Every scale number was taken on an offscreen image ring, not a swapchain.**
   `--headless` gives `crcbl-vk` a `SurfaceTarget::Offscreen` rotation of images,

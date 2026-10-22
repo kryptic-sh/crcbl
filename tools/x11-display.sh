@@ -19,6 +19,7 @@
 #   SCREEN              the geometry it was started with, depth included
 #   RUNTIME_DIR         a private 0700 directory, removed by the trap below
 #   XVFB_PID            the server, for a liveness check (Xorg's, if asked for)
+#   X_SERVER_NAME       which server that is, for the caller's own messages
 #   WM_PID              the window manager, unset when there is none
 #   DISPLAY_TIMEOUT_S   the deadline, so a caller's own polls share it
 #   log_tail            prints the server's log tail, and the manager's
@@ -49,7 +50,8 @@
 #   CRCBL_E2E_DISPLAY_TIMEOUT_S  How long to wait for the display, in seconds.
 #   CRCBL_E2E_X11_SCREEN         The `-screen 0` geometry, depth included.
 #   CRCBL_E2E_X11_WM             A window manager command; none by default.
-#   CRCBL_E2E_X11_SERVER         `xvfb`, the default, or `xorg`: see below.
+#   CRCBL_E2E_X11_SERVER         `xvfb`, the default, `xorg` or `xwayland`: see
+#                                below.
 #
 # # `xorg`: Xorg's dummy driver, not Xvfb
 #
@@ -72,6 +74,19 @@ DISPLAY_TIMEOUT_S="${CRCBL_E2E_DISPLAY_TIMEOUT_S:-20}"
 POLL_INTERVAL_S=0.1
 SCREEN="${CRCBL_E2E_X11_SCREEN:-1920x1080x24}"
 
+# # `xwayland`: a real GPU behind the display
+#
+# Neither `Xvfb` nor the dummy driver has DRI3, so a Vulkan swapchain on either
+# falls back to the CPU rasteriser and no windowed present on a real adapter is
+# ever made. With `CRCBL_E2E_X11_SERVER=xwayland` the server is Xwayland, hosted
+# by `crates/crcbl-shell/tests/sway-session.sh`'s headless sway on one output
+# of `SCREEN`'s size, and it renders through glamor on the render node wlroots
+# picks — `WLR_RENDER_DRM_DEVICE` names one. **A developer-machine mode**: a
+# runner without a GPU has no render node to give it. Sway manages the X
+# windows, and every one floats, so a window keeps the size it asked for, as
+# with no window manager; a suite that asserts what having no window manager
+# implies is not one to run here.
+
 # The mode an `xorg` run adds to the outputs that start with none: CVT's
 # 1280x720 at 60, as `cvt 1280 720 60` prints it.
 TWO_HEADS_MODE="1280x720_60"
@@ -91,8 +106,14 @@ if [ "${CRCBL_E2E_X11_SERVER:-xvfb}" = xorg ]; then
         echo "crcbl e2e: CRCBL_E2E_X11_SERVER=xorg needs Xorg, its dummy driver and xrandr; one is not installed" >&2
         exit 1
     fi
+elif [ "${CRCBL_E2E_X11_SERVER:-xvfb}" = xwayland ]; then
+    if ! command -v sway >/dev/null 2>&1 || ! command -v swaymsg >/dev/null 2>&1 \
+        || ! command -v Xwayland >/dev/null 2>&1; then
+        echo "crcbl e2e: CRCBL_E2E_X11_SERVER=xwayland needs sway, swaymsg and Xwayland; one is not installed" >&2
+        exit 1
+    fi
 elif [ "${CRCBL_E2E_X11_SERVER:-xvfb}" != xvfb ]; then
-    echo "crcbl e2e: CRCBL_E2E_X11_SERVER is xvfb or xorg, not ${CRCBL_E2E_X11_SERVER}" >&2
+    echo "crcbl e2e: CRCBL_E2E_X11_SERVER is xvfb, xorg or xwayland, not ${CRCBL_E2E_X11_SERVER}" >&2
     exit 1
 elif ! command -v Xvfb >/dev/null 2>&1; then
     echo "crcbl e2e: Xvfb is not installed; install it or run the harness elsewhere" >&2
@@ -139,28 +160,75 @@ cleanup() {
         kill "$XVFB_PID" 2>/dev/null || true
         wait "$XVFB_PID" 2>/dev/null || true
     fi
+    # Sway's own directory, which `sway_session_start` made beside this one.
+    if declare -F sway_session_stop >/dev/null; then
+        sway_session_stop
+    fi
     rm -rf "$RUNTIME_DIR"
     exit "$status"
 }
 trap cleanup EXIT INT TERM
 
-# Find a display number nobody is using. Xvfb's own `-displayfd` would be
+# The display number: Xwayland's is wlroots' to choose, and for the other two
+# servers this finds one nobody is using. Xvfb's own `-displayfd` would be
 # tidier and is not portable to every packaged build, so this claims a number
 # by checking for the lock *and* the socket, then lets the readiness poll below
 # catch a race with another process that claimed it first.
 DISPLAY_NUM=""
-for candidate in $(seq 90 120); do
-    if [ ! -e "/tmp/.X${candidate}-lock" ] && [ ! -e "/tmp/.X11-unix/X${candidate}" ]; then
-        DISPLAY_NUM="$candidate"
-        break
+if [ "${CRCBL_E2E_X11_SERVER:-xvfb}" = xwayland ]; then
+    # shellcheck source=crates/crcbl-shell/tests/sway-session.sh
+    source "${REPO_ROOT}/crates/crcbl-shell/tests/sway-session.sh"
+    # Every X window floats: a tiling sway would resize each to fill the
+    # output, and `xwayland force` starts the server with sway rather than on
+    # the first client, so there is a display to poll for below.
+    cat >"${RUNTIME_DIR}/xwayland-sway.conf" <<CONF
+output HEADLESS-1 mode ${SCREEN%x*}@60Hz position 0 0
+xwayland force
+default_border none
+focus_follows_mouse no
+for_window [shell="xwayland"] floating enable
+CONF
+    echo "crcbl e2e: starting Xwayland under headless sway (${WLR_RENDER_DRM_DEVICE:-the render node wlroots picks})"
+    CRCBL_E2E_OUTPUTS=1 sway_session_start "${RUNTIME_DIR}/xwayland-sway.conf"
+    XVFB_PID="$SWAY_PID"
+    XVFB_LOG="$SWAY_LOG"
+    # Wlroots chooses Xwayland's display number and gives it to what sway
+    # runs, so sway is asked for it rather than the socket directory guessed
+    # at, which every other X server on the machine shares.
+    swaymsg exec "printenv DISPLAY > ${RUNTIME_DIR}/xwayland.display" >/dev/null
+    XWAYLAND_DEADLINE=$(( $(date +%s) + DISPLAY_TIMEOUT_S ))
+    until [ -s "${RUNTIME_DIR}/xwayland.display" ]; do
+        if [ "$(date +%s)" -ge "$XWAYLAND_DEADLINE" ]; then
+            echo "crcbl e2e: sway named no Xwayland display after ${DISPLAY_TIMEOUT_S}s" >&2
+            log_tail
+            exit 1
+        fi
+        sleep "$POLL_INTERVAL_S"
+    done
+    DISPLAY_NUM="$(sed -n 's/^:\([0-9]*\).*/\1/p' "${RUNTIME_DIR}/xwayland.display")"
+    # The display is X11's from here: the backend would prefer Wayland.
+    unset WAYLAND_DISPLAY
+    if [ -z "$DISPLAY_NUM" ]; then
+        echo "crcbl e2e: sway named an Xwayland display this cannot read: $(cat "${RUNTIME_DIR}/xwayland.display")" >&2
+        exit 1
     fi
-done
-if [ -z "$DISPLAY_NUM" ]; then
-    echo "crcbl e2e: no free X display number in :90-:120" >&2
-    exit 1
+else
+    for candidate in $(seq 90 120); do
+        if [ ! -e "/tmp/.X${candidate}-lock" ] && [ ! -e "/tmp/.X11-unix/X${candidate}" ]; then
+            DISPLAY_NUM="$candidate"
+            break
+        fi
+    done
+    if [ -z "$DISPLAY_NUM" ]; then
+        echo "crcbl e2e: no free X display number in :90-:120" >&2
+        exit 1
+    fi
 fi
 
-if [ -n "$XORG" ]; then
+if [ "${CRCBL_E2E_X11_SERVER:-xvfb}" = xwayland ]; then
+    X_SERVER_NAME="Xwayland"
+elif [ -n "$XORG" ]; then
+    X_SERVER_NAME="Xorg's dummy driver"
     echo "crcbl e2e: starting Xorg with the dummy driver on :${DISPLAY_NUM}"
     # Xorg reads a configuration by a path relative to its working directory
     # when it is not root, so the file is written into the run's directory and
@@ -205,6 +273,7 @@ CONF
     ) &
     XVFB_PID=$!
 else
+    X_SERVER_NAME="Xvfb"
     echo "crcbl e2e: starting Xvfb on :${DISPLAY_NUM} (${SCREEN})"
     # `-nolisten tcp` keeps the server on its Unix socket, so nothing outside
     # this machine can reach it and the suite cannot accidentally talk to a
@@ -243,6 +312,7 @@ while [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; do
 done
 
 export DISPLAY=":${DISPLAY_NUM}"
+export X_SERVER_NAME
 
 if [ -n "$XORG" ]; then
     # The socket comes before the server answers, so the first RandR request is
