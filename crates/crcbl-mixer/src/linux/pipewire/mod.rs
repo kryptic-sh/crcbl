@@ -257,6 +257,21 @@ impl Drop for PipeWire {
     }
 }
 
+/// A socket failure before the first full picture: a server that resets,
+/// refuses or closes the connection then is not there — its socket file can
+/// outlive it, as it does while it restarts — so that is
+/// [`MixerError::NoServer`], the answer an app retries on.
+fn opening_error(error: io::Error) -> MixerError {
+    match error.kind() {
+        io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionRefused
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::BrokenPipe
+        | io::ErrorKind::UnexpectedEof => MixerError::NoServer,
+        _ => io_error(error),
+    }
+}
+
 fn io_error(error: io::Error) -> MixerError {
     MixerError::Protocol(format!("PipeWire's socket: {error}"))
 }
@@ -335,7 +350,7 @@ fn read_loop(
             Err(error) => {
                 shared.connected.store(false, Ordering::SeqCst);
                 if let Some(ready) = opening.take() {
-                    let _ = ready.send(Err(io_error(error)));
+                    let _ = ready.send(Err(opening_error(error)));
                 } else if !shared.closing.load(Ordering::SeqCst) {
                     // The server went: one last wake, for the app to see
                     // `is_connected` false and open a new mixer.
@@ -978,6 +993,24 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that goes while the client is opening, as one restarting
+    /// does, is no server, not a protocol fault.
+    #[test]
+    fn a_server_gone_while_opening_is_no_server() {
+        assert_eq!(
+            opening_error(io::ErrorKind::ConnectionReset.into()),
+            MixerError::NoServer
+        );
+        assert_eq!(
+            opening_error(io::ErrorKind::UnexpectedEof.into()),
+            MixerError::NoServer
+        );
+        assert!(matches!(
+            opening_error(io::ErrorKind::InvalidData.into()),
+            MixerError::Protocol(_)
+        ));
+    }
 
     /// **A server that goes wakes the app once and leaves it disconnected**;
     /// the mixer's own close does not wake it.
