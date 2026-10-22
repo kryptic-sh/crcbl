@@ -24433,7 +24433,35 @@ What else is open:
   the arc sweep to. Prefer the closed form for the straight sweep: it is exact,
   non-iterative and keeps the determinism-bearing path free of an iteration
   count. A regression test is EW's repro. EW takes the fix through the next
-  crates.io release and has nothing pending on it.
+  crates.io release and has nothing pending on it. **The sweep half is written
+  (2026-10-23), on branch `phys-rounded-box-sweep`, not main:**
+  `query::aabb_sweep::swept_sphere_vs_rounded_aabb` (Ericson §5.5.7: the
+  inflated box's entry, then the edge's capsule, or the first of a corner's
+  three), which `swept_capsule_vs_aabb` now uses. Its tests hold EW's numbers:
+  0.29 from the edge the normal is `(0.29, 0.0768, 0) / 0.3`, past edge plus
+  radius and diagonally beyond a corner it misses, over the face it lands flat;
+  three of them fail with the inflated sweep put back. The arc sweep's
+  `an_unturned_box_edge_is_met_where_the_round_capsule_touches_it` now agrees
+  with the straight sweep to its tolerance. **Six tests fail on the branch, and
+  they are the blocker:** the curb test and
+  `query_digest_tests::every_answer_on_unturned_scenes_is_where_it_was` pinned
+  the inflated box (expected to change), but four `character` tests
+  (`the_step_the_controller_stops_climbing_is_the_offset_it_was_configured_with`,
+  `walking_off_a_lip_within_the_step_offset_never_leaves_the_ground`,
+  `a_step_climbed_is_a_contact_marked_stepped_up`,
+  `sub_skin_moves_climb_steps_and_follow_walkable_slopes`) show
+  `CharacterController` climbs steps and snaps down lips only because box edges
+  were square: `try_step_up` advances at most a tick's motion past the step
+  face, its landing then sits on the edge's curve, and `is_walkable` refuses
+  that normal. A `TriangleMesh` step, whose edges were always rounded, likely
+  fails the same way; nothing tests it. **Decision needed (EW's, since it is
+  gameplay feel):** a perch rule, as Unreal's `PerchRadiusThreshold`: an edge
+  contact is footing when it lies within `radius - perch_margin` of the
+  capsule's axis horizontally. EW's case is 0.29 of a 0.30 radius and must stay
+  refused, while a step landing is about 0.25 out, so the margin sits between
+  those and wants EW's numbers; or step landings sweep with the advance carried
+  far enough past the edge to land on the face. Then the four character tests
+  pass again and the digest is re-pinned with the reason.
 - **A capsule wedged in a V-crease of two steep faces is never grounded (EW,
   2026-10-23, on 0.8.1).** EW's repro, through its `PlayerController` with
   radius 0.30: a `TriangleMesh` V of two 60° faces meeting along z at x = 0
