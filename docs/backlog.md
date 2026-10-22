@@ -23,11 +23,14 @@ with and without validation. What is still open:
   `libnvidia-eglcore.so.615.78.08` once the first presenter's device and
   instance are gone; keeping them alive (a temporary build that leaked them)
   avoided it. Legal usage, so a driver bug. **Not reported to NVIDIA.**
-- **lyr has not adopted it.** It opens a `Presenter` per surface (bars, popups,
-  toasts, through `lyr_render::surface::Surface::open`), reproduced the crash
-  with `CRCBL_ADAPTER=discrete` and a bar on each of two outputs, and will hold
-  one `SharedGpu` in its `App` once a release carries it; it offered to run a
-  local `[patch]` build first.
+- **lyr has adopted it on a branch and confirmed the fix** (2026-10-22): its
+  `crcbl-shared-gpu` branch, against crcbl main through a git-rev `[patch]`,
+  keeps the first surface's `SharedGpu` and opens every later surface on it,
+  falling back to `Presenter::open` when refused. On the MX550 with two bars,
+  the output removal that segfaulted every time, five more add/remove rounds, a
+  tooltip and the clock panel all ran without a crash and lyr exited 0; on the
+  Intel default too. lyr merges the branch once a crcbl release carries
+  `SharedGpu`, and asked to be told when one does.
 - **Not shared:** windows on displays driven by different GPUs.
   `SharedGpu::open` refuses a window its adapter cannot present to, and the
   caller opens that one with `Presenter::open`.
