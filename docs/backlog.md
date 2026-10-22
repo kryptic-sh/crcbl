@@ -3,14 +3,6 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## EW has not been told 0.8.0 shipped (2026-10-21)
-
-0.8.0 is on crates.io with `RouteFollower::set_last_stop_m`, which EW waits on
-to move its AI routes (EW pins released versions only); 0.8.1 followed the same
-day with a Wayland event-delivery fix and no API change, so EW should take
-0.8.1. pikr and lyr were told in session; no EW session was running to tell.
-Delete this once EW knows.
-
 ## System audio control, asked by lyr for the owner (2026-10-22)
 
 **Approved by the owner on 2026-10-22, in progress.** **Slice 1 is on main**
