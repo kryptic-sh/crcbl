@@ -1518,6 +1518,25 @@ jobs:
         shell: bash
         run: crates/crcbl-dx12/tests/run-dx12-e2e.sh
 
+      # **A presenter resized after presenting, on a real window.** lyr hit
+      # `DXGI_ERROR_INVALID_CALL` from `ResizeBuffers` when it called
+      # `Presenter::resize` with a frame still in flight, and every other D3D12
+      # step here presents offscreen, where a reconfigure never reaches
+      # `ResizeBuffers` — the step above resizes a real `HWND` too, but with
+      # every command buffer destroyed by hand first, which is the order the
+      # presenter has to get right. `tests/dx12_windowed_e2e.rs` opens a window
+      # through the Win32 shell, presents through `crcbl_app`'s `Presenter`,
+      # and resizes it twice over: a bar by `set_panel`, as lyr's was, and a
+      # window by `SetWindowPos` from outside.
+      #
+      # The harness pins `CRCBL_ADAPTER=cpu`, which is WARP here, and fails when
+      # the suite ran no tests or named another adapter. The debug layer is
+      # asserted in each test, off the log `crcbl-dx12` writes at device
+      # teardown, so a runner without it fails rather than passing unchecked.
+      - name: Resize a presenter on a real D3D12 window on WARP
+        shell: bash
+        run: crates/crcbl/tests/run-dx12-windowed-e2e.sh
+
       # # A frame through ForwardRenderer, on D3D12 — a measurement, not a gate
       #
       # Ran on `dc846ff` and again on `0354eec` with `CRCBL_ADAPTER=cpu`. Both

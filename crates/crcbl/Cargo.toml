@@ -336,6 +336,19 @@ mesh-e2e = []
 # `SetWindowPos`.
 windowed-e2e = ["crcbl-shell/x11-e2e"]
 
+# `tests/dx12_windowed_e2e.rs` — a `crcbl_app::present::Presenter` on a real
+# Win32 window and a D3D12 device, resized after it has presented, driven by
+# `tests/run-dx12-windowed-e2e.sh`. Gated and `#[ignore]`d for exactly the
+# reason `render-e2e` above is.
+#
+# A feature of its own rather than more of `windowed-e2e` because the two run in
+# different jobs on different backends: that suite is Vulkan by construction and
+# runs under Xvfb and on lavapipe, this one is D3D12 by construction and runs on
+# WARP beside `crcbl-dx12`'s own device tests. It needs nothing forwarded: the
+# Win32 shell is unconditional on Windows, and the test resizes its own
+# process's window with `SetWindowPos`.
+dx12-windowed-e2e = []
+
 # `crcbl-ui`'s parsed font — `skrifa`, the committed Atkinson Hyperlegible,
 # `Font::sans` and the `sans-serif` family — forwarded to it and to
 # `crcbl-render`. **Off by default**: linked unconditionally it cost every
