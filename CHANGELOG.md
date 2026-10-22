@@ -93,6 +93,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`Ui::selectable_list`**: `Ui::list` with one row selected, built `:checked`
   so a stylesheet draws it as `.list-row:checked`, and read as selected by a
   screen reader. `Ui::list` is `selectable_list` with no selection.
+- **D3D12 writes the debug layer's messages to the log at device teardown.**
+  With the layer on, `crcbl-dx12` logs
+  `crcbl-dx12: validation enabled (D3D12 debug layer), …` when a device opens
+  (it replaces `this device's validation messages are readable`), and when the
+  device is dropped logs each stored message from `crcbl_dx12::debug` as
+  `dx12 validation: [SEVERITY] id N: text`, at error for errors and corruption
+  and at warn for warnings, then one info line,
+  `crcbl-dx12: validation messages read at device teardown: …`, with the counts.
+  Warnings `crcbl_dx12::debug::ALLOWED` names are counted there, not quoted.
+  `tools/run-samples-windowed.ps1 -Backend dx12` now sets
+  `CRCBL_DX12_VALIDATION=1` and fails a sample on any such line, on a missing
+  enabled line, or on a missing teardown line; `-NoValidation` turns it off. The
+  check is `crcbl_dx12_validation_saw_nothing` in `tools/vk-validation-log.sh`.
 
 ### Fixed
 

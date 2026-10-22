@@ -605,6 +605,15 @@ pub(crate) struct DeviceInner {
     /// See [`crate::handle`].
     pub(crate) owner: Owner,
     state: Mutex<DeviceState>,
+    /// Writes what the debug layer stored against this device to the log once
+    /// everything above has been released.
+    ///
+    /// **Last, and the order is the point.** Fields drop in declaration order,
+    /// so by the time this one does, `raw`, the queue and every pool in
+    /// `state` are gone, and only the info-queue reference this holds keeps the
+    /// D3D12 device object alive — so anything the layer said about the
+    /// teardown itself is in the log too. See [`debug::TeardownLog`].
+    _teardown: debug::TeardownLog,
 }
 
 impl core::fmt::Debug for DeviceInner {
@@ -1691,7 +1700,8 @@ impl Dx12Device {
         // Says whether this device's validation messages can be read back at
         // all, and drops whatever the info queue already held so a later
         // failure reports its own messages rather than the process's.
-        debug::attach(&raw);
+        // What comes back writes them to the log when this device goes.
+        let teardown = debug::attach(&raw);
 
         let queue_desc = D3D12_COMMAND_QUEUE_DESC {
             Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -1786,6 +1796,7 @@ impl Dx12Device {
             zero,
             owner,
             state: Mutex::new(state),
+            _teardown: teardown,
         });
         crcbl_core::log::info!(
             "crcbl-dx12: opened \"{}\" (geometry {:?}, binding {:?}, lighting {:?})",

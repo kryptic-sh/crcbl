@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Reading what the Vulkan validation layer said, for every harness that runs a
-# binary under it and has to fail on the answer.
+# binary under it and has to fail on the answer — and what the D3D12 debug
+# layer said, for the one harness that runs samples on dx12.
 #
-# **Sourced, never run.** It defines one function in the caller's shell, which
-# is what three harnesses did when they carried it inline:
+# **Sourced, never run.** It defines its functions in the caller's shell, which
+# is what three harnesses did when they carried the first one inline:
 #
 #   source "${REPO_ROOT}/tools/vk-validation-log.sh"
 #   if ! crcbl_validation_saw_nothing "$log" "$what"; then
@@ -38,6 +39,29 @@
 # `vk <kind>:` prefix — the teardown leak warning comes from `crcbl_vk::device`
 # and is a different question, asked separately by each harness.
 #
+# # And the same two questions for dx12
+#
+# `crcbl-dx12` has no messenger: the debug layer stores its messages in an
+# `ID3D12InfoQueue`, and `crcbl_dx12::debug::TeardownLog` writes them to the
+# log when the device is dropped, at the same levels and in the same shape —
+# `(ERROR|WARN) +crcbl_dx12::debug] dx12 validation: …`. Its "validation
+# enabled" line is printed once the device's info queue is reachable, which is
+# the same claim `crcbl-vk`'s makes about its messenger. So
+# `crcbl_dx12_validation_saw_nothing` asks both questions through the one body
+# below, with the backend's name swapped.
+#
+# **And one more, which only dx12 needs.** A vk message is logged the moment
+# the layer reports it; a dx12 message is logged only if the device is
+# dropped. A process that exits past its device — or leaks the last reference
+# to it — logs nothing at all, which reads exactly like a clean run. So a dx12
+# log must also carry the line `TeardownLog` always ends on,
+# `crcbl-dx12: validation messages read at device teardown`, or it is refused.
+#
+# There is no dx12 counterpart of `crcbl_validation_layer_checked` yet:
+# `crcbl-dx12` has no switch that commits a violation in a running binary, so
+# nothing has shown this check go red on a real dx12 log. Its own device tests
+# do provoke the layer, through `debug::Validated`.
+#
 # # What it does not do
 #
 # It never exits and it never calls the caller's `log_tail`: a harness knows
@@ -49,24 +73,67 @@
 # Returns 0 when the layer was loaded and said nothing, 1 otherwise, having
 # written to stderr what it found.
 crcbl_validation_saw_nothing() {
-    local log="$1" what="$2" complaints
-    if ! grep -qF 'crcbl-vk: validation enabled (' "$log"; then
-        echo "crcbl e2e: ${what} ran with CRCBL_VK_VALIDATION=1 and never loaded the" >&2
-        echo "           layer, so a clean log here proves nothing. Install" >&2
-        echo "           VK_LAYER_KHRONOS_validation (Arch: vulkan-validation-layers," >&2
-        echo "           Debian/Ubuntu: vulkan-validationlayers) — crcbl-vk warns by name" >&2
-        echo "           when it is missing, and the warning is in the log above." >&2
+    crcbl_backend_validation_saw_nothing vk "$1" "$2"
+}
+
+# `crcbl_dx12_validation_saw_nothing <log> <what>` — dx12 runs only.
+#
+# The same answer about the D3D12 debug layer, plus the teardown line the
+# header argues for.
+crcbl_dx12_validation_saw_nothing() {
+    crcbl_backend_validation_saw_nothing dx12 "$1" "$2"
+}
+
+# `crcbl_backend_validation_saw_nothing <vk|dx12> <log> <what>` — the body
+# both of the above share. What differs by backend is the advice for a missing
+# layer and the one liveness question each backend has of its own; the two
+# lines asked about and the complaint pattern are one shape with the name
+# swapped.
+crcbl_backend_validation_saw_nothing() {
+    local backend="$1" log="$2" what="$3" complaints
+    if ! grep -qF "crcbl-${backend}: validation enabled (" "$log"; then
+        case "$backend" in
+            vk)
+                echo "crcbl e2e: ${what} ran with CRCBL_VK_VALIDATION=1 and never loaded the" >&2
+                echo "           layer, so a clean log here proves nothing. Install" >&2
+                echo "           VK_LAYER_KHRONOS_validation (Arch: vulkan-validation-layers," >&2
+                echo "           Debian/Ubuntu: vulkan-validationlayers) — crcbl-vk warns by name" >&2
+                echo "           when it is missing, and the warning is in the log above." >&2
+                ;;
+            dx12)
+                echo "crcbl e2e: ${what} ran with CRCBL_DX12_VALIDATION=1 and never enabled the" >&2
+                echo "           D3D12 debug layer, so a clean log here proves nothing. Install" >&2
+                echo "           Windows' Graphics Tools optional feature — crcbl-dx12 warns by" >&2
+                echo "           name when the layer is missing, and the warning is in the log" >&2
+                echo "           above." >&2
+                ;;
+            *)
+                echo "crcbl e2e: no validation log shape is known for backend '${backend}'" >&2
+                return 1
+                ;;
+        esac
         cat "$log" >&2
         return 1
     fi
-    if grep -qF 'a panic escaped the Vulkan debug messenger callback' "$log"; then
+    if [ "$backend" = vk ] &&
+        grep -qF 'a panic escaped the Vulkan debug messenger callback' "$log"; then
         echo "crcbl e2e: ${what} lost validation messages — a panic escaped the" >&2
         echo "           messenger callback, so the check below cannot see what the" >&2
         echo "           layer said." >&2
         cat "$log" >&2
         return 1
     fi
-    complaints="$(grep -E '(ERROR|WARN) +crcbl_vk::debug] vk ' "$log" || true)"
+    if [ "$backend" = dx12 ] &&
+        ! grep -qF 'crcbl-dx12: validation messages read at device teardown' "$log"; then
+        echo "crcbl e2e: ${what} enabled the D3D12 debug layer and never read its" >&2
+        echo "           messages back — crcbl-dx12 writes them when the device is" >&2
+        echo "           dropped, and this run's device never was, so a log with no" >&2
+        echo "           complaint in it here proves nothing. Drop the device before" >&2
+        echo "           the process exits." >&2
+        cat "$log" >&2
+        return 1
+    fi
+    complaints="$(grep -E "(ERROR|WARN) +crcbl_${backend}::debug] ${backend} " "$log" || true)"
     [ -z "$complaints" ] && return 0
     echo "crcbl e2e: the validation layer complained about ${what}:" >&2
     while IFS= read -r line; do

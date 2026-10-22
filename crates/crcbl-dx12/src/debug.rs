@@ -43,6 +43,15 @@
 //! same problem and solves it the same way, through a messenger callback into
 //! [`crate::debug`]'s opposite number there.
 //!
+//! # And a run that ends cleanly writes them to its log
+//!
+//! An error is only one reader. A sample that runs to the end returns no error
+//! at all, so [`TeardownLog`] reads the same queue when the device is dropped
+//! and logs every stored message from this module, under the [`LOG_PREFIX`] a
+//! harness greps for, beside the "validation enabled" line [`attach`] prints —
+//! the pair of lines `crcbl-vk`'s messenger gives `tools/vk-validation-log.sh`
+//! to read. [`teardown_lines`] is what they say and at which level.
+//!
 //! # When the layer is on
 //!
 //! Debug builds, which is every `cargo test` and every `cargo run` a developer
@@ -152,6 +161,29 @@ fn parse_flag(value: &str) -> Option<bool> {
     }
 }
 
+/// What every debug-layer message [`TeardownLog`] writes starts with.
+///
+/// `crcbl_vk::debug` starts its messenger's lines `vk <kind>:`, and the
+/// harnesses grep for that word under the level and the module. This is the
+/// same shape, so `tools/vk-validation-log.sh` reads a dx12 log with the
+/// backend's name swapped and nothing else.
+const LOG_PREFIX: &str = "dx12 validation: ";
+
+/// The line [`TeardownLog`] ends on, whatever the queue held.
+///
+/// It is what a harness requires before it believes a log with no complaint in
+/// it: a device that was never dropped — a process that exited past it, an
+/// `Arc` that leaked — never read its queue, and its log is quiet for that
+/// reason alone.
+const TEARDOWN_READ: &str = "crcbl-dx12: validation messages read at device teardown";
+
+/// The line [`attach`] prints once a device's info queue is reachable.
+///
+/// A harness greps for its opening `crcbl-dx12: validation enabled (`, the
+/// same words `crcbl-vk` prints once its messenger exists.
+const VALIDATION_ENABLED: &str = "crcbl-dx12: validation enabled (D3D12 debug layer), messages are \
+                                  read from the info queue at device teardown";
+
 /// How many of the info queue's messages are kept verbatim in a report.
 ///
 /// A cap rather than the whole queue: a device that has gone wrong emits the
@@ -196,6 +228,26 @@ impl Severity {
         !matches!(self, Self::Message | Self::Info)
     }
 
+    /// The level [`TeardownLog`] writes a message at this severity with.
+    ///
+    /// `crcbl_vk::debug`'s mapping, carried across: an error is an error, a
+    /// warning a warning, and the layer's chatter goes out at the levels a
+    /// harness does not grep — [`Severity::Info`] at info and
+    /// [`Severity::Message`] at debug. Chatter is denied at the storage filter
+    /// and never kept in a report anyway, so that half only speaks if either
+    /// of those stops holding. Corruption is worse than an error and has no
+    /// level above it. A severity this build has no name for goes out as a
+    /// warning: [`Severity::is_failure`] already counts it, and a warning is
+    /// what fails a harness without claiming to know how bad it is.
+    const fn log_level(self) -> LogLevel {
+        match self {
+            Self::Corruption | Self::Error => LogLevel::Error,
+            Self::Warning | Self::Unknown(_) => LogLevel::Warn,
+            Self::Info => LogLevel::Info,
+            Self::Message => LogLevel::Debug,
+        }
+    }
+
     /// The word that appears in a report line.
     fn as_str(self) -> String {
         match self {
@@ -205,6 +257,33 @@ impl Severity {
             Self::Error => "ERROR".to_string(),
             Self::Corruption => "CORRUPTION".to_string(),
             Self::Unknown(raw) => format!("SEVERITY {raw}"),
+        }
+    }
+}
+
+/// The level a [`TeardownLog`] line goes out at.
+///
+/// This crate's own enum rather than `crcbl_core::log::Level` for the reason
+/// [`Severity`] is: `crcbl-core` is a Windows-only dependency here, and which
+/// level a message is logged at is exactly what [`teardown_lines`]'s tests
+/// assert on a machine with no D3D12.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+#[cfg(target_os = "windows")]
+impl LogLevel {
+    /// The `crcbl_core::log` level of the same name.
+    const fn as_core(self) -> crcbl_core::log::Level {
+        match self {
+            Self::Error => crcbl_core::log::Level::Error,
+            Self::Warn => crcbl_core::log::Level::Warn,
+            Self::Info => crcbl_core::log::Level::Info,
+            Self::Debug => crcbl_core::log::Level::Debug,
         }
     }
 }
@@ -444,6 +523,44 @@ impl ValidationReport {
     }
 }
 
+/// Every line [`TeardownLog`] writes for a report, with the level it goes out
+/// at.
+///
+/// One per kept message, each starting with [`LOG_PREFIX`], then the
+/// [`TEARDOWN_READ`] line at info with the exact counts — the messages are
+/// capped at [`MAX_KEPT_MESSAGES`] and the counts are not, so the last line is
+/// what says whether the quoted ones are the whole story. Warnings
+/// [`allowance`] answered are counted there and quoted nowhere, which is where
+/// `ValidationReport::assert_clean` leaves them too: a harness reading this log
+/// must not fail a run on a message the device tests pass over by name.
+///
+/// Pure, so what a harness greps for is asserted on a machine with no D3D12.
+fn teardown_lines(report: &ValidationReport) -> Vec<(LogLevel, String)> {
+    let mut lines: Vec<(LogLevel, String)> = report
+        .messages
+        .iter()
+        .map(|message| {
+            (
+                message.severity.log_level(),
+                format!("{LOG_PREFIX}{message}"),
+            )
+        })
+        .collect();
+    lines.push((
+        LogLevel::Info,
+        format!(
+            "{TEARDOWN_READ}: {} corruption, {} error(s) and {} warning(s), {} quoted above, plus \
+             {} allowed by name in crcbl_dx12::debug::ALLOWED",
+            report.corruption,
+            report.errors,
+            report.warnings,
+            report.messages.len(),
+            report.allowed
+        ),
+    ));
+    lines
+}
+
 /// Whether the debug layer was asked for, and whether it was there.
 ///
 /// A [`OnceLock`] because `ID3D12Debug::EnableDebugLayer` has to run **before**
@@ -509,15 +626,20 @@ fn debug_layer_on() -> bool {
 
 /// Reports whether the info queue behind the debug layer is reachable on a
 /// freshly created device, files the storage filter, and clears whatever the
-/// queue already holds.
+/// queue already holds. Returns the [`TeardownLog`] that reads it back when the
+/// device goes.
 ///
 /// The clear is what makes a later [`diagnosis`] mean "since this device was
 /// created" rather than "since the process started". The log line is the half
 /// `crcbl_vk::debug`'s `ValidationReport::enabled` exists for: a report that is
 /// silent because nothing was checked is a very different thing from one that
 /// is silent because nothing was wrong, and only this line tells them apart.
+/// It is worded as `crcbl-vk`'s `announce_messenger` words its own, and logged
+/// from this module for that function's reason: a `CRCBL_LOG` directive that
+/// silenced the messages [`TeardownLog`] writes silences this line with them,
+/// so a harness is never left holding the reassurance without the complaints.
 #[cfg(target_os = "windows")]
-pub(crate) fn attach(device: &ID3D12Device) {
+pub(crate) fn attach(device: &ID3D12Device) -> TeardownLog {
     let Ok(queue) = device.cast::<ID3D12InfoQueue>() else {
         if debug_layer_on() {
             crcbl_core::log::warn!(
@@ -525,7 +647,7 @@ pub(crate) fn attach(device: &ID3D12Device) {
                  validation message can be read back"
             );
         }
-        return;
+        return TeardownLog { queue: None };
     };
     // **The queue is told not to keep chatter, and that is what keeps it
     // useful.** The layer emits an `INFO` message per object created and
@@ -561,7 +683,45 @@ pub(crate) fn attach(device: &ID3D12Device) {
     }
     // SAFETY: as above. The call takes nothing and returns nothing.
     unsafe { queue.ClearStoredMessages() };
-    crcbl_core::log::info!("crcbl-dx12: this device's validation messages are readable");
+    crcbl_core::log::info!("{VALIDATION_ENABLED}");
+    TeardownLog { queue: Some(queue) }
+}
+
+/// Writes everything the debug layer stored against a device to the log when
+/// it is dropped.
+///
+/// **Held by the device as its last field, and holding the queue rather than
+/// the device.** The reasoning is `Validated`'s: the messages live on the
+/// `ID3D12Device`, so they cannot be read once that object is gone, and an
+/// `ID3D12InfoQueue` reference keeps the object alive by itself. Dropped after
+/// everything else the device owns, it reads a queue that already holds
+/// whatever the layer said about releasing it.
+///
+/// **It reads and takes nothing**, as every reader of this queue does — see
+/// the module docs. So a device test's `Validated`, which reads the same queue
+/// after this has run, still sees every message and still fails on it, and a
+/// removed device's [`diagnosis`] is quoted in its error and written here
+/// again. The second copy is the log's own record, not a second count: no
+/// reader adds the two together.
+///
+/// `None` when the layer is off or the device has no info queue, which is also
+/// when [`attach`] printed no "validation enabled" line — so a harness sees
+/// both lines or neither.
+#[cfg(target_os = "windows")]
+pub(crate) struct TeardownLog {
+    queue: Option<ID3D12InfoQueue>,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for TeardownLog {
+    fn drop(&mut self) {
+        let Some(queue) = self.queue.take() else {
+            return;
+        };
+        for (level, line) in teardown_lines(&read_queue(&queue)) {
+            crcbl_core::log::log_at!(level.as_core(), "{line}");
+        }
+    }
 }
 
 /// The reason D3D12 gives for a device having been removed, or `None` while it
@@ -607,12 +767,12 @@ fn reason_name(code: HRESULT) -> &'static str {
 /// Everything the debug layer has stored against this device, read without
 /// taking it.
 ///
-/// **Nothing is cleared.** Two callers read this queue — [`report`] at a test's
-/// teardown and [`diagnosis`] inside a failure's own message — and a read that
-/// consumed the messages would leave whichever ran second looking at a clean
-/// device. The module docs argue it; the cost is that a second `diagnosis`
-/// repeats the first one's lines, which is worth far less than a report that
-/// silently lost them.
+/// **Nothing is cleared.** Several callers read this queue — [`report`] at a
+/// test's teardown, [`diagnosis`] inside a failure's own message and
+/// [`TeardownLog`] when the device goes — and a read that consumed the messages
+/// would leave whichever ran later looking at a clean device. The module docs
+/// argue it; the cost is that a second `diagnosis` repeats the first one's
+/// lines, which is worth far less than a report that silently lost them.
 #[cfg(target_os = "windows")]
 fn read_queue(queue: &ID3D12InfoQueue) -> ValidationReport {
     // SAFETY: `queue` is a live `ID3D12InfoQueue` the caller holds a reference
@@ -1037,6 +1197,134 @@ mod tests {
         let report = recorded(&storm, true);
         assert_eq!(report.messages.len(), MAX_KEPT_MESSAGES);
         assert_eq!(report.errors as usize, storm.len());
+    }
+
+    /// **What a harness greps a dx12 log for, at the level it greps it at.**
+    ///
+    /// `tools/vk-validation-log.sh` fails a dx12 run on an `ERROR` or `WARN`
+    /// line from `crcbl_dx12::debug` starting with [`LOG_PREFIX`], and refuses
+    /// a log with no [`VALIDATION_ENABLED`] or [`TEARDOWN_READ`] line in it.
+    /// The strings are spelled out here because that script spells them out
+    /// too, and a rename on this side alone would leave it grepping for lines
+    /// nothing writes.
+    ///
+    /// Red if a failure severity goes out at a level the harness does not
+    /// read, if a quoted message loses the prefix, or if the closing line stops
+    /// being last or stops carrying the counts.
+    #[test]
+    fn every_failure_reaches_the_log_at_a_level_and_prefix_a_harness_greps() {
+        assert_eq!(LOG_PREFIX, "dx12 validation: ");
+        assert!(
+            VALIDATION_ENABLED.starts_with("crcbl-dx12: validation enabled ("),
+            "{VALIDATION_ENABLED}"
+        );
+        assert_eq!(
+            TEARDOWN_READ,
+            "crcbl-dx12: validation messages read at device teardown"
+        );
+
+        let report = recorded(
+            &[
+                message(Severity::Corruption, 5),
+                message(Severity::Error, 4),
+                message(Severity::Warning, 3),
+                message(Severity::Unknown(9), 2),
+            ],
+            true,
+        );
+        let lines = teardown_lines(&report);
+        let levels: Vec<LogLevel> = lines.iter().map(|(level, _)| *level).collect();
+        assert_eq!(
+            levels,
+            [
+                LogLevel::Error,
+                LogLevel::Error,
+                LogLevel::Warn,
+                LogLevel::Warn,
+                LogLevel::Info
+            ],
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines[1].1, "dx12 validation: [ERROR] id 4: something happened",
+            "a quoted message is the prefix and the report's own line"
+        );
+        for (_, line) in &lines[..lines.len() - 1] {
+            assert!(line.starts_with(LOG_PREFIX), "{line}");
+        }
+        let (level, last) = lines.last().expect("the closing line is always there");
+        assert_eq!(*level, LogLevel::Info);
+        assert_eq!(
+            last,
+            "crcbl-dx12: validation messages read at device teardown: 1 corruption, 2 error(s) \
+             and 1 warning(s), 4 quoted above, plus 0 allowed by name in \
+             crcbl_dx12::debug::ALLOWED"
+        );
+        assert!(
+            !last.starts_with(LOG_PREFIX),
+            "the closing line is not a complaint and must not read as one"
+        );
+    }
+
+    /// **A silent queue still says it was read, and an allowed warning is
+    /// counted on that line and quoted nowhere.**
+    ///
+    /// The first half is what a harness tells a clean device from one whose
+    /// queue nobody read. The second keeps the log's verdict where
+    /// `ValidationReport::assert_clean` puts it: a message the device tests
+    /// pass over by name must not fail a sample.
+    #[test]
+    fn a_clean_teardown_logs_only_its_closing_line() {
+        let silent = teardown_lines(&recorded(&[], true));
+        assert_eq!(silent.len(), 1, "{silent:?}");
+        assert!(silent[0].1.starts_with(TEARDOWN_READ), "{silent:?}");
+
+        let allowed = teardown_lines(&recorded(
+            &[message(Severity::Warning, CLEAR_VALUE_NOT_GIVEN)],
+            true,
+        ));
+        assert_eq!(allowed.len(), 1, "{allowed:?}");
+        assert_eq!(allowed[0].0, LogLevel::Info);
+        assert!(
+            allowed[0].1.contains("plus 1 allowed by name"),
+            "{allowed:?}"
+        );
+    }
+
+    /// **The quoted messages are capped and the closing line's counts are
+    /// not**, so a storm's log says it is the start of the story.
+    #[test]
+    fn a_storm_quotes_the_cap_and_counts_the_rest() {
+        let storm: Vec<ValidationMessage> = (0..MAX_KEPT_MESSAGES + 50)
+            .map(|index| {
+                message(
+                    Severity::Error,
+                    i32::try_from(index).expect("the storm fits in an i32"),
+                )
+            })
+            .collect();
+        let lines = teardown_lines(&recorded(&storm, true));
+        assert_eq!(lines.len(), MAX_KEPT_MESSAGES + 1);
+        let last = &lines[MAX_KEPT_MESSAGES].1;
+        assert!(
+            last.contains(&format!(
+                "{} error(s) and 0 warning(s), {MAX_KEPT_MESSAGES} quoted above",
+                storm.len()
+            )),
+            "{last}"
+        );
+    }
+
+    /// **The layer's chatter goes out below what a harness reads**, the way
+    /// `crcbl_vk::debug` logs its messenger's info and verbose messages.
+    #[test]
+    fn chatter_maps_below_the_levels_a_harness_reads() {
+        assert_eq!(Severity::Info.log_level(), LogLevel::Info);
+        assert_eq!(Severity::Message.log_level(), LogLevel::Debug);
+        assert_eq!(Severity::Corruption.log_level(), LogLevel::Error);
+        assert_eq!(Severity::Error.log_level(), LogLevel::Error);
+        assert_eq!(Severity::Warning.log_level(), LogLevel::Warn);
+        assert_eq!(Severity::Unknown(9).log_level(), LogLevel::Warn);
     }
 
     /// **The trap this whole thing exists to close.** A clean report from a

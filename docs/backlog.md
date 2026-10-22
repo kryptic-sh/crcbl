@@ -29495,12 +29495,28 @@ under the same heading, and it binds any Windows test written from now on.
     `continue-on-error` trial adds minutes to every push to produce a number
     nobody gates on. The headless dx12 suites already run on WARP in CI; revisit
     when the samples' own cost drops or a faster runner is available.
-  - **dx12 runs check no validation.** The D3D12 debug layer's messages are read
-    only by `crcbl-dx12`'s device tests (`debug::Validated`) and by
-    `debug::diagnosis` on a removed device. A sample that runs to the end never
-    writes them to its log, so the script warns and checks nothing. Grading them
-    needs `crcbl-dx12` to log the info queue's contents at teardown, as
-    `crcbl-vk`'s messenger already does.
+  - **dx12 validation grading has never run against a debug layer.**
+    `crcbl-dx12` now logs `crcbl-dx12: validation enabled (` once a device's
+    info queue is reachable (`debug::attach`), and `debug::TeardownLog`, the
+    last field of `DeviceInner`, reads the queue after everything else the
+    device owns is released and logs each kept message from `crcbl_dx12::debug`
+    as `dx12 validation: …` at error or warn, then the
+    `crcbl-dx12: validation messages read at device teardown` line with the
+    counts. It reads without clearing, so `debug::Validated` in the device tests
+    still sees every message. `tools/run-samples-windowed.ps1 -Backend dx12`
+    sets `CRCBL_DX12_VALIDATION=1` and grades each sample with
+    `crcbl_dx12_validation_saw_nothing` in `tools/vk-validation-log.sh`, which
+    also refuses a log with no teardown line (a device never dropped never read
+    its queue). Checked: `teardown_lines` unit tests, the helper's dx12 fixture
+    logs in `tools/vk-validation-log-test.sh`, the helper called through Git
+    Bash from PowerShell on a fixture, and a mutant of each check going red. Not
+    checked: no machine here has the Graphics Tools feature, so no real
+    debug-layer message has been seen in a log, the script has not been run with
+    dx12 validation on, and whether every sample drops its device before exit
+    (which the teardown line requires) is unverified. There is no dx12 self-test
+    pass either: `crcbl-dx12` has no switch that commits a violation in a
+    running binary, as `CRCBL_VK_VALIDATION_PROVOKE` does for vk, so the check
+    has never gone red on a real log. Adding one would be the next step.
   - **The vk validation half has never run against a layer.** No layer is
     installed on the desktop, so every local vk run used `-NoValidation`.
     `crcbl_validation_saw_nothing` and `crcbl_validation_layer_checked` are

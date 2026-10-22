@@ -39,11 +39,15 @@
 # check. `-NoValidation` turns all of that off, loudly, for a machine without
 # `VK_LAYER_KHRONOS_validation`.
 #
-# **dx12**: nothing is checked, and the run says so. The D3D12 debug layer's
-# messages are read only by `crcbl-dx12`'s own device tests and by the
-# diagnosis a device-removed failure carries; a sample that runs to the end
-# never writes them to its log, so there is nothing here to grade.
-# `docs/backlog.md` carries it.
+# **dx12**: `CRCBL_DX12_VALIDATION=1`, graded by the same file's
+# `crcbl_dx12_validation_saw_nothing`. `crcbl-dx12` logs the "validation
+# enabled" line once a device's info queue is reachable, and writes every
+# message the D3D12 debug layer stored when that device is dropped, in the
+# shape `crcbl-vk`'s messenger uses — so the helper asks the same two
+# questions, plus that the queue was read at all. There is no self-test pass:
+# `crcbl-dx12` has no switch that commits a violation in a running binary, and
+# the run says so. `-NoValidation` turns the check off, loudly, for a machine
+# without Windows' Graphics Tools optional feature.
 #
 # # The autoexec, through `USERPROFILE`
 #
@@ -109,7 +113,10 @@ $harness = Join-Path $repoRoot 'tools/run-samples-windowed.sh'
 $validationHelper = Join-Path $repoRoot 'tools/vk-validation-log.sh'
 $runtimeDir = Join-Path ([System.IO.Path]::GetTempPath()) "crcbl-samples-windowed-$PID"
 $sampleLog = if ($env:CRCBL_E2E_SAMPLE_LOG) { $env:CRCBL_E2E_SAMPLE_LOG } else { 'info' }
-$validating = $Backend -eq 'vk' -and -not $NoValidation
+$validating = -not $NoValidation
+# What turns each backend's layer on, and the helper function that grades it.
+$validationEnv = if ($Backend -eq 'vk') { 'CRCBL_VK_VALIDATION' } else { 'CRCBL_DX12_VALIDATION' }
+$validationCheck = if ($Backend -eq 'vk') { 'crcbl_validation_saw_nothing' } else { 'crcbl_dx12_validation_saw_nothing' }
 
 # The whole log of the run that just failed, printed under its diagnosis — the
 # bash script's `cat "$log"`.
@@ -257,7 +264,7 @@ function Invoke-Sample {
         CRCBL_LOG   = $sampleLog
     }
     if ($validating) {
-        $childEnv['CRCBL_VK_VALIDATION'] = '1'
+        $childEnv[$validationEnv] = '1'
     }
     foreach ($key in $Environment.Keys) {
         $childEnv[$key] = $Environment[$key]
@@ -310,7 +317,7 @@ function Invoke-Sample {
 
     $checked = 'validation not checked'
     if ($validating) {
-        $complaint = Invoke-ValidationHelper -Function crcbl_validation_saw_nothing -Log $log -What $name
+        $complaint = Invoke-ValidationHelper -Function $validationCheck -Log $log -What $name
         if ($null -ne $complaint) {
             throw $complaint
         }
@@ -505,9 +512,9 @@ try {
         Stop-Gate $_.Exception.Message
     }
 
-    if ($Backend -eq 'dx12') {
-        Write-Warning ('crcbl e2e: dx12 runs check NO validation. The D3D12 debug layer''s messages never reach a ' +
-            'sample''s log, so nothing here can read them. docs/backlog.md, "No sample-level pass in CI", has it.')
+    if ($NoValidation -and $Backend -eq 'dx12') {
+        Write-Warning ('crcbl e2e: -NoValidation: CRCBL_DX12_VALIDATION is not set and the validation check does not ' +
+            'run. A green run here says nothing about the D3D12 debug layer.')
     } elseif ($NoValidation) {
         Write-Warning ('crcbl e2e: -NoValidation: CRCBL_VK_VALIDATION is not set, and neither the validation check nor ' +
             'its self-test runs. A green run here says nothing about the Vulkan validation layer.')
@@ -542,7 +549,11 @@ try {
     Write-Host ("crcbl e2e: $($samples.Count) samples ran windowed on win32/$Backend in " +
         "$([math]::Round($clock.Elapsed.TotalSeconds, 1))s")
 
-    if ($validating) {
+    if ($validating -and $Backend -eq 'dx12') {
+        Write-Warning ('crcbl e2e: dx12 has no validation self-test: crcbl-dx12 has no switch that commits a ' +
+            'violation in a running binary, so the check these runs passed has not been seen to fail on a real ' +
+            'log. docs/backlog.md, "No sample-level pass in CI", has it.')
+    } elseif ($validating) {
         Test-ValidationSelfTest -Sample $samples[0]
     } else {
         Write-Warning 'crcbl e2e: the validation self-test did not run, because validation is off for this run.'
