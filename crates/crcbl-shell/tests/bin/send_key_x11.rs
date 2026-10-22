@@ -2,7 +2,7 @@
 //! process.
 //!
 //! ```text
-//! crcbl-e2e-x11-key <pointer-x> <pointer-y> <wm-class> < a stream of X11 keycodes and `close`, one per line
+//! crcbl-e2e-x11-key <pointer-x> <pointer-y> <wm-class> < a stream of X11 keycodes, `resize WxH` and `close`, one per line
 //! ```
 //!
 //! **Compiled only with the `x11-e2e` feature**, which nothing but
@@ -54,6 +54,13 @@
 //! which is what the harness asserts. That is the difference between a game
 //! that ended on its own terms and a SIGTERM that left the extent after F11
 //! never checked; see `run_sandbox_toggle` in `tests/run-x11-e2e.sh`.
+//!
+//! # Resizing it from outside
+//!
+//! The line `resize WxH` finds the same window and asks the server for that
+//! size with `ConfigureWindow`, as a user dragging its edge would: granted
+//! directly with no window manager, and handed to one as a request when one is
+//! running. It is how `run_sandbox_resize` resizes a game that is presenting.
 //!
 //! # Linux only, and it says so out loud
 //!
@@ -128,6 +135,24 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             }
+            continue;
+        }
+        if let Some(size) = code.strip_prefix("resize ") {
+            let Some((width, height)) = size
+                .split_once('x')
+                .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+            else {
+                eprintln!("crcbl-e2e-x11-key: {size:?} is not a size; resize takes WxH");
+                return ExitCode::from(2);
+            };
+            let Some(xid) = peer.find_window(&class) else {
+                eprintln!(
+                    "crcbl-e2e-x11-key: no window has WM_CLASS instance {class:?}; nothing to resize"
+                );
+                return ExitCode::FAILURE;
+            };
+            peer.resize(xid, width, height);
+            say(&format!("resized {xid} to {width}x{height}"));
             continue;
         }
         let Ok(keycode) = code.parse::<u8>() else {

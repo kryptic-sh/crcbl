@@ -532,6 +532,85 @@ run_sandbox_toggle() {
     echo "crcbl e2e: $how, and the summary read 'at ${want_extent}, ${want_mode}' on x11/$backend, nothing left alive${validated}"
 }
 
+# `run_sandbox_resize <backend>`
+#
+# The window resized from outside while frames are in flight, which is what
+# `Presenter::resize`'s drain-before-reconfigure is for; the X11 half of
+# `run-wayland-e2e.sh`'s pass of the same name. The key sender asks the server
+# for each size with `ConfigureWindow` — granted directly with no window
+# manager, and a request openbox grants — and each must reach the presenter as
+# a reconfigure at that size. The run then closes cleanly and must end at the
+# last one with nothing left alive. The reconfigure lines are `debug`, so this
+# run logs at debug.
+run_sandbox_resize() {
+    local backend="$1"
+    local log="${RUNTIME_DIR}/sandbox-resize.log"
+    local keys_in="${RUNTIME_DIR}/resize.fifo"
+    local keys_log="${RUNTIME_DIR}/resize-keys.log"
+    echo "crcbl e2e: running the sandbox on $backend and resizing it while it presents"
+
+    CRCBL_SHELL=x11 \
+    CRCBL_VK_VALIDATION=1 \
+    CRCBL_LOG=debug \
+        "${BIN_DIR}/sandbox" --backend "$backend" --title "crcbl e2e sandbox" \
+        >"$log" 2>&1 &
+    local sandbox_pid=$!
+    wait_for_line "the sandbox to report itself windowed" "$log" "shell: the window is windowed"
+
+    rm -f "$keys_in"
+    mkfifo "$keys_in"
+    "${BIN_DIR}/crcbl-e2e-x11-key" 0 0 "sh.kryptic.crcbl.sandbox" \
+        <"$keys_in" >"$keys_log" 2>&1 &
+    local keys_pid=$!
+    exec 9>"$keys_in"
+    wait_for_line "the key sender to reach the display" "$keys_log" "crcbl-e2e-x11-key: ready"
+
+    local size
+    for size in 900x500 640x360; do
+        echo "resize $size" >&9
+        wait_for_line "a reconfigure at $size" "$log" "hal: reconfiguring the swapchain to $size"
+    done
+    # No frame count before the close, unlike `run-wayland-e2e.sh`'s pass:
+    # there a close could be answered in the pump that reconfigured, and X11
+    # has no `FrameReady` to count anyway. Here the reconfigure is made in the
+    # frame that answers the `Resized`, which presents at the new size before
+    # the loop pumps again, and the close is sent only after that line is in
+    # the log — so the summary below can only report 640x360 if it is right.
+    local deadline
+    echo close >&9
+    deadline=$(( $(date +%s) + DISPLAY_TIMEOUT_S ))
+    while kill -0 "$sandbox_pid" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "crcbl e2e: the resized sandbox did not exit after the close request" >&2
+            tail -n 40 "$log" >&2 || true
+            log_tail
+            exit 1
+        fi
+        sleep "$TOGGLE_POLL_S"
+    done
+    local status=0
+    wait "$sandbox_pid" || status=$?
+    exec 9>&-
+    wait "$keys_pid" || true
+    rm -f "$keys_in"
+    if [ "$status" -ne 0 ]; then
+        echo "crcbl e2e: the sandbox failed while being resized on $backend (exit $status)" >&2
+        tail -n 40 "$log" >&2
+        log_tail
+        exit "$status"
+    fi
+    if ! grep -qE "at 640x360, windowed \([^)]*CloseRequested\)" "$log"; then
+        echo "crcbl e2e: the resized sandbox did not end windowed at 640x360" >&2
+        tail -n 40 "$log" >&2
+        log_tail
+        exit 1
+    fi
+    assert_nothing_left_alive "$log" "the resized sandbox"
+    assert_validation_saw_nothing "$log" "the resized sandbox"
+    echo "crcbl e2e: the sandbox was resized twice while presenting on x11/$backend, \
+reconfigured at each size, nothing left alive, validation silent"
+}
+
 # See the equivalent block in `run-wayland-e2e.sh` for why the loader probe is a
 # skip on a developer machine and a hard failure in CI.
 if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
@@ -539,6 +618,7 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     run_sandbox vk windowed
     run_sandbox vk fullscreen
     run_sandbox_toggle vk
+    run_sandbox_resize vk
     # One more windowed run, this time required to fail. After the three above
     # rather than instead of any of them: each of those was still graded by the
     # ordinary checks with nothing injected.

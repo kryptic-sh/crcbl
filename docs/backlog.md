@@ -2471,7 +2471,7 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   | Fractional scale without the integer step     | unit test; pikr on Hyprland     | n/a                                               | n/a                           |
   | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)       | refused                                           | laptop                        |
   | `display_adapter`                             | laptop (iGPU only)              | laptop (Xwayland, DRI3)                           | laptop                        |
-  | `Presenter::resize` with frames in flight     | CI, laptop                      | not run                                           | laptop                        |
+  | `Presenter::resize` with frames in flight     | CI, laptop                      | CI, laptop (`run_sandbox_resize`)                 | laptop                        |
   | `push_opacity` groups                         | n/a                             | n/a                                               | CI (lavapipe), laptop (Intel) |
   | Pointer leave between own windows (Win32 fix) | CI test, laptop                 | CI test (Xvfb only)                               | n/a                           |
 
