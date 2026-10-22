@@ -201,6 +201,12 @@ fn a_shell_whose_compositor_does_not_pace_frames_is_not_asked() {
 fn a_held_frame_sleeps_until_the_next_tick() {
     /// Held frames stepped, each a real sleep of up to a tick.
     const FRAMES: u32 = 3;
+    /// A slow tick, so no frame's own work outlasts one. At the loop's usual
+    /// rate a slow runner's frame can take longer than a tick, and then the
+    /// next tick is already due when the frame would wait — the loop rightly
+    /// does not sleep, and a count of one sleep a frame came up short on
+    /// macOS (2026-10-22, run 39791350330).
+    const TICK_HZ: u32 = 4;
 
     let mut clock_source = Clock::new(false);
     clock_source.set_limit(FrameLimit::unlimited());
@@ -208,6 +214,7 @@ fn a_held_frame_sleeps_until_the_next_tick() {
         ShellCaps::DESKTOP,
         clock_source,
         LoopConfig {
+            tick_hz: TICK_HZ,
             windowed: true,
             limit: FrameLimit::unlimited(),
             ..hosted_config(None)
