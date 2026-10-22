@@ -494,22 +494,21 @@ that is not a panel, are `InvalidDescriptor` everywhere
   change. A panel whose monitor is gone is refused with `NoSuchMonitor`, as
   creating it would be.
 
-**A presenter resized after presenting on D3D12: no CI test covers it.** lyr hit
+**A presenter resized after presenting on D3D12: covered on WARP only.** lyr hit
 `DXGI_ERROR_INVALID_CALL` from `ResizeBuffers` on 0.7.0 (Windows 11, RX 7900
-XTX) when a bar resized in place by `set_panel` called `Presenter::resize`: the
-presenter's in-flight command buffers still held the back buffers, which
-`crcbl-dx12`'s `reconfigure_swapchain` documents it cannot release.
-`Presenter::reconfigure` now drains first
-(`a_resize_after_presenting_reconfigures_with_nothing_in_flight` checks that
-every command buffer is destroyed before the `Reconfigured` event). lyr's fix
-was the same drain in its own code, screenshot-checked. **Run on a real D3D12
-window by lyr on 0.8.1 (2026-10-22, lyr `53a63e9`):** with its own drain taken
-out, reloads from a 30 px top bar to a 50 px bottom one and back moved the bar
-each time, with no `ResizeBuffers` error and a clean exit. No CI test presents
-to a D3D12 window and then resizes: `tests/windowed_e2e.rs` is Vulkan only, and
-the D3D12 suites present offscreen, where a reconfigure makes new ring images
-and never calls `ResizeBuffers`. A Win32 D3D12 leg of the windowed e2e would
-close it.
+XTX) when `Presenter::resize` ran with a command buffer still in flight.
+`Presenter::reconfigure` now drains first, and `tests/dx12_windowed_e2e.rs` (the
+`dx12-e2e` job, `run-dx12-windowed-e2e.sh`) presents to a real Win32 window
+through `Presenter` on D3D12, then resizes a bar with `set_panel` and a window
+with `SetWindowPos`. With the drain removed both tests fail with that same
+`DXGI_ERROR_INVALID_CALL` on WARP (CI run 39848324557, 2026-10-23), so the
+refusal is reference-counted and does not need hardware. What is still not
+covered: a hardware adapter in CI (the runner has only WARP; lyr's own run on
+0.8.1, `53a63e9`, is the hardware evidence), a transparent window's composition
+swapchain resized after presenting, and a reserving bar (an appbar), which the
+test leaves out because it moves the runner's other windows. The test's debug
+layer check (no `dx12 validation:` line at teardown) has not been seen to go
+red: `crcbl-dx12` has no switch that commits a violation in a running binary.
 
 **Frame pacing (`Shell::request_frame`, `ShellEvent::FrameReady`): what is
 left.** Built as decided on 2026-10-19 for lyr: Wayland answers with
