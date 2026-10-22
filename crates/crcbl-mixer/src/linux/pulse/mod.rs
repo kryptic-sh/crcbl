@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -108,6 +109,11 @@ struct Shared {
     writer: Mutex<UnixStream>,
     inner: Mutex<Inner>,
     waker: Box<dyn Fn() + Send + Sync>,
+    /// False once the server has gone: the reader saw its socket close.
+    connected: AtomicBool,
+    /// True while the mixer is being dropped, when the socket closing is
+    /// ours and not news for the app.
+    closing: AtomicBool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -194,6 +200,8 @@ impl Pulse {
                 reported: None,
             }),
             waker,
+            connected: AtomicBool::new(true),
+            closing: AtomicBool::new(false),
         });
         {
             let mut writer = lock(&shared.writer);
@@ -208,7 +216,7 @@ impl Pulse {
             let socket = socket.try_clone().map_err(io_error)?;
             std::thread::Builder::new()
                 .name("crcbl-mixer pulse".into())
-                .spawn(move || read_loop(&shared, socket, &ready))
+                .spawn(move || read_loop(&shared, socket, Some(ready)))
                 .map_err(io_error)?
         };
         let pulse = Self {
@@ -229,6 +237,10 @@ impl Pulse {
         state(&lock(&self.shared.inner).known)
     }
 
+    pub(crate) fn is_connected(&self) -> bool {
+        self.shared.connected.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn set_interest(&self, interest: Interest) {
         let mut inner = lock(&self.shared.inner);
         inner.interest = interest;
@@ -236,6 +248,9 @@ impl Pulse {
     }
 
     pub(crate) fn apply(&self, target: Target, action: &Action) -> Result<(), MixerError> {
+        if !self.is_connected() {
+            return Err(MixerError::Disconnected);
+        }
         let mut writer = lock(&self.shared.writer);
         let mut inner = lock(&self.shared.inner);
         let state = state(&inner.known);
@@ -245,6 +260,7 @@ impl Pulse {
 
 impl Drop for Pulse {
     fn drop(&mut self) {
+        self.shared.closing.store(true, Ordering::SeqCst);
         let _ = self.socket.shutdown(std::net::Shutdown::Both);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
@@ -310,18 +326,24 @@ fn read_packet(socket: &mut UnixStream) -> io::Result<(u32, Vec<u8>)> {
     Ok((word(4), payload))
 }
 
+/// `opening` is where the first full picture, or the failure to get one, is
+/// reported; `None` for a reader that is already open.
 fn read_loop(
     shared: &Shared,
     mut socket: UnixStream,
-    ready: &mpsc::Sender<Result<(), MixerError>>,
+    mut opening: Option<mpsc::Sender<Result<(), MixerError>>>,
 ) {
-    let mut opening = Some(ready.clone());
     loop {
         let (channel, payload) = match read_packet(&mut socket) {
             Ok(packet) => packet,
             Err(error) => {
+                shared.connected.store(false, Ordering::SeqCst);
                 if let Some(ready) = opening.take() {
                     let _ = ready.send(Err(io_error(error)));
+                } else if !shared.closing.load(Ordering::SeqCst) {
+                    // The server went: one last wake, for the app to see
+                    // `is_connected` false and open a new mixer.
+                    (shared.waker)();
                 }
                 return;
             }
@@ -835,6 +857,40 @@ fn channels(inner: &Inner, is_device: bool, direction: Direction, index: u32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The PipeWire backend's test of the same name, for this backend.
+    #[test]
+    fn a_server_that_goes_wakes_the_app_once_and_disconnects() {
+        for closing in [false, true] {
+            let (server, client) = UnixStream::pair().unwrap();
+            let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = Arc::clone(&wakes);
+            let shared = Arc::new(Shared {
+                writer: Mutex::new(client.try_clone().unwrap()),
+                inner: Mutex::new(Inner {
+                    known: Known::default(),
+                    version: proto::VERSION,
+                    next_tag: 0,
+                    asked: BTreeMap::new(),
+                    opening: 0,
+                    interest: Interest::DevicesAndStreams,
+                    settle: None,
+                    reported: None,
+                }),
+                waker: Box::new(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }),
+                connected: AtomicBool::new(true),
+                closing: AtomicBool::new(closing),
+            });
+            let reader = Arc::clone(&shared);
+            let thread = std::thread::spawn(move || read_loop(&reader, client, None));
+            drop(server);
+            thread.join().unwrap();
+            assert!(!shared.connected.load(Ordering::SeqCst));
+            assert_eq!(wakes.load(Ordering::SeqCst), usize::from(!closing));
+        }
+    }
 
     #[test]
     fn a_channel_volume_is_the_percent_pactl_shows() {

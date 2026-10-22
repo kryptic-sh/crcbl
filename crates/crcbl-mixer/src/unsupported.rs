@@ -22,6 +22,10 @@ impl Backend {
         match *self {}
     }
 
+    pub(crate) fn is_connected(&self) -> bool {
+        match *self {}
+    }
+
     pub(crate) fn set_interest(&self, _interest: Interest) {
         match *self {}
     }

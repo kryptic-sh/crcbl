@@ -23,6 +23,7 @@ mod wire;
 use std::collections::BTreeMap;
 use std::io;
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -103,6 +104,11 @@ struct Shared {
     writer: Mutex<Writer>,
     inner: Mutex<Inner>,
     waker: Box<dyn Fn() + Send + Sync>,
+    /// False once the server has gone: the reader saw its socket close.
+    connected: AtomicBool,
+    /// True while the mixer is being dropped, when the socket closing is
+    /// ours and not news for the app.
+    closing: AtomicBool,
 }
 
 /// Locks `mutex`, carrying on past a poisoned one: the data is a cache of the
@@ -148,6 +154,8 @@ impl PipeWire {
                 reported: None,
             }),
             waker,
+            connected: AtomicBool::new(true),
+            closing: AtomicBool::new(false),
         });
         {
             let mut writer = lock(&shared.writer);
@@ -179,7 +187,7 @@ impl PipeWire {
             let socket = socket.try_clone().map_err(io_error)?;
             std::thread::Builder::new()
                 .name("crcbl-mixer pipewire".into())
-                .spawn(move || read_loop(&shared, Reader::new(socket), &ready))
+                .spawn(move || read_loop(&shared, Reader::new(socket), Some(ready)))
                 .map_err(io_error)?
         };
         let pipewire = Self {
@@ -200,6 +208,10 @@ impl PipeWire {
         lock(&self.shared.inner).graph.state()
     }
 
+    pub(crate) fn is_connected(&self) -> bool {
+        self.shared.connected.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn set_interest(&self, interest: Interest) {
         let mut inner = lock(&self.shared.inner);
         inner.interest = interest;
@@ -212,6 +224,9 @@ impl PipeWire {
     /// Writes `action` on `target` to the server. The change arrives back as
     /// an event, which is when [`state`](Self::state) shows it.
     pub(crate) fn apply(&self, target: Target, action: &Action) -> Result<(), MixerError> {
+        if !self.is_connected() {
+            return Err(MixerError::Disconnected);
+        }
         let mut writer = lock(&self.shared.writer);
         let inner = lock(&self.shared.inner);
         let state = inner.graph.state();
@@ -232,6 +247,7 @@ impl PipeWire {
 
 impl Drop for PipeWire {
     fn drop(&mut self) {
+        self.shared.closing.store(true, Ordering::SeqCst);
         // The reader is blocked in a read; shutting the socket down ends it
         // with an end of file.
         let _ = self.socket.shutdown(std::net::Shutdown::Both);
@@ -305,14 +321,25 @@ fn global_of<T>(
 /// [`Interest`] filters it, and the app is woken only if that differs: a
 /// sink's info changing state when a stream starts on it moves nothing a
 /// devices-only app shows.
-fn read_loop(shared: &Shared, mut reader: Reader, ready: &mpsc::Sender<Result<(), MixerError>>) {
-    let mut opening = Some(ready.clone());
+///
+/// `opening` is where the first full picture, or the failure to get one, is
+/// reported; `None` for a reader that is already open.
+fn read_loop(
+    shared: &Shared,
+    mut reader: Reader,
+    mut opening: Option<mpsc::Sender<Result<(), MixerError>>>,
+) {
     loop {
         let message = match reader.next() {
             Ok(message) => message,
             Err(error) => {
+                shared.connected.store(false, Ordering::SeqCst);
                 if let Some(ready) = opening.take() {
                     let _ = ready.send(Err(io_error(error)));
+                } else if !shared.closing.load(Ordering::SeqCst) {
+                    // The server went: one last wake, for the app to see
+                    // `is_connected` false and open a new mixer.
+                    (shared.waker)();
                 }
                 return;
             }
@@ -951,6 +978,42 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A server that goes wakes the app once and leaves it disconnected**;
+    /// the mixer's own close does not wake it.
+    #[test]
+    fn a_server_that_goes_wakes_the_app_once_and_disconnects() {
+        for closing in [false, true] {
+            let (server, client) = UnixStream::pair().unwrap();
+            let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = Arc::clone(&wakes);
+            let shared = Arc::new(Shared {
+                writer: Mutex::new(Writer::new(client.try_clone().unwrap())),
+                inner: Mutex::new(Inner {
+                    graph: Graph::default(),
+                    proxies: BTreeMap::new(),
+                    by_global: BTreeMap::new(),
+                    next_proxy: FIRST_PROXY,
+                    next_sync: 1,
+                    phase: Phase::Ready,
+                    interest: Interest::DevicesAndStreams,
+                    settle: None,
+                    reported: None,
+                }),
+                waker: Box::new(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }),
+                connected: AtomicBool::new(true),
+                closing: AtomicBool::new(closing),
+            });
+            let reader = Arc::clone(&shared);
+            let thread = std::thread::spawn(move || read_loop(&reader, Reader::new(client), None));
+            drop(server);
+            thread.join().unwrap();
+            assert!(!shared.connected.load(Ordering::SeqCst));
+            assert_eq!(wakes.load(Ordering::SeqCst), usize::from(!closing));
+        }
+    }
 
     #[test]
     fn a_name_is_quoted_as_json_and_read_back() {

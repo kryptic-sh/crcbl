@@ -42,6 +42,13 @@ impl Backend {
         }
     }
 
+    pub(crate) fn is_connected(&self) -> bool {
+        match self {
+            Self::PipeWire(backend) => backend.is_connected(),
+            Self::Pulse(backend) => backend.is_connected(),
+        }
+    }
+
     pub(crate) fn set_interest(&self, interest: Interest) {
         match self {
             Self::PipeWire(backend) => backend.set_interest(interest),

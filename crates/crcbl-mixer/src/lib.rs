@@ -102,6 +102,9 @@ pub enum MixerError {
     /// The server's protocol went wrong: a malformed message, a refused
     /// client, or a socket that failed.
     Protocol(String),
+    /// The sound server went away, as it does when it restarts; see
+    /// [`Mixer::is_connected`].
+    Disconnected,
 }
 
 impl fmt::Display for MixerError {
@@ -112,6 +115,7 @@ impl fmt::Display for MixerError {
             Self::NoSuchTarget => f.write_str("no such device, stream or card"),
             Self::Invalid(why) => write!(f, "that action does not apply: {why}"),
             Self::Protocol(what) => write!(f, "sound server protocol: {what}"),
+            Self::Disconnected => f.write_str("the sound server went away"),
         }
     }
 }
@@ -145,6 +149,18 @@ impl Mixer {
         self.backend.state()
     }
 
+    /// Whether the sound server is still there.
+    ///
+    /// False once it has gone, as it does when it restarts: the waker is
+    /// called once more when that happens, [`state`](Self::state) keeps the
+    /// last state it had, and [`apply`](Self::apply) answers
+    /// [`MixerError::Disconnected`]. Open a new mixer to follow the new server,
+    /// once it is up.
+    #[must_use]
+    pub fn is_connected(&self) -> bool {
+        self.backend.is_connected()
+    }
+
     /// Which changes call the waker from now on.
     pub fn set_interest(&self, interest: Interest) {
         self.backend.set_interest(interest);
@@ -158,8 +174,9 @@ impl Mixer {
     ///
     /// [`MixerError::NoSuchTarget`] when the target is not in the current
     /// state, [`MixerError::Invalid`] when the action does not apply to it,
-    /// [`MixerError::Unsupported`] when the platform cannot do it, and
-    /// [`MixerError::Protocol`] when it could not be sent.
+    /// [`MixerError::Unsupported`] when the platform cannot do it,
+    /// [`MixerError::Protocol`] when it could not be sent, and
+    /// [`MixerError::Disconnected`] once the server has gone.
     pub fn apply(&self, target: Target, action: &Action) -> Result<(), MixerError> {
         self.backend.apply(target, action)
     }

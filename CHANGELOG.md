@@ -25,7 +25,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Linux it speaks PipeWire's own protocol over its socket, or PulseAudio's
   native protocol where PipeWire is not running, both written in the crate, with
   no C library and no tool such as `pactl`. Windows and macOS are planned;
-  `Mixer::open` reports `MixerError::Unsupported` there.
+  `Mixer::open` reports `MixerError::Unsupported` there. When the sound server
+  goes away, as it does when it restarts, the waker is called once more,
+  `Mixer::is_connected` turns false and `apply` answers
+  `MixerError::Disconnected`, so an app knows to open a new mixer.
 - **`crcbl_hal::null::Recorder::bind_group_updates` and
   `Recorder::buffer_label`.** The null backend's recorder now counts successful
   `update_bind_group` calls, which no `Event` records, and names the buffer
