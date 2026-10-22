@@ -283,16 +283,6 @@ SVG text shaping and the Unicode text work have shipped; what is left:
    `VK_CONTROL` in place of `VK_LCONTROL` for the unsided-modifier fix, which is
    unit-tested only. pikr adopts `TextLayout::caret` for its right-to-left query
    caret in the same release.
-3. **An editable accessibility role for a field the app draws itself** (asked by
-   pikr, 2026-10-22, from a UI Automation read of its window on Windows 11,
-   crcbl 0.7.0). pikr draws its query with `Ui` text spans, not
-   `Ui::text_input`, because it owns its caret, IME pre-edit and vim modes, so
-   the block is announced as text with no value pattern; only
-   `WidgetKind::TextInput` maps to `Role::TextInput` (`tree/accessibility.rs`).
-   Wanted: a way to mark a block as an editable text input with its value, and
-   ideally its caret and selection, such as
-   `Ui::set_accessible_text_input(value, caret_byte)`. Cross-platform `crcbl-ui`
-   work, offered to the session that built `Ui::set_accessible_label`.
 
 **Behaviour, not a bug: an injected Win32 arrow key needs
 `KEYEVENTF_EXTENDEDKEY`** (seen by lyr, 2026-10-20). Without it, `keybd_event`
