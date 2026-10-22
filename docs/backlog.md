@@ -2753,7 +2753,7 @@ next moves, every click goes to that surface at a position outside it, such as
 handles it; crcbl passes the coordinates on as the compositor sent them.
 
 **`run-wayland-e2e-hyprland.sh` on the office laptop, 2026-10-23, at
-`09ef236a`:** 55 of 55 passed against the nested Hyprland 0.56.2, the five
+`6bc47e17`:** 55 of 55 passed against the nested Hyprland 0.56.2, the five
 sway-only tests excluded by name as the script lists them.
 
 **Hyprland runs nested inside the live Hyprland, hidden** (owner's go-ahead,
