@@ -28384,11 +28384,18 @@ What is still owed:
     `Presenter::settle_pacing` is not what keeps the answer `Unknown`, and
     `VK_NOT_READY` never occurred. Creating the swapchain with
     `VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT` (`0x200`) changed nothing.
-    Untried, and the next thing to try: the rest of the extension this crate
-    leaves out, `vkSetSwapchainPresentTimingQueueSizeEXT` and a
-    `VkPresentTimingsInfoEXT` on each present, in case a driver fills the
-    properties only for a swapchain whose presents ask for timing feedback. That
-    is new FFI and a swapchain-creation change, not a measurement.
+    **The rest of the extension was then tried, temporarily, the same day**: the
+    swapchain created with that bit, `vkSetSwapchainPresentTimingQueueSizeEXT`
+    at 256 (`SUCCESS` on both drivers), and a `VkPresentTimingsInfoEXT` asking
+    for the queue-operations-end and first-pixel-out stages chained to every
+    present. Both drivers took all 180 timed presents (at a queue of 8 the ninth
+    failed with `VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT`, the queue never being
+    drained) and still answered `refreshDuration` and `refreshInterval` 0 on
+    every frame. So on these two drivers under a nested Hyprland, nothing this
+    extension offers makes the swapchain report a refresh. Untried: a Hyprland
+    on DRM rather than nested in another compositor, and
+    `vkGetPastPresentationTimingEXT`, which would read what each present did
+    rather than the properties.
   - **The four-state reading of `refreshDuration`/`refreshInterval` is taken
     from the proposal text, not from a driver.** In particular the `Stepped`
     case (interval non-zero, not `UINT64_MAX`, not equal to the duration) is a
