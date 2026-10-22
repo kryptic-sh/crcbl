@@ -117,6 +117,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A character wedged in a V-crease of two steep faces stands in it.**
+  `CharacterController`'s ground probe judged one surface at a time, so a
+  capsule resting between two faces each steeper than `min_ground_normal_y` was
+  never grounded: it lay in the crease, crawled along it at air control and
+  could not jump out (reported by EW against 0.8.1). When more than one
+  upward-facing surface holds the capsule and their normals' normalized sum is
+  walkable, that is footing, and `ground()` reports the summed normal, so a walk
+  runs along the crease; a crease too steep along its own length still slides.
 - **Win32 key, button and wheel events carry the modifiers held when they
   arrived**: they read the keyboard state when the pump translated them, after
   the whole batch had been dispatched, so a chord whose modifier was released in

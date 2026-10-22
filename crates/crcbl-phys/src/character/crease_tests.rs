@@ -134,3 +134,120 @@ fn no_start_falling_into_the_corner_hangs_on_the_turned_face() {
         COLUMNS * ROWS,
     );
 }
+
+/// EW's V-crease (2026-10-23): one mesh of two faces sloping up at 60° on
+/// either side of a crease along `z` at `x = 0`, turned by `turn`. Each face
+/// alone is steeper than the default slope limit.
+fn v_crease(world: &mut PhysicsWorld, turn: glam::DQuat) -> ColliderId {
+    use crate::{Transform, TriangleMesh};
+
+    // tan 60°, which is √3: `sqrt` is correctly rounded, and platform
+    // trigonometry is not deterministic.
+    let rise = 5.0 * 3_f64.sqrt();
+    let mesh = TriangleMesh::new(
+        &[
+            DVec3::new(-5.0, rise, -5.0),
+            DVec3::new(-5.0, rise, 5.0),
+            DVec3::new(0.0, 0.0, -5.0),
+            DVec3::new(0.0, 0.0, 5.0),
+            DVec3::new(5.0, rise, -5.0),
+            DVec3::new(5.0, rise, 5.0),
+        ],
+        &[[0, 1, 3], [0, 3, 2], [2, 3, 5], [2, 5, 4]],
+    )
+    .expect("two faces");
+    world.add_mesh(
+        mesh,
+        Transform {
+            rotation: turn,
+            ..Transform::IDENTITY
+        },
+    )
+}
+
+/// One tick of a character falling under gravity, or walking `walk` on the
+/// ground: what a game's controller does with it.
+fn tick(
+    character: &mut CharacterController,
+    world: &mut PhysicsWorld,
+    fall: &mut f64,
+    walk: DVec3,
+) -> bool {
+    const DT: f64 = 1.0 / 60.0;
+    *fall -= 9.81 * DT;
+    let outcome = character.move_and_slide(world, walk + DVec3::Y * (*fall * DT));
+    if outcome.grounded {
+        *fall = 0.0;
+    }
+    outcome.grounded
+}
+
+/// **A capsule wedged in a V-crease stands in it**, though each face alone
+/// is too steep: the two normals holding it up sum to straight up, which is
+/// footing, and it reports that as its ground. Before, it lay in the crease
+/// for five seconds ungrounded (EW's report).
+#[test]
+fn a_character_wedged_in_a_v_crease_is_grounded() {
+    let mut world = PhysicsWorld::new();
+    v_crease(&mut world, glam::DQuat::IDENTITY);
+    let mut character =
+        CharacterController::new(CharacterConfig::default(), DVec3::new(0.0, 1.0, 0.0));
+    let mut fall = 0.0;
+    let grounded = (0..300)
+        .map(|_| tick(&mut character, &mut world, &mut fall, DVec3::ZERO))
+        .last()
+        .expect("ticks ran");
+    assert!(
+        grounded,
+        "settled in the crease at {:?}",
+        character.position()
+    );
+    let ground = character.ground().expect("ground");
+    assert!(
+        (ground.normal - DVec3::Y).length() < 1e-6,
+        "the crease's footing points up: {:?}",
+        ground.normal
+    );
+}
+
+/// **It walks along the crease at a walk**, not at air control: a second of
+/// 3 m/s along `z` covers about 3 m and never leaves the ground.
+#[test]
+fn a_character_walks_along_a_v_crease() {
+    let mut world = PhysicsWorld::new();
+    v_crease(&mut world, glam::DQuat::IDENTITY);
+    let mut character =
+        CharacterController::new(CharacterConfig::default(), DVec3::new(0.0, 1.0, 0.0));
+    let mut fall = 0.0;
+    for _ in 0..120 {
+        tick(&mut character, &mut world, &mut fall, DVec3::ZERO);
+    }
+    let start = character.position().z;
+    for step in 0..60 {
+        assert!(
+            tick(&mut character, &mut world, &mut fall, DVec3::Z * 0.05),
+            "left the ground on step {step} at {:?}",
+            character.position()
+        );
+    }
+    let walked = character.position().z - start;
+    assert!((walked - 3.0).abs() < 0.05, "walked {walked} m");
+}
+
+/// **A crease steeper along its own length than the slope limit is still no
+/// footing**: tipped 50° about `x`, its faces' normals sum to a normal 50°
+/// off vertical, which the default 45° limit refuses, so it slides.
+#[test]
+fn a_v_crease_too_steep_along_its_length_is_no_footing() {
+    let mut world = PhysicsWorld::new();
+    v_crease(
+        &mut world,
+        rotation_from_scaled_axis(DVec3::X * 50_f64.to_radians()),
+    );
+    let config = CharacterConfig::default();
+    let character = CharacterController::new(config, DVec3::new(0.0, 1.0, 0.0));
+    let probe = character
+        .probe_ground_at(&mut world, DVec3::new(0.0, 1.0, 0.0), 2.0)
+        .expect("the crease is below");
+    assert!(!probe.walkable, "{probe:?}");
+}

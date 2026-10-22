@@ -272,6 +272,44 @@ impl TriangleMesh {
         radius: f64,
         scratch: &mut MeshScratch,
     ) -> Option<Penetration> {
+        let mut deepest: Option<(f64, u32, DVec3)> = None;
+        self.for_each_capsule_contact(centre, half, radius, scratch, |index, depth, out| {
+            if deepest.is_none_or(|(d, i, _)| depth > d || (depth == d && index < i)) {
+                deepest = Some((depth, index, out));
+            }
+        });
+        deepest.map(|(depth, _, normal)| Penetration { normal, depth })
+    }
+
+    /// The push-out normal of every triangle a capsule of `radius` about
+    /// `centre - half ..= centre + half` is inside, in triangle order: what
+    /// [`capsule_penetration_with`](Self::capsule_penetration_with) chooses the
+    /// deepest of. A capsule wedged between two faces is inside both.
+    pub(crate) fn capsule_contact_normals_with(
+        &self,
+        centre: DVec3,
+        half: DVec3,
+        radius: f64,
+        scratch: &mut MeshScratch,
+        out: &mut Vec<DVec3>,
+    ) {
+        self.for_each_capsule_contact(centre, half, radius, scratch, |_, _, normal| {
+            out.push(normal);
+        });
+    }
+
+    /// Calls `visit(index, depth, normal)` for every triangle a capsule of
+    /// `radius` about `centre - half ..= centre + half` is inside: its depth,
+    /// and the unit push-out on the side the capsule's centre is, far enough
+    /// for the end behind the plane to clear it.
+    fn for_each_capsule_contact(
+        &self,
+        centre: DVec3,
+        half: DVec3,
+        radius: f64,
+        scratch: &mut MeshScratch,
+        mut visit: impl FnMut(u32, f64, DVec3),
+    ) {
         let reach = DVec3::splat(radius) + half.abs();
         self.bvh().traverse_aabb_into(
             &Aabb::new(centre - reach, centre + reach),
@@ -279,7 +317,6 @@ impl TriangleMesh {
             &mut scratch.found,
         );
         let (p0, p1) = (centre - half, centre + half);
-        let mut deepest: Option<(f64, u32, DVec3)> = None;
         for &index in &scratch.found {
             let corners = self.corners(index as usize);
             let normal = self.normal(index as usize);
@@ -298,11 +335,8 @@ impl TriangleMesh {
                     .max(0.0);
                 radius + behind
             };
-            if deepest.is_none_or(|(d, i, _)| depth > d || (depth == d && index < i)) {
-                deepest = Some((depth, index, out));
-            }
+            visit(index, depth, out);
         }
-        deepest.map(|(depth, _, normal)| Penetration { normal, depth })
     }
 }
 
@@ -536,6 +570,27 @@ impl PlacedMesh {
             normal: self.transform.rotation * penetration.normal,
             ..penetration
         })
+    }
+
+    /// [`TriangleMesh::capsule_contact_normals_with`] for an upright capsule,
+    /// the normals in world space, appended to `out`.
+    pub(crate) fn capsule_contact_normals(
+        &self,
+        capsule: &Capsule,
+        scratch: &mut MeshScratch,
+        out: &mut Vec<DVec3>,
+    ) {
+        let first = out.len();
+        self.mesh.capsule_contact_normals_with(
+            self.to_local(capsule.centre),
+            self.transform.rotation.inverse() * (DVec3::Y * capsule.half_height),
+            capsule.radius,
+            scratch,
+            out,
+        );
+        for normal in &mut out[first..] {
+            *normal = self.transform.rotation * *normal;
+        }
     }
 }
 

@@ -774,6 +774,48 @@ impl OverlapQueries<'_> {
         );
     }
 
+    /// The push-out normal of every surface an upright `capsule` is inside,
+    /// appended to `out`: one per sphere, box or capsule primitive, and one per
+    /// **triangle** of a mesh, where
+    /// [`capsule_penetrations_filtered_into`](Self::capsule_penetrations_filtered_into)
+    /// keeps a collider's deepest. What a character wedged between two faces
+    /// of one mesh stands on is both of them. Triggers and the filter's
+    /// exclusions are skipped as there.
+    pub(crate) fn capsule_contact_normals_into(
+        &self,
+        capsule: &Capsule,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<DVec3>,
+    ) {
+        let filter = ResolvedFilter::solid(self.colliders, self.generations, filter);
+        self.bvh
+            .traverse_aabb_into(&capsule.aabb(), &mut scratch.stack, &mut scratch.candidates);
+        for &element in scratch.candidates.iter() {
+            let idx = element as usize;
+            let Some(Some(slot)) = self.colliders.get(idx) else {
+                continue;
+            };
+            if !filter.admits(idx, slot) {
+                continue;
+            }
+            for (_, shape) in slot.entry.primitives() {
+                let penetration = match shape {
+                    Primitive::Sphere(s) => query::capsule_penetration_vs_sphere(capsule, s),
+                    Primitive::Box(b) => query::capsule_penetration_vs_box(capsule, b),
+                    Primitive::Capsule(c) => {
+                        query::capsule_penetration_vs_turned_capsule(capsule, c)
+                    }
+                    Primitive::Mesh(m) => {
+                        m.capsule_contact_normals(capsule, &mut scratch.mesh, out);
+                        None
+                    }
+                };
+                out.extend(penetration.map(|penetration| penetration.normal));
+            }
+        }
+    }
+
     /// [`PhysicsWorld::lying_capsule_blocker`] under a shared borrow, working
     /// in `scratch` instead of the world's own buffers.
     #[must_use]

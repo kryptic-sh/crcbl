@@ -24464,24 +24464,6 @@ What else is open:
   those and wants EW's numbers; or step landings sweep with the advance carried
   far enough past the edge to land on the face. Then the four character tests
   pass again and the digest is re-pinned with the reason.
-- **A capsule wedged in a V-crease of two steep faces is never grounded (EW,
-  2026-10-23, on 0.8.1).** EW's repro, through its `PlayerController` with
-  radius 0.30: a `TriangleMesh` V of two 60° faces meeting along z at x = 0
-  (vertices (-5, 5·tan 60°, ±5), (0, 0, ±5), (5, 5·tan 60°, ±5)), capsule
-  spawned at (0, 1, 0). After 5 s at 1/60 s ticks `move_and_slide` still reports
-  `grounded == false` with the body resting in the crease and making no downward
-  progress; walking along the crease for 30 s moves it 0.33 m, at air control,
-  and it can never jump out. The same at 1/144 s, uneven steps and 0.1 s ticks.
-  Each face alone is steeper than `min_ground_normal_y`, and
-  `CharacterController::is_walkable` judges one normal at a time, so no single
-  contact is footing. Expected, as EW asks: when the contacts holding the
-  capsule up together point up within the walkable limit (their normals' sum,
-  normalized, has `y >= min_ground_normal_y`), that is footing. **Not yet fixed,
-  not investigated in `CharacterController`.** To decide with it: which normal
-  the ground then reports (the combined one, so slope projection runs along the
-  crease), and whether a crease steeper than the limit along its own length
-  still slides. A regression test is EW's repro. EW takes the fix through the
-  next crates.io release and has nothing pending on it.
 
 ### What puppet's locomotion blend leaves for the rest of milestone 2
 

@@ -1083,7 +1083,59 @@ impl CharacterController {
             world.scratch,
             |hit| hit.normal.dot(UP) > MIN_MOVE,
         )?;
-        Some(self.ground_probe(found, distance))
+        let probe = self.ground_probe(found, distance);
+        if probe.walkable {
+            return Some(probe);
+        }
+        Some(self.wedged_footing(world, from - UP * probe.distance, probe))
+    }
+
+    /// `probe`, a surface too steep to stand on alone, as footing when the
+    /// capsule at `at` is held up by more than one surface whose normals
+    /// together point up within the slope limit: a capsule wedged in the
+    /// V-crease of two steep faces stands in it, as EW asked (2026-10-23).
+    /// The ground it reports is the normals' normalized sum, so slope
+    /// projection runs along the crease, and a crease too steep along its own
+    /// length still sums to a normal the limit refuses, and slides.
+    ///
+    /// The surfaces are the ones within the probe's slack of the capsule,
+    /// where the slide loop leaves a resting character a skin off each of
+    /// them, and only those facing up: a wall beside the capsule holds
+    /// nothing up. One supporting surface is `probe` itself, refused as it
+    /// was.
+    fn wedged_footing(
+        &self,
+        world: &mut WorldReader<'_, '_>,
+        at: DVec3,
+        probe: GroundProbe,
+    ) -> GroundProbe {
+        let reach = Capsule::new(
+            at,
+            self.config.radius + self.config.skin_width * GROUND_PROBE_SKINS,
+            self.config.half_height,
+        );
+        let mut normals = Vec::new();
+        world
+            .view
+            .capsule_contact_normals_into(&reach, self.filter(), world.scratch, &mut normals);
+        let (count, sum) = normals
+            .iter()
+            .filter(|normal| normal.dot(UP) > MIN_MOVE)
+            .fold((0_usize, DVec3::ZERO), |(count, sum), normal| {
+                (count + 1, sum + *normal)
+            });
+        let combined = sum.normalize_or_zero();
+        if count < 2 || !self.is_walkable(combined) {
+            return probe;
+        }
+        GroundProbe {
+            contact: GroundContact {
+                normal: combined,
+                ..probe.contact
+            },
+            walkable: true,
+            ..probe
+        }
     }
 
     /// A downward sweep of `distance` that met `found`, described as ground.
