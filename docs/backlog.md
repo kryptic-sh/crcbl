@@ -704,9 +704,16 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    surface, so its refusal stays.
 3. **Refused today, to build:** S14 accessibility on AppKit (`accesskit_macos`),
    M (Wayland and X11 are built, through `accesskit_unix`; see S14 below); X11
-   panels, popups and transparency (`_NET_WM_WINDOW_TYPE_DOCK`,
-   `_NET_WM_STRUT_PARTIAL`, override-redirect popups with a grab, a 32-bit ARGB
-   visual once `_NET_WM_CM_Sn` has an owner), M to L together.
+   panels and popups (`_NET_WM_WINDOW_TYPE_DOCK`, `_NET_WM_STRUT_PARTIAL`,
+   override-redirect popups with a grab), M to L together. X11 transparency is
+   built (2026-10-23): a window on the screen's 32-bit ARGB visual with a
+   colormap of its own, offered only when something composites — Xwayland, or a
+   compositing manager owning `_NET_WM_CM_S<n>` — since a bare X server draws
+   alpha as opaque (`x11::connect::setup_argb`). `crcbl-app`'s
+   `wayland_transparency` reads an Xwayland window back with `grim` as it does a
+   Wayland one, in `run-wayland-e2e.sh`. Not run: a compositing manager on a
+   plain X server (picom, say), whose `_NET_WM_CM_S0` path is written but
+   untested.
 4. **Implemented, untested:** S17 panel focus on Win32 and AppKit, and on
    Hyprland in CI (a job of its own, M to L; on the office laptop's nested
    Hyprland 0.56.2, 2026-10-21, an exclusive panel took the keyboard as on sway,
@@ -2651,7 +2658,7 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   | Popup reposition                              | refusal in CI; real path laptop | refused                                           | n/a                           |
   | Panel at fractional scale (S21)               | laptop + CI test                | n/a                                               | n/a                           |
   | Fractional scale without the integer step     | unit test; pikr on Hyprland     | n/a                                               | n/a                           |
-  | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)       | refused                                           | laptop                        |
+  | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)       | laptop (Xwayland, `grim`)                         | laptop                        |
   | `display_adapter`                             | laptop (iGPU only)              | laptop (Xwayland, DRI3)                           | laptop                        |
   | `Presenter::resize` with frames in flight     | CI, laptop                      | CI, laptop (`run_sandbox_resize`)                 | laptop                        |
   | `push_opacity` groups                         | n/a                             | n/a                                               | CI (lavapipe), laptop (Intel) |
@@ -2671,12 +2678,16 @@ runs the shell suite (56 of 56 passed on 2026-10-20), then fails at its sandbox
 step because `VK_LAYER_KHRONOS_validation` is not installed
 (`vulkan-validation-layers` on Arch); the harness refuses a validation run that
 never loaded the layer, by design. Two more things about this machine: headless
-sway's renderer fails EGL on the NVIDIA node while the driver mismatch lasts, so
-without `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128` it renders in software,
-offers no dmabuf, and the Intel Vulkan adapter refuses the surface
-(`ERROR_SURFACE_LOST_KHR`) so the presenter falls to llvmpipe; and the per-user
-`/tmp` quota fills with other sessions' scratch files, which killed a sandbox
-log write once (`TMPDIR` elsewhere avoids it).
+sway renders on the NVIDIA MX550 unless
+`WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128` puts it on the Intel GPU
+(2026-10-23; while the driver mismatched, earlier, it fell to software instead).
+**Run the harness with that variable here**: with sway on NVIDIA the Xwayland
+transparency read-back cannot pass, because NVIDIA's surface for an Xwayland
+window offers no premultiplied alpha and Intel's swapchain for an X server on
+NVIDIA fails with `ERROR_INITIALIZATION_FAILED`, so the presenter refuses the
+window (the Wayland read-back passes on NVIDIA); and the per-user `/tmp` quota
+fills with other sessions' scratch files, which killed a sandbox log write once
+(`TMPDIR` elsewhere avoids it).
 
 **Behaviour, not a crcbl bug: Hyprland keeps a panel's exclusive keyboard under
 its own grabbing popup** (lyr, 2026-10-21, Hyprland 0.56.2). With a layer panel

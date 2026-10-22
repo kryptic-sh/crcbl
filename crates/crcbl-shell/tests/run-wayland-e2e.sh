@@ -118,19 +118,33 @@ fi
 # S16 through the compositor: a transparent Vulkan window over an opaque bar,
 # read back off the screen with `grim`, which is the only check that the
 # compositor blends what the swapchain asked for (premultiplied) rather than
-# what the cap says. Lives in `crcbl-app`, which has the presenter. The run must
-# report exactly one test, or a renamed test would pass this step by matching
-# nothing.
+# what the cap says, once for a Wayland window and once for an X11 window on
+# Xwayland. Lives in `crcbl-app`, which has the presenter. The run must report
+# exactly two tests, or a renamed test would pass this step by matching nothing.
 echo "crcbl e2e: reading a transparent window back through sway with grim"
 TRANSPARENCY_LOG="${SWAY_RUNTIME_DIR}/transparency.log"
 set +e
-CRCBL_SHELL=wayland cargo test --locked -q -p crcbl-app --test wayland_transparency \
-    -- --ignored --nocapture 2>&1 | tee "$TRANSPARENCY_LOG"
+# The second test puts the window on sway's Xwayland, whose `DISPLAY` only sway
+# knows: a command it runs inherits it, so one writes it down.
+DISPLAY_FILE="${SWAY_RUNTIME_DIR}/xwayland-display"
+swaymsg exec "printenv DISPLAY > ${DISPLAY_FILE}" >/dev/null
+for _ in $(seq 50); do
+    [ -s "$DISPLAY_FILE" ] && break
+    sleep 0.1
+done
+if [ ! -s "$DISPLAY_FILE" ]; then
+    echo "crcbl e2e: sway did not say which DISPLAY its Xwayland is" >&2
+    sway_log_tail
+    exit 1
+fi
+DISPLAY="$(cat "$DISPLAY_FILE")" CRCBL_SHELL=wayland \
+    cargo test --locked -q -p crcbl-app --test wayland_transparency \
+    -- --ignored --nocapture --test-threads=1 2>&1 | tee "$TRANSPARENCY_LOG"
 STATUS=${PIPESTATUS[0]}
 set -e
 TRANSPARENCY_PLAIN="${SWAY_RUNTIME_DIR}/transparency.plain.log"
 crcbl_nextest_plain "$TRANSPARENCY_LOG" "$TRANSPARENCY_PLAIN"
-if [ "$STATUS" -ne 0 ] || ! grep -q "test result: ok. 1 passed" "$TRANSPARENCY_PLAIN"; then
+if [ "$STATUS" -ne 0 ] || ! grep -q "test result: ok. 2 passed" "$TRANSPARENCY_PLAIN"; then
     echo "crcbl e2e: the transparency read-back failed or ran no test" >&2
     sway_log_tail
     exit 1

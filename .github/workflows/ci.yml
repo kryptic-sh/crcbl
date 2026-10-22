@@ -1128,6 +1128,8 @@ jobs:
       # test, which the harness runs between the shell suite and the sandbox.
       # `dbus` (for `dbus-run-session`) and `at-spi2-core` (the accessibility
       # bus and registry) are the AT-SPI reader's step, as in the x11 job.
+      # `xwayland` and `libxcb1` are the transparency read-back's X11 half: a
+      # window on sway's Xwayland, through the X11 backend's dlopen of libxcb.
       - name: Install sway and the ALSA headers cpal links against
         timeout-minutes: 10
         uses: ./.github/actions/apt-packages
@@ -1135,6 +1137,7 @@ jobs:
           packages: >-
             sway grim libasound2-dev libwayland-client0 libxkbcommon0 libvulkan1
             mesa-vulkan-drivers vulkan-validationlayers dbus at-spi2-core
+            xwayland libxcb1
       # Starts headless sway in a private XDG_RUNTIME_DIR, polls for the socket
       # with a deadline and a liveness check on the child, runs the
       # `#[ignore]`d suite with `--features wayland-e2e`, and dumps the

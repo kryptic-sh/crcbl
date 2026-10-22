@@ -19,6 +19,15 @@
 //! `crates/crcbl-shell/tests/sway-session.sh`'s session. Verified on the office
 //! laptop's Intel RPL-U under headless sway 1.12 rendering on that GPU
 //! (`WLR_RENDER_DRM_DEVICE`), 2026-10-20.
+//!
+//! The second test is the same window on X11, through sway's Xwayland; the
+//! harness passes its `DISPLAY`. Verified there on 2026-10-23 with sway on the
+//! Intel GPU, and with sway in software on llvmpipe, CI's setup. **It cannot
+//! pass with sway on the laptop's NVIDIA MX550** (driver 615.78), and that is
+//! the platform, not the backend: NVIDIA's surface for an Xwayland window
+//! offers no premultiplied alpha, and the Intel adapter's swapchain for an X
+//! server rendering on NVIDIA fails (`ERROR_INITIALIZATION_FAILED`), so the
+//! presenter refuses the window.
 
 #![cfg(target_os = "linux")]
 
@@ -32,8 +41,8 @@ use crcbl_hal::{
     ImageSubresourceRange, LoadOp, Rect2d, RenderPassDesc, ResourceState, StoreOp,
 };
 use crcbl_shell::{
-    LogicalSize, PanelAnchor, PanelDesc, PanelLayer, Shell, ShellBackend, WindowDesc, WindowId,
-    WindowRole,
+    LogicalSize, PanelAnchor, PanelDesc, PanelLayer, Shell, ShellBackend, ShellCaps, WindowDesc,
+    WindowId, WindowRole,
 };
 
 /// The app id the e2e sway config floats, so the window sits at the centre.
@@ -178,12 +187,12 @@ fn stored(value: f32, srgb: bool) -> i32 {
     (encoded * 255.0).round() as i32
 }
 
-#[test]
-#[ignore = "needs headless sway, grim and a Vulkan driver; see the module docs"]
-fn a_transparent_window_is_blended_premultiplied_by_the_compositor() {
-    let mut shell = crcbl_shell::open_backend(ShellBackend::Wayland).expect("a Wayland session");
+/// The red bar on `shell`, the half-alpha blue window on `glass_shell` — the
+/// same Wayland shell, or an X11 one on sway's Xwayland — and the pixel the
+/// screen shows where the window is, which must be the premultiplied blend.
+fn assert_blended(shell: &mut dyn Shell, mut glass_shell: Option<&mut dyn Shell>) {
     let mut backdrop = Solid::open(
-        shell.as_mut(),
+        shell,
         &WindowDesc {
             title: "crcbl s16 backdrop",
             app_id: APP_ID,
@@ -202,22 +211,25 @@ fn a_transparent_window_is_blended_premultiplied_by_the_compositor() {
         [1.0, 0.0, 0.0, 1.0],
         None,
     );
-    // On the backdrop's device: two windows each with a device of their own
-    // crash NVIDIA's driver in the second one's teardown (see
-    // `crcbl_app::present::SharedGpu`), and one device is how a program with
-    // two windows should run anyway.
-    let mut glass = Solid::open(
-        shell.as_mut(),
-        &WindowDesc {
-            title: "crcbl s16 glass",
-            app_id: APP_ID,
-            size: LogicalSize::new(400.0, 300.0),
-            transparent: true,
-            ..WindowDesc::default()
-        },
-        WINDOW,
-        Some(&backdrop),
-    );
+    let glass_desc = WindowDesc {
+        title: "crcbl s16 glass",
+        app_id: APP_ID,
+        size: LogicalSize::new(400.0, 300.0),
+        transparent: true,
+        ..WindowDesc::default()
+    };
+    // A Wayland glass is on the backdrop's device: two windows each with a
+    // device of their own crash NVIDIA's driver in the second one's teardown
+    // (see `crcbl_app::present::SharedGpu`), and one device is how a program
+    // with two windows should run anyway. An X11 glass picks its own adapter:
+    // NVIDIA's surface for an Xwayland window offers no premultiplied alpha
+    // (the office laptop's MX550, driver 615.78, where sway renders on it),
+    // so the backdrop's device may not present it, and `Presenter::open`
+    // passes over an adapter that cannot.
+    let mut glass = match glass_shell.as_deref_mut() {
+        Some(x11) => Solid::open(x11, &glass_desc, WINDOW, None),
+        None => Solid::open(shell, &glass_desc, WINDOW, Some(&backdrop)),
+    };
     assert_eq!(
         glass.presenter.composite_alpha(),
         CompositeAlpha::PreMultiplied,
@@ -228,13 +240,21 @@ fn a_transparent_window_is_blended_premultiplied_by_the_compositor() {
     let half = 128;
 
     // Both keep presenting until the screen shows the window over the bar, or
-    // the deadline names what it showed instead.
+    // the deadline names what it showed instead. Each shell's events go to
+    // the presenter of its own window: two shells number windows apart, so
+    // one's id can be the other's.
     let deadline = Instant::now() + Duration::from_secs(10);
     let pixel = loop {
-        shell.pump(&mut |event| {
-            backdrop.presenter.observe(&event);
-            glass.presenter.observe(&event);
-        });
+        match glass_shell.as_deref_mut() {
+            Some(x11) => {
+                shell.pump(&mut |event| backdrop.presenter.observe(&event));
+                x11.pump(&mut |event| glass.presenter.observe(&event));
+            }
+            None => shell.pump(&mut |event| {
+                backdrop.presenter.observe(&event);
+                glass.presenter.observe(&event);
+            }),
+        }
         backdrop.present();
         glass.present();
         std::thread::sleep(Duration::from_millis(50));
@@ -256,6 +276,30 @@ fn a_transparent_window_is_blended_premultiplied_by_the_compositor() {
         blue / 2
     );
 
-    glass.close(shell.as_mut());
-    backdrop.close(shell.as_mut());
+    match glass_shell {
+        Some(x11) => glass.close(x11),
+        None => glass.close(shell),
+    }
+    backdrop.close(shell);
+}
+
+#[test]
+#[ignore = "needs headless sway, grim and a Vulkan driver; see the module docs"]
+fn a_transparent_window_is_blended_premultiplied_by_the_compositor() {
+    let mut shell = crcbl_shell::open_backend(ShellBackend::Wayland).expect("a Wayland session");
+    assert_blended(shell.as_mut(), None);
+}
+
+/// **The same through X11**: the window on sway's Xwayland, created on the
+/// 32-bit visual, which Xwayland hands sway with its alpha.
+#[test]
+#[ignore = "needs headless sway with Xwayland, DISPLAY naming it, grim and a Vulkan driver"]
+fn an_xwayland_window_is_blended_premultiplied_too() {
+    let mut shell = crcbl_shell::open_backend(ShellBackend::Wayland).expect("a Wayland session");
+    let mut x11 = crcbl_shell::open_backend(ShellBackend::X11).expect("sway's Xwayland");
+    assert!(
+        x11.caps().contains(ShellCaps::TRANSPARENT),
+        "Xwayland composites, so the X11 backend offers transparent windows"
+    );
+    assert_blended(shell.as_mut(), Some(x11.as_mut()));
 }

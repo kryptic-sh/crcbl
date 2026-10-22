@@ -6,9 +6,136 @@
 //! [`X11Shell::latch_caps`](super::X11Shell::latch_caps) for why that is not
 //! merely a convenience.
 
-use super::{BASE_DPI, Conn, DEFAULT_SCALE, ffi};
+use std::ffi::c_int;
+
+use super::{Argb, BASE_DPI, Conn, DEFAULT_SCALE, ffi};
+
+/// Whether `visual` is a 32-bit true-colour visual with an alpha channel: the
+/// bits its colour masks leave over.
+fn is_argb(depth: u8, visual: &ffi::VisualType) -> bool {
+    depth == 32
+        && visual.class == ffi::value::TRUE_COLOR
+        && visual.red_mask | visual.green_mask | visual.blue_mask != u32::MAX
+}
 
 impl Conn {
+    /// The visual a transparent window is created on, and a colormap for it,
+    /// **when something composites this screen** — `None` otherwise, and then
+    /// [`TRANSPARENT`](crate::ShellCaps::TRANSPARENT) stays clear.
+    ///
+    /// A 32-bit visual alone is not enough: X draws a window's pixels as they
+    /// are, alpha ignored, unless a compositor blends them, so on a bare server
+    /// a "transparent" window is an opaque one in darkened colours. Two things
+    /// composite: **Xwayland**, whose Wayland compositor blends each window by
+    /// its alpha, and **a compositing manager**, which owns the
+    /// `_NET_WM_CM_S<screen>` selection by the EWMH. Both are read once, here;
+    /// a compositing manager started later is not seen, and one that quits
+    /// leaves transparent windows drawn opaque.
+    ///
+    /// One colormap serves every transparent window, made once on the root
+    /// and freed by the server when the connection closes.
+    pub(super) fn setup_argb(
+        &self,
+        screen: *const ffi::Screen,
+        screen_index: c_int,
+    ) -> Option<Argb> {
+        let visual = self.argb_visual(screen)?;
+        if !self.has_extension("XWAYLAND") && !self.has_compositing_manager(screen_index) {
+            crcbl_core::log::debug!("nothing composites this X screen; no transparent windows");
+            return None;
+        }
+        let colormap = self.generate_id();
+        // SAFETY: the connection is live, `colormap` is a fresh XID, the root
+        // is this screen's and `visual` one of its visuals.
+        unsafe {
+            (self.lib.create_colormap)(
+                self.raw(),
+                ffi::value::COLORMAP_ALLOC_NONE,
+                colormap,
+                self.root,
+                visual,
+            );
+        }
+        Some(Argb { visual, colormap })
+    }
+
+    /// The screen's first 32-bit true-colour visual with alpha.
+    fn argb_visual(&self, screen: *const ffi::Screen) -> Option<u32> {
+        // SAFETY: `screen` is the setup reply's, which libxcb keeps for the
+        // connection's lifetime, and each iterator walks memory inside it,
+        // stopping at its `rem` count.
+        unsafe {
+            let mut depths = (self.lib.screen_allowed_depths_iterator)(screen);
+            while depths.rem > 0 {
+                let depth = *depths.data;
+                let mut visuals = (self.lib.depth_visuals_iterator)(depths.data);
+                while visuals.rem > 0 {
+                    let visual = *visuals.data;
+                    if is_argb(depth.depth, &visual) {
+                        return Some(visual.visual_id);
+                    }
+                    (self.lib.visualtype_next)(&raw mut visuals);
+                }
+                (self.lib.depth_next)(&raw mut depths);
+            }
+        }
+        None
+    }
+
+    /// Whether the server has the extension called `name`.
+    fn has_extension(&self, name: &str) -> bool {
+        let len = u16::try_from(name.len()).unwrap_or(u16::MAX);
+        // SAFETY: the connection is live and `name` a counted string valid for
+        // the call; a null error pointer discards the error, and a null reply
+        // is handled below.
+        let reply = unsafe {
+            let cookie = (self.lib.query_extension)(self.raw(), len, name.as_ptr().cast());
+            (self.lib.query_extension_reply)(self.raw(), cookie, core::ptr::null_mut())
+        };
+        if reply.is_null() {
+            return false;
+        }
+        // SAFETY: `reply` is a live reply this call owns, freed exactly once.
+        unsafe {
+            let present = (*reply).present != 0;
+            ffi::free_reply(reply);
+            present
+        }
+    }
+
+    /// Whether a compositing manager owns `_NET_WM_CM_S<screen_index>`.
+    fn has_compositing_manager(&self, screen_index: c_int) -> bool {
+        let name = format!("_NET_WM_CM_S{screen_index}");
+        let len = u16::try_from(name.len()).unwrap_or(u16::MAX);
+        // SAFETY: as `has_extension`; `only_if_exists = 1`, so an atom no one
+        // has made answers `0`, and then no one owns it.
+        let atom = unsafe {
+            let cookie = (self.lib.intern_atom)(self.raw(), 1, len, name.as_ptr().cast());
+            let reply = (self.lib.intern_atom_reply)(self.raw(), cookie, core::ptr::null_mut());
+            if reply.is_null() {
+                return false;
+            }
+            let atom = (*reply).atom;
+            ffi::free_reply(reply);
+            atom
+        };
+        if atom == ffi::value::NONE {
+            return false;
+        }
+        // SAFETY: as above.
+        unsafe {
+            let cookie = (self.lib.get_selection_owner)(self.raw(), atom);
+            let reply =
+                (self.lib.get_selection_owner_reply)(self.raw(), cookie, core::ptr::null_mut());
+            if reply.is_null() {
+                return false;
+            }
+            let owner = (*reply).owner;
+            ffi::free_reply(reply);
+            owner != ffi::value::NONE
+        }
+    }
+
     /// Negotiates RandR, and selects the events that mean "the monitors
     /// changed".
     ///
@@ -441,6 +568,40 @@ fn parse_xft_dpi(database: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The visual a transparent window needs: 32 bits, true colour, and bits
+    /// its colour masks leave for alpha. Xwayland's and Xvfb's ARGB visual is
+    /// the first; a 32-bit visual whose masks take every bit has no alpha.
+    #[test]
+    fn only_a_32_bit_true_colour_visual_with_spare_bits_has_alpha() {
+        let visual = |class, red: u32, green: u32, blue: u32| ffi::VisualType {
+            visual_id: 1,
+            class,
+            bits_per_rgb_value: 8,
+            colormap_entries: 256,
+            red_mask: red,
+            green_mask: green,
+            blue_mask: blue,
+            pad0: [0; 4],
+        };
+        let argb = visual(
+            ffi::value::TRUE_COLOR,
+            0x00ff_0000,
+            0x0000_ff00,
+            0x0000_00ff,
+        );
+        assert!(is_argb(32, &argb));
+        assert!(!is_argb(24, &argb), "a 24-bit depth has no room for alpha");
+        let direct = visual(5, 0x00ff_0000, 0x0000_ff00, 0x0000_00ff);
+        assert!(!is_argb(32, &direct), "direct colour is not true colour");
+        let wide = visual(
+            ffi::value::TRUE_COLOR,
+            0xffc0_0000,
+            0x003f_f800,
+            0x0000_07ff,
+        );
+        assert!(!is_argb(32, &wide), "every bit is colour");
+    }
 
     #[test]
     fn xft_dpi_is_read_the_way_a_real_xresources_file_writes_it() {

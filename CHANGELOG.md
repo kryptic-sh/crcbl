@@ -15,6 +15,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Transparent windows on X11.** `WindowDesc::transparent` now works on the X11
+  backend wherever something composites the screen (Xwayland, or a compositing
+  manager owning `_NET_WM_CM_S<n>`): the window is created on the screen's
+  32-bit ARGB visual and its surface target says so, so a Vulkan swapchain
+  presents premultiplied alpha the compositor blends. `ShellCaps::TRANSPARENT`
+  reports it, and a bare X server still refuses a transparent window rather than
+  draw it opaque.
 - **`Menu::set_stylesheet`, a game's stylesheet over a menu's default look.** A
   `crcbl_ui::menu::Menu` given a sheet is measured and drawn with it after
   `default.css`'s menu rules, so a game can recolour its pause and settings

@@ -269,6 +269,67 @@ pub struct ScreenIterator {
     pub index: c_int,
 }
 
+/// `xcb_depth_t`: one depth a screen allows, followed in the setup reply by
+/// its visuals.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Depth {
+    /// Bits per pixel.
+    pub depth: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// How many visuals follow.
+    pub visuals_len: u16,
+    /// Padding.
+    pub pad1: [u8; 4],
+}
+
+/// `xcb_depth_iterator_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DepthIterator {
+    /// The depth this iterator is on.
+    pub data: *mut Depth,
+    /// How many remain after this one.
+    pub rem: c_int,
+    /// Byte index into the reply.
+    pub index: c_int,
+}
+
+/// `xcb_visualtype_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VisualType {
+    /// The visual's id, what `CreateWindow` and Vulkan are given.
+    pub visual_id: u32,
+    /// `xcb_visual_class_t`; see [`value::TRUE_COLOR`].
+    pub class: u8,
+    /// Bits per colour channel.
+    pub bits_per_rgb_value: u8,
+    /// Colormap entries.
+    pub colormap_entries: u16,
+    /// The pixel bits that hold red.
+    pub red_mask: u32,
+    /// The pixel bits that hold green.
+    pub green_mask: u32,
+    /// The pixel bits that hold blue.
+    pub blue_mask: u32,
+    /// Padding.
+    pub pad0: [u8; 4],
+}
+
+/// `xcb_visualtype_iterator_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VisualTypeIterator {
+    /// The visual this iterator is on.
+    pub data: *mut VisualType,
+    /// How many remain after this one.
+    pub rem: c_int,
+    /// Byte index into the reply.
+    pub index: c_int,
+}
+
 /// `xcb_intern_atom_reply_t`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -1199,8 +1260,15 @@ pub mod gc {
 pub mod cw {
     /// `XCB_CW_BACK_PIXEL`.
     pub const BACK_PIXEL: u32 = 1 << 1;
+    /// `XCB_CW_BORDER_PIXEL`. A window on a visual other than its parent's
+    /// must set it, or `CreateWindow` fails with `BadMatch`: the default, the
+    /// parent's border pixmap, is in the parent's depth.
+    pub const BORDER_PIXEL: u32 = 1 << 3;
     /// `XCB_CW_EVENT_MASK`.
     pub const EVENT_MASK: u32 = 1 << 11;
+    /// `XCB_CW_COLORMAP`. As [`BORDER_PIXEL`]: the default, the parent's, is
+    /// for the parent's visual.
+    pub const COLORMAP: u32 = 1 << 13;
 }
 
 /// `xcb_config_window_t` — which fields a `ConfigureWindow` carries.
@@ -1227,6 +1295,11 @@ pub mod config_window {
 pub mod value {
     /// `XCB_COPY_FROM_PARENT`, for depth and visual.
     pub const COPY_FROM_PARENT: u32 = 0;
+    /// `XCB_VISUAL_CLASS_TRUE_COLOR`.
+    pub const TRUE_COLOR: u8 = 4;
+    /// `XCB_COLORMAP_ALLOC_NONE`: a colormap whose entries the client does
+    /// not allocate, the only kind a true-colour visual takes.
+    pub const COLORMAP_ALLOC_NONE: u8 = 0;
     /// `XCB_WINDOW_CLASS_INPUT_OUTPUT`.
     pub const INPUT_OUTPUT: u16 = 1;
     /// `XCB_PROP_MODE_REPLACE`.
@@ -1353,13 +1426,13 @@ mod prototype {
     #[cfg(feature = "x11-e2e")]
     use super::QueryTreeReply;
     use super::{
-        Connection, Cookie, CursorContext, Dri3OpenReply, Extension, GenericError, GenericEvent,
-        GetGeometryReply, GetPropertyReply, GetSelectionOwnerReply, GrabPointerReply,
-        InternAtomReply, QueryExtensionReply, QueryPointerReply, RandrCrtcInfoReply,
-        RandrOutputInfoReply, RandrOutputPrimaryReply, RandrQueryVersionReply,
+        Connection, Cookie, CursorContext, Depth, DepthIterator, Dri3OpenReply, Extension,
+        GenericError, GenericEvent, GetGeometryReply, GetPropertyReply, GetSelectionOwnerReply,
+        GrabPointerReply, InternAtomReply, QueryExtensionReply, QueryPointerReply,
+        RandrCrtcInfoReply, RandrOutputInfoReply, RandrOutputPrimaryReply, RandrQueryVersionReply,
         RandrScreenResourcesReply, Rectangle, Screen, ScreenIterator, Setup,
-        ShapeQueryVersionReply, TranslateCoordinatesReply, XiEventMask, XiQueryVersionReply,
-        XkbPerClientFlagsReply, XkbUseExtensionReply, c_char, c_int, c_void,
+        ShapeQueryVersionReply, TranslateCoordinatesReply, VisualTypeIterator, XiEventMask,
+        XiQueryVersionReply, XkbPerClientFlagsReply, XkbUseExtensionReply, c_char, c_int, c_void,
     };
 
     /// `xcb_connection_t *xcb_connect(const char *displayname, int *screenp)`
@@ -1377,6 +1450,30 @@ mod prototype {
     pub type SetupRootsIterator = unsafe extern "C" fn(*const Setup) -> ScreenIterator;
     /// `void xcb_screen_next(xcb_screen_iterator_t *)`
     pub type ScreenNext = unsafe extern "C" fn(*mut ScreenIterator);
+    /// `xcb_depth_iterator_t xcb_screen_allowed_depths_iterator(
+    /// const xcb_screen_t *)`
+    pub type AllowedDepthsIterator = unsafe extern "C" fn(*const Screen) -> DepthIterator;
+    /// `void xcb_depth_next(xcb_depth_iterator_t *)`
+    pub type DepthNext = unsafe extern "C" fn(*mut DepthIterator);
+    /// `xcb_visualtype_iterator_t xcb_depth_visuals_iterator(
+    /// const xcb_depth_t *)`
+    pub type DepthVisualsIterator = unsafe extern "C" fn(*const Depth) -> VisualTypeIterator;
+    /// `void xcb_visualtype_next(xcb_visualtype_iterator_t *)`
+    pub type VisualTypeNext = unsafe extern "C" fn(*mut VisualTypeIterator);
+    /// `xcb_void_cookie_t xcb_create_colormap(xcb_connection_t *,
+    /// uint8_t alloc, xcb_colormap_t mid, xcb_window_t window,
+    /// xcb_visualid_t visual)`
+    pub type CreateColormap = unsafe extern "C" fn(*mut Connection, u8, u32, u32, u32) -> Cookie;
+    /// `xcb_query_extension_cookie_t xcb_query_extension(xcb_connection_t *,
+    /// uint16_t name_len, const char *name)`: for an extension libxcb has no
+    /// `xcb_extension_t` for, as XWAYLAND.
+    pub type QueryExtension = unsafe extern "C" fn(*mut Connection, u16, *const c_char) -> Cookie;
+    /// `xcb_query_extension_reply_t *xcb_query_extension_reply(…)`
+    pub type QueryExtensionReplyFn = unsafe extern "C" fn(
+        *mut Connection,
+        Cookie,
+        *mut *mut GenericError,
+    ) -> *mut QueryExtensionReply;
     /// `xcb_generic_event_t *xcb_poll_for_event(xcb_connection_t *)`
     pub type PollForEvent = unsafe extern "C" fn(*mut Connection) -> *mut GenericEvent;
     /// `const xcb_query_extension_reply_t *xcb_get_extension_data(
@@ -1728,8 +1825,8 @@ mod prototype {
 
 /// Every libxcb entry point this backend uses.
 ///
-/// Forty-four functions, plus four behind the `x11-e2e` feature for the
-/// harness that walks another process's window tree. Each one is used; a
+/// The backend's functions, and behind the `x11-e2e` feature those the
+/// harness needs to walk another process's window tree. Each one is used; a
 /// function that stops being used is deleted from this struct in the same
 /// commit, which is what "audited by use" means in the windowing rules
 /// (`docs/notes/backends.md`).
@@ -1745,6 +1842,13 @@ pub struct Lib {
     pub screen_next: prototype::ScreenNext,
     pub poll_for_event: prototype::PollForEvent,
     pub get_extension_data: prototype::GetExtensionData,
+    pub screen_allowed_depths_iterator: prototype::AllowedDepthsIterator,
+    pub depth_next: prototype::DepthNext,
+    pub depth_visuals_iterator: prototype::DepthVisualsIterator,
+    pub visualtype_next: prototype::VisualTypeNext,
+    pub create_colormap: prototype::CreateColormap,
+    pub query_extension: prototype::QueryExtension,
+    pub query_extension_reply: prototype::QueryExtensionReplyFn,
     pub create_window: prototype::CreateWindow,
     pub destroy_window: prototype::WindowRequest,
     pub map_window: prototype::WindowRequest,
@@ -2083,6 +2187,22 @@ fn load_uncached() -> Result<Lib, String> {
         screen_next: symbol!("xcb_screen_next", prototype::ScreenNext),
         poll_for_event: symbol!("xcb_poll_for_event", prototype::PollForEvent),
         get_extension_data: symbol!("xcb_get_extension_data", prototype::GetExtensionData),
+        screen_allowed_depths_iterator: symbol!(
+            "xcb_screen_allowed_depths_iterator",
+            prototype::AllowedDepthsIterator
+        ),
+        depth_next: symbol!("xcb_depth_next", prototype::DepthNext),
+        depth_visuals_iterator: symbol!(
+            "xcb_depth_visuals_iterator",
+            prototype::DepthVisualsIterator
+        ),
+        visualtype_next: symbol!("xcb_visualtype_next", prototype::VisualTypeNext),
+        create_colormap: symbol!("xcb_create_colormap", prototype::CreateColormap),
+        query_extension: symbol!("xcb_query_extension", prototype::QueryExtension),
+        query_extension_reply: symbol!(
+            "xcb_query_extension_reply",
+            prototype::QueryExtensionReplyFn
+        ),
         create_window: symbol!("xcb_create_window", prototype::CreateWindow),
         destroy_window: symbol!("xcb_destroy_window", prototype::WindowRequest),
         map_window: symbol!("xcb_map_window", prototype::WindowRequest),

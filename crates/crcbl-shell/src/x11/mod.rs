@@ -329,6 +329,13 @@ impl TimeBase {
 // The connection
 // ---------------------------------------------------------------------------
 
+/// A 32-bit visual with alpha, and the colormap its windows share.
+#[derive(Clone, Copy, Debug)]
+struct Argb {
+    visual: u32,
+    colormap: u32,
+}
+
 /// The X connection and everything latched from it at startup.
 struct Conn {
     lib: &'static Lib,
@@ -350,6 +357,9 @@ struct Conn {
     /// libxcb-shape, when the server also has SHAPE 1.1's input shapes; see
     /// [`setup_shape`](Self::setup_shape).
     shape: Option<&'static ffi::ShapeLib>,
+    /// What a transparent window is made with, when something composites the
+    /// screen; see [`setup_argb`](Self::setup_argb).
+    argb: Option<Argb>,
     /// The GPU the server renders on; see [`dri3_device`](Self::dri3_device).
     main_device: Option<u64>,
     /// Whether the server agreed to stop faking a `KeyRelease` in front of
@@ -681,6 +691,9 @@ struct XWindow {
     /// gap.
     map_requested: bool,
     close_pending: bool,
+    /// Whether [`WindowDesc::transparent`] was set: the window is on the
+    /// connection's [`Argb`] visual rather than the root's.
+    transparent: bool,
     /// Whether [`WindowDesc::accept_drops`] was set.
     ///
     /// Recorded as well as advertised. `XdndAware` is a *window* property that
@@ -895,12 +908,14 @@ impl X11Shell {
             randr_event_base: None,
             xi_opcode: None,
             shape: None,
+            argb: None,
             main_device: None,
             detectable_auto_repeat: false,
         };
         conn.randr_event_base = conn.setup_randr();
         conn.xi_opcode = conn.setup_xinput2();
         conn.shape = conn.setup_shape();
+        conn.argb = conn.setup_argb(screen, screen_index);
         conn.main_device = conn.dri3_device();
         conn.detectable_auto_repeat = conn.setup_detectable_auto_repeat();
 
@@ -987,6 +1002,8 @@ impl X11Shell {
         caps.set(ShellCaps::CURSOR_SHAPE, self.cursors.applies_shapes());
         // An input shape needs libxcb-shape and a server with SHAPE 1.1.
         caps.set(ShellCaps::INPUT_REGION, self.conn.shape.is_some());
+        // A 32-bit visual, and something that blends by its alpha.
+        caps.set(ShellCaps::TRANSPARENT, self.conn.argb.is_some());
 
         // Both of these need a window manager, and a window manager is a
         // separate program that may simply not be running — the finding this

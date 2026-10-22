@@ -292,18 +292,41 @@ impl Shell for X11Shell {
         }
         let xid = self.conn.generate_id();
         // The value list is read in **mask-bit order**, one word per set bit:
-        // `BACK_PIXEL` is bit 1 and `EVENT_MASK` is bit 11, so they go in that
-        // order. Getting the order wrong makes the event mask the background
-        // colour, which produces a window that receives nothing.
-        let values = [0u32, WINDOW_EVENT_MASK];
+        // `BACK_PIXEL` is bit 1, `BORDER_PIXEL` bit 3, `EVENT_MASK` bit 11 and
+        // `COLORMAP` bit 13, so they go in that order. Getting the order wrong
+        // makes the event mask the background colour, which produces a window
+        // that receives nothing.
+        //
+        // A transparent window is on the 32-bit visual, which is not its
+        // parent's, so it takes that visual's depth, a border pixel and a
+        // colormap of its own; the parent's would be `BadMatch`. Its background
+        // is zero, transparent black, until the first frame.
+        let (depth, visual, mask, values) = match self.conn.argb.filter(|_| desc.transparent) {
+            Some(argb) => (
+                32,
+                argb.visual,
+                ffi::cw::BACK_PIXEL
+                    | ffi::cw::BORDER_PIXEL
+                    | ffi::cw::EVENT_MASK
+                    | ffi::cw::COLORMAP,
+                vec![0u32, 0, WINDOW_EVENT_MASK, argb.colormap],
+            ),
+            None => (
+                ffi::value::COPY_FROM_PARENT as u8,
+                self.conn.root_visual,
+                ffi::cw::BACK_PIXEL | ffi::cw::EVENT_MASK,
+                vec![0u32, WINDOW_EVENT_MASK],
+            ),
+        };
         // SAFETY: the connection is live, `xid` is fresh from
         // `xcb_generate_id`, the parent is the root of the screen this
-        // connection selected, and `values` has exactly the two words the mask
-        // declares and outlives the call.
+        // connection selected, `visual` is the root's or one of its 32-bit
+        // visuals at that depth, and `values` has exactly one word per bit of
+        // `mask` and outlives the call.
         unsafe {
             (self.conn.lib.create_window)(
                 self.conn.raw(),
-                ffi::value::COPY_FROM_PARENT as u8,
+                depth,
                 xid,
                 self.conn.root,
                 0,
@@ -312,8 +335,8 @@ impl Shell for X11Shell {
                 u16::try_from(size.height).unwrap_or(u16::MAX),
                 0,
                 ffi::value::INPUT_OUTPUT,
-                self.conn.root_visual,
-                ffi::cw::BACK_PIXEL | ffi::cw::EVENT_MASK,
+                visual,
+                mask,
                 values.as_ptr().cast::<c_void>(),
             );
         }
@@ -336,6 +359,7 @@ impl Shell for X11Shell {
             pointer_inside: false,
             focused: false,
             visible: desc.visible,
+            transparent: desc.transparent,
             mapped: false,
             map_requested: false,
             close_pending: false,
@@ -619,12 +643,12 @@ impl Shell for X11Shell {
     /// only the swapchain waits for the first
     /// [`Resized`](ShellEvent::Resized).
     ///
-    /// The `visual_id` is the **root visual**, which is what
-    /// [`create_window`](Shell::create_window) passes and therefore what the
-    /// window actually has. A backend that guessed a 32-bit ARGB visual here
-    /// would hand Vulkan a format the window is not in, and
-    /// `vkGetPhysicalDeviceXcbPresentationSupportKHR` would answer for the
-    /// wrong one.
+    /// The `visual_id` is the one [`create_window`](Shell::create_window)
+    /// created the window on — the root visual, or the 32-bit one for a
+    /// transparent window — and therefore what the window actually has. A
+    /// backend that guessed here would hand Vulkan a format the window is not
+    /// in, and `vkGetPhysicalDeviceXcbPresentationSupportKHR` would answer for
+    /// the wrong one.
     ///
     /// Lifetime: the connection lives as long as this shell and the window as
     /// long as the [`WindowId`], so a HAL surface built from these must be
@@ -635,11 +659,13 @@ impl Shell for X11Shell {
         Ok(SurfaceTarget::Xcb {
             connection: self.conn.connection.cast::<c_void>(),
             window: state.id,
-            visual_id: self.conn.root_visual,
-            // Every window is on the root visual, which has no alpha, and
-            // `create_window` refuses a transparent one (`TRANSPARENT` is not
-            // in this backend's caps), so no window here is transparent.
-            transparent: false,
+            visual_id: match self.conn.argb {
+                Some(argb) if state.transparent => argb.visual,
+                _ => self.conn.root_visual,
+            },
+            // `create_window` refuses a transparent window unless `TRANSPARENT`
+            // is set, which it is only with an ARGB visual to put it on.
+            transparent: state.transparent,
             main_device: self.conn.main_device,
         })
     }
