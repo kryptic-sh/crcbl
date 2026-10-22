@@ -31297,6 +31297,30 @@ be.
 The loader's own diagnosis, the registry fix and the retraction are in
 docs/notes/ci.md under the same heading. What is left:
 
+**An access violation in the HAL seam suite, on this leg only (2026-10-23).**
+`crcbl::hal_seam_e2e`'s
+`every_declared_capability_behaves_the_way_it_was_declared` aborted with
+`0xc0000005` in the `vk-e2e-windows` job: passed in the first five runs that
+carried the step, then failed in three of the next five, including a run of
+`main` (39865952451). The crashed process's last line is the stencil target's
+format (`D32FloatS8Uint`), so it dies between `StencilTarget::open` and the end
+of `exercise_stencil_reference`. What did **not** reproduce it: the same pinned
+lavapipe (`lavapipe-x64-26.1.5`) and layer (1.4.357) on the RX 7900 XTX desktop
+— 200 single runs, 480 runs eight-way concurrent, 85 full-suite nextest runs,
+with `GALLIVM_PERF=nopt` and `CARGO_PROFILE_DEV_DEBUG=0` as CI sets them; 21
+runs under `cdb` on CI itself (single test and whole suite in one process); and
+a CI run with a checkpoint `eprintln!` between every step of the exercise.
+Windows Error Reporting wrote no dump on the runner. A crash that the debugger
+and extra output both hide reads as a race, in `crcbl-vk` or in lavapipe's
+Windows build, not settled which. **Decided:** the step excludes that one test
+by name and says why, so `main` is not red on it while every other test in the
+suite still runs on this leg; it runs everywhere else. To settle it: run the
+excluded test under nextest in a loop on CI with `--success-output never` (the
+instrumented run did not crash, so the instrument must be quiet) and capture a
+dump by `procdump -e -ma`, which does not depend on WER, then read the faulting
+module; if it is `vulkan_lvp.dll`, compare against the next lavapipe release
+before suspecting this crate.
+
 **Still unknown after this fix:** whether the goldens hold.
 `Tolerance::RASTERISER` was calibrated radv-versus-one-lavapipe and this is a
 second, Windows Mesa build — unmeasured between two lavapipes.
