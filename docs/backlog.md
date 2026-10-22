@@ -226,9 +226,9 @@ measurements. What is left:
   30-minute cap when the package install alone took 4.6 min; the viewer's suite
   was cancelled. The ForwardRenderer, forward-pass and lit-mesh steps (13 of
   27.6 min at `3a24c12f`) now run in `vk-e2e-mesh`, "vk e2e forward + mesh
-  (lavapipe)". **Not yet measured:** the two halves' times on main, which the
-  next push run gives; if either nears 30 min again, the sample draws are the
-  next piece to move.
+  (lavapipe)". Measured on main run 39791350330 (`ee8c7dde`): `vk-e2e` took 14.1
+  min and `vk-e2e-mesh` 14.5, both green. If either nears 30 min again, the
+  sample draws are the next piece to move.
 - **The `rust-cache` key moves with the runner image's own toolchain.** Its
   environment hash covers every installed `rustc`, and on 2026-10-19 runners
   carried 1.99.0 or 1.99.1 beside the pinned 1.98.1, so one scope saved under
