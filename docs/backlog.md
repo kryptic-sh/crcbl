@@ -36,7 +36,11 @@ validation layer). Intel (ANV) and lavapipe tear the same down cleanly.
 - **Who it hits:** any crcbl program with two presenters whose display GPU is
   NVIDIA under Wayland, on closing the second window — lyr's bar per monitor, on
   a monitor unplugged. Not this laptop under Hyprland, whose presenters pick the
-  Intel display GPU.
+  Intel display GPU. **Confirmed by lyr the same day:** with
+  `CRCBL_ADAPTER=discrete`, a bar on each of two outputs of a nested Hyprland,
+  removing one output killed lyr with SIGSEGV at PC 0x0; on the default Intel
+  GPU nothing happens. lyr records it as the owner's call and would adopt a
+  shared `VkInstance` if crcbl ships one.
 - **Owner's call, options:** (a) one `VkInstance` per process, shared by every
   presenter, which would also cut the per-window instance cost; (b) report it to
   NVIDIA and keep the per-presenter instance; (c) both. Not reported upstream
