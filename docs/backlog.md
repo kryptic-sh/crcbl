@@ -26401,7 +26401,12 @@ the hardware can run it; the fault is on the D3D12 side.
 regresses nothing that draws today, and (c) needs measurements that do not exist
 yet. Revisit when either a newer AMD driver on the 7900 XTX or non-AMD D3D12
 hardware passes `the_cluster_shaders_dag_descent_draws_the_cut_it_chose` with
-the reporting re-applied. The options were:
+the reporting re-applied.**Re-checked 2026-10-22: the trigger has not
+happened.** The 7900 XTX still runs driver 32.0.21036.18, the one measured; this
+machine's Raphael iGPU has a newer AMD driver (32.0.21042.62, dated 2026-09-18),
+which is not the card the decision names but would be a second AMD data point
+for option (c) if the reporting is re-applied and the test pinned to it. The
+options were:
 
 - (a) Withhold everywhere until the 7900 XTX draws. Honest, and what the tree
   does. Costs nothing that works today.
