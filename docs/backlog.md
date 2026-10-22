@@ -234,6 +234,17 @@ measurements. What is left:
   at 17.6 s, so execution got slower; whether two macOS-15 jobs at once contend
   for something is unknown. Also untried: more nextest threads on the 3-vCPU
   runner — nobody has measured whether these suites are CPU- or GPU-bound.
+- **A job whose `.deb` cache is cold cannot get past a stalling mirror.** On
+  2026-10-22 and 23 `mesa-vulkan-drivers` (17.5 MB) stalled downloading from
+  `azure.archive.ubuntu.com` in every attempt, so
+  `windowed swapchain e2e (Xvfb)` and both `vk-e2e` lavapipe halves died in
+  their install step across runs 39829049187, 39849528705 and 39857988611, while
+  the Wayland job, installing the same package from its restored archive,
+  passed. `.github/actions/apt-packages` saves the archive only after a
+  successful install, so a cold cache stays cold while the mirror stalls.
+  Options: seed one shared archive from a job that has it (the Wayland job's),
+  or fall back to another mirror (`archive.ubuntu.com`) after the first stall.
+  Not changed.
 - **`vk e2e (lavapipe)` is split in two, like `mtl-e2e`.** As one job it took
   16.1–28.0 min across main runs, every step slowing by about a third between
   run 39088257372 (20.9 min) and 39287773047 (27.6 min) with nothing in the
