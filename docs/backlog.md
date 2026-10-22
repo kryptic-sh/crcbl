@@ -241,10 +241,12 @@ measurements. What is left:
   their install step across runs 39829049187, 39849528705 and 39857988611, while
   the Wayland job, installing the same package from its restored archive,
   passed. `.github/actions/apt-packages` saves the archive only after a
-  successful install, so a cold cache stays cold while the mirror stalls.
-  Options: seed one shared archive from a job that has it (the Wayland job's),
-  or fall back to another mirror (`archive.ubuntu.com`) after the first stall.
-  Not changed.
+  successful install, so a cold cache stays cold while the mirror stalls. Since
+  2026-10-23 the retry falls back to `archive.ubuntu.com` after the long first
+  attempt (`.github/actions/apt-packages`). **The fallback has not run yet:** on
+  its branch run 39862227703 the Azure mirror delivered on the first attempt and
+  all three jobs passed. The other option, seeding one shared archive from a job
+  that has it, is unbuilt.
 - **`vk e2e (lavapipe)` is split in two, like `mtl-e2e`.** As one job it took
   16.1–28.0 min across main runs, every step slowing by about a third between
   run 39088257372 (20.9 min) and 39287773047 (27.6 min) with nothing in the
