@@ -24473,8 +24473,17 @@ What else is open:
   What remains: carry the step-up's advance far enough past the edge that the
   landing meets the top face (more travel than the tick asked, on the step tick
   only), or hold a character that rose onto an edge raised until a later tick's
-  advance reaches the face. Then the four character tests pass again and the
-  digest is re-pinned with the reason.
+  advance reaches the face. **The first was prototyped and is not enough
+  (2026-10-23, discarded):** retrying the advance one radius further when the
+  landing meets the edge raised the highest step climbed from 0.202 to 0.299 m
+  of the configured 0.4, and it cannot help the lip test at all: 0.25 m past a
+  drop's edge the capsule still overlaps the upper box's rounded edge, the
+  ground probe meets that edge first and refuses it, and the character falls for
+  a tick, where square edges handed it a flat top. So the controller's step and
+  lip handling as a whole leans on square edges, and EW's fix needs a design
+  pass over how it treats edges (step landing, the closing ground probe, and the
+  snap down a lip together), not a tweak to one of them. Then the four character
+  tests pass again and the digest is re-pinned with the reason.
 
 ### What puppet's locomotion blend leaves for the rest of milestone 2
 
