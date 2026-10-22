@@ -541,8 +541,8 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    below 3, so CI holds only the refusal; the office laptop's sway 1.12 ran the
    real path green on 2026-10-20); S22 a colour glyph in a GPU golden; S18
    FreeBSD beyond `check (freebsd)`'s clippy, in a VM job; S13 cold start to the
-   first presented frame, end to end (the D3D12 instance and first device are
-   measured; see 11).
+   first presented frame on Win32 + D3D12 since adapters are probed lazily
+   (Linux and Vulkan is measured end to end; see 11).
 5. **Genuinely impossible, and refused:** D3D12 off Windows, Metal off Apple, a
    software Metal adapter, AppKit reserving screen space (only the menu bar and
    the Dock do). Vulkan on macOS is refused today and could go through MoltenVK
@@ -1589,6 +1589,18 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       ms lazily against 455.7–1035.0 ms with every adapter probed first, six
       runs each, alternating. Not measured: pikr's first paint on the new seam;
       the remaining cost is the one driver device for the adapter actually used.
+    - **Linux, measured 2026-10-22** on the office laptop (i7-1355U, Intel RPL-U
+      and NVIDIA MX550, Arch, Mesa 26.2.5, NVIDIA 615.78): the release
+      `sandbox --backend vk --frames 1` against headless sway, from the
+      launching shell's clock to the first `wl_surface.commit` after a buffer
+      attach in its `WAYLAND_DEBUG` log, ten runs each with warm caches. On the
+      MX550, which the sandbox ranked first there: median 251 ms (236–280).
+      Pinned with `CRCBL_ADAPTER=integrated`: median 170 ms (165–225). Pinned
+      and with `VK_LOADER_DRIVERS_SELECT='*intel*'`: median 99 ms (90–108), the
+      driver-loading cost `crcbl-app`'s `adapter` module docs describe. Every
+      case is under 500 ms. Not measured: a cold disk cache, a first run after a
+      driver update (the pipeline cache is rebuilt), and without
+      `WAYLAND_DEBUG`, whose logging is inside each figure.
     - Tried and dropped, still binding: describing adapters on parallel threads
       (no gain; D3D12 serialises device creation), and DRED as the cost (the
       open measured the same without `dred::enable`).
