@@ -2078,9 +2078,8 @@ impl Dx12Device {
             composition: None,
             // The field that decides everything else about this entry.
             raw: None,
-            // Zero is "there is nothing to wait on", which `swapchain::wait`
-            // answers immediately — see `SwapchainEntry::waitable`.
-            waitable: 0,
+            // Nothing to wait on, which `swapchain::wait` answers immediately.
+            waitable: swapchain::Waitable::none(),
             hwnd: OFFSCREEN_HWND,
             extent,
             format: desc.format,
@@ -4543,7 +4542,7 @@ impl Device for Dx12Device {
                         .raw
                         .clone()
                         .unwrap_or_else(|| unreachable!("a windowed swapchain has a DXGI object")),
-                    waitable: entry.waitable,
+                    waitable: Arc::clone(&entry.waitable),
                     extent,
                     buffers,
                     present_mode,
@@ -4829,10 +4828,10 @@ impl Device for Dx12Device {
                 handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
             match entry.ledger.plan(present_id) {
                 PresentWait::NothingToWaitFor => return Ok(()),
-                PresentWait::Block => entry.waitable,
+                PresentWait::Block => Arc::clone(&entry.waitable),
             }
         };
-        swapchain::wait(waitable, timeout)
+        swapchain::wait(&waitable, timeout)
     }
 
     /// Always [`DisplayTiming::Unknown`]: this backend does not advertise

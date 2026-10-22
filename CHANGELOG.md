@@ -64,6 +64,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **D3D12 closes each swapchain's frame-latency waitable object**: the handle
+  `GetFrameLatencyWaitableObject` returns is the caller's to close, and one was
+  left open per swapchain created. It is now closed when the swapchain is
+  destroyed, or after a present wait still holding it finishes.
 - **SSAO's "no bent direction" sentinel is the same byte on every driver.** The
   occlusion shaders wrote it as `0.5`, which an `Rgba8Unorm` target stores at
   the tie between 127 and 128, and Vulkan lets a driver round either way:

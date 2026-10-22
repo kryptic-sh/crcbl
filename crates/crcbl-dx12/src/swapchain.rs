@@ -79,12 +79,13 @@
 //! an `OutOfDate` would put a frame loop into an unending reconfigure.
 
 use core::time::Duration;
+use std::sync::Arc;
 
 use crcbl_hal::{
     CompositeAlpha, Format, HalError, ImageHandle, ImageViewHandle, PresentMode, SurfaceError,
     SwapchainDesc,
 };
-use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, ID3D12CommandQueue, ID3D12Device,
 };
@@ -129,24 +130,10 @@ pub(crate) struct SwapchainEntry {
     /// to present to and therefore no swapchain to present through. See the
     /// module docs for the table of what each call does instead.
     pub(crate) raw: Option<IDXGISwapChain3>,
-    /// `GetFrameLatencyWaitableObject`, as a plain address.
-    ///
-    /// A `HANDLE` is a raw pointer `windows-rs` declares neither `Send` nor
-    /// `Sync`, and this entry lives in a pool behind the device's one
-    /// [`Mutex`](std::sync::Mutex) inside a struct the seam requires to be
-    /// both. Keeping the integer is what leaves this crate with no `unsafe`
-    /// marker impl; the handle is rebuilt inside [`wait`].
-    ///
-    /// **Not closed when the swapchain is destroyed.** Whose handle it is, is
-    /// the one thing about this object the documentation is not crisp on, and
-    /// the two errors are not symmetric: a double `CloseHandle` is a
-    /// process-wide fault, while a handle left open is bounded by the number of
-    /// swapchains a process makes and goes at exit. `wgpu-hal` 29's D3D12
-    /// backend does not close it either — checked, rather than assumed.
-    /// `docs/backlog.md` records it as unsettled.
-    /// Zero for an offscreen ring, which has none to wait on. [`wait`] answers
-    /// immediately on that value, so nothing else has to test for it.
-    pub(crate) waitable: usize,
+    /// `GetFrameLatencyWaitableObject`'s handle, closed once nothing holds it;
+    /// see [`Waitable`]. [`Waitable::none`] for an offscreen ring, which has
+    /// none to wait on.
+    pub(crate) waitable: Arc<Waitable>,
     /// The window, kept so `reconfigure_swapchain` can tell a resize from an
     /// attempt to move the swapchain to a different surface — and so the entry
     /// survives its surface handle being destroyed, which obligation 2 permits.
@@ -238,7 +225,7 @@ impl SwapchainEntry {
 #[derive(Debug)]
 pub(crate) struct Created {
     pub(crate) raw: IDXGISwapChain3,
-    pub(crate) waitable: usize,
+    pub(crate) waitable: Arc<Waitable>,
     pub(crate) extent: (u32, u32),
     pub(crate) buffers: u32,
     pub(crate) present_mode: PresentMode,
@@ -507,9 +494,10 @@ pub(crate) fn create(
     unsafe { raw.SetMaximumFrameLatency(latency) }
         .map_err(|error| surface_error(device, "SetMaximumFrameLatency", &error))?;
     // SAFETY: as above. The call reads nothing of ours and returns a handle by
-    // value; see `SwapchainEntry::waitable` for why it is kept as an integer
-    // and not closed.
-    let waitable = unsafe { raw.GetFrameLatencyWaitableObject() }.0 as usize;
+    // value, which the caller owns and closes; `Waitable` does.
+    let waitable = Arc::new(Waitable::adopt(unsafe {
+        raw.GetFrameLatencyWaitableObject()
+    }));
 
     // Alt+Enter otherwise puts DXGI's own message hook in charge of a
     // fullscreen transition the engine did not ask for and cannot see, which
@@ -616,11 +604,68 @@ pub(crate) fn present(
         .map_err(|error| surface_error(device, "IDXGISwapChain::Present", &error))
 }
 
+/// A swapchain's frame-latency waitable object, closed when the last holder
+/// drops it.
+///
+/// **The caller owns the handle** `GetFrameLatencyWaitableObject` returns: its
+/// documentation says "When you are done with the handle, use CloseHandle to
+/// close it", so one left open was a handle leaked per swapchain.
+///
+/// **Shared, so a wait keeps it open.** [`wait`] blocks on it after the device
+/// lock is released, and a swapchain destroyed on another thread meanwhile
+/// would otherwise close the handle under the wait. The entry holds one
+/// reference and a wait takes another, so the handle is closed by whichever of
+/// them lets go last.
+///
+/// Kept as a plain address: a `HANDLE` is a raw pointer `windows-rs` declares
+/// neither `Send` nor `Sync`, and this lives in a pool behind the device's one
+/// [`Mutex`](std::sync::Mutex) inside a struct the seam requires to be both.
+/// The integer is what leaves this crate with no `unsafe` marker impl; the
+/// handle is rebuilt where it is used.
+#[derive(Debug)]
+pub(crate) struct Waitable(usize);
+
+impl Waitable {
+    /// Takes ownership of `handle`, which this closes when dropped. A null
+    /// handle, which the call returns for a swapchain made without the flag,
+    /// is [`none`](Self::none)'s value.
+    pub(crate) fn adopt(handle: HANDLE) -> Self {
+        Self(handle.0 as usize)
+    }
+
+    /// Nothing to wait on: an offscreen ring's. [`wait`] answers at once and
+    /// dropping it closes nothing.
+    pub(crate) fn none() -> Arc<Self> {
+        Arc::new(Self(0))
+    }
+
+    fn handle(&self) -> HANDLE {
+        HANDLE(core::ptr::without_provenance_mut(self.0))
+    }
+}
+
+impl Drop for Waitable {
+    fn drop(&mut self) {
+        if self.0 == 0 {
+            return;
+        }
+        // SAFETY: the handle came from `GetFrameLatencyWaitableObject` and is
+        // this value's alone: `adopt` is the only way in, nothing copies the
+        // address out, and this is the one close, run once, when the last
+        // `Arc` goes.
+        if let Err(error) = unsafe { CloseHandle(self.handle()) } {
+            crcbl_core::log::debug!(
+                "crcbl-dx12: could not close a frame-latency waitable object: {error}"
+            );
+        }
+    }
+}
+
 /// Blocks on a frame-latency waitable object.
 ///
-/// A `waitable` of zero is "there is nothing to wait on" and returns at once;
-/// every swapchain this backend creates has one, so it is the shape of the
-/// answer rather than a case that arises.
+/// [`Waitable::none`] is "there is nothing to wait on" and returns at once;
+/// every windowed swapchain this backend creates has one, so it is the shape of
+/// the answer rather than a case that arises.
 ///
 /// # Errors
 ///
@@ -628,18 +673,17 @@ pub(crate) fn present(
 /// full — the seam calls that expected traffic on a stalled compositor.
 /// [`HalError::Backend`] for a wait that failed outright, which on this call
 /// means the handle is not one.
-pub(crate) fn wait(waitable: usize, timeout: Duration) -> Result<(), SurfaceError> {
-    if waitable == 0 {
+pub(crate) fn wait(waitable: &Waitable, timeout: Duration) -> Result<(), SurfaceError> {
+    if waitable.0 == 0 {
         return Ok(());
     }
-    let handle = HANDLE(core::ptr::without_provenance_mut(waitable));
-    // SAFETY: `handle` is the waitable object of a live swapchain this device
-    // created and holds a reference to for the duration of this call — the
-    // device lock was released before it, but the entry cannot be removed
-    // without the swapchain handle, which the caller holds. `false` for
-    // alertable, so no APC can make this return early with a value neither arm
-    // below expects.
-    let waited = unsafe { WaitForSingleObjectEx(handle, present::timeout_millis(timeout), false) };
+    // SAFETY: the handle is open for the whole call: the caller holds a
+    // reference to `waitable`, and it is closed only when the last one drops.
+    // `false` for alertable, so no APC can make this return early with a value
+    // neither arm below expects.
+    let waited = unsafe {
+        WaitForSingleObjectEx(waitable.handle(), present::timeout_millis(timeout), false)
+    };
     match waited {
         WAIT_OBJECT_0 => Ok(()),
         WAIT_TIMEOUT => Err(SurfaceError::Timeout),
@@ -2268,5 +2312,44 @@ mod tests {
         device.destroy_swapchain(single);
         instance.destroy_surface(surface);
         device.wait_idle().expect("the queue drains");
+    }
+
+    /// Whether `handle` is still an open handle of this process.
+    fn is_open(handle: HANDLE) -> bool {
+        let mut flags = 0;
+        // SAFETY: a query of the handle table that writes one `u32` we own; an
+        // unknown handle is an error return, not a fault.
+        unsafe { windows::Win32::Foundation::GetHandleInformation(handle, &raw mut flags) }.is_ok()
+    }
+
+    /// An event, standing in for the waitable object: a handle of the same
+    /// kind, made without a swapchain.
+    fn event() -> HANDLE {
+        // SAFETY: no attributes and no name; the handle returned is ours.
+        unsafe { windows::Win32::System::Threading::CreateEventW(None, false, false, None) }
+            .expect("an unnamed event is created")
+    }
+
+    /// **The waitable object is closed when the last holder drops it, and not
+    /// before.** A wait holds its own reference, so a swapchain destroyed
+    /// meanwhile leaves the handle open until the wait lets go.
+    #[test]
+    fn a_waitable_object_is_closed_by_its_last_holder() {
+        let handle = event();
+        let entry = Arc::new(Waitable::adopt(handle));
+        let in_a_wait = Arc::clone(&entry);
+        drop(entry);
+        assert!(is_open(handle), "a wait still holds it, so it stays open");
+        drop(in_a_wait);
+        assert!(!is_open(handle), "the last holder closed it");
+    }
+
+    /// **An offscreen ring's has nothing to close, and its wait answers at
+    /// once.**
+    #[test]
+    fn nothing_to_wait_on_closes_nothing_and_never_blocks() {
+        let none = Waitable::none();
+        assert!(matches!(wait(&none, Duration::from_secs(60)), Ok(())));
+        drop(none);
     }
 }

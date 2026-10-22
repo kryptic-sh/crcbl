@@ -458,19 +458,22 @@ that is not a panel, are `InvalidDescriptor` everywhere
   change. A panel whose monitor is gone is refused with `NoSuchMonitor`, as
   creating it would be.
 
-**A presenter resized after presenting on D3D12: proven on the null backend
-only.** lyr hit `DXGI_ERROR_INVALID_CALL` from `ResizeBuffers` on 0.7.0 (Windows
-11, RX 7900 XTX) when a bar resized in place by `set_panel` called
-`Presenter::resize`: the presenter's in-flight command buffers still held the
-back buffers, which `crcbl-dx12`'s `reconfigure_swapchain` documents it cannot
-release. `Presenter::reconfigure` now drains first
+**A presenter resized after presenting on D3D12: no CI test covers it.** lyr hit
+`DXGI_ERROR_INVALID_CALL` from `ResizeBuffers` on 0.7.0 (Windows 11, RX 7900
+XTX) when a bar resized in place by `set_panel` called `Presenter::resize`: the
+presenter's in-flight command buffers still held the back buffers, which
+`crcbl-dx12`'s `reconfigure_swapchain` documents it cannot release.
+`Presenter::reconfigure` now drains first
 (`a_resize_after_presenting_reconfigures_with_nothing_in_flight` checks that
 every command buffer is destroyed before the `Reconfigured` event). lyr's fix
-was the same drain in its own code, screenshot-checked; this crcbl change has
-not run on a D3D12 window. No CI test presents to a D3D12 window and then
-resizes: `tests/windowed_e2e.rs` is Vulkan only, and the D3D12 suites present
-offscreen, where a reconfigure makes new ring images and never calls
-`ResizeBuffers`. A Win32 D3D12 leg of the windowed e2e would close it.
+was the same drain in its own code, screenshot-checked. **Run on a real D3D12
+window by lyr on 0.8.1 (2026-10-22, lyr `53a63e9`):** with its own drain taken
+out, reloads from a 30 px top bar to a 50 px bottom one and back moved the bar
+each time, with no `ResizeBuffers` error and a clean exit. No CI test presents
+to a D3D12 window and then resizes: `tests/windowed_e2e.rs` is Vulkan only, and
+the D3D12 suites present offscreen, where a reconfigure makes new ring images
+and never calls `ResizeBuffers`. A Win32 D3D12 leg of the windowed e2e would
+close it.
 
 **Frame pacing (`Shell::request_frame`, `ShellEvent::FrameReady`): what is
 left.** Built as decided on 2026-10-19 for lyr: Wayland answers with
@@ -30958,14 +30961,6 @@ arithmetic (host-testable, and its tests run on any `cargo test`);
   traffic. Any _other_ error fails. Closing this needs a run whose output is
   read: if the waits return promptly there, the tolerance can become an
   assertion.
-
-- **Whose handle `GetFrameLatencyWaitableObject` returns is unsettled**, so it
-  is never closed. `SwapchainEntry::waitable` argues the asymmetry — a double
-  `CloseHandle` is a process fault, a leaked handle is bounded — and records
-  that `wgpu-hal` 29's D3D12 backend does not close it either (checked in the
-  vendored source, not recalled). Settling it means reading the current DXGI
-  documentation for that method; if the caller owns it, `destroy_swapchain` and
-  `reconfigure_swapchain` are the two places that have to close it.
 
 - **A present id is matched against a count, and the mapping is deliberately
   coarse.** DXGI's waitable object answers "fewer than `SetMaximumFrameLatency`
