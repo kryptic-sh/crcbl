@@ -8384,13 +8384,13 @@ green local run.
   `crates/crcbl/tests/run-{render,hal-seam,draw-gen,forward,mesh,gltf,sprite,tiling}-e2e.sh`.
   Without `CRCBL_VK_ICD` the loader picks the hardware adapter, which is not the
   run CI makes.
-- **On an NVIDIA GeForce MX550 (615.71.09)** two `forward_e2e` occlusion tests
-  fail by one eight-bit level —
-  `the_bent_direction_switch_writes_the_sentinel_and_leaves_the_scalar_alone`
-  and `the_cheap_tier_occludes_the_band_and_reports_no_direction` read 127 where
-  `BENT_NORMAL_NONE` is 128 — and pass on lavapipe. Not diagnosed: rounding of
-  the half-resolution upsample on that driver is the suspect, not a view or
-  culling change (they failed before either landed).
+- **On the NVIDIA GeForce MX550 (615.78)** `run-forward-e2e.sh` and
+  `run-mesh-e2e.sh` pass in full, with validation on (2026-10-22): forward 53 of
+  53 there, on the Intel iGPU and on lavapipe, mesh 120 of 120. The two
+  occlusion tests that read 127 for `BENT_NORMAL_NONE` were the shaders writing
+  the zero direction as `0.5`, a rounding tie at `127.5` Vulkan leaves to the
+  driver; they now write 128/255. The two `mesh_e2e` exposure failures recorded
+  on 615.71 did not reproduce.
 - **lavapipe runs commands in the order they were recorded, which hides a
   missing barrier.** `crcbl-vk` records explicit pipeline barriers
   (`vkCmdPipelineBarrier2`), and a driver may run commands that declare no

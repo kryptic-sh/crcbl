@@ -215,6 +215,14 @@ float sampling_radius()
 /// a pixel was handed a direction.
 static const float BENT_NORMAL_MIN_LENGTH = 0.5;
 
+/// The zero direction's value in each of the three bent-direction channels:
+/// `crcbl_shaders::ssao::BENT_NORMAL_NONE` over 255, which an `Rgba8Unorm`
+/// target stores as exactly that byte. Not `0.5`, which lands on `127.5`: Vulkan
+/// lets a driver round that tie either way, and NVIDIA's 615 driver stores 127
+/// where Mesa stores 128. The same value in every shader that writes the
+/// channel; see `crcbl_shaders::ssao`'s `OCCLUSION_SOURCES`.
+static const float BENT_NORMAL_NONE_CHANNEL = 128.0 / 255.0;
+
 /// The share the nearest half-resolution sample keeps however far its surface
 /// turns out to be.
 ///
@@ -384,7 +392,9 @@ float3 encode_bent(float3 summed, float weight)
     float3 direction = length(mean) < BENT_NORMAL_MIN_LENGTH
         ? float3(0.0, 0.0, 0.0)
         : normalize(mean);
-    return direction * 0.5 + 0.5;
+    return all(direction == float3(0.0, 0.0, 0.0))
+        ? float3(BENT_NORMAL_NONE_CHANNEL, BENT_NORMAL_NONE_CHANNEL, BENT_NORMAL_NONE_CHANNEL)
+        : direction * 0.5 + 0.5;
 }
 
 [shader("vertex")]

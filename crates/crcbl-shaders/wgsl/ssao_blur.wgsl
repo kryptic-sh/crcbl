@@ -63,8 +63,16 @@ fn encode_bent_0( summed_0 : vec3<f32>,  weight_0 : f32) -> vec3<f32>
     {
         direction_0 = normalize(mean_0);
     }
-    var _S3 : vec3<f32> = vec3<f32>(0.5f);
-    return direction_0 * _S3 + _S3;
+    if((all((direction_0 == vec3<f32>(0.0f, 0.0f, 0.0f)))))
+    {
+        mean_0 = vec3<f32>(0.50196081399917603f, 0.50196081399917603f, 0.50196081399917603f);
+    }
+    else
+    {
+        var _S3 : vec3<f32> = vec3<f32>(0.5f);
+        mean_0 = direction_0 * _S3 + _S3;
+    }
+    return mean_0;
 }
 
 fn unproject_z_0( depth_0 : f32) -> vec2<f32>

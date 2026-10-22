@@ -63,14 +63,36 @@ float depth_at_1(int2 pixel_2, int2 extent_1, KernelContext_0 thread* kernelCont
 }
 
 
-#line 526
+#line 533
 float3 encode_bent_0(float3 direction_0)
 {
 
-#line 526
-    float3 _S3 = float3(0.5f) ;
+#line 533
+    float3 _S3;
 
-    return direction_0 * _S3 + _S3;
+
+    if(all(direction_0 == float3(0.0f, 0.0f, 0.0f)))
+    {
+
+#line 536
+        _S3 = float3(0.50196081399917603f, 0.50196081399917603f, 0.50196081399917603f);
+
+#line 536
+    }
+    else
+    {
+
+#line 536
+        float3 _S4 = float3(0.5f) ;
+
+#line 536
+        _S3 = direction_0 * _S4 + _S4;
+
+#line 536
+    }
+
+#line 535
+    return _S3;
 }
 
 
@@ -86,10 +108,10 @@ float4 unproject_0(float2 ndc_0, float depth_1, KernelContext_0 thread* kernelCo
 {
 
 #line 338
-    float2 _S4 = unproject_z_0(depth_1, kernelContext_3);
+    float2 _S5 = unproject_z_0(depth_1, kernelContext_3);
 
 
-    return float4((&kernelContext_3->camera_0->inv_proj_0)->data_0[int(0)].x * ndc_0.x + (&kernelContext_3->camera_0->inv_proj_0)->data_0[int(3)].x, (&kernelContext_3->camera_0->inv_proj_0)->data_0[int(1)].y * ndc_0.y + (&kernelContext_3->camera_0->inv_proj_0)->data_0[int(3)].y, _S4.x, _S4.y);
+    return float4((&kernelContext_3->camera_0->inv_proj_0)->data_0[int(0)].x * ndc_0.x + (&kernelContext_3->camera_0->inv_proj_0)->data_0[int(3)].x, (&kernelContext_3->camera_0->inv_proj_0)->data_0[int(1)].y * ndc_0.y + (&kernelContext_3->camera_0->inv_proj_0)->data_0[int(3)].y, _S5.x, _S5.y);
 }
 
 
@@ -98,10 +120,10 @@ float3 view_position_0(int2 pixel_3, float depth_2, float2 extent_2, KernelConte
 {
 
 #line 354
-    float4 _S5 = unproject_0(float2((float(pixel_3.x) + 0.5f) / extent_2.x * 2.0f - 1.0f, 1.0f - (float(pixel_3.y) + 0.5f) / extent_2.y * 2.0f), depth_2, kernelContext_4);
+    float4 _S6 = unproject_0(float2((float(pixel_3.x) + 0.5f) / extent_2.x * 2.0f - 1.0f, 1.0f - (float(pixel_3.y) + 0.5f) / extent_2.y * 2.0f), depth_2, kernelContext_4);
 
 #line 365
-    return _S5.xyz / float3(_S5.w) ;
+    return _S6.xyz / float3(_S6.w) ;
 }
 
 
@@ -110,54 +132,54 @@ float3 view_position_1(int2 pixel_4, float depth_3, float2 extent_3, KernelConte
 {
 
 #line 354
-    float4 _S6 = unproject_0(float2((float(pixel_4.x) + 0.5f) / extent_3.x * 2.0f - 1.0f, 1.0f - (float(pixel_4.y) + 0.5f) / extent_3.y * 2.0f), depth_3, kernelContext_5);
+    float4 _S7 = unproject_0(float2((float(pixel_4.x) + 0.5f) / extent_3.x * 2.0f - 1.0f, 1.0f - (float(pixel_4.y) + 0.5f) / extent_3.y * 2.0f), depth_3, kernelContext_5);
 
 #line 365
-    return _S6.xyz / float3(_S6.w) ;
+    return _S7.xyz / float3(_S7.w) ;
 }
 
 
 #line 381
 float3 normal_at_0(int2 pixel_5, float3 centre_0, int2 extent_4, float2 size_0, KernelContext_0 thread* kernelContext_6)
 {
-    int2 _S7 = pixel_5 + int2(int(-1), int(0));
+    int2 _S8 = pixel_5 + int2(int(-1), int(0));
 
 #line 383
-    float _S8 = depth_at_1(_S7, extent_4, kernelContext_6);
+    float _S9 = depth_at_1(_S8, extent_4, kernelContext_6);
 
 #line 383
-    float3 _S9 = view_position_1(_S7, _S8, size_0, kernelContext_6);
-    int2 _S10 = pixel_5 + int2(int(1), int(0));
+    float3 _S10 = view_position_1(_S8, _S9, size_0, kernelContext_6);
+    int2 _S11 = pixel_5 + int2(int(1), int(0));
 
 #line 384
-    float _S11 = depth_at_1(_S10, extent_4, kernelContext_6);
+    float _S12 = depth_at_1(_S11, extent_4, kernelContext_6);
 
 #line 384
-    float3 _S12 = view_position_1(_S10, _S11, size_0, kernelContext_6);
-    int2 _S13 = pixel_5 + int2(int(0), int(-1));
+    float3 _S13 = view_position_1(_S11, _S12, size_0, kernelContext_6);
+    int2 _S14 = pixel_5 + int2(int(0), int(-1));
 
 #line 385
-    float _S14 = depth_at_1(_S13, extent_4, kernelContext_6);
+    float _S15 = depth_at_1(_S14, extent_4, kernelContext_6);
 
 #line 385
-    float3 _S15 = view_position_1(_S13, _S14, size_0, kernelContext_6);
-    int2 _S16 = pixel_5 + int2(int(0), int(1));
+    float3 _S16 = view_position_1(_S14, _S15, size_0, kernelContext_6);
+    int2 _S17 = pixel_5 + int2(int(0), int(1));
 
 #line 386
-    float _S17 = depth_at_1(_S16, extent_4, kernelContext_6);
+    float _S18 = depth_at_1(_S17, extent_4, kernelContext_6);
 
 #line 386
-    float3 _S18 = view_position_1(_S16, _S17, size_0, kernelContext_6);
+    float3 _S19 = view_position_1(_S17, _S18, size_0, kernelContext_6);
 
-    float _S19 = centre_0.z;
+    float _S20 = centre_0.z;
 
 #line 388
     float3 horizontal_0;
-    if((abs(_S12.z - _S19)) < (abs(_S19 - _S9.z)))
+    if((abs(_S13.z - _S20)) < (abs(_S20 - _S10.z)))
     {
 
 #line 389
-        horizontal_0 = _S12 - centre_0;
+        horizontal_0 = _S13 - centre_0;
 
 #line 389
     }
@@ -165,7 +187,7 @@ float3 normal_at_0(int2 pixel_5, float3 centre_0, int2 extent_4, float2 size_0, 
     {
 
 #line 389
-        horizontal_0 = centre_0 - _S9;
+        horizontal_0 = centre_0 - _S10;
 
 #line 389
     }
@@ -174,11 +196,11 @@ float3 normal_at_0(int2 pixel_5, float3 centre_0, int2 extent_4, float2 size_0, 
     float3 vertical_0;
 
 
-    if((abs(_S18.z - _S19)) < (abs(_S19 - _S15.z)))
+    if((abs(_S19.z - _S20)) < (abs(_S20 - _S16.z)))
     {
 
 #line 392
-        vertical_0 = _S18 - centre_0;
+        vertical_0 = _S19 - centre_0;
 
 #line 392
     }
@@ -186,7 +208,7 @@ float3 normal_at_0(int2 pixel_5, float3 centre_0, int2 extent_4, float2 size_0, 
     {
 
 #line 392
-        vertical_0 = centre_0 - _S15;
+        vertical_0 = centre_0 - _S16;
 
 #line 392
     }
@@ -213,10 +235,10 @@ float occlusion_at_0(int2 pixel_6, uint tile_0, float3 centre_1, float3 normal_0
 {
 
 #line 444
-    float _S20 = sampling_radius_0(kernelContext_8);
+    float _S21 = sampling_radius_0(kernelContext_8);
 
 #line 449
-    float _S21 = _S20 * 0.03999999910593033f;
+    float _S22 = _S21 * 0.03999999910593033f;
 
 #line 457
     float3 seed_0 = float3(ROTATIONS_0[tile_0], 0.0f);
@@ -243,7 +265,7 @@ float occlusion_at_0(int2 pixel_6, uint tile_0, float3 centre_1, float3 normal_0
 
 #line 462
     }
-    float3 _S22 = cross(normal_0, across_0);
+    float3 _S23 = cross(normal_0, across_0);
 
 #line 463
     uint index_0 = 0U;
@@ -266,14 +288,14 @@ float occlusion_at_0(int2 pixel_6, uint tile_0, float3 centre_1, float3 normal_0
             break;
         }
 
-        float3 at_0 = centre_1 + (across_0 * float3(KERNEL_0[index_0].x)  + _S22 * float3(KERNEL_0[index_0].y)  + normal_0 * float3(KERNEL_0[index_0].z) ) * float3(_S20) ;
+        float3 at_0 = centre_1 + (across_0 * float3(KERNEL_0[index_0].x)  + _S23 * float3(KERNEL_0[index_0].y)  + normal_0 * float3(KERNEL_0[index_0].z) ) * float3(_S21) ;
 
         float4 clip_0 = (((float4(at_0, 1.0f)) * (matrix<float,int(4),int(4)> (kernelContext_8->camera_0->proj_0.data_0[int(0)][int(0)], kernelContext_8->camera_0->proj_0.data_0[int(1)][int(0)], kernelContext_8->camera_0->proj_0.data_0[int(2)][int(0)], kernelContext_8->camera_0->proj_0.data_0[int(3)][int(0)], kernelContext_8->camera_0->proj_0.data_0[int(0)][int(1)], kernelContext_8->camera_0->proj_0.data_0[int(1)][int(1)], kernelContext_8->camera_0->proj_0.data_0[int(2)][int(1)], kernelContext_8->camera_0->proj_0.data_0[int(3)][int(1)], kernelContext_8->camera_0->proj_0.data_0[int(0)][int(2)], kernelContext_8->camera_0->proj_0.data_0[int(1)][int(2)], kernelContext_8->camera_0->proj_0.data_0[int(2)][int(2)], kernelContext_8->camera_0->proj_0.data_0[int(3)][int(2)], kernelContext_8->camera_0->proj_0.data_0[int(0)][int(3)], kernelContext_8->camera_0->proj_0.data_0[int(1)][int(3)], kernelContext_8->camera_0->proj_0.data_0[int(2)][int(3)], kernelContext_8->camera_0->proj_0.data_0[int(3)][int(3)]))));
 
-        float _S23 = clip_0.w;
+        float _S24 = clip_0.w;
 
 #line 473
-        if(_S23 <= 0.0f)
+        if(_S24 <= 0.0f)
         {
             index_0 = index_0 + 1U;
 
@@ -282,40 +304,19 @@ float occlusion_at_0(int2 pixel_6, uint tile_0, float3 centre_1, float3 normal_0
         }
 
 #line 477
-        float2 ndc_1 = clip_0.xy / float2(_S23) ;
+        float2 ndc_1 = clip_0.xy / float2(_S24) ;
 
-        int _S24 = int((ndc_1.x * 0.5f + 0.5f) * size_1.x);
-        int _S25 = int((0.5f - ndc_1.y * 0.5f) * size_1.y);
-
-#line 478
-        int2 tap_0 = int2(_S24, _S25);
+        int _S25 = int((ndc_1.x * 0.5f + 0.5f) * size_1.x);
+        int _S26 = int((0.5f - ndc_1.y * 0.5f) * size_1.y);
 
 #line 478
-        bool _S26;
+        int2 tap_0 = int2(_S25, _S26);
 
-#line 484
-        if(_S24 < int(0))
-        {
-
-#line 484
-            _S26 = true;
-
-#line 484
-        }
-        else
-        {
-
-#line 484
-            _S26 = _S25 < int(0);
-
-#line 484
-        }
-
-#line 484
+#line 478
         bool _S27;
 
 #line 484
-        if(_S26)
+        if(_S25 < int(0))
         {
 
 #line 484
@@ -327,7 +328,7 @@ float occlusion_at_0(int2 pixel_6, uint tile_0, float3 centre_1, float3 normal_0
         {
 
 #line 484
-            _S27 = _S24 >= (extent_5.x);
+            _S27 = _S26 < int(0);
 
 #line 484
         }
@@ -348,25 +349,34 @@ float occlusion_at_0(int2 pixel_6, uint tile_0, float3 centre_1, float3 normal_0
         {
 
 #line 484
-            _S28 = _S25 >= (extent_5.y);
+            _S28 = _S25 >= (extent_5.x);
 
 #line 484
         }
+
+#line 484
+        bool _S29;
 
 #line 484
         if(_S28)
         {
-            index_0 = index_0 + 1U;
 
-#line 466
-            continue;
+#line 484
+            _S29 = true;
+
+#line 484
+        }
+        else
+        {
+
+#line 484
+            _S29 = _S26 >= (extent_5.y);
+
+#line 484
         }
 
-#line 466
-        float _S29 = depth_at_0(tap_0, extent_5, kernelContext_8);
-
-#line 490
-        if(_S29 <= 0.0f)
+#line 484
+        if(_S29)
         {
             index_0 = index_0 + 1U;
 
@@ -375,20 +385,32 @@ float occlusion_at_0(int2 pixel_6, uint tile_0, float3 centre_1, float3 normal_0
         }
 
 #line 466
-        float3 _S30 = view_position_0(tap_0, _S29, size_1, kernelContext_8);
+        float _S30 = depth_at_0(tap_0, extent_5, kernelContext_8);
+
+#line 490
+        if(_S30 <= 0.0f)
+        {
+            index_0 = index_0 + 1U;
+
+#line 466
+            continue;
+        }
+
+#line 466
+        float3 _S31 = view_position_0(tap_0, _S30, size_1, kernelContext_8);
 
 #line 499
-        float _S31 = _S30.z;
+        float _S32 = _S31.z;
 
 #line 499
         float blocked_1;
 
 #line 499
-        if(_S31 >= (at_0.z + _S21))
+        if(_S32 >= (at_0.z + _S22))
         {
 
 #line 499
-            blocked_1 = blocked_0 + saturate(_S20 / max(abs(centre_1.z - _S31), 0.00000999999974738f));
+            blocked_1 = blocked_0 + saturate(_S21 / max(abs(centre_1.z - _S32), 0.00000999999974738f));
 
 #line 499
         }
@@ -429,64 +451,64 @@ struct pixelInput_0
 };
 
 
-#line 532
-[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S32 [[stage_in]], float4 position_0 [[position]], depth2d<float, access::sample> scene_depth_1 [[texture(0)]], SsaoParams_natural_0 constant* camera_1 [[buffer(0)]])
+#line 541
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S33 [[stage_in]], float4 position_0 [[position]], depth2d<float, access::sample> scene_depth_1 [[texture(0)]], SsaoParams_natural_0 constant* camera_1 [[buffer(0)]])
 {
 
-#line 532
+#line 541
     thread KernelContext_0 kernelContext_9;
 
-#line 532
+#line 541
     (&kernelContext_9)->scene_depth_0 = scene_depth_1;
 
-#line 532
+#line 541
     (&kernelContext_9)->camera_0 = camera_1;
 
     thread uint width_0;
     thread uint height_0;
 
-#line 542
+#line 551
     (*((&width_0)) = (scene_depth_1).get_width(0)),(*((&height_0)) = (scene_depth_1).get_height(0));
     int2 extent_6 = int2(int(width_0), int(height_0));
     float2 size_2 = float2(float(width_0), float(height_0));
 
-#line 552
-    int2 _S33 = int2(position_0.xy);
-    int2 pixel_7 = full_res_pixel_0(_S33);
-    uint tile_1 = (uint(_S33.y) & 3U) * 4U + (uint(_S33.x) & 3U);
+#line 561
+    int2 _S34 = int2(position_0.xy);
+    int2 pixel_7 = full_res_pixel_0(_S34);
+    uint tile_1 = (uint(_S34.y) & 3U) * 4U + (uint(_S34.x) & 3U);
 
-#line 554
-    float _S34 = depth_at_0(pixel_7, extent_6, &kernelContext_9);
+#line 563
+    float _S35 = depth_at_0(pixel_7, extent_6, &kernelContext_9);
 
 
 
-    if(_S34 <= 0.0f)
+    if(_S35 <= 0.0f)
     {
 
-#line 558
-        pixelOutput_0 _S35 = { float4(1.0f, encode_bent_0(float3(0.0f, 0.0f, 0.0f))) };
+#line 567
+        pixelOutput_0 _S36 = { float4(1.0f, encode_bent_0(float3(0.0f, 0.0f, 0.0f))) };
 
-        return _S35;
+        return _S36;
     }
 
-#line 560
-    float3 _S36 = view_position_0(pixel_7, _S34, size_2, &kernelContext_9);
+#line 569
+    float3 _S37 = view_position_0(pixel_7, _S35, size_2, &kernelContext_9);
 
-#line 560
-    float3 _S37 = normal_at_0(pixel_7, _S36, extent_6, size_2, &kernelContext_9);
+#line 569
+    float3 _S38 = normal_at_0(pixel_7, _S37, extent_6, size_2, &kernelContext_9);
 
-#line 560
-    float _S38 = occlusion_at_0(pixel_7, tile_1, _S36, _S37, extent_6, size_2, &kernelContext_9);
+#line 569
+    float _S39 = occlusion_at_0(pixel_7, tile_1, _S37, _S38, extent_6, size_2, &kernelContext_9);
 
-#line 560
-    pixelOutput_0 _S39 = { float4(saturate(1.0f - _S38), encode_bent_0(float3(0.0f, 0.0f, 0.0f))) };
+#line 569
+    pixelOutput_0 _S40 = { float4(saturate(1.0f - _S39), encode_bent_0(float3(0.0f, 0.0f, 0.0f))) };
 
-#line 568
-    return _S39;
+#line 577
+    return _S40;
 }
 
 
-#line 568
+#line 577
 struct vertexMain_Result_0
 {
     float4 position_1 [[position]];
@@ -519,22 +541,22 @@ struct FullscreenOutput_0
     thread FullscreenOutput_0 output_1;
 
 
-    float2 _S40 = float2(float((index_1 << 1U) & 2U), float(index_1 & 2U));
+    float2 _S41 = float2(float((index_1 << 1U) & 2U), float(index_1 & 2U));
 
 #line 517
-    (&output_1)->uv_2 = _S40;
-    (&output_1)->position_2 = float4(_S40 * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
+    (&output_1)->uv_2 = _S41;
+    (&output_1)->position_2 = float4(_S41 * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
 
 #line 518
-    thread vertexMain_Result_0 _S41;
+    thread vertexMain_Result_0 _S42;
 
 #line 518
-    (&_S41)->position_1 = output_1.position_2;
+    (&_S42)->position_1 = output_1.position_2;
 
 #line 518
-    (&_S41)->uv_1 = output_1.uv_2;
+    (&_S42)->uv_1 = output_1.uv_2;
 
 #line 518
-    return _S41;
+    return _S42;
 }
 

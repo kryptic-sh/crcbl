@@ -195,8 +195,8 @@ const _: () = {
 /// "they cancelled" begins.
 ///
 /// It is also what separates a decoded direction from the decoded sentinel: the
-/// zero direction encodes to `0.5` in each channel and [`BENT_NORMAL_NONE`] is
-/// the byte that lands on, which decodes back to under a hundredth of a unit
+/// zero direction is written as [`BENT_NORMAL_NONE`] in each channel, which
+/// decodes back to under a hundredth of a unit
 /// while a real direction survives `Rgba8Unorm` to within about the same. Half
 /// way between those is a threshold no rounding on any target can reach from
 /// either side.
@@ -205,8 +205,11 @@ pub const BENT_NORMAL_MIN_LENGTH: f32 = 0.5;
 /// The byte each of the three bent-direction channels holds where there is no
 /// direction.
 ///
-/// `ssao.slang` writes the zero direction as `0.0 * 0.5 + 0.5`, which an
-/// `Rgba8Unorm` target quantises to this — so a pixel the gather had nothing to
+/// Every shader that writes the channel writes the zero direction as this over
+/// 255 (`BENT_NORMAL_NONE_CHANNEL`), which an `Rgba8Unorm` target stores as
+/// exactly this byte on every driver — `0.5` would land on the tie at `127.5`,
+/// which Vulkan lets a driver round either way, and NVIDIA's does not round up
+/// — so a pixel the gather had nothing to
 /// say about and the 1×1 placeholder `crcbl_render::forward` binds when no
 /// occlusion pass runs hold the same bytes, and "no pass ran" and "no direction
 /// here" are one case with one answer. See [`BENT_NORMAL_MIN_LENGTH`], which is
@@ -462,6 +465,37 @@ mod tests {
         ),
         ("mesh.slang", include_str!("../shaders/mesh.slang")),
     ];
+
+    /// **Every shader that writes the bent-direction channel writes the zero
+    /// direction as [`BENT_NORMAL_NONE`] over 255, and that value stores as
+    /// [`BENT_NORMAL_NONE`] on any driver.** The encoding's own zero, `0.5`,
+    /// lands on `127.5`, a tie Vulkan lets a driver round either way: Mesa
+    /// stored 128 and NVIDIA's 615 driver 127, and two `forward_e2e` tests read
+    /// the difference on 2026-10-22. So the value is held here twice — the
+    /// declaration every writer carries, and its distance from either tie.
+    #[test]
+    fn the_zero_direction_is_written_off_the_rounding_tie() {
+        let declaration =
+            format!("static const float BENT_NORMAL_NONE_CHANNEL = {BENT_NORMAL_NONE}.0 / 255.0;");
+        let written = "? float3(BENT_NORMAL_NONE_CHANNEL, BENT_NORMAL_NONE_CHANNEL, \
+                       BENT_NORMAL_NONE_CHANNEL)";
+        for (name, source) in OCCLUSION_SOURCES {
+            assert!(
+                source.contains(&declaration),
+                "{name} does not declare `{declaration}`"
+            );
+            assert!(
+                source.contains(written),
+                "{name}'s `encode_bent` does not write `BENT_NORMAL_NONE_CHANNEL` for the zero \
+                 direction"
+            );
+        }
+        let stored = f32::from(BENT_NORMAL_NONE) / 255.0 * 255.0;
+        assert!(
+            (stored - f32::from(BENT_NORMAL_NONE)).abs() < 0.25,
+            "{stored} is near a rounding tie, so a driver may store either neighbour"
+        );
+    }
 
     /// The constant and the shaders must name the same far plane.
     ///

@@ -26,6 +26,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **SSAO's "no bent direction" sentinel is the same byte on every driver.** The
+  occlusion shaders wrote it as `0.5`, which an `Rgba8Unorm` target stores at
+  the tie between 127 and 128, and Vulkan lets a driver round either way:
+  NVIDIA's stored 127 where Mesa stores the `BENT_NORMAL_NONE` byte, 128. They
+  now write 128/255. Shading was unaffected, since `mesh.slang` thresholds the
+  decoded length.
 - **X11: a monitor unplugged and plugged back in no longer gets its old
   `MonitorId` back.** Ids were kept per RandR CRTC for the whole session, and a
   CRTC is reused for whatever output it drives next, so an id the application

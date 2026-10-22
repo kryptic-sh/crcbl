@@ -519,13 +519,22 @@ FullscreenOutput vertexMain(uint index: SV_VertexID)
     return output;
 }
 
+/// The zero direction's value in each of the three bent-direction channels:
+/// `crcbl_shaders::ssao::BENT_NORMAL_NONE` over 255, which an `Rgba8Unorm`
+/// target stores as exactly that byte. Not `0.5`, which lands on `127.5`: Vulkan
+/// lets a driver round that tie either way, and NVIDIA's 615 driver stores 127
+/// where Mesa stores 128. The same value in every shader that writes the
+/// channel; see `crcbl_shaders::ssao`'s `OCCLUSION_SOURCES`.
+static const float BENT_NORMAL_NONE_CHANNEL = 128.0 / 255.0;
+
 /// The bent direction as the three channels beside the scalar: `xyz * 0.5 +
-/// 0.5`, and a zero direction lands on `0.5` in each — the value `Rgba8Unorm`
-/// quantises to `0x80`, which is the byte the renderer's 1×1 placeholder holds.
-/// See the header.
+/// 0.5`, and a zero direction [`BENT_NORMAL_NONE_CHANNEL`] in each — `0x80`,
+/// the byte the renderer's 1×1 placeholder holds. See the header.
 float3 encode_bent(float3 direction)
 {
-    return direction * 0.5 + 0.5;
+    return all(direction == float3(0.0, 0.0, 0.0))
+        ? float3(BENT_NORMAL_NONE_CHANNEL, BENT_NORMAL_NONE_CHANNEL, BENT_NORMAL_NONE_CHANNEL)
+        : direction * 0.5 + 0.5;
 }
 
 [shader("fragment")]
