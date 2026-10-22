@@ -44,8 +44,35 @@ backends, and confirmed the disconnect signal against a private `pipewire`
 daemon it killed and restarted twice: lyr saw each loss at once and reconnected
 within its backoff. A reopen in the instant after the loss answered
 `Protocol("…Connection reset by peer")`; a socket that resets, refuses or closes
-before the first full picture now answers `NoServer`. Next: Windows (WASAPI),
-then macOS (CoreAudio). PipeWire and PulseAudio are both spoken natively:
+before the first full picture now answers `NoServer`. **Slice 3, the Windows
+backend, is on branch `mixer-windows`** (`src/windows/`, not yet on main):
+WASAPI through the `windows` crate, one COM thread (multithreaded apartment)
+owning every audio object, callbacks that only signal, actions marshalled to
+that thread, session-stable ids handed out per endpoint id string and session
+instance identifier (`windows/ids.rs`), the console role's default, volume as
+the scalar percent held to 100 (`level::SCALAR_MAX_PERCENT`), and `MakeDefault`
+through `IPolicyConfig` for the console and multimedia roles, declared from
+AudioDeviceCmdlets' declaration. Verified on the Windows 11 development machine
+by `tests/wasapi_live.rs`, run by hand: all six active endpoints (a USB DAC's
+speakers and microphone, a USB headset's headphones and microphone, two digital
+outputs) agree with WASAPI asked directly on id string, friendly name, volume,
+mute and default; every stream is on an endpoint the mixer has; on the default
+output a set to 37 %, a mute toggle and a step of −2 reached WASAPI and woke the
+app, and the original scalar and mute were put back bit-exactly. **Not verified
+on Windows:** a Bluetooth endpoint (none here; the `PKEY_Device_EnumeratorName`
+rule is lyr's, never seen to match a real device); the audio service stopping or
+restarting (the `DisconnectReasonServerShutdown` and
+`AUDCLNT_E_SERVICE_NOT_RUNNING` paths are written but not exercised, and with no
+session open nothing reports the stop until the next read or action);
+`MakeDefault` (no test changes the owner's default device); whether Windows
+Settings also moves the communications role when it sets a default (the mixer
+leaves that role alone, as the Sound control panel's "Default Device" does); and
+a live count of wakes for a stream's life under each interest (unit-tested
+only). **Windows behaviours to know:** every endpoint has its own "System
+sounds" session, so the mixer lists one per endpoint, and a quiet session whose
+program is open is listed, as Windows' volume mixer lists it; `apply` from
+inside the waker answers `Unsupported`, since it would wait on its own thread.
+Next: macOS (CoreAudio). PipeWire and PulseAudio are both spoken natively:
 PipeWire's own protocol when its socket is there, PulseAudio's when it is not
 (the owner runs PipeWire and wants it supported natively, not through
 `pipewire-pulse`). A seam any crcbl app can use to control the system mixer on
