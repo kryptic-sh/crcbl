@@ -539,10 +539,17 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    input method itself, through the view's `NSTextInputClient` methods); S3
    popup repositioning on Wayland **in CI** (CI's sway offers `xdg_wm_base`
    below 3, so CI holds only the refusal; the office laptop's sway 1.12 ran the
-   real path green on 2026-10-20); S22 a colour glyph in a GPU golden; S18
-   FreeBSD beyond `check (freebsd)`'s clippy, in a VM job; S13 cold start to the
-   first presented frame on Win32 + D3D12 since adapters are probed lazily
-   (Linux and Vulkan is measured end to end; see 11).
+   real path green on 2026-10-20); S22 a colour glyph in a GPU golden — needs
+   the owner's call on where the font comes from: a `crcbl::screenshot` scene
+   ships in the published `crcbl` crate, which cannot `include_bytes!`
+   `crcbl-ui`'s `tests/fixtures/emoji` fonts from outside its package, so it
+   takes a second copy of one (about 1.2 KB, two copies to drift) or a public
+   `crcbl-ui` constant for it (`SANS_TTF`'s shape, test data in the public API);
+   the GPU path itself is `crcbl-frame`'s `DrawList::to_triangles_with_colors`,
+   which nothing on a GPU has drawn yet; S18 FreeBSD beyond `check (freebsd)`'s
+   clippy, in a VM job; S13 cold start to the first presented frame on Win32 +
+   D3D12 since adapters are probed lazily (Linux and Vulkan is measured end to
+   end; see 11).
 5. **Genuinely impossible, and refused:** D3D12 off Windows, Metal off Apple, a
    software Metal adapter, AppKit reserving screen space (only the menu bar and
    the Dock do). Vulkan on macOS is refused today and could go through MoltenVK
