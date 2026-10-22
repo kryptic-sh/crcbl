@@ -14439,6 +14439,23 @@ criterion, not this render one.
 descriptor-write count and found none; the recorder's event list was read in
 `crates/crcbl-hal/src/null/record.rs`.
 
+**CPU flatness, measured for meshes on 2026-10-22.** The horde sweep in
+`docs/notes/samples.md` (2026-08-07) is sprites, not this path, so it does not
+answer the criterion. `mesh_e2e`'s `bucket_price` drives the GPU-driven mesh
+path; with its instance count read from a temporary environment override, on the
+office laptop's Intel RPL-U (Mesa 26.2.5), release, 256x192, 240 priced frames,
+two buckets: from 1 000 to 40 000 instances the calls a frame stayed 32 (a call
+per bucket) and 22 (ranged), and the CPU-only columns stayed around a tenth of a
+millisecond — `IndirectCount` begin 0.054 → 0.084 ms, build 0.083 → 0.115 ms,
+submit 0.096 → 0.198 ms — with the per-bucket `record` flat at 0.23 to 0.51 ms.
+**The ranged rows' `record` was not flat**: 0.68, 1.01, 1.97, 2.81 and 2.71 ms
+on `IndirectCount` at 1k, 5k, 10k, 20k and 40k (`IndirectPerBatch` the same
+shape). That column includes the GPU wait (see "The price test's record includes
+the wait for the GPU"), and the ranged tail's own passes are not among the
+priced ones, so whether the rise is CPU or waiting is not determined here.
+**Still owed:** the descriptor-write and readback counts on the null recorder,
+which need the `update_bind_group` event described above.
+
 ### Ray-traced lighting (P7C) is not built (2026-08-27)
 
 **Confirmed absent.** `crcbl-hal` has `Features::RAY_QUERY`,
