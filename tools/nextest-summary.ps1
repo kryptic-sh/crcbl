@@ -10,7 +10,7 @@
 #   if ($null -eq $ran) { exit 1 }
 #
 # The PowerShell twin of `tools/nextest-summary.sh`, which every bash harness
-# sources; `run-vk-e2e.ps1` and `run-win32-e2e.ps1` cannot source a bash file.
+# sources; `run-win32-e2e.ps1` cannot source a bash file.
 # The two are one piece of knowledge in two languages, so they are held together
 # the only way that survives an edit: `tools/nextest-summary-test.sh` feeds the
 # same fixture logs through both and asserts the same outcome from each. A

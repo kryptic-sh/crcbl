@@ -1041,6 +1041,17 @@ that the HKLM writes are in the workflow and not in either harness. What was
 not: whether `run-vk-e2e.sh` under Git Bash would pass on that runner today,
 which only a CI run can answer.
 
+**Answered 2026-10-23, and the `.ps1` is gone.** `run-vk-e2e.sh` under
+`shell: bash` on `windows-latest` ran the whole suite, 69 of 69, with the pin,
+the adapter check, the leak check, the mesh-path check and the reach line
+intact, so the environment argument for `pwsh` was not load-bearing and the
+duplicate harness was deleted. The one guard the `.ps1` never carried, the
+fatal-gate refusal, cannot run there: the elevated loader logs that it ignores
+`VK_LAYER_PATH` and every other layer variable, `VK_LOADER_LAYERS_DISABLE`
+included, so the layer registered in HKLM cannot be hidden from a harness. The
+script accepts that only on the loader's own word and says it was not checked;
+the Linux leg proves the refusal.
+
 ## Where the Windows vk e2e leg's time goes, and the one measurement nobody has taken
 
 Record; the unmeasured suspicion and the decision on it are in docs/backlog.md

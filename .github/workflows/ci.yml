@@ -2528,23 +2528,18 @@ jobs:
   # `VK_LOADER_DEBUG` now sits on this job's run step, and the suite runs from
   # `pwsh`.
   #
-  # # `shell: pwsh`, and a second harness rather than a second shell
+  # # `shell: bash`, and one harness again
   #
-  # `crates/crcbl-vk/tests/run-vk-e2e.ps1` is the Windows twin of
-  # `run-vk-e2e.sh`, which is untouched and stays the Linux one. A native process
-  # launching a native process puts no environment translation anywhere in the
-  # chain from the shell to `vulkan-1.dll`, which is the whole point — and it is a
-  # measurement either way, since a loader that still cannot see `VK_DRIVER_FILES`
-  # from here was never blocked by the environment and the next round should look
-  # at the manifest and the driver instead.
-  #
-  # It carries every guard its bash twin does — the pin, the loader probe, the
-  # `vulkaninfo` dump, the zero-tests trap, the cancelled-part-way trap,
-  # `CRCBL_VK_EXPECT_ADAPTER` against the adapter the *suite* reports, and the
-  # sync-validation reach — and adds one: it prints the loader's variables as the
-  # *harness process* holds them, which is one process closer to the loader than
-  # a step's own environment dump and is the reading three rounds did not have.
-  # `run-win32-e2e.ps1` is the precedent for the shape.
+  # The suite ran from `pwsh` through `run-vk-e2e.ps1`, a second harness
+  # carrying copies of `run-vk-e2e.sh`'s guards, on the hypothesis that Git
+  # Bash's environment never reached the loader. The cause was elevation (the
+  # loader discards every environment path when elevated, so HKLM is what
+  # selects lavapipe here), and the hypothesis was measured away on 2026-10-23:
+  # `run-vk-e2e.sh` under `shell: bash` ran 69 of 69 with the pin, the adapter
+  # check, the leak check and the reach line intact, so the `.ps1` was deleted
+  # and its copies with it. The bash harness's fatal-gate refusal check cannot
+  # hide the HKLM layer from an elevated loader; it says so in its log and in
+  # the script, and the Linux leg proves the refusal.
   #
   # # Nothing below has ever executed
   #
@@ -2693,7 +2688,7 @@ jobs:
       # sibling manifest because Debian ships `lvp_icd.x86_64.json` and Arch
       # ships `lvp_icd.json`; that is Linux packaging knowledge and there is no
       # second packager of lavapipe for Windows to disagree with the first, so
-      # `run-vk-e2e.ps1` does not reimplement it. What *can* drift here is the
+      # this job does not lean on that search. What *can* drift here is the
       # pinned asset above changing the name when it is bumped, and the glob is
       # where that belongs — one step, next to the pin it is about, still failing
       # with the whole file listing when nothing matches.
@@ -2728,10 +2723,9 @@ jobs:
           # what it does when the variable never arrived. Set here, the process
           # that reads them is already native.
           #
-          # All three in the native `C:\…` form, including `CRCBL_VK_ICD` — which
-          # the bash harness needed with forward slashes, because Git Bash's
-          # `[ -f ]` takes only that spelling. `run-vk-e2e.ps1` has no such
-          # constraint, so nothing here converts a path any more.
+          # All three in the native `C:\…` form, including `CRCBL_VK_ICD`:
+          # `crcbl_pin_vk_icd` converts it through `cygpath` for Git Bash's
+          # `[ -f ]` itself, so nothing here converts a path.
           Add-Content -Path $env:GITHUB_ENV -Value "VK_DRIVER_FILES=$icd"
           # Registered for the same reason the layer is: an elevated loader
           # ignores VK_DRIVER_FILES. The variable stays set so a future
@@ -2784,7 +2778,7 @@ jobs:
           Get-Process | Sort-Object CPU -Descending | Select-Object -First 8 Name, Id, @{ n = 'CpuSeconds'; e = { [math]::Round($_.CPU, 1) } }, @{ n = 'WorkingSetMiB'; e = { [math]::Round($_.WorkingSet64 / 1MB, 0) } } |
               Format-Table -AutoSize | Out-String | Write-Host
       - name: Run the suite against lavapipe
-        shell: pwsh
+        shell: bash
         env:
           # The loader's own search log, on the job that needs it. Its summary
           # line is ambiguous — `Registry lookup failed to get ICD manifest
@@ -2796,10 +2790,10 @@ jobs:
           VK_LOADER_DEBUG: all
           CRCBL_VK_EXPECT_ADAPTER: llvmpipe
           CRCBL_VK_SYNC_VALIDATION: '1'
-        run: crates/crcbl-vk/tests/run-vk-e2e.ps1
+        run: crates/crcbl-vk/tests/run-vk-e2e.sh
 
       # **The one agnostic suite this configuration lost, put back.** Until
-      # `ba0c49f` on 2026-08-18 `depth_probe` lived in `run-vk-e2e.ps1`'s suite
+      # `ba0c49f` on 2026-08-18 `depth_probe` lived in `vk_e2e`'s suite
       # above, and Vulkan-on-Windows is the only place its
       # `reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
       # has ever failed — five times in one evening, shading one primitive to the
@@ -2880,9 +2874,8 @@ jobs:
       # registered.
       #
       # **`shell: bash`, for `run-dx12-e2e.sh`'s reason and on this job's
-      # precedent** — the forward step above. The harness pins no driver through
-      # the loader's environment, so the Git Bash hazard `run-vk-e2e.ps1` records
-      # does not reach it; what it sets is read by the test process.
+      # precedent** — the forward step above. What it sets is read by the test
+      # process, not by the loader.
       #
       # A lavapipe build that did not offer the extension fails here by name,
       # with `create_surface`'s "VK_KHR_win32_surface is not available", rather

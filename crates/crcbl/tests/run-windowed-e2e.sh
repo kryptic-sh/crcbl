@@ -69,10 +69,7 @@
 #
 # What changes is only what a Windows session already provides: a desktop, so
 # nothing is started and there is no server log to tail; and a loader that is
-# `vulkan-1.dll` rather than `libvulkan.so.1`. `run-vk-e2e.ps1` records why the
-# Windows *vk* harness is PowerShell — the loader discarding environment it was
-# handed through Git Bash — and that does not reach this script: it pins no
-# driver through the loader's variables, and the variables it does set are read
+# `vulkan-1.dll` rather than `libvulkan.so.1`. The variables it sets are read
 # by the test process, which `run-dx12-e2e.sh` shows arriving intact.
 
 set -euo pipefail

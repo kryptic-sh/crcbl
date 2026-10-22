@@ -554,12 +554,12 @@ Stated plainly, as gaps:
   towers/arena blocking relationship and the lantern/quarry/bracket/sparks
   `GameModule` exemptions.
 - **The five findings I inherited from the testing plan's pre-verification were
-  acted on, and one of them was wrong.** That report claimed
-  `crates/crcbl-vk/tests/run-vk-e2e.ps1` surfaces `--bless`; it explicitly does
-  not — its own comment says "There is no `--bless` flag here, unlike the Linux
-  script", because it runs a different lavapipe build from the one the
-  references were blessed on. I wrote the correct fact into the doc. The other
-  four findings I spot-checked and they held.
+  acted on, and one of them was wrong.** That report claimed `run-vk-e2e.ps1`
+  (deleted 2026-10-23) surfaces `--bless`; it explicitly does not — its own
+  comment says "There is no `--bless` flag here, unlike the Linux script",
+  because it runs a different lavapipe build from the one the references were
+  blessed on. I wrote the correct fact into the doc. The other four findings I
+  spot-checked and they held.
 
 ## Coverage gaps in the simulation audit
 

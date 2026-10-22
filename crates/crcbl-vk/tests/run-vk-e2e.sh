@@ -133,8 +133,7 @@ crcbl_pin_vk_icd "crcbl vk e2e"
 # Reading nextest's summary is `tools/nextest-summary.sh`'s job, for the same
 # reason this file does not carry its own ICD resolution: eight harnesses had a
 # copy, and five of them read a cancelled run's `2/15 tests run` as a healthy
-# fifteen. `run-vk-e2e.ps1` still carries its own — it cannot source a bash file
-# — which `docs/backlog.md` records.
+# fifteen.
 # shellcheck source=tools/nextest-summary.sh
 source "${REPO_ROOT}/tools/nextest-summary.sh"
 
@@ -222,7 +221,7 @@ trap cleanup EXIT INT TERM
 # whatever either flag said. Capturing instead lets nextest use the runner's
 # cores, and `immediate` keeps every line the greps below need — the adapter
 # line, the sync-validation reach — in the log, ahead of the summary, which is
-# the ordering both this file and `run-vk-e2e.ps1` read. `run-dx12-e2e.sh`,
+# the ordering this file reads. `run-dx12-e2e.sh`,
 # `run-mtl-e2e.sh` and `run-render-e2e.sh` were already spelled this way.
 set +e
 cargo nextest run \
@@ -376,13 +375,14 @@ echo "crcbl vk e2e: $REACH"
 case "$REACH" in
     *cross-submission=no*)
         echo "crcbl vk e2e: ############################################################" >&2
-        echo "crcbl vk e2e: # THIS RUN IS WEAKER THAN THE CI JOB IT STANDS IN FOR.     #" >&2
+        echo "crcbl vk e2e: # THIS RUN IS WEAKER THAN THE LINUX CI LEG.                #" >&2
         echo "crcbl vk e2e: ############################################################" >&2
         echo "crcbl vk e2e: This machine's validation layer reports hazards inside a" >&2
         echo "              submission and not hazards *between* submissions. Every" >&2
         echo "              missing cross-frame barrier is of the second kind, so the" >&2
-        echo "              green result above says nothing about them — CI's layer" >&2
-        echo "              has caught one that this configuration cannot see." >&2
+        echo "              green result above says nothing about them — the Linux CI" >&2
+        echo "              leg's layer has caught one that this configuration cannot" >&2
+        echo "              see." >&2
         echo "              Rely on 'cargo nextest run -p crcbl-render' for that" >&2
         echo "              class: it compiles consecutive frames against one pool" >&2
         echo "              and needs no layer at all." >&2
@@ -443,6 +443,15 @@ echo "crcbl vk e2e: both backends are selectable from one binary"
 #
 # `VK_LAYER_PATH` at an empty directory is how the layer is hidden — the
 # loader's own mechanism, so this proves the real path rather than a test hook.
+#
+# **Except under an elevated loader**, which is every GitHub Windows runner: it
+# ignores `VK_LAYER_PATH` and every other layer variable, `VK_LOADER_LAYERS_
+# DISABLE` included (measured on CI, loader 1.4.357), and finds the layer the
+# job registered in HKLM. Nothing a harness can set hides it there, so a run
+# that completes is accepted **only** when the loader's own log says it was
+# elevated, and is announced as not checked rather than as a pass. The refusal
+# itself is platform-independent code in `VkInstance::open`, which the Linux
+# leg proves. An unelevated Windows run, a developer's, still has to refuse.
 # The layer is genuinely installed on any machine that got this far, which is
 # what makes the assertion meaningful: the run below fails *because of the
 # variable*, not because the box is bare.
@@ -450,13 +459,23 @@ echo "crcbl vk e2e: running the sandbox with a fatal validation gate it cannot h
 NO_LAYERS="$(mktemp -d -t crcbl-vk-no-layers.XXXXXX)"
 REFUSAL_LOG="$(mktemp -t crcbl-vk-refusal.XXXXXX.log)"
 set +e
-VK_LAYER_PATH="$NO_LAYERS" CRCBL_VK_VALIDATION=1 CRCBL_VK_VALIDATION_FATAL=1 \
+VK_LAYER_PATH="$NO_LAYERS" VK_LOADER_DEBUG=info \
+    CRCBL_VK_VALIDATION=1 CRCBL_VK_VALIDATION_FATAL=1 \
     cargo run --locked --quiet --package sandbox -- \
     --headless --backend vk --frames 5 >"$REFUSAL_LOG" 2>&1
 REFUSAL_STATUS=$?
 set -e
 rmdir "$NO_LAYERS"
-if [ "$REFUSAL_STATUS" -eq 0 ]; then
+ELEVATED="Loader is running with elevated permissions. Environment variable VK_LAYER_PATH will be ignored"
+if [ "$REFUSAL_STATUS" -eq 0 ] && grep -qF "$ELEVATED" "$REFUSAL_LOG"; then
+    rm -f "$REFUSAL_LOG"
+    echo "crcbl vk e2e: ############################################################"
+    echo "crcbl vk e2e: # THE FATAL-GATE REFUSAL WAS NOT CHECKED ON THIS MACHINE.  #"
+    echo "crcbl vk e2e: ############################################################"
+    echo "crcbl vk e2e: The loader runs elevated and said it ignores VK_LAYER_PATH, so"
+    echo "              the layer could not be hidden and the sandbox ran with it."
+    echo "              The Linux leg is where the refusal is proven."
+elif [ "$REFUSAL_STATUS" -eq 0 ]; then
     echo "crcbl vk e2e: the sandbox ran to completion with CRCBL_VK_VALIDATION_FATAL=1" >&2
     echo "              and no validation layer to honour it, so that variable can be" >&2
     echo "              set on a machine without the layer and change nothing — which" >&2
@@ -464,13 +483,13 @@ if [ "$REFUSAL_STATUS" -eq 0 ]; then
     cat "$REFUSAL_LOG" >&2
     rm -f "$REFUSAL_LOG"
     exit 1
-fi
-if ! grep -qF "CRCBL_VK_VALIDATION_FATAL=1 cannot be honoured" "$REFUSAL_LOG"; then
+elif ! grep -qF "CRCBL_VK_VALIDATION_FATAL=1 cannot be honoured" "$REFUSAL_LOG"; then
     echo "crcbl vk e2e: the sandbox failed with the fatal gate unavailable, but not" >&2
     echo "              for that reason — so this proves nothing about the refusal" >&2
     cat "$REFUSAL_LOG" >&2
     rm -f "$REFUSAL_LOG"
     exit 1
+else
+    rm -f "$REFUSAL_LOG"
+    echo "crcbl vk e2e: a fatal validation gate that cannot be honoured refuses to open"
 fi
-rm -f "$REFUSAL_LOG"
-echo "crcbl vk e2e: a fatal validation gate that cannot be honoured refuses to open"

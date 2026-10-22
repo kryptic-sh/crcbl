@@ -31301,9 +31301,6 @@ docs/notes/ci.md under the same heading. What is left:
 `Tolerance::RASTERISER` was calibrated radv-versus-one-lavapipe and this is a
 second, Windows Mesa build — unmeasured between two lavapipes.
 
-**Owed:** `run-vk-e2e.ps1` and `run-vk-e2e.sh` are two harnesses over one suite,
-and their guards are duplicated knowledge that will drift.
-
 ### What WARP has actually proven
 
 What it has proven, the three times the "still unimplemented" test rotted, and
