@@ -155,6 +155,10 @@ pub(super) struct WinWindow {
     /// build the window region again against a new frame; `None` for the
     /// whole window.
     input_region: Option<Vec<PhysicalRect>>,
+    /// Whether the window carries [`WindowDesc::app_id`] as its AppUserModelID,
+    /// which [`app_id::clear`](super::app_id::clear) must remove before the
+    /// window is destroyed.
+    app_id: bool,
 }
 
 impl WinWindow {
@@ -1319,16 +1323,14 @@ impl Shell for Win32Shell {
     /// events is [`pump`](Shell::pump)'s job. The create-then-wait loop is real
     /// here as well; it just completes on the **first pump**.
     ///
-    /// # `app_id` is validated and not yet applied
+    /// # `app_id` is the window's AppUserModelID
     ///
     /// Win32 has no `WM_CLASS`. The equivalent is the *Application User Model
-    /// ID*, a process-wide string set with
-    /// `SetCurrentProcessExplicitAppUserModelID` from `shell32`, and it is what
-    /// decides taskbar grouping and which shortcut a window is matched to.
-    /// This slice does not set it — that is a third system library for a
-    /// property that is not per window — so
-    /// [`WindowDesc::app_id`](crate::WindowDesc::app_id) is checked for
-    /// validity and otherwise unused here. `docs/backlog.md` carries it.
+    /// ID*, which decides taskbar grouping and which shortcut a window is
+    /// matched to. [`WindowDesc::app_id`](crate::WindowDesc::app_id) is set as
+    /// this window's own, never the process's — see
+    /// [`app_id`](super::app_id) — and one Windows would not accept (longer
+    /// than it allows, or with a space) is left off with a warning.
     ///
     /// # Errors
     ///
@@ -1429,6 +1431,7 @@ impl Shell for Win32Shell {
             },
             popup,
             input_region: None,
+            app_id: super::app_id::set(hwnd.as_ptr(), desc.app_id),
         };
         if desc.transparent {
             Self::apply_transparent_chrome(hwnd.as_ptr());
@@ -1482,6 +1485,9 @@ impl Shell for Win32Shell {
         self.forget_input(window);
         if removed.panel.is_some_and(|panel| panel.appbar) {
             Self::remove_appbar(removed.raw());
+        }
+        if removed.app_id {
+            super::app_id::clear(removed.raw());
         }
         // The pool entry is gone **before** the system call, deliberately:
         // `DestroyWindow` dispatches `WM_DESTROY` into the window procedure
@@ -2237,6 +2243,9 @@ impl Drop for Win32Shell {
         for (_, window) in self.windows.iter() {
             if window.panel.is_some_and(|panel| panel.appbar) {
                 Self::remove_appbar(window.raw());
+            }
+            if window.app_id {
+                super::app_id::clear(window.raw());
             }
         }
         for hwnd in windows {

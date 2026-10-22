@@ -23,6 +23,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   carry the text as one `TextRun`, which is what UI Automation's `TextPattern`
   and AT-SPI's `Text` interface are built from: a reader can say where the caret
   is and what is selected.
+- **Win32 applies `WindowDesc::app_id` as the window's AppUserModelID**, which
+  is what Windows groups taskbar buttons by and matches shortcuts to; it was
+  validated and ignored. It is set on the window's own property store, never
+  process-wide, so a host application embedding the engine keeps its own, and it
+  is removed before the window is destroyed. An ID Windows would not accept
+  (over 128 characters, or with a space) is left off with a warning.
 - **`crcbl-mixer`, a new crate: control of the system's audio mixer.** Reads
   every output and input device (volume as the percent desktop mixers show,
   mute, default, active port and ports, form factor, Bluetooth, card), every

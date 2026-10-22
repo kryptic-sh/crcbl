@@ -2044,6 +2044,54 @@ fn a_waker_ends_a_wait_from_another_thread_and_rings_coalesce() {
     );
 }
 
+/// The `System.AppUserModel.ID` on `hwnd`'s property store, read through the
+/// `windows` crate rather than this backend's own declarations.
+fn app_user_model_id(hwnd: Handle) -> Option<String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+    use windows::Win32::UI::Shell::PropertiesSystem::{
+        IPropertyStore, SHGetPropertyStoreForWindow,
+    };
+    // SAFETY: a live window of this thread; the store is released when the
+    // `IPropertyStore` drops.
+    let store: IPropertyStore =
+        unsafe { SHGetPropertyStoreForWindow(HWND(hwnd)) }.expect("a window has a property store");
+    // SAFETY: reads one property into a `PROPVARIANT` the crate owns and clears.
+    let value = unsafe { store.GetValue(&PKEY_AppUserModel_ID) }.expect("the property reads");
+    let text = value.to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// **`app_id` labels the window, and only one Windows accepts.** The ID is
+/// the window's own AppUserModelID, read back from its property store; one
+/// with a space is left off, and the window is still made.
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn app_id_is_the_windows_own_app_user_model_id() {
+    let mut shell = shell();
+    let labelled = shell
+        .create_window(&WindowDesc {
+            title: "app id",
+            app_id: "Kryptic.Crcbl.E2E",
+            ..WindowDesc::default()
+        })
+        .expect("a window with an app id");
+    let unlabelled = shell
+        .create_window(&WindowDesc {
+            title: "bad app id",
+            app_id: "Kryptic Crcbl",
+            ..WindowDesc::default()
+        })
+        .expect("an app id Windows would refuse does not refuse the window");
+    assert_eq!(
+        app_user_model_id(hwnd_of(&shell, labelled)).as_deref(),
+        Some("Kryptic.Crcbl.E2E")
+    );
+    assert_eq!(app_user_model_id(hwnd_of(&shell, unlabelled)), None);
+    shell.destroy_window(labelled).expect("destroy");
+    shell.destroy_window(unlabelled).expect("destroy");
+}
+
 /// **A leave the wait's own drain dispatches ends the wait.** lyr's stuck
 /// tooltip: the pointer left, the posted `WM_MOUSELEAVE` arrived just after a
 /// pump, the drain at the top of the next wait dispatched it and recorded the

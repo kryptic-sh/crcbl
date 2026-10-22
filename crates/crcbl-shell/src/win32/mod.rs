@@ -237,6 +237,8 @@ pub mod ffi;
 #[cfg(all(target_os = "windows", feature = "accesskit"))]
 mod access;
 #[cfg(target_os = "windows")]
+mod app_id;
+#[cfg(target_os = "windows")]
 mod input;
 #[cfg(target_os = "windows")]
 mod monitors;

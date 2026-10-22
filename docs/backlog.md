@@ -29712,14 +29712,6 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   makes a `GlobalSize` larger than the request harmless — and what would
   truncate an `Other("image/png")` offer ending in NUL. Recorded in
   `win32::clipboard`'s module docs as well.
-- **`WindowDesc::app_id` is validated and never applied.** Win32's equivalent of
-  `WM_CLASS` is the Application User Model ID, set process-wide with
-  `SetCurrentProcessExplicitAppUserModelID` from `shell32`; it decides taskbar
-  grouping and which shortcut a window matches, and W1 rejects a NUL and
-  otherwise ignores it, so a Crucible window groups under whatever Explorer
-  infers. Wiring it means a third system library (`shell32` is already linked
-  for the drop calls) and a decision about _where_ a process-wide property is
-  set when a host application embedded the engine.
 - **No verified IME pre-edit, and a CJK commit has not been watched.** Win32
   sets `ShellCaps::TEXT_COMPOSE` for dead keys and `ShellCaps::TEXT_IME` for the
   input method, pre-edit included, because the path is written (the bit was

@@ -165,7 +165,7 @@ accesskit_windows = { version = "0.35.1", optional = true }
 # is the provider side and never calls these. Already in the lock file through
 # `accesskit_windows`, so it adds no crate.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Variant", "Win32_UI_Accessibility"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_EnhancedStorage", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
 
 # The Wayland and X11 backends' accessibility adapter, behind the `accesskit`
 # feature: it serves the tree over AT-SPI on the session bus and turns Orca's
