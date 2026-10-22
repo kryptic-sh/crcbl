@@ -400,7 +400,10 @@ sample's error type is in fact a type alias for
 - §3's exit criteria "10k+ instanced meshes … CPU frame time flat vs instance
   count" and "zero per-frame descriptor writes (RenderDoc-verified)" were
   **not** verified. `apps/horde`'s own docs say it "holds a thousand and then
-  wants ten"; no RenderDoc capture is recorded anywhere in the tree.
+  wants ten"; no RenderDoc capture is recorded anywhere in the tree. Both have
+  since been measured instead (2026-10-22): see the exit-criteria note in
+  `docs/notes/rendering.md`. No RenderDoc capture was taken; the descriptor
+  count is the null recorder's.
 - Whether the depth prepass took the `GreaterOrEqual` overdraw win or kept the
   zero-risk clearing fallback was not checked against the shipped
   `crcbl_render::forward`; `docs/notes/rendering.md` (_What the deleted

@@ -14405,59 +14405,6 @@ extent, which is the constraint `Bindless` exists to lift and the trigger for
 building it. Two prerequisites are already closed: `BindingKind::SampledImage`
 carries a `view_type`, and every backend honours `BindGroupEntry::array_index`.
 
-### The GPU-driven exit criteria have never been measured (2026-09-24)
-
-**Not measured.** Stage 3's exit criteria ask for three numbers and none has
-been recorded: 10k+ instanced meshes with CPU frame time flat against instance
-count, zero per-frame descriptor writes in steady state, and zero frame-loop
-readbacks other than the delayed cull-stats ring. The renderer is built to meet
-them — the cull, draw generation and bucket table are GPU-side and the ring is
-`crcbl_render::cull_stats` — but "built to" is not a measurement.
-
-**The fixture exists.** `apps/horde --prefill N` stages N enemies over the whole
-arena before the first frame and raises `--max-enemies` to fit them, so the 10k
-size is reachable without waiting on the spawner (its `--help` says that would
-take over ten minutes). Horde's own 10k-at-60 entry is a simulation tick
-criterion, not this render one.
-
-**What it would take:**
-
-- **CPU flatness:** record CPU frame time (encode + submit, excluding the GPU
-  wait) at several `--prefill` sizes, say 100, 1k, 5k and 10k, on one machine,
-  and report the slope. Flat means the per-frame command count does not grow
-  with instances.
-- **Descriptor writes and readbacks:** drive a steady-state frame loop on the
-  null backend and count its `crcbl_hal::null` recorder's events after warm-up:
-  `Event::Created { kind: ObjectKind::BindGroup, .. }` should be zero per frame
-  and `Event::ReadbackRequested` should be the ring's alone. The recorder has no
-  event for `Device::update_bind_group` today, so that one needs an event added
-  before it can be counted. This replaces the RenderDoc check the plan named; a
-  hand-taken capture stays the gap recorded under _Findings the roadmap carried
-  that nothing else did_.
-
-**Evidence:** searched the backlog and `docs/notes/` for a recorded CPU sweep or
-descriptor-write count and found none; the recorder's event list was read in
-`crates/crcbl-hal/src/null/record.rs`.
-
-**CPU flatness, measured for meshes on 2026-10-22.** The horde sweep in
-`docs/notes/samples.md` (2026-08-07) is sprites, not this path, so it does not
-answer the criterion. `mesh_e2e`'s `bucket_price` drives the GPU-driven mesh
-path; with its instance count read from a temporary environment override, on the
-office laptop's Intel RPL-U (Mesa 26.2.5), release, 256x192, 240 priced frames,
-two buckets: from 1 000 to 40 000 instances the calls a frame stayed 32 (a call
-per bucket) and 22 (ranged), and the CPU-only columns stayed around a tenth of a
-millisecond — `IndirectCount` begin 0.054 → 0.084 ms, build 0.083 → 0.115 ms,
-submit 0.096 → 0.198 ms — with the per-bucket `record` flat at 0.23 to 0.51 ms.
-The ranged rows' `record` with pass timers on rose, 0.68, 1.01, 1.97, 2.81 and
-2.71 ms on `IndirectCount` at 1k, 5k, 10k, 20k and 40k, while their GPU passes
-matched the per-bucket rows' (`draw-args` and `draw-starts` priced too, both
-under 0.1 ms). **That rise is the timers' wait, not CPU:** with
-`CRCBL_PRICE_UNTIMED=1` the ranged `record` was 0.28, 0.61 and 0.24 ms at 1k,
-10k and 40k, level with the per-bucket rows. So CPU frame time is flat against
-instance count on both tails, which is the criterion. **Still owed:** the
-descriptor-write and readback counts on the null recorder, which need the
-`update_bind_group` event described above.
-
 ### Ray-traced lighting (P7C) is not built (2026-08-27)
 
 **Confirmed absent.** `crcbl-hal` has `Features::RAY_QUERY`,

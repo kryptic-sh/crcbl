@@ -15,6 +15,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_hal::null::Recorder::bind_group_updates` and
+  `Recorder::buffer_label`.** The null backend's recorder now counts successful
+  `update_bind_group` calls, which no `Event` records, and names the buffer
+  behind a handle an event carries, so a test can assert a frame wrote no
+  descriptors and which buffer a readback read. `Event` itself is unchanged.
 - **`crcbl_app::present::SharedGpu`: several windows on one device.**
   `Presenter::shared()` returns a cloneable handle on the presenter's instance
   and device, and `SharedGpu::open(shell, window, extent, desc)` opens another

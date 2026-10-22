@@ -809,6 +809,9 @@ pub(super) struct State {
     /// `crcbl-mtl` turns into Metal argument-table indices by counting. See
     /// [`Recorder::bind_group_layouts_created`].
     pub(super) bind_group_layouts_created: Vec<(Option<String>, Vec<BindGroupLayoutEntry>)>,
+    /// How many `update_bind_group` calls succeeded. See
+    /// [`Recorder::bind_group_updates`].
+    pub(super) bind_group_updates: u64,
     /// Every pipeline created, with its layout and stages resolved — a log for
     /// the same reason as the two above. See [`Recorder::pipelines_created`].
     pub(super) pipelines_created: Vec<PipelineRecord>,
@@ -857,6 +860,7 @@ impl State {
             device_latency: 0,
             shader_modules_created: Vec::new(),
             bind_group_layouts_created: Vec::new(),
+            bind_group_updates: 0,
             pipelines_created: Vec::new(),
             device_errors: std::collections::VecDeque::new(),
             reconfigure_failures: 0,
@@ -966,6 +970,15 @@ impl Recorder {
     #[must_use]
     pub fn events(&self) -> Vec<Event> {
         self.lock().events.clone()
+    }
+
+    /// How many `update_bind_group` calls have succeeded: the descriptor
+    /// writes a frame makes into a bind group that already exists, which no
+    /// [`Event`] records. A count rather than an event so that adding it did
+    /// not change [`Event`], which callers match on.
+    #[must_use]
+    pub fn bind_group_updates(&self) -> u64 {
+        self.lock().bind_group_updates
     }
 
     /// Every recorded command, in record order, across all command buffers.
@@ -1089,6 +1102,20 @@ impl Recorder {
             Detail::Buffer { size, .. } => Some(*size),
             _ => unreachable!("a buffer handle always carries buffer detail"),
         }
+    }
+
+    /// The label a live buffer was created with, or `None` for an unlabelled
+    /// buffer or a handle that is not a live buffer.
+    ///
+    /// What names the buffer behind a handle an [`Event`] carries — a
+    /// [`Event::ReadbackRequested`], say — when a test asserts which buffer it
+    /// was rather than that there was one.
+    #[must_use]
+    pub fn buffer_label(&self, buffer: BufferHandle) -> Option<String> {
+        self.lock()
+            .get(ObjectKind::Buffer, buffer.to_bits())?
+            .label
+            .clone()
     }
 
     /// Every shader module created so far, as `(label, formats the descriptor

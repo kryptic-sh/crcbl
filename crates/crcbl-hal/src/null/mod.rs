@@ -1466,7 +1466,9 @@ impl Device for NullDevice {
             return Err(self.unsupported("update_bind_group on a layout without UPDATE_AFTER_BIND"));
         }
         let layout = self.layout_of(layout_handle)?;
-        self.check_entries_against(&layout, entries)
+        self.check_entries_against(&layout, entries)?;
+        self.recorder.lock().bind_group_updates += 1;
+        Ok(())
     }
 
     fn destroy_bind_group(&self, group: BindGroupHandle) {

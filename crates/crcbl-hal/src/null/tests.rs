@@ -4147,10 +4147,12 @@ fn a_host_visible_buffer_cannot_fill_a_writable_storage_binding() {
 
 /// `update_bind_group` on a layout without `UPDATE_AFTER_BIND` is the error
 /// `Device::update_bind_group` promises, and `crcbl-vk` produces. The null
-/// backend used to accept it, which made the doc untestable.
+/// backend used to accept it, which made the doc untestable. The recorder
+/// counts the update that went through and not the one refused.
 #[test]
 fn updating_a_group_without_update_after_bind_is_refused() {
-    let instance = NullInstance::gpu_driven();
+    let recorder = Recorder::new();
+    let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
     let device = open(&instance);
     let slot = |flags| BindGroupLayoutEntry {
         binding: 0,
@@ -4181,6 +4183,11 @@ fn updating_a_group_without_update_after_bind_is_refused() {
         .update_bind_group(plain_group, &[])
         .expect_err("no UPDATE_AFTER_BIND");
     assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
+    assert_eq!(
+        recorder.bind_group_updates(),
+        0,
+        "a refused update is not a write"
+    );
 
     let bindless = device
         .create_bind_group_layout(&BindGroupLayoutDesc {
@@ -4199,6 +4206,37 @@ fn updating_a_group_without_update_after_bind_is_refused() {
     device
         .update_bind_group(bindless_group, &[])
         .expect("UPDATE_AFTER_BIND is what the flag is for");
+    assert_eq!(recorder.bind_group_updates(), 1);
+}
+
+/// A buffer's label is read back by its handle, and a handle that is not a
+/// live buffer has none.
+#[test]
+fn a_buffer_label_is_read_back_by_its_handle() {
+    let recorder = Recorder::new();
+    let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+    let device = open(&instance);
+    let buffer = |label| {
+        device
+            .create_buffer(&BufferDesc {
+                label,
+                size: 16,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a buffer")
+    };
+    let named = buffer(Some("named"));
+    let unnamed = buffer(None);
+    assert_eq!(recorder.buffer_label(named).as_deref(), Some("named"));
+    assert_eq!(recorder.buffer_label(unnamed), None);
+    device.destroy_buffer(named);
+    assert_eq!(
+        recorder.buffer_label(named),
+        None,
+        "a dead handle has no label"
+    );
+    device.destroy_buffer(unnamed);
 }
 
 /// `PushConstantRange { offset: u32::MAX, size: 1 }` panicked in debug and

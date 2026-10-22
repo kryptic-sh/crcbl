@@ -57,6 +57,19 @@ correction". Those numbers resolve here:
 | Exit criteria                | 10k+ instanced meshes with CPU frame time flat against instance count; zero per-frame descriptor writes and zero frame-loop readbacks bar the ring; a golden per selected path combination |
 | The 2026-07-27 correction(s) | Camera-relative instances, the fixed bucket table, GPU radix sort for transparency, and each path selector as a permutation axis — see the rules below                                     |
 
+- **The exit criteria's first two rows are measured (2026-10-22).** CPU frame
+  time against mesh instances, on the office laptop's Intel RPL-U (Mesa 26.2.5)
+  through `mesh_e2e`'s `bucket_price` with its instance count overridden: from 1
+  000 to 40 000 instances the calls a frame stayed 32 (a call per bucket) and 22
+  (ranged), and the CPU-only columns stayed near a tenth of a millisecond
+  (`IndirectCount` begin 0.054 → 0.084 ms, build 0.083 → 0.115 ms, submit 0.096
+  → 0.198 ms). `record` with pass timers on rises on the ranged tail; with
+  `CRCBL_PRICE_UNTIMED=1` it is 0.24–0.61 ms at every size, so that rise is the
+  timers' wait. Descriptor writes and readbacks are counted, not argued:
+  `crates/crcbl-render/tests/steady_state.rs` draws 60 steady-state frames of 10
+  000 instances on the null backend and asserts no bind group created, no
+  `update_bind_group`, and one readback a frame, of the cull-stats ring's
+  buffer.
 - **The lesser path is a constraint on data layout, not a separate renderer.**
   Pools, instance buffers and material tables are laid out so every path
   consumes them; only the emit tail and the material lookup differ. **The cull
