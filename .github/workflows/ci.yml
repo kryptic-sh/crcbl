@@ -3385,6 +3385,11 @@ jobs:
       # One directory of each theme, shallow, sparse and without the blobs
       # outside it: Papirus's whole tree is many times the 48-pixel set the
       # measurement reads.
+      #
+      # Each fetch is tried three times, each attempt bounded: the themes come
+      # from three projects' own hosts, and KDE's and GNOME's each answered a
+      # 502 on 2026-10-22 and nothing on the retry after, so one host's bad
+      # minute should cost a retry rather than the job.
       - name: Fetch the themes at their pinned commits
         timeout-minutes: 10
         run: |
@@ -3393,8 +3398,16 @@ jobs:
             git init -q "$RUNNER_TEMP/$1"
             git -C "$RUNNER_TEMP/$1" remote add origin "$2"
             git -C "$RUNNER_TEMP/$1" sparse-checkout set --no-cone "/$4/"
-            git -C "$RUNNER_TEMP/$1" fetch -q --depth 1 --filter=blob:none origin "$3"
-            git -C "$RUNNER_TEMP/$1" checkout -q FETCH_HEAD
+            for wait in 15 45 0; do
+              if timeout 120 git -C "$RUNNER_TEMP/$1" fetch -q --depth 1 \
+                --filter=blob:none origin "$3"; then
+                git -C "$RUNNER_TEMP/$1" checkout -q FETCH_HEAD
+                return 0
+              fi
+              [ "$wait" -eq 0 ] || sleep "$wait"
+            done
+            echo "::error::$2 did not serve $3 in three attempts; the host is down, which is not a fault in this repository"
+            return 1
           }
           fetch adwaita https://gitlab.gnome.org/GNOME/adwaita-icon-theme.git "$ADWAITA_COMMIT" Adwaita
           fetch papirus https://github.com/PapirusDevelopmentTeam/papirus-icon-theme.git "$PAPIRUS_COMMIT" Papirus/48x48
