@@ -24412,10 +24412,46 @@ What else is open:
   trimesh or heightfield to walk on, which is what a real map is. It has not
   been profiled, run at scale, or checked for cross-target determinism. Nothing
   exercises `CharacterConfig` values other than the default.
-- **The swept-capsule narrow phase inherits `swept_sphere_vs_aabb`'s corner
-  treatment:** the box is inflated by the radius rather than rounded, so a
-  capsule arriving diagonally at a box corner reports the inflated box's corner
-  and its face normal. Pre-existing, and shared by both sweep families.
+- **An unturned box's straight capsule sweep stands a character on air past the
+  box's edge (EW, 2026-10-23, on 0.8.1).** `swept_capsule_vs_box` hands an
+  unturned box to `swept_capsule_vs_aabb`, which inflates the box by the radius
+  rather than rounding it (`swept_sphere_vs_aabb`'s treatment), so a capsule
+  over the inflated corner meets the box's top face, normal straight up. EW's
+  case, through its `PlayerController` with radius 0.30: a box whose top edge is
+  at x = 0.5, a capsule spawned at x = 0.79 stays grounded for 60 ticks though
+  the gap to the corner is 0.124 m; `sweep_capsule_filtered` straight down
+  reports t ≈ 0.01 with normal (0, 1, 0) at (0.5, 0, 0). Walking off goes
+  airborne only near edge + radius. The same platform as a `TriangleMesh` falls
+  at x = 0.79 and tips onto the edge, so only the box path is wrong. Expected: a
+  rounded-edge contact, normal from the corner toward the capsule's axis, which
+  the controller's slope limit then refuses. **Not yet fixed.** Options: route
+  unturned boxes through `advance_upright_capsule`, as turned boxes already are
+  (one path, but iterative and stopping a little short); or sweep the exact
+  rounded box (faces, edge cylinders, corner spheres) in closed form, as
+  `world::arc_sweep_tests`'s
+  `an_unturned_box_edge_is_met_where_the_round_capsule_touches_it` already holds
+  the arc sweep to. Prefer the closed form for the straight sweep: it is exact,
+  non-iterative and keeps the determinism-bearing path free of an iteration
+  count. A regression test is EW's repro. EW takes the fix through the next
+  crates.io release and has nothing pending on it.
+- **A capsule wedged in a V-crease of two steep faces is never grounded (EW,
+  2026-10-23, on 0.8.1).** EW's repro, through its `PlayerController` with
+  radius 0.30: a `TriangleMesh` V of two 60° faces meeting along z at x = 0
+  (vertices (-5, 5·tan 60°, ±5), (0, 0, ±5), (5, 5·tan 60°, ±5)), capsule
+  spawned at (0, 1, 0). After 5 s at 1/60 s ticks `move_and_slide` still reports
+  `grounded == false` with the body resting in the crease and making no downward
+  progress; walking along the crease for 30 s moves it 0.33 m, at air control,
+  and it can never jump out. The same at 1/144 s, uneven steps and 0.1 s ticks.
+  Each face alone is steeper than `min_ground_normal_y`, and
+  `CharacterController::is_walkable` judges one normal at a time, so no single
+  contact is footing. Expected, as EW asks: when the contacts holding the
+  capsule up together point up within the walkable limit (their normals' sum,
+  normalized, has `y >= min_ground_normal_y`), that is footing. **Not yet fixed,
+  not investigated in `CharacterController`.** To decide with it: which normal
+  the ground then reports (the combined one, so slope projection runs along the
+  crease), and whether a crease steeper than the limit along its own length
+  still slides. A regression test is EW's repro. EW takes the fix through the
+  next crates.io release and has nothing pending on it.
 
 ### What puppet's locomotion blend leaves for the rest of milestone 2
 
