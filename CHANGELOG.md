@@ -15,6 +15,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-mixer`, a new crate: control of the system's audio mixer.** Reads
+  every output and input device (volume as the percent desktop mixers show,
+  mute, default, active port and ports, form factor, Bluetooth, card), every
+  playing and recording stream with its application and device, and every card's
+  profiles; `Mixer::apply` sets volume or mute, steps the volume, makes a device
+  the default, moves a stream, and selects a port or a profile; a waker is
+  called on every change, with `Interest::Devices` to ignore stream churn. On
+  Linux it speaks PipeWire's own protocol over its socket, written in the crate,
+  with no C library and no tool such as `pactl`. PulseAudio without PipeWire,
+  Windows and macOS are planned; `Mixer::open` reports `MixerError::NoServer` or
+  `Unsupported` there.
 - **`crcbl_hal::null::Recorder::bind_group_updates` and
   `Recorder::buffer_label`.** The null backend's recorder now counts successful
   `update_bind_group` calls, which no `Event` records, and names the buffer

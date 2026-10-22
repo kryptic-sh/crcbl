@@ -13,13 +13,27 @@ Delete this once EW knows.
 
 ## System audio control, asked by lyr for the owner (2026-10-22)
 
-**Approved by the owner on 2026-10-22, in progress.** PipeWire and PulseAudio
-are both spoken natively: PipeWire's own protocol when its socket is there,
-PulseAudio's when it is not (the owner runs PipeWire and wants it supported
-natively, not through `pipewire-pulse`). A seam any crcbl app can use to control
-the system mixer on Linux, Windows and macOS: volume, mute, devices, streams.
-Not playback, which is `crcbl-audio` and cpal. lyr moves its audio onto it and
-drops its own per-platform sources (`lyr-sources/src/audio/`: `pactl.rs`,
+**Approved by the owner on 2026-10-22, in progress.** **Slice 1 is on main**
+(`crates/crcbl-mixer`): the model and the PipeWire backend. Verified on the
+office laptop (PipeWire 1.6.9) by `tests/pipewire_live.rs`, run by hand: every
+sink and source agrees with `pactl` on id (the object serial), name, volume,
+mute and the default; volume and mute set on a card's active route (HDMI1) and
+on a node's own props (HDMI3) reach the server, `pactl` sees them, the waker
+fires, and both are put back. **Written and not yet run against a server:**
+make-default, move-a-stream, set-port and set-profile (each changes the owner's
+live audio, so they wait for a test that restores it safely or for lyr's run),
+and the `Interest::Devices` filter. Two server behaviours found and handled: a
+node lists `Props` as more than one object, the volume in the first; and a
+card's subscription does not resend a changed param, so the client re-enumerates
+a param when the card's info flips its serial bit, and a re-enumeration numbers
+its values by place among all of them (routes arrive as 2, 3, 5). Next: lyr's
+run through a local `[patch]`, then the PulseAudio backend. PipeWire and
+PulseAudio are both spoken natively: PipeWire's own protocol when its socket is
+there, PulseAudio's when it is not (the owner runs PipeWire and wants it
+supported natively, not through `pipewire-pulse`). A seam any crcbl app can use
+to control the system mixer on Linux, Windows and macOS: volume, mute, devices,
+streams. Not playback, which is `crcbl-audio` and cpal. lyr moves its audio onto
+it and drops its own per-platform sources (`lyr-sources/src/audio/`: `pactl.rs`,
 `windows.rs` and `win32.rs`, `macos.rs` and `coreaudio.rs`, `level.rs`; model
 types `lyr_core::audio` and `lyr_core::audio_menu`), which are the requirements
 reference and may be taken.

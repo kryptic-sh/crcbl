@@ -307,6 +307,7 @@ crates/crcbl-steam      Steamworks over the SDK's flat C API, loaded at runtime
 crates/crcbl-reflect    a component's editable fields, and the derive that writes them
 crates/crcbl-greybox    greybox prototyping primitives, sized in real-world metres
 crates/crcbl-golden     golden-image comparison for the render tests
+crates/crcbl-mixer      control of the system mixer: volume, devices, streams (PipeWire; more planned)
 crates/crcbl-rand       the one randomness seam
 crates/crcbl-cli        the `crcbl` binary
 apps/                   the samples

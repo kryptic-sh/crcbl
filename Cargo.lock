@@ -851,6 +851,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-mixer"
+version = "0.8.1"
+dependencies = [
+ "crcbl-spawn",
+]
+
+[[package]]
 name = "crcbl-mtl"
 version = "0.8.1"
 dependencies = [

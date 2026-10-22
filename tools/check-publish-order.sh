@@ -37,6 +37,7 @@ crcbl-shaders
 crcbl-net
 crcbl-store
 crcbl-audio
+crcbl-mixer
 crcbl-hal
 crcbl-shell
 crcbl-input

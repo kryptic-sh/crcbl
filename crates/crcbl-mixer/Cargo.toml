@@ -1,0 +1,22 @@
+[package]
+name = "crcbl-mixer"
+description = "Crucible mixer control: the system's volume, devices and streams"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# No dependencies, by the owner's rule for this crate: it reaches the sound
+# server through its protocol, written here, rather than through a C client
+# library a user might not have, or a tool such as `pactl`. Windows and macOS
+# will add the platform crates the workspace already uses (`windows`, `objc2`)
+# when their backends land.
+[dependencies]
+
+# The live test runs `pactl` as its witness, through the workspace's spawner.
+[dev-dependencies]
+crcbl-spawn = { workspace = true }
