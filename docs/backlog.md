@@ -6917,9 +6917,11 @@ G2–G6 and T1–T2 are separate slices rather than gaps.
   excused by name. **Also declined: `precise` on the placement arithmetic** —
   Slang accepts it and emits no `NoContraction` in SPIR-V, and WGSL has no
   equivalent, so it cannot make two compilers agree about a multiply-add.
-- **Not reviewed or tested**: the grass passes on Metal and D3D12. The artefacts
-  are committed and compile, but no frame has been drawn on either; CI's
-  software adapters are the only verdict available.
+- **Not reviewed or tested**: the grass passes on Metal. D3D12 drew them on
+  hardware 2026-10-23, on the RX 7900 XTX (driver 32.0.21036.18),
+  `CRCBL_GPU=dx12` over `run-render-e2e.sh`, every `render_e2e::grass` test
+  passing with its golden (104 of 104 in the suite). Metal's verdict is still
+  CI's software adapter.
 
 ## What occlusion culling shipped without (2026-09-17)
 
@@ -7023,7 +7025,9 @@ benchmarked.
 - **Blades are unpriced in a browser.** Natively at 1920×1080 the `grass` pass
   costs 0.124 ms near, 0.047 ms far and 0.053 ms at the meadow's switch on an RX
   7900 XTX; 47.2, 12.4 and 16.2 ms on lavapipe.
-- **Not reviewed or tested**: blades on Metal and D3D12.
+- **Not reviewed or tested**: blades on Metal. Every `grass_blades` test, golden
+  included, passed on D3D12 hardware 2026-10-23, on the RX 7900 XTX (driver
+  32.0.21036.18), `CRCBL_GPU=dx12`.
 - **`BLADE_FAR_WIDEN` and `CLUMP_DOME` are chosen, not measured.**
 - **The far level lives on fixed tiles**, keeping one cell of each two-by-two
   block, until G6's rings give the plan's twice-the-size tiles.
@@ -7052,7 +7056,9 @@ benchmarked.
 - **Shells are unpriced in a browser**, as G1's cards are. Measured natively at
   1920×1080: 16 shells with fins 0.933 ms on an RX 7900 XTX and 65.7 ms on
   lavapipe, about 0.040 ms per layer on the hardware adapter.
-- **Not reviewed or tested**: shells and fins on Metal and D3D12.
+- **Not reviewed or tested**: shells and fins on Metal. Every `grass_shells`
+  test, golden included, passed on D3D12 hardware 2026-10-23, on the RX 7900 XTX
+  (driver 32.0.21036.18), `CRCBL_GPU=dx12`.
 - **Near the camera the stack shows its layers** at 16 shells over 0.55 m. A
   per-distance shell count or near fins would fix it, if wanted.
 - **The `cells` buffer is allocated for card-only fields too**, the size of the
@@ -10658,12 +10664,14 @@ The sun disc half is done too — `sky.slang`'s `sun_disc` and
   a scene that wants a reddened low sun sets it; attenuating it would also move
   every atmosphere golden.
 
-- **`SkyParams` grew and Metal and D3D12 have not run it.** The block is sixteen
-  bytes longer and `sky.slang` reads one more `float4`; no _binding_ changed, so
-  `crcbl_dx12::dxil`'s rows are untouched and the layout is the one every
-  backend already agreed about. Still, the only verdict on `msl/sky.metal` and
-  `dxil/sky.fragment.dxil` is CI's software adapters — there is no Apple or
-  Windows hardware here.
+- **`SkyParams` grew and Metal has not run it.** D3D12 has, on hardware
+  2026-10-23, on the RX 7900 XTX (driver 32.0.21036.18), `CRCBL_GPU=dx12` over
+  `run-render-e2e.sh`, `an_atmosphere_mirror_reflects_the_luts_limb` and
+  `aerial` passing. The block is sixteen bytes longer and `sky.slang` reads one
+  more `float4`; no _binding_ changed, so `crcbl_dx12::dxil`'s rows are
+  untouched and the layout is the one every backend already agreed about. Still,
+  the only verdict on `msl/sky.metal` is CI's software adapter — there is no
+  Apple hardware here.
 
 - **The share between the LUT and the bands is argued, not measured.**
   `sky_environment` takes `sharpness_of`'s ramp because that ramp is already
@@ -10676,16 +10684,19 @@ The sun disc half is done too — `sky.slang`'s `sun_disc` and
   reference would be a brute-force GGX gather over the LUT on the host, which is
   a fixture rather than a shipped path.
 
-- **The new binding is unmeasured on Metal and D3D12.** `crcbl_render::ssr`'s
-  `SKY_VIEW_BINDING` lands at `msl/ssr.metal`'s `buffer(2)` and is declared
-  `ShaderStages::FRAGMENT` alone — matching the probe table at binding 4, and
-  unlike `crcbl_render::sky_pass`'s copy of the same buffer, which names
-  `VERTEX` beside `FRAGMENT` because Slang's Metal backend materialises every
-  global into every entry point. `ssr.metal`'s `vertexMain` has taken `probes`
-  at `buffer(1)` unbound since that binding landed, which is the evidence the
-  narrower visibility is safe here; it is evidence by analogy and not a run.
-  There is no Apple or Windows hardware here, so CI's software adapters are the
-  only verdict, and `ATMOSPHERE_MIRROR_BAND_LEVELS` carries headroom for them.
+- **The new binding is unmeasured on Metal.** On D3D12 it ran on 2026-10-23 on
+  the RX 7900 XTX (driver 32.0.21036.18), with `CRCBL_GPU=dx12`:
+  `a_missed_reflection_falls_back_to_the_sky_along_its_own_ray` and the
+  atmosphere mirror passed. `crcbl_render::ssr`'s `SKY_VIEW_BINDING` lands at
+  `msl/ssr.metal`'s `buffer(2)` and is declared `ShaderStages::FRAGMENT` alone —
+  matching the probe table at binding 4, and unlike `crcbl_render::sky_pass`'s
+  copy of the same buffer, which names `VERTEX` beside `FRAGMENT` because
+  Slang's Metal backend materialises every global into every entry point.
+  `ssr.metal`'s `vertexMain` has taken `probes` at `buffer(1)` unbound since
+  that binding landed, which is the evidence the narrower visibility is safe
+  here; it is evidence by analogy and not a run. There is no Apple hardware
+  here, so CI's software adapter is Metal's only verdict, and
+  `ATMOSPHERE_MIRROR_BAND_LEVELS` carries headroom for it.
 
 - **The striped march now runs under a moving sun, and nobody has looked at
   it.** `apps/sundial` calls `ForwardRenderer::set_atmosphere` every frame from
@@ -12608,14 +12619,16 @@ brute-force hemisphere sweep and against the GGX lobe. What it did not do:
   is compared on radv, lavapipe and SwiftShader. What that buys is a _frame_,
   not a _price_: nothing times the rectangle's shading against a punctual
   light's on any tier, so the recorded browser figure is still an ALU count.
-- **Metal and D3D12 have never drawn a rectangle; WGSL now has.**
-  `Scene::AreaLight` reaches the browser harness, so SwiftShader draws one every
-  run and matches the radv golden at a max channel delta of 1. What is left is
-  the two backends with no hardware here: `mesh_e2e` names no backend, so
-  `CRCBL_GPU=mtl`/`dx12` over `crates/crcbl/tests/run-mesh-e2e.sh` is the
-  evidence that is missing, and the artifacts are compiled and committed with
-  nothing having run them. Note the WGSL route was never a native harness run —
-  asking for `webgpu` natively refuses rather than falling back
+- **Metal has never drawn a rectangle; D3D12 and WGSL now have.**
+  `CRCBL_GPU=dx12` over `crates/crcbl/tests/run-mesh-e2e.sh` ran on 2026-10-23
+  on the RX 7900 XTX (driver 32.0.21036.18): 120 of 120,
+  `area_light::an_area_light_over_a_slab_matches_its_golden` at a max channel
+  delta of 1. `Scene::AreaLight` reaches the browser harness, so SwiftShader
+  draws one every run and matches the radv golden at a max channel delta of 1.
+  What is left is Metal, with no hardware here: `CRCBL_GPU=mtl` over the same
+  harness is the evidence that is missing. Note the WGSL route was never a
+  native harness run — asking for `webgpu` natively refuses rather than falling
+  back
   (`it reaches a device only on wasm32, where it is the automatic backend`), so
   the browser harness is the only thing that could ever have exercised those
   artifacts.
