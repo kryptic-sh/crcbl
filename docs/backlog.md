@@ -8628,9 +8628,10 @@ green local run.
   127 for `BENT_NORMAL_NONE` on the MX550 were the shaders writing the zero
   direction as `0.5`, a rounding tie at `127.5` Vulkan leaves to the driver;
   they now write 128/255. The two `mesh_e2e` exposure failures recorded on
-  615.71 did not reproduce. `CRCBL_VK_ICD=hardware` drops the pin in every suite
-  (`crcbl_pin_vk_icd`), not only `run-vk-e2e.sh`, whose null-backend step now
-  runs without a developer's `CRCBL_ADAPTER`.
+  615.71 did not reproduce, and the whole mesh suite passed 120 of 120 on the
+  MX550 again on 2026-10-23. `CRCBL_VK_ICD=hardware` drops the pin in every
+  suite (`crcbl_pin_vk_icd`), not only `run-vk-e2e.sh`, whose null-backend step
+  now runs without a developer's `CRCBL_ADAPTER`.
 - **lavapipe runs commands in the order they were recorded, which hides a
   missing barrier.** `crcbl-vk` records explicit pipeline barriers
   (`vkCmdPipelineBarrier2`), and a driver may run commands that declare no
@@ -8647,16 +8648,6 @@ green local run.
   on a hardware adapter** — `CRCBL_VK_ICD=hardware` with the validation
   variables above — not only on lavapipe. On the MX550 after the fix,
   `run-draw-gen-e2e.sh` passes 17 of 17.
-- **Two `mesh_e2e` exposure tests fail on the MX550** and pass on lavapipe:
-  `exposure::the_histogram_bins_every_texel_of_the_frame_the_host_reads_back`
-  ("a frame that landed in one bin would make every comparison here vacuous")
-  and `exposure::the_direction_of_travel_picks_the_rate` (measured 10.563887).
-  Not diagnosed. Given the ordering bug above, first check whether the
-  histogram's readers are ordered against its writer by a barrier on hardware;
-  "Exposure reduces to a slightly different number" under the D3D12 hardware
-  section may be the same fault. The full `run-mesh-e2e.sh`, `run-render-e2e.sh`
-  and `run-forward-e2e.sh` suites have not been run on the MX550 beyond these
-  filters.
 
 ## What secondary views shipped without (2026-09-15)
 
