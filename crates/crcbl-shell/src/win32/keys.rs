@@ -478,11 +478,19 @@ pub const fn without_composition_window(l_param: isize) -> isize {
 /// changed, which is what makes it a pre-edit.
 ///
 /// The message also arrives for a result alone (`GCS_RESULTSTR`), which is the
-/// commit: that reaches the seam as `WM_CHAR`, never as a pre-edit.
+/// commit, never a pre-edit; see [`composition_committed`].
 #[must_use]
 pub const fn composition_changed(l_param: isize) -> bool {
     // The `GCS_*` flags are a `DWORD` in the low half; truncating is the read.
     (l_param as u32) & value::GCS_COMP_STR != 0
+}
+
+/// Whether a `WM_IME_COMPOSITION`'s `lParam` carries a result, which is the
+/// commit. One message can carry both a result and a new composition, when the
+/// input method commits part of what was typed and keeps composing the rest.
+#[must_use]
+pub const fn composition_committed(l_param: isize) -> bool {
+    (l_param as u32) & value::GCS_RESULT_STR != 0
 }
 
 /// The keys an input method consumed, so neither edge of one is reported.
@@ -535,16 +543,28 @@ mod tests {
 
     #[test]
     fn only_a_changed_composition_string_is_a_pre_edit() {
-        /// `GCS_RESULTSTR`: the commit, which arrives as `WM_CHAR` instead.
-        const GCS_RESULT_STR: isize = 0x0800;
         /// `GCS_COMPATTR`: the clause attributes, sent alongside the string.
         const GCS_COMP_ATTR: isize = 0x0010;
         let comp_str = value::GCS_COMP_STR as isize;
+        let result_str = value::GCS_RESULT_STR as isize;
         assert!(composition_changed(comp_str));
         assert!(composition_changed(comp_str | GCS_COMP_ATTR));
-        assert!(composition_changed(comp_str | GCS_RESULT_STR));
-        assert!(!composition_changed(GCS_RESULT_STR));
+        assert!(composition_changed(comp_str | result_str));
+        assert!(!composition_changed(result_str));
         assert!(!composition_changed(0));
+    }
+
+    #[test]
+    fn only_a_result_is_a_commit() {
+        let comp_str = value::GCS_COMP_STR as isize;
+        let result_str = value::GCS_RESULT_STR as isize;
+        assert!(composition_committed(result_str));
+        assert!(
+            composition_committed(result_str | comp_str),
+            "a partial commit carries the rest of the composition too"
+        );
+        assert!(!composition_committed(comp_str));
+        assert!(!composition_committed(0));
     }
 
     #[test]

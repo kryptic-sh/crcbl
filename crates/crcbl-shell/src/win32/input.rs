@@ -268,33 +268,7 @@ fn with_input_context<T>(hwnd: Handle, use_it: impl FnOnce(Handle) -> T) -> Opti
 /// during this message; see [`Preedit`](super::proc::Preedit).
 pub(super) fn composition(hwnd: Handle) -> (Vec<u16>, Option<usize>) {
     with_input_context(hwnd, |context| {
-        // SAFETY: a null buffer with a zero size asks only for the size in
-        // bytes; a negative answer is an `IMM_ERROR_*`.
-        let answer = unsafe {
-            ffi::ImmGetCompositionStringW(context, value::GCS_COMP_STR, ptr::null_mut(), 0)
-        };
-        let Ok(bytes) = u32::try_from(answer) else {
-            crcbl_core::log::debug!("the composition string's size was refused: {answer}");
-            return (Vec::new(), None);
-        };
-        // Rounded up, so an odd answer cannot have the call write a byte past
-        // the buffer.
-        let mut units = vec![0u16; (bytes as usize).div_ceil(size_of::<u16>())];
-        // SAFETY: `units` holds at least `bytes` bytes, which is the size the
-        // call is told it may write.
-        let copied = unsafe {
-            ffi::ImmGetCompositionStringW(
-                context,
-                value::GCS_COMP_STR,
-                units.as_mut_ptr().cast(),
-                bytes,
-            )
-        };
-        let Ok(copied) = usize::try_from(copied) else {
-            crcbl_core::log::debug!("the composition string was refused: {copied}");
-            return (Vec::new(), None);
-        };
-        units.truncate(copied / size_of::<u16>());
+        let units = composition_string(context, value::GCS_COMP_STR);
         // SAFETY: `GCS_CURSORPOS` answers in the return value and writes
         // nothing, so a null buffer is what it takes.
         let cursor = unsafe {
@@ -303,6 +277,45 @@ pub(super) fn composition(hwnd: Handle) -> (Vec<u16>, Option<usize>) {
         (units, usize::try_from(cursor).ok())
     })
     .unwrap_or_default()
+}
+
+/// The string the composition committed, as UTF-16 code units; empty when
+/// there is no input context or no result.
+///
+/// Read here rather than left to the default handler, which would turn it into
+/// `WM_IME_CHAR` and `WM_CHAR` but also show the input method's own
+/// composition window; see the `WM_IME_COMPOSITION` arm in
+/// [`proc`](super::proc).
+pub(super) fn composition_result(hwnd: Handle) -> Vec<u16> {
+    with_input_context(hwnd, |context| {
+        composition_string(context, value::GCS_RESULT_STR)
+    })
+    .unwrap_or_default()
+}
+
+/// One of the input context's strings — `GCS_COMPSTR` or `GCS_RESULTSTR` — as
+/// UTF-16 code units, or empty if the input method refuses the read.
+fn composition_string(context: ffi::Handle, index: u32) -> Vec<u16> {
+    // SAFETY: a null buffer with a zero size asks only for the size in bytes; a
+    // negative answer is an `IMM_ERROR_*`.
+    let answer = unsafe { ffi::ImmGetCompositionStringW(context, index, ptr::null_mut(), 0) };
+    let Ok(bytes) = u32::try_from(answer) else {
+        crcbl_core::log::debug!("the size of input method string {index:#x} was refused: {answer}");
+        return Vec::new();
+    };
+    // Rounded up, so an odd answer cannot have the call write a byte past the
+    // buffer.
+    let mut units = vec![0u16; (bytes as usize).div_ceil(size_of::<u16>())];
+    // SAFETY: `units` holds at least `bytes` bytes, which is the size the call
+    // is told it may write.
+    let copied =
+        unsafe { ffi::ImmGetCompositionStringW(context, index, units.as_mut_ptr().cast(), bytes) };
+    let Ok(copied) = usize::try_from(copied) else {
+        crcbl_core::log::debug!("input method string {index:#x} was refused: {copied}");
+        return Vec::new();
+    };
+    units.truncate(copied / size_of::<u16>());
+    units
 }
 
 /// Turns the input method on or off for `hwnd`: its thread's default input

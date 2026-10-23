@@ -522,6 +522,59 @@ mod desktop {
         took && conversion & IME_HIRAGANA == IME_HIRAGANA
     }
 
+    #[cfg(feature = "win32-ime-e2e")]
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumWindows(
+            callback: unsafe extern "system" fn(Handle, isize) -> i32,
+            context: isize,
+        ) -> i32;
+        fn IsWindowVisible(hwnd: Handle) -> i32;
+    }
+
+    /// The visible top-level windows of this process that are an input
+    /// method's own composition window, described for the failure message.
+    ///
+    /// `MSCTFIME Composition` is the class the TSF bridge gives the window it
+    /// draws the reading in (pikr's report on 0.8.1); a field that draws its
+    /// own pre-edit must leave none showing. Every visible window of this
+    /// process whose class names a composition window is counted, so a
+    /// differently prefixed class from another input method is caught too.
+    #[cfg(feature = "win32-ime-e2e")]
+    #[must_use]
+    pub fn composition_windows_showing() -> Vec<String> {
+        unsafe extern "system" fn collect(hwnd: Handle, context: isize) -> i32 {
+            // SAFETY: `context` is the `&mut Vec<Handle>` `EnumWindows` was
+            // handed below, live for the whole enumeration.
+            let found = unsafe { &mut *(context as *mut Vec<Handle>) };
+            let mut process: u32 = 0;
+            // SAFETY: a window handle by value; the out-pointer is a live
+            // `DWORD`; `IsWindowVisible` takes the handle by value.
+            let ours = unsafe {
+                GetWindowThreadProcessId(hwnd, &raw mut process);
+                process == GetCurrentProcessId() && IsWindowVisible(hwnd) != 0
+            };
+            if ours {
+                found.push(hwnd);
+            }
+            1
+        }
+        let mut visible: Vec<Handle> = Vec::new();
+        // SAFETY: the callback reads `context` only as the vector passed here,
+        // which outlives the call.
+        unsafe { EnumWindows(collect, (&raw mut visible) as isize) };
+        visible
+            .into_iter()
+            .filter(|&hwnd| {
+                // SAFETY: as in `describe`.
+                let class =
+                    text(|buffer, capacity| unsafe { GetClassNameW(hwnd, buffer, capacity) });
+                class.contains("Composition")
+            })
+            .map(describe)
+            .collect()
+    }
+
     /// Where the window's input method was last told to put its composition
     /// window, or `None` without an input context.
     #[cfg(feature = "win32-ime-e2e")]
@@ -2143,7 +2196,7 @@ fn a_key_typed_by_another_process_carries_its_position_its_symbol_and_its_text()
 ///
 /// Typing `k` `a` in hiragana composes `か`. That is the pre-edit, with the
 /// input method's cursor after it (byte 3, since `か` is three bytes). Enter
-/// commits it: a `TextCommit` of `か` through `WM_CHAR`, and an empty pre-edit
+/// commits it: a `TextCommit` of `か` read from the composition's result, and an empty pre-edit
 /// when the composition ends.
 #[cfg(feature = "win32-ime-e2e")]
 #[test]
@@ -2222,6 +2275,12 @@ fn an_input_method_composition_is_a_pre_edit_and_its_result_a_commit() {
         !session.names().contains(&"TextCommit"),
         "nothing is committed while composing: {:?}",
         session.names()
+    );
+    let showing = desktop::composition_windows_showing();
+    assert!(
+        showing.is_empty(),
+        "the field draws the pre-edit, so the input method shows no composition window of its \
+         own beside it: {showing:?}"
     );
 
     session.events.clear();

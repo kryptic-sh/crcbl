@@ -295,16 +295,14 @@ SVG text shaping and the Unicode text work have shipped; what is left:
    `crcbl_app::TextPump` draws no pre-edit at the caret and never calls
    `set_text_input_area`, so the candidate window sits at the window's origin.
    Build both in `crcbl-app` and `crcbl-ui`'s text field.
-2. **Owed by pikr, not yet run (both need the owner's go-ahead in pikr's
-   session, since they send keystrokes to the desktop).** pikr is on 0.7.0 (pikr
-   `8551e31`, builds unchanged, tests green on Windows and headless Linux).
-   Still to run there: the Japanese IME re-check that 0.7.0's
-   `WM_IME_SETCONTEXT` handling (`keys::without_composition_window`) leaves one
-   reading on screen, not the IME's own composition window beside the inline
-   pre-edit; and, on the release after 0.7.0, the keystroke test with
-   `VK_CONTROL` in place of `VK_LCONTROL` for the unsided-modifier fix, which is
-   unit-tested only. pikr adopts `TextLayout::caret` for its right-to-left query
-   caret in the same release.
+2. **Owed by pikr: the Japanese IME re-check on the release after 0.9.0.**
+   pikr's run on 0.8.1 (2026-10-23) found the IME's own composition window still
+   showing beside the inline pre-edit, and again on 0.9.0, which predates the
+   fix; the fix is proven on CI's desktop (the weekly `win32-ime` job). The
+   unsided-modifier check is done: generic `VK_CONTROL`+U in one `SendInput`
+   marked Ctrl in 4 of 4 runs on 0.9.0, where 0.8.1 lost it in 4 of 4. pikr
+   adopts `TextLayout::caret` for its right-to-left query caret in the same
+   release.
 
 **Behaviour, not a bug: an injected Win32 arrow key needs
 `KEYEVENTF_EXTENDEDKEY`** (seen by lyr, 2026-10-20). Without it, `keybd_event`
@@ -741,8 +739,7 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    Hyprland 0.56.2, 2026-10-21, an exclusive panel took the keyboard as on sway,
    and an OnDemand panel took it **on map**, where sway waits for a click, kept
    it on a click and gave it back on a click in a tiled window); S7 monitor
-   hot-plug on Win32 and AppKit; S9 Win32 pre-edit (`win32-ime-e2e` is not
-   enabled by `run-win32-e2e.ps1`), AppKit dead keys, and AppKit's input method
+   hot-plug on Win32 and AppKit; AppKit dead keys, and AppKit's input method
    against a real one — whether one in its native mode gives way to the
    Roman-only restriction `appkit::view::allow_input_methods` sets for a window
    with no field or a sensitive one, the pre-edit an input method sends, and
@@ -1769,12 +1766,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      no input context (`ImmAssociateContextEx`) and gets its default one back
      when a field asks, checked by
      `a_window_has_no_input_context_until_a_field_asks_for_one` on CI's real
-     desktop; the Japanese IME test that would show a composition after the ask
-     is behind `win32-ime-e2e`, which CI does not run. AppKit holds a window's
-     input context to the keyboard layouts until an ordinary field asks
-     (2026-10-19). A game's own text entry (what reaches
-     `HostedGame::text_event`) has no way to ask for the input method through
-     the engine yet.
+     desktop, and the Japanese IME test composes after the ask in the weekly
+     `win32-ime` job. AppKit holds a window's input context to the keyboard
+     layouts until an ordinary field asks (2026-10-19). A game's own text entry
+     (what reaches `HostedGame::text_event`) has no way to ask for the input
+     method through the engine yet.
    - S20, checked 2026-10-15. There already: hover and click as pseudo-classes
      and responses, `Shell::set_cursor` with `CursorIcon`, `ShellEvent::Wheel`
      keeping detents (`ScrollDelta::Lines`) apart from pixels, and
@@ -29782,59 +29778,23 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   makes a `GlobalSize` larger than the request harmless — and what would
   truncate an `Other("image/png")` offer ending in NUL. Recorded in
   `win32::clipboard`'s module docs as well.
-- **No verified IME pre-edit, and a CJK commit has not been watched.** Win32
-  sets `ShellCaps::TEXT_COMPOSE` for dead keys and `ShellCaps::TEXT_IME` for the
-  input method, pre-edit included, because the path is written (the bit was
-  split in two 2026-10-17). `win32_e2e`'s
-  `a_dead_key_typed_by_another_process_composes_with_the_next_key` proves the
-  dead-key half on a real desktop. The IME half rests on `DefWindowProc` turning
-  `WM_IME_CHAR` into `WM_CHAR`, which is documented behaviour but has not been
-  run here, because no East Asian IME was working on any desk tried.
-
-  **Decided 2026-10-06 (owner): the pre-edit code is merged unverified rather
-  than left parked to rot.** It was written 2026-09-21 and brought onto `main`
-  2026-10-06: `ShellEvent::TextPreedit` and a provided
-  `Shell::set_text_input_area` on the seam, and the Win32 half —
-  `WM_IME_COMPOSITION` read into a pre-edit (`input::composition`),
-  `WM_IME_ENDCOMPOSITION` as an empty one, one end per composition
-  (`preedit::Composing`, shared with AppKit since 2026-10-19), and
-  `ImmSetCompositionWindow` / `ImmSetCandidateWindow` at the caret area
-  (`input::place_ime`), restated at every `WM_IME_STARTCOMPOSITION`. Verified:
-  unit tests for the UTF-16 cursor conversion (`preedit::preedit`), the `GCS_*`
-  test (`keys::composition_changed`), the end de-duplication, the area
-  conversion (`geometry::rect_from`), the payload queues in `proc::Shared`, and
-  the `COMPOSITIONFORM` / `CANDIDATEFORM` layouts; clippy and rustdoc on the
-  Windows, Linux, macOS and wasm targets. **Not verified: anything an input
-  method does with it.**
-
-  **Owed: the real-IME e2e test.**
-  `an_input_method_composition_is_a_pre_edit_and_its_result_a_commit` in
-  `tests/win32_e2e.rs` stays behind the `win32-ime-e2e` feature and out of CI
-  (`run-win32-e2e.ps1` does not enable it), and it has never passed. On the RX
-  7900 XTX desktop (2026-09-21) the Microsoft Japanese IME reported itself open
-  in hiragana through `ImmGetConversionStatus`, yet typed plain `k` `a`. ja-JP's
-  `BasicTyping` feature was stuck downloading throughout
-  (`Get-InstalledLanguage` showed `LanguageFeatures: None`), which is the likely
-  cause. The test's `desktop::ThreadLocalInput` guard, which enables
-  `SPI_SETTHREADLOCALINPUTSETTINGS` so a per-thread language switch activates a
-  TSF input method, did not change the result either, but it was only tried
-  without the feature installed. To close it: on a machine where typing Japanese
-  in Notepad works, run the test (the command is in `crcbl-shell`'s `Cargo.toml`
-  under `win32-ime-e2e`), drop the guard if the test passes without it, and fix
-  whatever it finds. Until then no doc may call the Win32 pre-edit working.
-
-  **Run again 2026-10-06, with ja-JP's `BasicTyping` installed**
-  (`Get-InstalledLanguage` now lists it), on the same desktop: **it fails the
-  same way, so the stuck download was not the cause.** What passed, for the
-  first time against a real input method: the IME opened in hiragana on the test
-  window, and `set_text_input_area` placed its composition window at the caret
-  area's corner (40, 60, read back through `ImmGetCompositionWindow`). What did
-  not: the injected keys arrived as `Key` then `TextCommit` and no composition
-  ever started, and the test timed out at its 20 s wait (`win32_e2e.rs`' wait
-  for the composition). The next suspect is the injection itself — whether keys
-  `tests/bin/send_input_win32.rs` sends with `SendInput` reach the IME at all,
-  which typing the same keys by hand into the test window would answer — then
-  `ThreadLocalInput`. Composition placement is verified; the pre-edit is not.
+- **The Win32 input method is verified against the Japanese IME only.**
+  `an_input_method_composition_is_a_pre_edit_and_its_result_a_commit` runs in
+  the weekly `win32-ime` job in `cron.yml` since 2026-10-23, after
+  `Install-Language ja-JP` (32 minutes on the runner, which is why it is weekly
+  and not per push; an IME regression surfaces within a week rather than on the
+  push that made it): it composes `か` as a pre-edit with its cursor, commits it
+  from `GCS_RESULTSTR`, ends the composition once, reads the composition
+  window's placement back at the caret area, and asserts no
+  `MSCTFIME Composition` window is showing. Main's code failed that last check
+  (pikr's report: the reading appeared twice), and the fix keeps
+  `WM_IME_STARTCOMPOSITION` and `WM_IME_COMPOSITION` from `DefWindowProc`. Why
+  it never passed on the RX 7900 XTX desktop (2026-09-21 and 2026-10-06,
+  injected keys arrived as plain `Key` and `TextCommit`) is still unexplained;
+  the runner has no such trouble. **Not verified:** a Chinese or Korean input
+  method, the candidate list's placement (nothing reads it back), a partial
+  commit that keeps composing, and whether `desktop::ThreadLocalInput` is still
+  needed.
 
 - **Per-device ids: what is not verified.** `win32::devices` attributes each
   key, button and wheel message to the raw report that produced it, and keys ids

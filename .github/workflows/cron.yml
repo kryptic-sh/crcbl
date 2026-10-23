@@ -208,3 +208,47 @@ jobs:
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
               --body "The scheduled cron run failed: $RUN_URL. Its jobs are cargo-deny against a fresh advisory database and miri over the crates without FFI; the failing job's log says which."
           fi
+
+  # **The Win32 input-method test, against the Microsoft Japanese IME.**
+  # Weekly rather than on every push because the IME has to be installed
+  # first: `windows-latest` does not carry ja-JP's language features, and
+  # `Install-Language` took 32 minutes on 2026-10-23, longer than the rest of
+  # the `win32-e2e` job put together. The step after it fails when the
+  # features still are not there, so a failed install is a red step and not a
+  # test that cannot compose. The test is behind `win32-ime-e2e`, which
+  # `run-win32-e2e.ps1` does not enable.
+  win32-ime:
+    name: win32 input method (Japanese IME)
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+          shared-key: test
+      - uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Install Japanese and put it in the user's language list
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Language -Language ja-JP | Out-String | Write-Host
+          $basic = Get-WindowsCapability -Online -Name 'Language.Basic~~~ja-JP~0.0.1.0'
+          if ($basic.State -ne 'Installed') {
+            throw "ja-JP's basic language features are $($basic.State) after Install-Language, so the Japanese IME cannot run"
+          }
+          $list = Get-WinUserLanguageList
+          if (-not ($list | Where-Object LanguageTag -like 'ja*')) { $list.Add('ja-JP') }
+          Set-WinUserLanguageList $list -Force
+          Get-WinUserLanguageList | Format-List LanguageTag, InputMethodTips | Out-String | Write-Host
+      - name: Compose through the Japanese IME
+        shell: pwsh
+        run:
+          cargo nextest run --locked -p crcbl-shell --features
+          win32-e2e,win32-ime-e2e --test win32_e2e --run-ignored all --no-tests
+          fail --success-output immediate -E 'test(/input_method/)'

@@ -1242,18 +1242,18 @@ impl Shell for Win32Shell {
     ///   `WM_CHAR`, which arrives as [`TextCommit`](ShellEvent::TextCommit),
     ///   surrogate pairs joined. `win32_e2e`'s dead-key test proves the
     ///   composition on a real desktop.
-    /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — `imm32`. The `WM_IME_*` family
-    ///   falls through to `DefWindowProc`, which delivers an IME's committed
-    ///   string as `WM_CHAR` and so as a commit. The composition in progress is
-    ///   read from `WM_IME_COMPOSITION` and reported as
+    /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — `imm32`. An IME's committed
+    ///   string is read from `WM_IME_COMPOSITION` (`GCS_RESULTSTR`) and
+    ///   delivered as a commit, and the composition in progress is read from
+    ///   the same message and reported as
     ///   [`TextPreedit`](ShellEvent::TextPreedit), and
     ///   [`set_text_input_area`](Shell::set_text_input_area) places the input
-    ///   method's composition window and candidate list at the caret. **The
-    ///   pre-edit and placement are unverified against a real input method**:
-    ///   their desktop test, behind the `win32-ime-e2e` feature, has never
-    ///   passed, and only the decoding and bookkeeping around the `imm32` calls
-    ///   are unit-tested. The bit is set because the path is written, not
-    ///   because it is proven.
+    ///   method's composition window and candidate list at the caret. The
+    ///   input method's own composition window is kept down, since the field
+    ///   draws the pre-edit. `win32_e2e`'s
+    ///   `an_input_method_composition_is_a_pre_edit_and_its_result_a_commit`
+    ///   proves the pre-edit, the commit, the placement and the absent window
+    ///   against the Microsoft Japanese IME, weekly on CI's desktop.
     /// * [`TOUCH`](ShellCaps::TOUCH) — `WM_POINTERDOWN`/`UPDATE`/`UP` for
     ///   `PT_TOUCH` pointers, with a capture change or a cancelled release as
     ///   [`Cancelled`](crcbl_core::input::TouchPhase::Cancelled). The primary

@@ -825,14 +825,17 @@ pub(super) unsafe extern "system" fn window_proc(
             0
         }
 
-        // The input method's half of text. Every one of these still reaches
-        // the default handler: it draws the input method's own composition
-        // window, and it turns a committed result into the `WM_IME_CHAR` and
-        // then `WM_CHAR` that the arm above records as the commit. What is
-        // taken here is the composition in progress, which nothing else reports.
-        // The field draws its own pre-edit, so the input method is told not
-        // to draw its composition window as well; see
-        // [`keys::without_composition_window`].
+        // The input method's half of text. The field draws its own pre-edit, so
+        // the input method's composition window must not show the reading a
+        // second time beside it. Clearing `ISC_SHOWUICOMPOSITIONWINDOW` in
+        // `WM_IME_SETCONTEXT` is not enough on its own: with the Microsoft
+        // Japanese IME through the TSF bridge, passing `WM_IME_STARTCOMPOSITION`
+        // and `WM_IME_COMPOSITION` to the default handler put up an
+        // `MSCTFIME Composition` window anyway (pikr, on 0.8.1). So neither of
+        // those reaches it, and the committed result is read here instead of
+        // from the `WM_IME_CHAR` and `WM_CHAR` the default handler would have
+        // made of it. Candidate lists come through `WM_IME_NOTIFY`, which still
+        // reaches it, and so does the end of the composition.
         msg::IME_SET_CONTEXT => {
             let l_param = keys::without_composition_window(l_param);
             // SAFETY: as `default` above, with only the flags changed.
@@ -844,12 +847,23 @@ pub(super) unsafe extern "system" fn window_proc(
             if let Some(area) = shared.input_area_for(window) {
                 input::place_ime(hwnd, Some(area));
             }
-            default()
+            0
         }
         msg::IME_COMPOSITION => {
-            // `lParam` names what changed; only a changed composition string
-            // is a pre-edit. A result alone is the commit, which arrives as
-            // `WM_CHAR`.
+            // `lParam` names what changed. A result is the commit, recorded as
+            // the code units `WM_CHAR` would have carried, and before any new
+            // composition the same message carries: the committed part comes
+            // first in the text. Only a changed composition string is a
+            // pre-edit.
+            if keys::composition_committed(l_param) {
+                for unit in input::composition_result(hwnd) {
+                    shared.push(RawEvent::Char {
+                        hwnd: window,
+                        unit,
+                        millis,
+                    });
+                }
+            }
             if keys::composition_changed(l_param) {
                 let (units, cursor) = input::composition(hwnd);
                 shared.push_preedit(Preedit {
@@ -862,7 +876,7 @@ pub(super) unsafe extern "system" fn window_proc(
                     millis,
                 });
             }
-            default()
+            0
         }
         msg::IME_END_COMPOSITION => {
             shared.push_preedit(Preedit {

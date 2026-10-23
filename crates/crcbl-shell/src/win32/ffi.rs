@@ -1479,6 +1479,9 @@ pub mod value {
     pub const ISC_SHOW_UI_COMPOSITION_WINDOW: u32 = 0x8000_0000;
     /// `GCS_CURSORPOS` — the index that reads the cursor within it.
     pub const GCS_CURSOR_POS: u32 = 0x0080;
+    /// `GCS_RESULTSTR` — the composition produced a result, or the index that
+    /// reads it.
+    pub const GCS_RESULT_STR: u32 = 0x0800;
     /// `IACE_DEFAULT` — give a window back its default input context.
     pub const IACE_DEFAULT: u32 = 0x0010;
     /// `CFS_DEFAULT` — the input method places its window itself.

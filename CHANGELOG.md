@@ -29,6 +29,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `TriangleMesh` now climbs too. **Behaviour change:** contacts against box
   edges report the rounded edge's normal, not the face's, and a character over
   an edge it cannot stand on falls.
+- **Win32: the input method no longer shows its own composition window beside
+  the field's pre-edit.** With the Microsoft Japanese IME, the reading appeared
+  twice: underlined in the field and again in an `MSCTFIME Composition` window
+  beside it, because `WM_IME_STARTCOMPOSITION` and `WM_IME_COMPOSITION` reached
+  `DefWindowProc` even with the composition window turned off in
+  `WM_IME_SETCONTEXT`. Neither does now, and the committed string is read from
+  the composition (`GCS_RESULTSTR`) instead of arriving as `WM_CHAR`.
 
 ## [0.9.0] - 2026-10-23
 
