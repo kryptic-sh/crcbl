@@ -13,6 +13,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-23
+
 ### Added
 
 - **Panels on X11.** `WindowRole::Panel` and `Shell::set_panel` now work on the
@@ -21270,7 +21272,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/kryptic-sh/crcbl/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/kryptic-sh/crcbl/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/kryptic-sh/crcbl/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/kryptic-sh/crcbl/compare/v0.6.0...v0.7.0
