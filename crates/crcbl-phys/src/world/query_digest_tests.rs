@@ -24,7 +24,10 @@ use crate::system::PhysicsSystem;
 use super::{ColliderId, PhysicsWorld, QueryFilter};
 
 /// What [`every_answer_on_unturned_scenes_is_where_it_was`] digests to.
-const PINNED: u64 = 0x7cfef22959e2066a;
+///
+/// Moved on 2026-10-23, when a capsule's sweep against an unturned box began
+/// meeting the box's rounded edges rather than an inflated box's square ones.
+const PINNED: u64 = 0x1c45057730d675a7;
 
 /// What [`every_overlap_hit_on_unturned_scenes_is_pinned`] digests to.
 const PINNED_OVERLAP_HITS: u64 = 0x7fcb3f4621c891b0;

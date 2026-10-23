@@ -380,7 +380,20 @@ fn a_step_climbed_is_a_contact_marked_stepped_up() {
         .iter()
         .find(|contact| contact.stepped_up)
         .expect("a contact stepped up");
-    assert_eq!((climbed.collider, climbed.normal), (step, DVec3::NEG_X));
+    // The lower cap's centre rests a skin above the floor, so it meets the
+    // step's rounded top edge, `rise` below that centre.
+    assert_eq!(climbed.collider, step);
+    let rise = config.radius + config.skin_width - height;
+    let expected = DVec3::new(
+        -(config.radius * config.radius - rise * rise).sqrt(),
+        rise,
+        0.0,
+    ) / config.radius;
+    assert!(
+        (climbed.normal - expected).length() < 1e-9,
+        "the step's top edge: {:?}",
+        climbed.normal
+    );
     assert!(
         (climbed.applied.y - height).abs() < EXACT,
         "the climb is in the displacement: {climbed:?}"

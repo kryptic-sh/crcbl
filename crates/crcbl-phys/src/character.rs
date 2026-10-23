@@ -113,7 +113,7 @@
 
 use glam::DVec3;
 
-use crate::broadphase::Segment;
+use crate::broadphase::{Ray, Segment};
 use crate::collider::{Capsule, LyingCapsule};
 use crate::query::{Penetration, ShapeHit};
 use crate::world::{
@@ -985,21 +985,35 @@ impl CharacterController {
         if advance <= MIN_MOVE {
             return None;
         }
-        let over = raised + forward_direction * advance;
-
         // Drop, far enough to actually reach what it is landing on: the rise
         // it is undoing plus the gap it started from, or a step of no height at
         // all comes back as a sweep that ends exactly at contact and is
         // reported as a miss. Unreal spends the same two floor distances on it.
         let drop = rise + self.config.skin_width * GROUND_PROBE_SKINS;
-        let (_, landing) = world.view.sweep_upright_where(
-            &Capsule::new(over, self.config.radius, self.config.half_height),
-            over - UP * drop,
-            self.filter(),
-            world.scratch,
-            |hit| hit.normal.dot(UP) > MIN_MOVE,
-        )?;
-        if landing.started_inside || !self.is_walkable(landing.normal) {
+        let land = |world: &mut WorldReader<'_, '_>, advance: f64| {
+            let over = raised + forward_direction * advance;
+            let (_, landing) = world.view.sweep_upright_where(
+                &Capsule::new(over, self.config.radius, self.config.half_height),
+                over - UP * drop,
+                self.filter(),
+                world.scratch,
+                |hit| hit.normal.dot(UP) > MIN_MOVE,
+            )?;
+            (!landing.started_inside).then_some((advance, over, landing))
+        };
+        let (advance, over, landing) = land(world, advance)?;
+        if !self.is_walkable(landing.normal)
+            && !self.perches_on(world, landing.point, over, forward_direction)
+        {
+            return None;
+        }
+        // The step is as high as what it lands on, not as high as the capsule
+        // rose: a round capsule on a rounded edge sits lower than the edge's
+        // top, and would otherwise climb a step a little higher than the
+        // offset. `feet` rest a skin above the floor, so this allows the
+        // offset above the floor and that skin.
+        let feet = self.position.y - self.config.radius - self.config.half_height;
+        if landing.point.y - feet > self.config.step_offset {
             return None;
         }
         let fall = (landing.t * drop - self.config.skin_width).clamp(0.0, drop);
@@ -1032,11 +1046,37 @@ impl CharacterController {
         }
         let probe = self.settle_reach(was_grounded, motion);
 
-        let Some(found) = self.probe_below(world, self.position, probe) else {
+        let Some(mut found) = self.probe_below(world, self.position, probe) else {
             return;
         };
+        let ahead = DVec3::new(motion.x, 0.0, motion.z).normalize_or_zero();
+        let perched = !found.walkable
+            && was_grounded
+            && self.perches_on(
+                world,
+                found.contact.point,
+                self.position - UP * found.distance,
+                ahead,
+            );
+        if perched {
+            // Stood on as a step's corner is, flat: the edge's own normal
+            // steepens towards horizontal at its rim, and ground-following
+            // along it would climb without bound. The next move's sweep meets
+            // the edge ahead and steps on.
+            found.contact.normal = UP;
+            found.walkable = true;
+        }
         if !found.walkable {
-            return;
+            // A walking character over an edge too steep to stand on, and not
+            // stepping onto it, slides off it, down its tangent, onto what is
+            // below within the same reach: a lip walked off lands on the
+            // floor beneath, while a character that was not walking has only
+            // the probe's slack to slide and falls.
+            let Some((landed, below)) = self.slide_off_edge(world, probe, &found) else {
+                return;
+            };
+            self.position = landed;
+            found = below;
         }
         // Signed, and so it corrects in both directions: a capsule that ended
         // the move *closer* to the floor than a skin width — set down on it, or
@@ -1049,6 +1089,71 @@ impl CharacterController {
         let fall = (found.distance - self.config.skin_width).clamp(-self.config.skin_width, probe);
         self.position -= UP * fall;
         self.ground = Some(found.contact);
+    }
+
+    /// Whether a capsule centred at `centre`, moving horizontally along
+    /// `ahead`, perches on an edge it touches at `point` that is too steep to
+    /// stand on: when the edge is ahead of it, so it is stepping onto it, no
+    /// higher above its feet than the step offset, and **the rim of a walkable
+    /// top**, which a ray dropped a skin beyond the contact finds within a
+    /// skin of its height. A steep slope has no top there, only more slope,
+    /// and is refused: perching on it would climb it a step at a time.
+    /// Standing still, or moving away, a capsule has nothing ahead, and slides
+    /// off.
+    fn perches_on(
+        &self,
+        world: &mut WorldReader<'_, '_>,
+        point: DVec3,
+        centre: DVec3,
+        ahead: DVec3,
+    ) -> bool {
+        let feet = centre.y - self.config.radius - self.config.half_height;
+        let toward = DVec3::new(point.x - centre.x, 0.0, point.z - centre.z);
+        if toward.dot(ahead) <= MIN_MOVE || point.y - feet > self.config.step_offset {
+            return false;
+        }
+        let skin = self.config.skin_width;
+        let ray = Ray::new(point + ahead * skin + UP * skin, -UP).with_bounds(0.0, 2.0 * skin);
+        world
+            .view
+            .cast_ray_filtered(&ray, self.filter(), world.scratch)
+            .is_some_and(|(_, top)| !top.started_inside && self.is_walkable(top.normal))
+    }
+
+    /// Where a capsule resting `found.distance` above an edge too steep to
+    /// stand on comes to rest sliding off it with the rest of `reach`, and
+    /// the walkable ground it finds there, or `None` if it finds none: the
+    /// slide follows the edge's surface downward, as far as falls the rest of
+    /// the reach, and ends a skin short of whatever it meets.
+    fn slide_off_edge(
+        &self,
+        world: &mut WorldReader<'_, '_>,
+        reach: f64,
+        found: &GroundProbe,
+    ) -> Option<(DVec3, GroundProbe)> {
+        let normal = found.contact.normal;
+        let down = (-UP + normal * normal.dot(UP)).normalize_or_zero();
+        let remaining = reach - found.distance;
+        if down.dot(UP) > -MIN_MOVE || remaining <= MIN_MOVE {
+            return None;
+        }
+        let start = self.position - UP * found.distance;
+        let length = remaining / -down.dot(UP);
+        // Only surfaces the slide closes on stop it: the edge it slides along
+        // is tangent to it and holds nothing back.
+        let travel = match world.view.sweep_upright_where(
+            &Capsule::new(start, self.config.radius, self.config.half_height),
+            start + down * length,
+            self.filter(),
+            world.scratch,
+            |hit| down.dot(hit.normal) < -MIN_MOVE,
+        ) {
+            None => length,
+            Some((_, hit)) => self.skin_short(hit.t * length, down, hit.normal)?,
+        };
+        let end = start + down * travel;
+        let below = self.probe_below(world, end, self.config.skin_width * GROUND_PROBE_SKINS)?;
+        below.walkable.then_some((end, below))
     }
 
     /// How far below itself a move's closing ground probe looks: the
@@ -2119,6 +2224,10 @@ mod slide_contact_tests;
 #[cfg(test)]
 #[path = "character/crease_tests.rs"]
 mod crease_tests;
+
+#[cfg(test)]
+#[path = "character/edge_tests.rs"]
+mod edge_tests;
 
 #[cfg(test)]
 #[path = "character/rest_tests.rs"]

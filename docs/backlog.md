@@ -24415,69 +24415,6 @@ What else is open:
   trimesh or heightfield to walk on, which is what a real map is. It has not
   been profiled, run at scale, or checked for cross-target determinism. Nothing
   exercises `CharacterConfig` values other than the default.
-- **An unturned box's straight capsule sweep stands a character on air past the
-  box's edge (EW, 2026-10-23, on 0.8.1).** `swept_capsule_vs_box` hands an
-  unturned box to `swept_capsule_vs_aabb`, which inflates the box by the radius
-  rather than rounding it (`swept_sphere_vs_aabb`'s treatment), so a capsule
-  over the inflated corner meets the box's top face, normal straight up. EW's
-  case, through its `PlayerController` with radius 0.30: a box whose top edge is
-  at x = 0.5, a capsule spawned at x = 0.79 stays grounded for 60 ticks though
-  the gap to the corner is 0.124 m; `sweep_capsule_filtered` straight down
-  reports t ≈ 0.01 with normal (0, 1, 0) at (0.5, 0, 0). Walking off goes
-  airborne only near edge + radius. The same platform as a `TriangleMesh` falls
-  at x = 0.79 and tips onto the edge, so only the box path is wrong. Expected: a
-  rounded-edge contact, normal from the corner toward the capsule's axis, which
-  the controller's slope limit then refuses. **Not yet fixed.** Options: route
-  unturned boxes through `advance_upright_capsule`, as turned boxes already are
-  (one path, but iterative and stopping a little short); or sweep the exact
-  rounded box (faces, edge cylinders, corner spheres) in closed form, as
-  `world::arc_sweep_tests`'s
-  `an_unturned_box_edge_is_met_where_the_round_capsule_touches_it` already holds
-  the arc sweep to. Prefer the closed form for the straight sweep: it is exact,
-  non-iterative and keeps the determinism-bearing path free of an iteration
-  count. A regression test is EW's repro. EW takes the fix through the next
-  crates.io release and has nothing pending on it. **The sweep half is written
-  (2026-10-23), on branch `phys-rounded-box-sweep`, not main:**
-  `query::aabb_sweep::swept_sphere_vs_rounded_aabb` (Ericson §5.5.7: the
-  inflated box's entry, then the edge's capsule, or the first of a corner's
-  three), which `swept_capsule_vs_aabb` now uses. Its tests hold EW's numbers:
-  0.29 from the edge the normal is `(0.29, 0.0768, 0) / 0.3`, past edge plus
-  radius and diagonally beyond a corner it misses, over the face it lands flat;
-  three of them fail with the inflated sweep put back. The arc sweep's
-  `an_unturned_box_edge_is_met_where_the_round_capsule_touches_it` now agrees
-  with the straight sweep to its tolerance. **Six tests fail on the branch, and
-  they are the blocker:** the curb test and
-  `query_digest_tests::every_answer_on_unturned_scenes_is_where_it_was` pinned
-  the inflated box (expected to change), but four `character` tests
-  (`the_step_the_controller_stops_climbing_is_the_offset_it_was_configured_with`,
-  `walking_off_a_lip_within_the_step_offset_never_leaves_the_ground`,
-  `a_step_climbed_is_a_contact_marked_stepped_up`,
-  `sub_skin_moves_climb_steps_and_follow_walkable_slopes`) show
-  `CharacterController` climbs steps and snaps down lips only because box edges
-  were square: `try_step_up` advances at most a tick's motion past the step
-  face, its landing then sits on the edge's curve, and `is_walkable` refuses
-  that normal. A `TriangleMesh` step, whose edges were always rounded, likely
-  fails the same way; nothing tests it. **Decision needed (EW's, since it is
-  gameplay feel); a perch rule alone is ruled out (measured 2026-10-23):**
-  instrumented on the branch, the step landings `try_step_up` refuses on the
-  rounded edge meet it from 0.25 to 0.29 m from the axis of a 0.30-radius
-  capsule, 0.26 for most and up to 0.29 on the highest steps
-  `the_step_the_controller_stops_climbing…` ramps through. EW's refused case is
-  0.29, so no perch margin separates standing on air from landing on a step.
-  What remains: carry the step-up's advance far enough past the edge that the
-  landing meets the top face (more travel than the tick asked, on the step tick
-  only), or hold a character that rose onto an edge raised until a later tick's
-  advance reaches the face. **The first was prototyped and is not enough
-  (2026-10-23, discarded):** retrying the advance one radius further when the
-  landing meets the edge raised the highest step climbed from 0.202 to 0.299 m
-  of the configured 0.4, and it cannot help the lip test at all: 0.25 m past a
-  drop's edge the capsule still overlaps the upper box's rounded edge, the
-  ground probe meets that edge first and refuses it, and the character falls for
-  a tick, where square edges handed it a flat top. So the controller's step and
-  lip handling as a whole leans on square edges, and EW's fix needs a design
-  pass over how it treats edges (step landing, the closing ground probe, and the
-  snap down a lip together), not a tweak to one of them. Then the four character
-  tests pass again and the digest is re-pinned with the reason.
 
 ### What puppet's locomotion blend leaves for the rest of milestone 2
 

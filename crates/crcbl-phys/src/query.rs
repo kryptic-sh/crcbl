@@ -543,11 +543,12 @@ pub fn swept_capsule_vs_sphere(
 /// Compute the TOI for a Y-aligned capsule moving along a segment against a
 /// static AABB. `segment` is the path of the capsule's **centre**.
 ///
-/// An AABB grown along Y is an AABB, so this is [`swept_sphere_vs_aabb`]
-/// against that proxy — see the note above. It inherits that function's
-/// treatment of edges and corners: the box is inflated by the radius rather
-/// than rounded, so a hit arriving diagonally at a corner reports the corner of
-/// the inflated box and its face normal.
+/// An AABB grown along Y is an AABB, so this is a sphere swept against that
+/// proxy — see the note above — and **against the proxy rounded by the
+/// radius**, not inflated: a capsule passing within its radius of a top edge
+/// meets the edge's curve, with the normal from the edge towards its axis,
+/// where an inflated box would hand it the top face and a flat normal, and a
+/// character standing a radius past the edge would stand on air.
 ///
 /// As with the sphere sweeps, a sweep that starts already overlapping reports
 /// `t = 0`, [`ShapeHit::started_inside`] and the minimum-penetration face
@@ -569,9 +570,9 @@ pub fn swept_capsule_vs_aabb(
         target.min - DVec3::Y * swept_half_height,
         target.max + DVec3::Y * swept_half_height,
     );
-    let hit = swept_sphere_vs_aabb(segment, swept_radius, &grown)?;
-    // The sphere test clamped the contact onto `grown`, so only Y can be off
-    // the real box; clamping again puts it back on the face that was grown.
+    let hit = aabb_sweep::swept_sphere_vs_rounded_aabb(segment, swept_radius, &grown)?;
+    // The contact is on `grown`, so only Y can be off the real box; clamping
+    // again puts it back on the face or edge that was grown.
     Some(ShapeHit {
         point: hit.point.clamp(target.min, target.max),
         ..hit
@@ -1218,7 +1219,15 @@ mod tests {
         );
         let hit = swept_capsule_vs_aabb(&seg, radius, half_height, &curb)
             .expect("the capsule reaches down to the curb");
-        assert_eq!(hit.normal, DVec3::NEG_X, "struck the curb's -X face");
+        // The lower cap's centre is 0.1 above the curb's top, so the round
+        // capsule meets the curb's rounded top edge, not its -X face.
+        let rise = 0.1_f64;
+        let expected = DVec3::new(-(radius * radius - rise * rise).sqrt(), rise, 0.0) / radius;
+        assert!(
+            (hit.normal - expected).length() < 1e-12,
+            "struck the curb's top edge: {:?}",
+            hit.normal
+        );
     }
 
     /// The contact is reported on the real box, not on the Y-grown proxy the

@@ -451,8 +451,10 @@ fn an_unturned_box_edge_is_met_where_the_round_capsule_touches_it() {
     let (_, straight) = world
         .sweep_capsule(&segment, RADIUS, HALF_HEIGHT)
         .expect("the straight sweep meets it");
+    // The straight sweep rounds the edge too, so on this flat path the two
+    // meet it at the same moment.
     assert!(
-        straight.t * duration < hit.time,
+        (straight.t * duration - hit.time).abs() < AGREEMENT,
         "{straight:?} against {hit:?}"
     );
 }

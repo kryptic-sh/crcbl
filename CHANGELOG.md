@@ -13,6 +13,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **A character no longer stands on air past a box's edge.** A capsule's
+  straight sweep against an unturned box met the box inflated by its radius,
+  with square edges, so a character whose axis was nearly a radius past a top
+  edge stood on its flat top (reported by EW against 0.8.1).
+  `swept_capsule_vs_aabb` now sweeps against the box rounded by the radius, as a
+  mesh's edges always were, and `CharacterController` handles round edges: an
+  edge ahead of a walking character, no higher than `step_offset` and the rim of
+  a walkable top, is stepped onto and climbed, so steps still climb up to
+  exactly the offset with no extra travel; a character walking off a lip slides
+  down its edge to the floor below and stays grounded; and one left hanging over
+  an edge with nothing ahead slides off it and falls. A step built from a
+  `TriangleMesh` now climbs too. **Behaviour change:** contacts against box
+  edges report the rounded edge's normal, not the face's, and a character over
+  an edge it cannot stand on falls.
+
 ## [0.9.0] - 2026-10-23
 
 ### Added

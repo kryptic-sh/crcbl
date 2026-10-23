@@ -82,6 +82,75 @@ pub fn swept_sphere_vs_aabb(
     })
 }
 
+/// The time of impact of a sphere moving along `segment` against a static
+/// AABB, **exactly**: against the box rounded by the radius — its faces moved
+/// out, its edges cylinders, its corners spheres — where
+/// [`swept_sphere_vs_aabb`] sweeps against the box inflated into a larger box
+/// with square edges and corners.
+///
+/// Ericson, *Real-Time Collision Detection*, §5.5.7: the sweep enters the
+/// inflated box first. Where it enters beyond the box on at most one axis, a
+/// face's region, that is the hit. Where it enters beyond it on two, an edge's
+/// region, the hit is the segment against that edge's capsule of the radius,
+/// and on three, a corner's, the first of the three edges' capsules meeting
+/// there; a segment that misses them misses the rounded box, which is convex.
+/// A sweep starting within the radius of the box meets it at `t = 0` with
+/// [`ShapeHit::started_inside`].
+pub(crate) fn swept_sphere_vs_rounded_aabb(
+    segment: &crate::broadphase::Segment,
+    swept_radius: f64,
+    target: &Aabb,
+) -> Option<ShapeHit> {
+    let hit = swept_sphere_vs_aabb(segment, swept_radius, target)?;
+    let dir = segment.end - segment.start;
+    let entry = segment.start + dir * hit.t;
+    let below = [0, 1, 2].map(|axis| entry[axis] < target.min[axis]);
+    let above = [0, 1, 2].map(|axis| entry[axis] > target.max[axis]);
+    let beyond = (0..3).filter(|&axis| below[axis] || above[axis]).count();
+    if beyond <= 1 {
+        return Some(hit);
+    }
+    // The corner the entry is nearest, and the edges through it to test: the
+    // one along the axis the entry is within, or all three at a corner.
+    let corner = DVec3::from_array([0, 1, 2].map(|axis| {
+        if below[axis] {
+            target.min[axis]
+        } else {
+            target.max[axis]
+        }
+    }));
+    let along = (0..3).filter(|&axis| beyond == 3 || !(below[axis] || above[axis]));
+    along
+        .filter_map(|axis| {
+            let mut centre = corner;
+            centre[axis] = (target.min[axis] + target.max[axis]) * 0.5;
+            let half = (target.max[axis] - target.min[axis]) * 0.5;
+            // The edge turned onto Y, which `ray_vs_capsule` takes, by
+            // swapping two coordinates: exact, unlike a rotation.
+            let edge = Capsule::new(swap_with_y(centre, axis), swept_radius, half);
+            let ray = Ray::new(swap_with_y(segment.start, axis), swap_with_y(dir, axis))
+                .with_bounds(0.0, 1.0);
+            let found = ray_vs_capsule(&ray, &edge)?;
+            let normal = swap_with_y(found.normal, axis);
+            Some(ShapeHit {
+                t: found.t,
+                point: segment.start + dir * found.t - normal * swept_radius,
+                normal,
+                started_inside: found.started_inside,
+                part: 0,
+            })
+        })
+        .min_by(|a, b| a.t.total_cmp(&b.t))
+}
+
+/// `v` with its `axis` and Y coordinates swapped.
+fn swap_with_y(v: DVec3, axis: usize) -> DVec3 {
+    let mut swapped = v;
+    swapped[1] = v[axis];
+    swapped[axis] = v[1];
+    swapped
+}
+
 #[cfg(test)]
 #[path = "aabb_sweep_tests.rs"]
 mod tests;
