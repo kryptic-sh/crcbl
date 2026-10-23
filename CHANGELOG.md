@@ -13,6 +13,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Changed
+
+- **`crcbl_image::theme::IconThemes::lookup` is faster on a lookup it has not
+  cached.** It cloned each theme's parsed `index.theme`, every directory of it,
+  on every lookup, and rebuilt and hashed each directory's path once per file
+  extension. Themes are now shared and each directory's path is built once. On
+  an Arch desktop's Adwaita, Breeze, Papirus and hicolor, 4,488 lookups per
+  theme took 2.4 to 3.4 times less time, with the same answers.
+
 ### Fixed
 
 - **A character no longer stands on air past a box's edge.** A capsule's

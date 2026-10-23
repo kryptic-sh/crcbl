@@ -39,6 +39,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 /// The theme every theme falls back to, by the specification.
@@ -197,11 +198,11 @@ impl ThemeDir {
 }
 
 /// A theme as its `index.theme` describes it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug)]
 struct Theme {
-    /// Every directory holding a copy of the theme, in search-path order.
-    roots: Vec<PathBuf>,
-    dirs: Vec<ThemeDir>,
+    /// Each directory, with where it is in every copy of the theme, in
+    /// search-path order.
+    dirs: Vec<(ThemeDir, Vec<PathBuf>)>,
     inherits: Vec<String>,
 }
 
@@ -302,7 +303,7 @@ pub struct IconThemes {
     fallback_themes: Vec<String>,
     generic_names: Vec<String>,
     miss_retry: Duration,
-    themes: HashMap<String, Option<Theme>>,
+    themes: HashMap<String, Option<Arc<Theme>>>,
     listings: HashMap<PathBuf, Listing>,
     cache: HashMap<(String, u32, u32), Cached>,
 }
@@ -425,7 +426,7 @@ impl IconThemes {
             return None;
         }
         let parsed = self.theme(theme)?;
-        if let Some(path) = self.lookup_in(query, theme, &parsed) {
+        if let Some(path) = self.lookup_in(query, &parsed) {
             return Some(path);
         }
         parsed
@@ -435,26 +436,23 @@ impl IconThemes {
     }
 
     /// The specification's `LookupIcon` in one theme.
-    fn lookup_in(&mut self, query: Query<'_>, theme_name: &str, theme: &Theme) -> Option<PathBuf> {
+    fn lookup_in(&mut self, query: Query<'_>, theme: &Theme) -> Option<PathBuf> {
         let Query {
             name,
             size,
             scale,
             now,
         } = query;
-        let files: Vec<String> = EXTENSIONS
+        let files: Vec<OsString> = EXTENSIONS
             .iter()
-            .map(|extension| format!("{name}.{extension}"))
+            .map(|extension| format!("{name}.{extension}").into())
             .collect();
         let mut closest: Option<(u64, PathBuf)> = None;
-        for dir in &theme.dirs {
+        for (dir, directories) in &theme.dirs {
             let exact = dir.matches(size, scale);
-            for root in &theme.roots {
-                let directory = root.join(theme_name).join(&dir.path);
-                for file in &files {
-                    if !self.listed(&directory, file, now) {
-                        continue;
-                    }
+            for directory in directories {
+                let listing = self.listing(directory, now);
+                for file in files.iter().filter(|file| listing.contains(*file)) {
                     let path = directory.join(file);
                     if exact {
                         return Some(path);
@@ -471,7 +469,7 @@ impl IconThemes {
 
     /// `theme`'s description, read once; `None` for a theme with no
     /// `index.theme` on the search path.
-    fn theme(&mut self, theme: &str) -> Option<Theme> {
+    fn theme(&mut self, theme: &str) -> Option<Arc<Theme>> {
         if let Some(known) = self.themes.get(theme) {
             return known.clone();
         }
@@ -489,19 +487,31 @@ impl IconThemes {
             .find_map(|root| std::fs::read_to_string(root.join(theme).join("index.theme")).ok())
             .map(|text| {
                 let (dirs, inherits) = parse_index(&text);
-                Theme {
-                    roots: roots.clone(),
-                    dirs,
-                    inherits,
-                }
+                let dirs = dirs
+                    .into_iter()
+                    .map(|dir| {
+                        let directories = roots
+                            .iter()
+                            .map(|root| root.join(theme).join(&dir.path))
+                            .collect();
+                        (dir, directories)
+                    })
+                    .collect();
+                Arc::new(Theme { dirs, inherits })
             });
         self.themes.insert(theme.to_owned(), parsed.clone());
         parsed
     }
 
-    /// Whether `directory` holds `file`, from its listing, read again once it
-    /// is older than the miss retry.
+    /// Whether `directory` holds `file`, from its listing.
     fn listed(&mut self, directory: &Path, file: &str, now: Instant) -> bool {
+        self.listing(directory, now)
+            .contains(std::ffi::OsStr::new(file))
+    }
+
+    /// `directory`'s file names, read again once they are older than the miss
+    /// retry.
+    fn listing(&mut self, directory: &Path, now: Instant) -> &HashSet<OsString> {
         let stale = self
             .listings
             .get(directory)
@@ -518,9 +528,11 @@ impl IconThemes {
             self.listings
                 .insert(directory.to_owned(), Listing { names, at: now });
         }
-        self.listings
+        &self
+            .listings
             .get(directory)
-            .is_some_and(|listing| listing.names.contains(std::ffi::OsStr::new(file)))
+            .expect("listed just above when missing or stale")
+            .names
     }
 }
 

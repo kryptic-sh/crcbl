@@ -1967,9 +1967,29 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `Threshold` branch; this uses the threshold's own bounds, as GTK does.
       Verified by its unit tests on Windows and on Linux (WSL), over themes
       built in a temporary directory, and fourteen hand mutants, each failing
-      its own test. Not tested against an installed theme: CI's Linux runner has
-      `hicolor` at most, and the `svg corpus` job walks the themes' files for
-      the SVG renderer without looking anything up by name.
+      its own test. **Compared with GTK 3 on the office laptop's installed
+      themes** (2026-10-24; Adwaita, Breeze, Papirus and hicolor; 400 sampled
+      names, 11 size and scale pairs each, 17,952 lookups, against
+      `Gtk.IconTheme.lookup_icon_for_scale` through Python): with Adwaita given
+      as a fallback theme, which GTK always adds, crcbl found everything GTK
+      found. 1,624 answers name another file: 1,383 of those hold the same bytes
+      (an icon in two context directories), and the rest are GTK's own choices,
+      not the specification's — its built-in `/org/gtk/libgtk` icons, a
+      preference for the nearest nominal size over the first directory that
+      matches (hicolor lists `22x22/apps`, whose threshold takes 24, before
+      `24x24/apps`, so a 24-pixel `firefox` is the 22-pixel file here and the
+      24-pixel one in GTK), and for a larger file or a matching scale when none
+      matches exactly. **Decision open:** keep the specification's first-match
+      rule, or prefer the nearest nominal size among matching directories as GTK
+      does, which gives sharper icons. Not tested in CI: its Linux runner has
+      `hicolor` at most.
+    - **An uncached lookup still walks every directory of each theme it
+      reaches**: about 0.2 ms through hicolor's 649 directories in two roots on
+      the office laptop, mostly hashing each directory's path to find its
+      listing. A per-theme index of icon names to directories, built from the
+      listings once (GTK reads `icon-theme.cache` for the same reason), would
+      make it one lookup per theme; it has to be rebuilt on the miss-retry
+      clock. Found answers are cached, so this is first-draw cost.
     - **JPEG is in**, `jpeg::decode` behind the `jpeg` feature, written here:
       sequential and progressive Huffman frames with successive approximation,
       restart intervals, grey, YCbCr and RGB (by libjpeg's JFIF, Adobe and
