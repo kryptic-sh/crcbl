@@ -177,7 +177,7 @@ reference and may be taken.
 
 ## NVIDIA's Wayland WSI crashes with a device per window (2026-10-22)
 
-`crcbl_app::present::SharedGpu` is the way round it and is in `[Unreleased]`:
+`crcbl_app::present::SharedGpu` is the way round it and shipped in 0.9.0:
 windows opened on one shared device no longer crash on the MX550 (615.78), the
 `wayland_transparency` test opens its second window that way and passes there,
 with and without validation. What is still open:
@@ -193,20 +193,11 @@ with and without validation. What is still open:
   falling back to `Presenter::open` when refused. On the MX550 with two bars,
   the output removal that segfaulted every time, five more add/remove rounds, a
   tooltip and the clock panel all ran without a crash and lyr exited 0; on the
-  Intel default too. lyr merges the branch once a crcbl release carries
-  `SharedGpu`, and asked to be told when one does.
+  Intel default too. 0.9.0 carries `SharedGpu` and lyr was told on 2026-10-23;
+  the branch merge is lyr's.
 - **Not shared:** windows on displays driven by different GPUs.
   `SharedGpu::open` refuses a window its adapter cannot present to, and the
   caller opens that one with `Presenter::open`.
-
-## pikr waits on a release after 0.8.1 (2026-10-22)
-
-`[Unreleased]` holds `Ui::set_accessible_label` and `Ui::selectable_list`, which
-pikr asked for and verified through AT-SPI on Hyprland against main `acfad914`
-(the list item reads "gamma" whole and carries `selected`). pikr adopts them in
-the bump after the next release; its patch is ready. No breaking change, so a
-patch release. Cut it when the owner approves, then tell pikr. Delete this entry
-then.
 
 ## NEXT: speed up CI (asked by the owner, 2026-10-20)
 
