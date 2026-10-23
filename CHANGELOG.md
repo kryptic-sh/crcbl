@@ -36,6 +36,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   extension. Themes are now shared and each directory's path is built once. On
   an Arch desktop's Adwaita, Breeze, Papirus and hicolor, 4,488 lookups per
   theme took 2.4 to 3.4 times less time, with the same answers.
+- **Fill lights no longer pay for the specular they never show.** The forward
+  shader tested a light's fill flag only after evaluating its GGX or LTC
+  specular lobe, and the drivers measured paid for the discarded lobe in full.
+  It now skips the lobe: on an RX 7900 XTX the forward pass is 26–29% cheaper
+  under rectangular fill lights and 6% under point fill lights, against up to 4%
+  more under ordinary rectangular lights.
 
 ### Fixed
 

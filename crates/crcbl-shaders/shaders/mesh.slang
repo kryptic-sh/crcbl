@@ -5876,6 +5876,15 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     for (uint slot = 0; slot < count; ++slot)
     {
         GpuLight light = lights[cluster_lights[base + 1 + slot]];
+        // **A fill light lights and does not glint**, so both specular paths
+        // below test this before doing the work rather than zeroing its result
+        // after: zeroed afterwards, the lobe was still paid for in full on
+        // every adapter measured. The flag's other half — that it casts no shadow — is
+        // `crcbl_render::shadow::Selection` refusing it a tile, so nothing
+        // below has to test for it a second time.
+        // `crcbl_shaders::light::FLAG_FILL` argues why it is a flag rather than
+        // a kind of light.
+        bool fill = (light.flags & FLAG_FILL) != 0u;
 
         float3 to_light;
         // What scales this light's direct terms: the shadow map for the sun, the
@@ -5932,38 +5941,42 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
             rect_corners(light, input.world_position, corners);
             float3x3 to_local = ltc_shading_frame(normal, to_eye, n_dot_v);
             diffuse = ltc_irradiance(to_local, corners);
-            specular = ltc_irradiance(mul(ltc_transform(ltc_at(table)), to_local), corners)
-                     * lobe_energy;
+            if (fill)
+            {
+                specular = float3(0.0, 0.0, 0.0);
+            }
+            else
+            {
+                specular = ltc_irradiance(mul(ltc_transform(ltc_at(table)), to_local), corners)
+                         * lobe_energy;
+            }
         }
         else
         {
             // Lambert.
             diffuse = max(n_dot_l, 0.0);
 
-            // Cook-Torrance, one GGX lobe, driven by the row's own two factors
-            // — where this was a Blinn power and a strength constant no caller
-            // could vary. The half-vector form survives the change: it is what
-            // the microfacet model is written in, rather than an approximation
-            // of it.
-            float3 half_vector = normalize(to_light + to_eye);
-            specular = ggx_lobe(alpha2, f0, f90, diffuse, n_dot_v,
-                                max(dot(normal, half_vector), 0.0),
-                                max(dot(to_eye, half_vector), 0.0));
-            // No light on the back of a surface, whatever the half-vector says.
-            // The `N·L` the lobe left out is the same one Lambert already
-            // carries, so both terms take it from here and a back-facing
-            // fragment loses both.
-            specular *= diffuse;
-        }
-
-        // **A fill light lights and does not glint.** The other half of the
-        // flag — that it casts no shadow — is `crcbl_render::shadow::Selection`
-        // refusing it a tile, so nothing below has to test for it a second
-        // time. `crcbl_shaders::light::FLAG_FILL` argues why it is a flag
-        // rather than a kind of light.
-        if ((light.flags & FLAG_FILL) != 0u)
-        {
-            specular = float3(0.0, 0.0, 0.0);
+            if (fill)
+            {
+                specular = float3(0.0, 0.0, 0.0);
+            }
+            else
+            {
+                // Cook-Torrance, one GGX lobe, driven by the row's own two
+                // factors — where this was a Blinn power and a strength
+                // constant no caller could vary. The half-vector form survives
+                // the change: it is what the microfacet model is written in,
+                // rather than an approximation of it.
+                float3 half_vector = normalize(to_light + to_eye);
+                specular = ggx_lobe(alpha2, f0, f90, diffuse, n_dot_v,
+                                    max(dot(normal, half_vector), 0.0),
+                                    max(dot(to_eye, half_vector), 0.0));
+                // No light on the back of a surface, whatever the half-vector
+                // says. The `N·L` the lobe left out is the same one Lambert
+                // already carries, so both terms take it from here and a
+                // back-facing fragment loses both.
+                specular *= diffuse;
+            }
         }
 
         // The shadow maps, and the *only* place they enter the shading. The sun

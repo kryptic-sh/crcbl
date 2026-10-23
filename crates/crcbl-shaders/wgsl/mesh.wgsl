@@ -2121,6 +2121,7 @@ fn fragmentMain( _S191 : pixelInput_0, @builtin(front_facing) front_facing_1 : b
             break;
         }
         var _S216 : GpuLight_std430_0 = lights_0[cluster_lights_0[base_2 + u32(1) + slot_0]];
+        var fill_0 : bool = (((_S216.flags_3) & (u32(1)))) != u32(0);
         var _S217 : u32 = _S216.kind_0;
         var _S218 : bool = (_S216.kind_0) == u32(0);
         var to_light_7 : vec3<f32>;
@@ -2165,26 +2166,30 @@ fn fragmentMain( _S191 : pixelInput_0, @builtin(front_facing) front_facing_1 : b
             var corners_2 : array<vec3<f32>, i32(4)>;
             rect_corners_0(&(_S216), _S191.world_position_15, &(corners_2));
             var to_local_0 : mat3x3<f32> = ltc_shading_frame_0(normal_14, to_eye_1, _S208);
-            var _S220 : vec3<f32> = vec3<f32>(ltc_irradiance_0((((to_local_0) * (ltc_transform_0(ltc_at_0(table_0))))), corners_2)) * _S214;
-            diffuse_0 = ltc_irradiance_0(to_local_0, corners_2);
-            specular_0 = _S220;
+            var _S220 : f32 = ltc_irradiance_0(to_local_0, corners_2);
+            if(fill_0)
+            {
+                specular_0 = _S215;
+            }
+            else
+            {
+                specular_0 = vec3<f32>(ltc_irradiance_0((((to_local_0) * (ltc_transform_0(ltc_at_0(table_0))))), corners_2)) * _S214;
+            }
+            diffuse_0 = _S220;
         }
         else
         {
             var _S221 : f32 = max(n_dot_l_5, 0.0f);
-            var half_vector_0 : vec3<f32> = normalize(to_light_7 + to_eye_1);
-            var specular_1 : vec3<f32> = ggx_lobe_0(_S203, f0_2, f90_1, _S221, _S208, max(dot(normal_14, half_vector_0), 0.0f), max(dot(to_eye_1, half_vector_0), 0.0f)) * vec3<f32>(_S221);
+            if(fill_0)
+            {
+                specular_0 = _S215;
+            }
+            else
+            {
+                var half_vector_0 : vec3<f32> = normalize(to_light_7 + to_eye_1);
+                specular_0 = ggx_lobe_0(_S203, f0_2, f90_1, _S221, _S208, max(dot(normal_14, half_vector_0), 0.0f), max(dot(to_eye_1, half_vector_0), 0.0f)) * vec3<f32>(_S221);
+            }
             diffuse_0 = _S221;
-            specular_0 = specular_1;
-        }
-        var specular_2 : vec3<f32>;
-        if((((_S216.flags_3) & (u32(1)))) != u32(0))
-        {
-            specular_2 = _S215;
-        }
-        else
-        {
-            specular_2 = specular_0;
         }
         var reach_4 : f32;
         if(_S218)
@@ -2227,7 +2232,7 @@ fn fragmentMain( _S191 : pixelInput_0, @builtin(front_facing) front_facing_1 : b
         }
         var _S228 : vec3<f32> = _S216.color_0.xyz;
         var direct_1 : vec3<f32> = direct_0 + _S228 * vec3<f32>((diffuse_0 * reach_4));
-        var gloss_1 : vec3<f32> = gloss_0 + _S228 * (specular_2 * vec3<f32>(reach_4));
+        var gloss_1 : vec3<f32> = gloss_0 + _S228 * (specular_0 * vec3<f32>(reach_4));
         slot_0 = slot_0 + u32(1);
         direct_0 = direct_1;
         gloss_0 = gloss_1;
