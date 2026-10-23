@@ -7844,17 +7844,6 @@ No shader changed.
   and reflects the view's environment through the march's block, but no test
   draws water or grass through a fixed view, and `water.slang`'s other frame
   reads under one were not reviewed.
-- **Surprise: any edit to `mesh.slang` moved the Vulkan cascade view on the 7900
-  XTX.** A first cut added a light-row flag to the light loop (tried as an arm
-  in front of the shadow walk and as a select after it) and an empty-header
-  return in `probe_irradiance`; each alone turned
-  `forward_e2e::shadow::the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from`
-  red on `CRCBL_GPU=vk` (band reading 47.0 against HEAD's -7.2, near and far
-  unchanged), while D3D12 and WARP stayed green. The regenerated SPIR-V
-  decompiles to HEAD's plus the edit and HEAD's own source reproduces CI's
-  SPIR-V byte for byte, so this looks like the AMD Vulkan driver compiling the
-  cascade band blend differently, not a wrong shader — but it was not pinned
-  down. The next `mesh.slang` change is likely to hit it on this machine.
 - **Not run: Metal and wgpu.** The fixed-icon e2e ran on D3D12 (hardware and
   WARP) and Vulkan on the Windows box only.
 

@@ -4105,19 +4105,33 @@ static const float3 CASCADE_TINT_NONE = float3(1.0, 1.0, 1.0);
 /// weight the *visibility* was mixed by is what puts that gradient on screen. A
 /// view that drew one flat colour per cascade would show the boundary as a hard
 /// edge the shading does not actually have.
+///
+/// **Every read of the table takes a constant index.** Indexed by `cascade`
+/// directly, AMD's Vulkan compiler (driver 25.10.36 on an RX 7900 XTX,
+/// 2026-10-24) drew the band in nearly the near cascade's colour once an
+/// unrelated edit to `fragmentMain`'s light loop changed the code around it,
+/// while lavapipe, D3D12 on the same GPU and the same driver under GPU-assisted
+/// validation all drew the blend. Matching `cascade` against each constant
+/// index of a forced unroll leaves no runtime subscript to mistranslate, for
+/// any `SHADOW_CASCADES`; `forward_e2e`'s cascade check is the observer.
 float3 cascade_tint(uint cascade, float blend)
 {
-    if (cascade >= SHADOW_CASCADES)
+    float3 tint = CASCADE_TINT_NONE;
+    [ForceUnroll]
+    for (uint index = 0; index < SHADOW_CASCADES; ++index)
     {
-        return CASCADE_TINT_NONE;
+        if (index == cascade)
+        {
+            // The last cascade fades into nothing, exactly as
+            // `sun_visibility`'s answer there is one cascade's and not a mix.
+            // `min` keeps the unrolled last step's subscript inside the table
+            // on the side of the choice it does not take.
+            float3 next = CASCADE_TINTS[min(index + 1, SHADOW_CASCADES - 1)];
+            tint = index + 1 < SHADOW_CASCADES ? lerp(CASCADE_TINTS[index], next, blend)
+                                               : CASCADE_TINTS[index];
+        }
     }
-    if (cascade + 1 >= SHADOW_CASCADES)
-    {
-        // The last cascade fades into nothing, exactly as `sun_visibility`'s
-        // answer there is one cascade's and not a mix.
-        return CASCADE_TINTS[cascade];
-    }
-    return lerp(CASCADE_TINTS[cascade], CASCADE_TINTS[cascade + 1], blend);
+    return tint;
 }
 
 /// The fraction of the sun this fragment can see: `1.0` fully lit, `0.0` fully
