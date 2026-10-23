@@ -1056,19 +1056,21 @@ fn the_pointer_enters_moves_clicks_scrolls_and_leaves() {
     );
 }
 
-// **Back in the ordinary sweep (2026-10-23) after three flakes.** This test
-// and `minimizing_a_captured_window_releases_the_clip` compare a clip
-// rectangle the system applied against one this process computed, and both
-// operands can move underneath it: the desktop repositions windows, and focus
-// can be contended by whatever else the runner is doing. They were `#[ignore]`d
-// for that; what changed since is that `focus_and_confirm` confirms the
-// foreground with the system before either reads a clip, and nextest's
-// `windows-desktop` group keeps sibling test processes from stealing it (a
-// plain `cargo test` does not read the group; see `docs/backlog.md`). With
-// both, they passed every round of a 20-round crcbl-shell loop on a
-// `windows-latest` sweep runner and every run of the real-desktop job.
-// Deleting them was never the alternative: a process that keeps the cursor
-// clipped after losing focus has taken the desktop hostage.
+// **Held out of the ordinary sweep.** This test and
+// `minimizing_a_captured_window_releases_the_clip` compare a clip rectangle
+// the system applied against one this process computed, and both operands
+// move underneath it when anything else is using the desktop. They were
+// `#[ignore]`d after flakes on the `windows-latest` sweep, and briefly put back
+// on 2026-10-23 on CI evidence (every run of the real-desktop job green, and a
+// 20-round loop on a sweep runner). They came straight back out: un-ignored,
+// they run in every developer's plain `cargo nextest run`, which clips and
+// warps the cursor of the desktop being worked at, and one failed there the
+// same day on a desktop in use. The `win32 e2e (real desktop)` job runs them on
+// every push through `run-win32-e2e.ps1`'s `--run-ignored all`, so the sweep
+// added nothing that job does not already gate. Deleting them was never the
+// alternative: a process that keeps the cursor clipped after losing focus has
+// taken the desktop hostage.
+#[ignore = "clips and warps the real cursor; run-win32-e2e.ps1 runs it"]
 #[test]
 fn confining_the_pointer_clips_it_and_losing_focus_gives_the_desktop_back() {
     // The hazard that a compile cannot catch: a process that keeps the
@@ -1148,19 +1150,21 @@ fn confining_the_pointer_clips_it_and_losing_focus_gives_the_desktop_back() {
     assert_ne!(clip_rect(), clipped, "and focus does not resurrect it");
 }
 
-// **Back in the ordinary sweep (2026-10-23) after three flakes.** This test
-// and `minimizing_a_captured_window_releases_the_clip` compare a clip
-// rectangle the system applied against one this process computed, and both
-// operands can move underneath it: the desktop repositions windows, and focus
-// can be contended by whatever else the runner is doing. They were `#[ignore]`d
-// for that; what changed since is that `focus_and_confirm` confirms the
-// foreground with the system before either reads a clip, and nextest's
-// `windows-desktop` group keeps sibling test processes from stealing it (a
-// plain `cargo test` does not read the group; see `docs/backlog.md`). With
-// both, they passed every round of a 20-round crcbl-shell loop on a
-// `windows-latest` sweep runner and every run of the real-desktop job.
-// Deleting them was never the alternative: a process that keeps the cursor
-// clipped after losing focus has taken the desktop hostage.
+// **Held out of the ordinary sweep.** This test and
+// `minimizing_a_captured_window_releases_the_clip` compare a clip rectangle
+// the system applied against one this process computed, and both operands
+// move underneath it when anything else is using the desktop. They were
+// `#[ignore]`d after flakes on the `windows-latest` sweep, and briefly put back
+// on 2026-10-23 on CI evidence (every run of the real-desktop job green, and a
+// 20-round loop on a sweep runner). They came straight back out: un-ignored,
+// they run in every developer's plain `cargo nextest run`, which clips and
+// warps the cursor of the desktop being worked at, and one failed there the
+// same day on a desktop in use. The `win32 e2e (real desktop)` job runs them on
+// every push through `run-win32-e2e.ps1`'s `--run-ignored all`, so the sweep
+// added nothing that job does not already gate. Deleting them was never the
+// alternative: a process that keeps the cursor clipped after losing focus has
+// taken the desktop hostage.
+#[ignore = "clips and warps the real cursor; run-win32-e2e.ps1 runs it"]
 #[test]
 fn minimizing_a_captured_window_releases_the_clip() {
     // A minimized window is 0×0, and `client_screen_rect` maps both corners
@@ -1354,7 +1358,7 @@ fn a_cursor_shape_is_answered_from_the_window_procedure() {
     assert_ne!(frame, 1, "the non-client area is left to DefWindowProc");
 }
 
-// **The third test of this class, back in the sweep with the two above.**
+// **The third test of this class, held out with the two above.**
 // Windows refuses `SetCursorPos` from a process that is not in
 // the foreground, so this test's real precondition is the foreground
 // having taken — which nothing on a shared runner guarantees, and which
@@ -1368,6 +1372,7 @@ fn a_cursor_shape_is_answered_from_the_window_procedure() {
 // success and the mismatch surfaced here as a coordinate off by precisely
 // the offset asked for. It now returns `ShellError::Backend`, which is why
 // the `expect` below is the assertion that fires first.
+#[ignore = "clips and warps the real cursor; run-win32-e2e.ps1 runs it"]
 #[test]
 fn warping_the_pointer_moves_it_to_a_position_in_the_window() {
     // What `POINTER_WARP` claims, and the conversion it depends on: the

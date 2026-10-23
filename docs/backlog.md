@@ -27757,20 +27757,21 @@ would be.
 
 ### The Win32 pointer-clip tests and the ordinary sweep
 
-**Back in the sweep, 2026-10-23.** The three were `#[ignore]`d after four flakes
-(the record, and the real defect the fourth hid, are in docs/notes/ci.md under
-the same heading). They left `#[ignore]` on this evidence: the
-`win32 e2e (real desktop)` job ran all three green in every one of its 490
-successful runs among the 600 most recent CI runs (back to 2026-09-30; its 21
-failures were mutant runs and other tests), and on a branch with the attribute
-removed a `windows-latest` sweep passed and then 20 consecutive crcbl-shell
-rounds on the same runner passed (run 39884452640). What made the difference is
-`focus_and_confirm` confirming the foreground and the `windows-desktop` nextest
-group keeping siblings from stealing it. **Not addressed:** the desktop
-repositioning the window or changing its display set mid-test, the other half of
-the original flakes; it has not been seen since. If one of the three fails in
-the sweep again, that is the first suspect, and the run belongs here before
-anyone reaches for `#[ignore]` again.
+**Considered and declined, 2026-10-23: putting them back in the sweep.** The
+three are `#[ignore]`d (the four flakes and the defect the fourth hid are in
+docs/notes/ci.md under the same heading). The CI evidence for un-ignoring held:
+the `win32 e2e (real desktop)` job ran all three green in every one of its 490
+successful runs among the 600 most recent CI runs, and with the attribute
+removed a `windows-latest` sweep and 20 consecutive crcbl-shell rounds on that
+runner passed (run 39884452640). They went back in on that and came straight
+back out, because what it did not weigh is the developer's desktop: un-ignored,
+they run in every plain `cargo nextest run`, which clips and warps the cursor of
+the desktop being worked at, and
+`confining_the_pointer_clips_it_and_losing_focus_gives_the_desktop_back` failed
+there the same day with the desktop in use. The sweep added no gate the
+real-desktop job does not already run on every push, through
+`run-win32-e2e.ps1`'s `--run-ignored all`. Reopen only if that job stops running
+them.
 
 **The group is nextest's, and `cargo test` does not read it.** A plain
 `cargo test --workspace` on a Windows desktop runs the `win32::shell` suite in
