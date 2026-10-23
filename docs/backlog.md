@@ -434,12 +434,6 @@ driver to an ICD manifest, L-sized).
   - Behaviour, not a bug: the rectangles are the caller's layout in device
     pixels, so a window whose scale changes keeps its old region (scaled once,
     at the call) until the caller sends it again, as the trait docs say.
-- **The Win32 keyboard fixes' CI mutants were not run.** The branch's CI was
-  green on 2026-10-19, Wayland Escape and Win32 desktop tests included, but
-  these mutants were never run against it: `consumed.report` disabled in
-  `win32/input.rs`, `self.consumed.clear()` deleted in `win32/shell.rs`,
-  `if dismissed && repeat` in the Win32 key arm, `MAPVK_VK_TO_CHAR` in
-  `layout_scancode`, and `if dismissed && !pressed` in Wayland's `key_event`.
 - **Win32 popup leave (lyr): the cause was the wait, fixed; verified on CI's
   desktop only.** lyr's trace on 0.8.1 (2026-10-22, `RUST_LOG=crcbl_shell=trace`
   with a probe logging every event its bar received): the leave was recorded 8
