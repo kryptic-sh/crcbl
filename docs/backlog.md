@@ -27845,30 +27845,22 @@ warned about it. `web_exports!` is not affected — it forwards to free function
 in `crcbl::web`, not to same-named methods — but it is the kind of macro that
 would be.
 
-### The Win32 pointer-clip tests are held out of the ordinary sweep
+### The Win32 pointer-clip tests and the ordinary sweep
 
-Three pointer-clip tests are `#[ignore]`d in the workspace sweep and still gate
-under `run-win32-e2e.ps1`, which passes `--run-ignored all` on a real
-interactive desktop. The four flakes, the real defect the fourth one hid and the
-lesson about this family are in docs/notes/ci.md under the same heading.
-
-**Open: whether they can leave `#[ignore]`.** Not yet, and not undone here. The
-focus half of their flakiness is fixed: `focus_and_confirm` now confirms the
-foreground with the system, and all three call it (see the focus-flake record in
-docs/notes/ci.md). Since 2026-08-24 the `windows-desktop` nextest group also
-keeps sibling test processes from contending. Two things the fix does not
-address are still there. The desktop can reposition the window or change its
-display set mid-test. And a steal after the helper returns can still clear the
-clip: one of 35 parallel stress runs with the fix failed
-`minimizing_a_captured_window_releases_the_clip` on its restore assertion with
-the full-screen rectangle, after focus had been confirmed. That run had no test
-group, so the steal was a sibling's, which is exactly what the group now
-prevents. Evidence to collect before un-ignoring: remove the `#[ignore]` on a
-branch and get about 20 consecutive green `build + test (windows-latest)` runs,
-or loop the three there under `--run-ignored only` for the same count, since the
-ordinary sweep's runner is where every instance landed. Check the
-`win32 e2e (real desktop)` job's history since `aef2872` for failures in these
-three first; any there answer the question already.
+**Back in the sweep, 2026-10-23.** The three were `#[ignore]`d after four flakes
+(the record, and the real defect the fourth hid, are in docs/notes/ci.md under
+the same heading). They left `#[ignore]` on this evidence: the
+`win32 e2e (real desktop)` job ran all three green in every one of its 490
+successful runs among the 600 most recent CI runs (back to 2026-09-30; its 21
+failures were mutant runs and other tests), and on a branch with the attribute
+removed a `windows-latest` sweep passed and then 20 consecutive crcbl-shell
+rounds on the same runner passed (run 39884452640). What made the difference is
+`focus_and_confirm` confirming the foreground and the `windows-desktop` nextest
+group keeping siblings from stealing it. **Not addressed:** the desktop
+repositioning the window or changing its display set mid-test, the other half of
+the original flakes; it has not been seen since. If one of the three fails in
+the sweep again, that is the first suspect, and the run belongs here before
+anyone reaches for `#[ignore]` again.
 
 **The group is nextest's, and `cargo test` does not read it.** A plain
 `cargo test --workspace` on a Windows desktop runs the `win32::shell` suite in

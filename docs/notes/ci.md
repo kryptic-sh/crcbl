@@ -505,7 +505,7 @@ identically. So the goldens are not adapter-sensitive within
 rather than a general property of the software-only board. What the gap
 threatens is _new_ shader and driver-state work, not the existing picture.
 
-### The Win32 pointer-clip tests are held out of the ordinary sweep
+### The Win32 pointer-clip tests and the ordinary sweep
 
 Record; the one thing still open is in docs/backlog.md under the same heading.
 Three flakes across the session, on **two different tests** and **three
