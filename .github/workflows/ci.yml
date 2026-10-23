@@ -2850,12 +2850,12 @@ jobs:
         run: crates/crcbl/tests/run-draw-gen-e2e.sh
       # **One test held out here, by name**:
       # `every_declared_capability_behaves_the_way_it_was_declared` aborts with
-      # an access violation on this leg, intermittently, inside the stencil
-      # reference exercise. It reproduces on no other leg and on no local run of
-      # this same lavapipe build, and it vanishes when the exercise is
-      # instrumented. `docs/backlog.md` carries the evidence and what would
-      # settle it. Every other test in the suite still runs here, and that one
-      # still runs on Linux lavapipe, D3D12 and Metal.
+      # an access violation inside the stencil reference exercise, in llvmpipe's
+      # JIT-compiled code, on runners whose CPU is an AMD EPYC 7763 (Zen 3) and
+      # never on the EPYC 9V45 (Zen 5) ones, so it lands on some runs and not
+      # others. `docs/backlog.md` carries the evidence and what would settle
+      # it. Every other test in the suite still runs here, and that one still
+      # runs on Linux lavapipe, D3D12 and Metal.
       - name: Check the HAL seam on lavapipe
         shell: bash
         env:
