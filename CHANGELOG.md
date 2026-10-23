@@ -36,6 +36,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   extension. Themes are now shared and each directory's path is built once. On
   an Arch desktop's Adwaita, Breeze, Papirus and hicolor, 4,488 lookups per
   theme took 2.4 to 3.4 times less time, with the same answers.
+- **CMAA2's shape pass no longer divides per blend share.** It recovered each
+  source texel from a flat index with an integer division for every share it
+  emitted, although the line walk already held the coordinate; it now carries it
+  through. On an RX 7900 XTX the shape pass is 8–11% cheaper, with identical
+  output.
 - **Fill lights no longer pay for the specular they never show.** The forward
   shader tested a light's fill flag only after evaluating its GGX or LTC
   specular lobe, and the drivers measured paid for the discarded lobe in full.

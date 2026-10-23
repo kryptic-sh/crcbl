@@ -117,15 +117,15 @@ entry-points = edgesMain:glcompute
 
 [cmaa2_shapes]
 source = shaders/cmaa2_shapes.slang
-source-sha256 = 957e62b3b62a8d47d736c5c211d16939bef5f4c131a88250cca4e1f2ae83acc3
+source-sha256 = 63430bbeecc9383a2743d85114321b7000479791078eb2f4a14dd9ac75f412f9
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/cmaa2_shapes.spv
-spirv-sha256 = 575e06eb71686529bc605d4c278bf28e4d11b1a8f9724e1a235327a2e5139797
+spirv-sha256 = ed173b5579145bed48313f892b9e0c2f55cd9a647da5761738fe43cba4115bc8
 wgsl = wgsl/cmaa2_shapes.wgsl
-wgsl-sha256 = bb78b879fff488e3b490011b9149c5c79e5c08ca34e2dbeab8c10ee51bf1ef1e
+wgsl-sha256 = e0394230fa2483a4dbe30375715d688c6fcaea41b945c915737cfc9a46df0650
 msl = msl/cmaa2_shapes.metal
-msl-sha256 = 0c19b9cbfbac0280a9f124d559d03f7a524ce0e08d45324420d1e4c38e971578
-dxil = shapesMain:dxil/cmaa2_shapes.shapes.dxil:9107f93cb7a128133a5c72a23bd23768dd5a8b74355b5280b692d5760f5d8ca6
+msl-sha256 = dce4d3c1da0f87d50e3de45b54cdc7a21712f28c9c3c817b0fe2df2ec4162847
+dxil = shapesMain:dxil/cmaa2_shapes.shapes.dxil:426e47f63879b91021a234e10dcdb578c6b09570bfe02430a6dc8dc178825ee7
 entry-points = shapesMain:glcompute
 
 [compute_probe]
