@@ -142,13 +142,14 @@ fn tile_tap_0( rect_3 : vec4<f32>,  texel_step_0 : vec2<f32>,  tile_uv_1 : vec2<
 
 fn tile_pcf_0( tile_1 : u32,  tile_uv_2 : vec2<f32>,  reference_1 : f32,  pixel_2 : vec2<f32>,  radius_0 : f32) -> f32
 {
-    var _S6 : vec2<f32> = shadow_rotation_0(pixel_2);
+    var rotation_1 : vec2<f32> = shadow_rotation_0(pixel_2);
     var rect_4 : vec4<f32> = atlas_rect_0(tile_1);
     if(atlas_rect_is_empty_0(rect_4))
     {
         return 1.0f;
     }
-    var _S7 : vec2<f32> = atlas_step_0(rect_4);
+    var texel_step_1 : vec2<f32> = atlas_step_0(rect_4);
+    var probe_taps_0 : array<f32, i32(5)>;
     var spot_0 : u32 = u32(0);
     var probe_0 : f32 = 0.0f;
     for(;;)
@@ -160,7 +161,9 @@ fn tile_pcf_0( tile_1 : u32,  tile_uv_2 : vec2<f32>,  reference_1 : f32,  pixel_
         {
             break;
         }
-        var probe_1 : f32 = probe_0 + tile_tap_0(rect_4, _S7, tile_uv_2, SHADOW_DISC_0[SHADOW_PROBE_INDEX_0[spot_0]] * vec2<f32>(radius_0), _S6, reference_1);
+        var _S6 : f32 = tile_tap_0(rect_4, texel_step_1, tile_uv_2, SHADOW_DISC_0[SHADOW_PROBE_INDEX_0[spot_0]] * vec2<f32>(radius_0), rotation_1, reference_1);
+        probe_taps_0[spot_0] = _S6;
+        var probe_1 : f32 = probe_0 + _S6;
         spot_0 = spot_0 + u32(1);
         probe_0 = probe_1;
     }
@@ -172,8 +175,25 @@ fn tile_pcf_0( tile_1 : u32,  tile_uv_2 : vec2<f32>,  reference_1 : f32,  pixel_
     {
         return 1.0f;
     }
-    var index_1 : u32 = u32(0);
-    var visibility_0 : f32 = 0.0f;
+    var index_1 : u32 = u32(1);
+    var visibility_0 : f32 = probe_taps_0[i32(0)];
+    for(;;)
+    {
+        if(index_1 < u32(23))
+        {
+        }
+        else
+        {
+            break;
+        }
+        var visibility_1 : f32 = visibility_0 + tile_tap_0(rect_4, texel_step_1, tile_uv_2, SHADOW_DISC_0[index_1] * vec2<f32>(radius_0), rotation_1, reference_1);
+        index_1 = index_1 + u32(1);
+        visibility_0 = visibility_1;
+    }
+    var _S7 : vec2<f32> = vec2<f32>(radius_0);
+    var visibility_2 : f32 = visibility_0 + probe_taps_0[i32(1)] + tile_tap_0(rect_4, texel_step_1, tile_uv_2, vec2<f32>(0.43503299355506897f, 0.75919097661972046f) * _S7, rotation_1, reference_1) + probe_taps_0[i32(2)] + tile_tap_0(rect_4, texel_step_1, tile_uv_2, vec2<f32>(0.82610201835632324f, -0.38168001174926758f) * _S7, rotation_1, reference_1) + probe_taps_0[i32(3)] + tile_tap_0(rect_4, texel_step_1, tile_uv_2, vec2<f32>(-0.31940698623657227f, -0.88803398609161377f) * _S7, rotation_1, reference_1) + probe_taps_0[i32(4)];
+    index_1 = u32(30);
+    visibility_0 = visibility_2;
     for(;;)
     {
         if(index_1 < u32(32))
@@ -183,9 +203,9 @@ fn tile_pcf_0( tile_1 : u32,  tile_uv_2 : vec2<f32>,  reference_1 : f32,  pixel_
         {
             break;
         }
-        var visibility_1 : f32 = visibility_0 + tile_tap_0(rect_4, _S7, tile_uv_2, SHADOW_DISC_0[index_1] * vec2<f32>(radius_0), _S6, reference_1);
+        var visibility_3 : f32 = visibility_0 + tile_tap_0(rect_4, texel_step_1, tile_uv_2, SHADOW_DISC_0[index_1] * _S7, rotation_1, reference_1);
         index_1 = index_1 + u32(1);
-        visibility_0 = visibility_1;
+        visibility_0 = visibility_3;
     }
     return visibility_0 / 32.0f;
 }
@@ -539,7 +559,7 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     var to_1 : vec3<f32> = params_0.eye_0.xyz + along_0 * vec3<f32>(to_depth_0);
     var middle_0 : vec3<f32> = (from_1 + to_1) * vec3<f32>(0.5f);
     var pixel_6 : vec2<f32> = vec2<f32>(f32(tile_x_1), f32(tile_y_1));
-    var visibility_2 : f32 = volumetric_sun_visibility_0(middle_0, pixel_6);
+    var visibility_4 : f32 = volumetric_sun_visibility_0(middle_0, pixel_6);
     var segment_0 : vec3<f32> = to_1 - from_1;
     var length_of_0 : f32 = length(segment_0);
     var view_direction_3 : vec3<f32>;
@@ -551,7 +571,7 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     {
         view_direction_3 = vec3<f32>(0.0f, 0.0f, 1.0f);
     }
-    var lit_2 : vec4<f32> = vec4<f32>(volumetric_punctual_0(froxel_1, middle_0, view_direction_3, pixel_6), visibility_2);
+    var lit_2 : vec4<f32> = vec4<f32>(volumetric_punctual_0(froxel_1, middle_0, view_direction_3, pixel_6), visibility_4);
     lighting_0[froxel_1] = lit_2;
     volumetrics_0[froxel_1] = volumetric_slice_0(from_1, to_1, view_direction_3, lit_2);
     return;

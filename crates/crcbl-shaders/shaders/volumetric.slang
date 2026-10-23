@@ -759,11 +759,14 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
     }
     float2 texel_step = atlas_step(rect);
 
+    float probe_taps[SHADOW_PROBE_TAPS];
     float probe = 0.0;
     for (uint spot = 0u; spot < SHADOW_PROBE_TAPS; ++spot)
     {
-        probe += tile_tap(rect, texel_step, tile_uv,
-                          SHADOW_DISC[SHADOW_PROBE_INDEX[spot]] * radius, rotation, reference);
+        probe_taps[spot] = tile_tap(rect, texel_step, tile_uv,
+                                    SHADOW_DISC[SHADOW_PROBE_INDEX[spot]] * radius, rotation,
+                                    reference);
+        probe += probe_taps[spot];
     }
     // Unanimity, tested at both ends rather than by a tolerance: a comparison
     // sampler returns exactly zero or exactly one wherever the four texels it
@@ -778,8 +781,27 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
         return 1.0;
     }
 
-    float visibility = 0.0;
-    for (uint index = 0u; index < SHADOW_TAPS; ++index)
+    // The probe positions are members of the complete disc. Add their retained
+    // comparisons at the same indices the original 0..SHADOW_TAPS loop did, so
+    // a mixed edge takes only the remaining samples without changing the full
+    // filter's floating-point accumulation order.
+    float visibility = probe_taps[0];
+    for (uint index = 1u; index < SHADOW_PROBE_INDEX[1]; ++index)
+    {
+        visibility += tile_tap(rect, texel_step, tile_uv, SHADOW_DISC[index] * radius, rotation,
+                               reference);
+    }
+    visibility += probe_taps[1];
+    visibility += tile_tap(rect, texel_step, tile_uv,
+                           SHADOW_DISC[SHADOW_PROBE_INDEX[1] + 1u] * radius, rotation, reference);
+    visibility += probe_taps[2];
+    visibility += tile_tap(rect, texel_step, tile_uv,
+                           SHADOW_DISC[SHADOW_PROBE_INDEX[2] + 1u] * radius, rotation, reference);
+    visibility += probe_taps[3];
+    visibility += tile_tap(rect, texel_step, tile_uv,
+                           SHADOW_DISC[SHADOW_PROBE_INDEX[3] + 1u] * radius, rotation, reference);
+    visibility += probe_taps[4];
+    for (uint index = SHADOW_PROBE_INDEX[4] + 1u; index < SHADOW_TAPS; ++index)
     {
         visibility += tile_tap(rect, texel_step, tile_uv, SHADOW_DISC[index] * radius, rotation,
                                reference);

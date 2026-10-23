@@ -30,6 +30,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A shadow edge no longer samples its probe taps twice.** The shadow filter
+  takes a few probe taps to find a fully lit or fully shadowed neighbourhood and
+  then, on a mixed edge, sampled the whole disc again, probe taps included. It
+  now reuses those comparisons in the disc's own order, so the result is
+  unchanged. In the mesh, grass, water and volumetric shaders alike; on an RX
+  7900 XTX the forward pass is 3–10% cheaper in the sandbox's shadowed scenes.
 - **A scene with no light probes no longer gathers them.** The forward, SSR and
   water shaders ran the full eight-corner probe gather for every fragment and
   summed the zeros an empty volume holds; they now return before it when the

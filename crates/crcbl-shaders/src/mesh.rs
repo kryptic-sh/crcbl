@@ -6985,21 +6985,7 @@ mod tests {
              probe is five taps nothing reads"
         );
 
-        let declaration = SOURCE
-            .split_once("static const uint SHADOW_PROBE_INDEX[SHADOW_PROBE_TAPS] = {")
-            .expect("mesh.slang has no probe index list")
-            .1;
-        let probe = declaration[..declaration.find("};").expect("an unterminated list")]
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(|entry| {
-                entry
-                    .trim_end_matches('u')
-                    .parse::<usize>()
-                    .expect("a probe index that is not a number")
-            })
-            .collect::<Vec<_>>();
+        let probe = shadow_probe_index(SOURCE);
 
         let count = probe.len();
         assert!(
@@ -7070,6 +7056,123 @@ mod tests {
             "the probe's ring leaves a gap of {} radians, which is a third of the disc it \
              never looks at",
             widest
+        );
+    }
+
+    /// `mesh.slang`'s `SHADOW_PROBE_INDEX`, parsed out of the source.
+    fn shadow_probe_index(source: &str) -> Vec<usize> {
+        let declaration = source
+            .split_once("static const uint SHADOW_PROBE_INDEX[SHADOW_PROBE_TAPS] = {")
+            .expect("mesh.slang has no probe index list")
+            .1;
+        declaration[..declaration.find("};").expect("an unterminated list")]
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .trim_end_matches('u')
+                    .parse::<usize>()
+                    .expect("a probe index that is not a number")
+            })
+            .collect()
+    }
+
+    /// **A mixed edge samples the complete disc without sampling its probe a
+    /// second time.**
+    ///
+    /// The probe comparisons are already the complete disc's comparisons at
+    /// `SHADOW_PROBE_INDEX`. Retaining them makes the mixed path strictly less
+    /// work while preserving the original accumulation order. If this quietly
+    /// returns to a loop over the complete disc, rendered output stays correct
+    /// and only the performance regression exposes the duplicate work.
+    #[test]
+    fn the_mixed_shadow_filter_reuses_its_probe_taps() {
+        const SOURCE: &str = include_str!("../shaders/mesh.slang");
+        let filter = SOURCE
+            .split_once("float tile_pcf(")
+            .expect("mesh.slang declares tile_pcf")
+            .1;
+        let filter = &filter[..filter.find("\n}").expect("tile_pcf closes")];
+        assert!(
+            filter.contains("float probe_taps[SHADOW_PROBE_TAPS];"),
+            "tile_pcf must retain the probe comparisons for a mixed edge",
+        );
+        let mixed = &filter[filter
+            .find("float visibility = probe_taps[0];")
+            .expect("the full filter must begin with the retained centre comparison")..];
+
+        // **Every disc tap is added exactly once, in index order**, which is what
+        // makes the mixed path the complete filter with the probe's comparisons
+        // reused rather than taken again. The path is spelled out around the
+        // probe instead of looped, so this walks its statements in source order
+        // and evaluates their bounds against the declared tables: a dropped or
+        // repeated line, or a `SHADOW_PROBE_INDEX` the spelling no longer fits,
+        // adds some tap twice or not at all. No GPU test sees that — one tap of
+        // the disc moves a mixed edge by less than any image tolerance.
+        let probe = shadow_probe_index(SOURCE);
+        let taps: usize = SOURCE
+            .split_once("static const uint SHADOW_TAPS = ")
+            .and_then(|(_, rest)| rest.split_once(';'))
+            .map(|(count, _)| count.trim().parse().expect("SHADOW_TAPS is a number"))
+            .expect("mesh.slang declares SHADOW_TAPS");
+        let bound = |expression: &str| -> usize {
+            let expression = expression.trim();
+            let (base, step) = match expression.strip_suffix(" + 1u") {
+                Some(base) => (base, 1),
+                None => (expression, 0),
+            };
+            let base = if base == "SHADOW_TAPS" {
+                taps
+            } else if let Some(slot) = base
+                .strip_prefix("SHADOW_PROBE_INDEX[")
+                .and_then(|slot| slot.strip_suffix(']'))
+            {
+                probe[slot.parse::<usize>().expect("a constant probe slot")]
+            } else {
+                base.trim_end_matches('u')
+                    .parse()
+                    .unwrap_or_else(|_| panic!("`{base}` is not a bound this walk can read"))
+            };
+            base + step
+        };
+
+        const RETAINED: &str = "probe_taps[";
+        const RANGE: &str = "for (uint index = ";
+        const SINGLE: &str = "SHADOW_DISC[SHADOW_PROBE_INDEX[";
+        let mut added = Vec::new();
+        let mut rest = mixed;
+        while let Some((at, marker)) = [RETAINED, RANGE, SINGLE]
+            .into_iter()
+            .filter_map(|marker| rest.find(marker).map(|at| (at, marker)))
+            .min()
+        {
+            rest = &rest[at + marker.len()..];
+            match marker {
+                RETAINED => {
+                    let (slot, after) = rest.split_once(']').expect("a closed probe subscript");
+                    added.push(probe[slot.parse::<usize>().expect("a constant probe slot")]);
+                    rest = after;
+                }
+                RANGE => {
+                    let (start, after) = rest.split_once("; index < ").expect("a loop bound");
+                    let (end, after) = after.split_once("; ++index)").expect("a loop step");
+                    added.extend(bound(start)..bound(end));
+                    rest = after;
+                }
+                _ => {
+                    let (expression, after) = rest
+                        .split_once("] * radius")
+                        .expect("a single tap scaled by the radius");
+                    added.push(bound(&format!("SHADOW_PROBE_INDEX[{expression}")));
+                    rest = after;
+                }
+            }
+        }
+        assert_eq!(
+            added,
+            (0..taps).collect::<Vec<_>>(),
+            "the mixed-edge path does not add each of the disc's taps once, in order",
         );
     }
 
