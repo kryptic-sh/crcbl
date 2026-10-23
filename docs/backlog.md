@@ -2723,19 +2723,6 @@ reproduced locally, with Arch's or Ubuntu 24.04's openbox and Xvfb. `x11_e2e`'s
 `Session::open` now waits for openbox to list a probe window before any test
 runs.
 
-**Not reproduced: Hyprland keeping a panel's exclusive keyboard under its own
-grabbing popup** (lyr, 2026-10-21, Hyprland 0.56.2). lyr saw keys reach a bar
-holding `keyboard_interactivity = exclusive` rather than the `xdg_popup` grab
-open from it, and forwards the bar's keys to its dropdown itself. The Wayland
-suite's `a_grabbing_popup_takes_the_keyboard_from_its_exclusive_panel` (an
-anchored top-layer bar, a click on it, a grabbing dropdown, a virtual key)
-passes under both sway and the nested Hyprland 0.56.2 on the office laptop
-(2026-10-23): the dropdown hears the key, and the test goes red when it asserts
-the bar instead. So the difference is in something the test does not do: a real
-keyboard, a grab quoting a key serial rather than a click, or the order lyr maps
-and focuses in. lyr was asked which; until that is known, the shell should not
-forward keys itself.
-
 **Behaviour, not a crcbl bug: Hyprland moves pointer focus to a layer surface
 that takes the keyboard** (lyr, 2026-10-21, Hyprland 0.56.2). Until the pointer
 next moves, every click goes to that surface at a position outside it, such as
