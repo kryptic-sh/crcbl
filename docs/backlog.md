@@ -2723,13 +2723,18 @@ reproduced locally, with Arch's or Ubuntu 24.04's openbox and Xvfb. `x11_e2e`'s
 `Session::open` now waits for openbox to list a probe window before any test
 runs.
 
-**Behaviour, not a crcbl bug: Hyprland keeps a panel's exclusive keyboard under
-its own grabbing popup** (lyr, 2026-10-21, Hyprland 0.56.2). With a layer panel
-holding `keyboard_interactivity = exclusive` and an `xdg_popup` grab open from
-it, Hyprland delivers keys to the panel rather than the popup, so lyr forwards
-the panel's keys to its open dropdown itself. Not checked on sway or another
-compositor; if more than one compositor does it, the shell could do the
-forwarding instead of each program.
+**Not reproduced: Hyprland keeping a panel's exclusive keyboard under its own
+grabbing popup** (lyr, 2026-10-21, Hyprland 0.56.2). lyr saw keys reach a bar
+holding `keyboard_interactivity = exclusive` rather than the `xdg_popup` grab
+open from it, and forwards the bar's keys to its dropdown itself. The Wayland
+suite's `a_grabbing_popup_takes_the_keyboard_from_its_exclusive_panel` (an
+anchored top-layer bar, a click on it, a grabbing dropdown, a virtual key)
+passes under both sway and the nested Hyprland 0.56.2 on the office laptop
+(2026-10-23): the dropdown hears the key, and the test goes red when it asserts
+the bar instead. So the difference is in something the test does not do: a real
+keyboard, a grab quoting a key serial rather than a click, or the order lyr maps
+and focuses in. lyr was asked which; until that is known, the shell should not
+forward keys itself.
 
 **Behaviour, not a crcbl bug: Hyprland moves pointer focus to a layer surface
 that takes the keyboard** (lyr, 2026-10-21, Hyprland 0.56.2). Until the pointer
@@ -2737,9 +2742,9 @@ next moves, every click goes to that surface at a position outside it, such as
 (569, -41), so a panel without a grab sees presses outside its own bounds. lyr
 handles it; crcbl passes the coordinates on as the compositor sent them.
 
-**`run-wayland-e2e-hyprland.sh` on the office laptop, 2026-10-23, at
-`6bc47e17`:** 55 of 55 passed against the nested Hyprland 0.56.2, the five
-sway-only tests excluded by name as the script lists them.
+**`run-wayland-e2e-hyprland.sh` on the office laptop, 2026-10-23:** 56 of 56
+passed against the nested Hyprland 0.56.2, the five sway-only tests excluded by
+name as the script lists them.
 
 **Hyprland runs nested inside the live Hyprland, hidden** (owner's go-ahead,
 2026-10-21; it cannot nest in headless sway, whose `xdg_wm_base` 5 is below the
@@ -2758,7 +2763,7 @@ drives either compositor through its `wm_` functions, which
 `CRCBL_E2E_COMPOSITOR=hyprland` points at `hyprctl eval`; the nested config
 gives Hyprland sway's two `HEADLESS` outputs, its float rules, no gaps, and
 `follow_mouse = 2` with `mouse_move_focuses_monitor = false`. On the office
-laptop: 55 of 55 pass, and 5 that assert sway's answer are not run, each named
+laptop: 56 of 56 pass, and 5 that assert sway's answer are not run, each named
 with its reason in the script. Every one was diagnosed from a `WAYLAND_DEBUG=1`
 run, and in none is crcbl at fault: the decoration test reads sway's `border`
 field; Hyprland keeps answering frame requests for surfaces it is not showing

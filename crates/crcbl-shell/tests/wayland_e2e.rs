@@ -4519,6 +4519,106 @@ fn escape_on_a_grabbing_popup_is_delivered_then_asks_it_to_close() {
     session.shell.destroy_window(window).expect("destroy");
 }
 
+/// lyr's dropdown: a grabbing popup opened from a bar that holds the keyboard
+/// exclusively. xdg-shell gives a grabbing popup the keyboard, and with this
+/// suite's virtual keyboard both sway and Hyprland do.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_grabbing_popup_takes_the_keyboard_from_its_exclusive_panel() {
+    let mut session = Session::open();
+    let size = LogicalSize::new(0.0, 30.0);
+    let bar = session.create(&panel(
+        "crcbl e2e exclusive bar with a dropdown",
+        size,
+        PanelDesc {
+            anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+            layer: PanelLayer::Top,
+            keyboard: PanelKeyboard::Exclusive,
+            ..PanelDesc::default()
+        },
+    ));
+    session.pump_until("the panel's first configure", |session| {
+        session.size(bar).is_some()
+    });
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    let input = VirtualInput::attach(&*session.shell, bar).expect("virtual devices");
+    session.pump_until("the panel to take the keyboard", |session| {
+        session
+            .shell
+            .window_state(bar)
+            .is_ok_and(|state| state.focused)
+    });
+
+    // A click on the bar: the input serial the grab quotes.
+    let _refocus = FirstOutputFocused;
+    input.move_to(OUTPUT_SIZE.width / 2, 15, LAYOUT_SIZE);
+    input.button(evdev::BTN_LEFT, true);
+    input.button(evdev::BTN_LEFT, false);
+    session.pump_until("the click on the panel", |session| {
+        session.events.iter().any(|event| {
+            matches!(
+                event,
+                ShellEvent::Button {
+                    window,
+                    state: ButtonState::Released,
+                    ..
+                } if *window == bar
+            )
+        })
+    });
+
+    let dropdown = session.create(&popup(
+        "crcbl e2e dropdown",
+        LogicalSize::new(200.0, 100.0),
+        PopupDesc {
+            parent: bar,
+            anchor: LogicalRect::new(LogicalPoint::new(800.0, 0.0), LogicalSize::new(120.0, 30.0)),
+            placement: PopupPlacement::Below,
+            input: PopupInput::Grab,
+        },
+    ));
+    session.pump_until("the dropdown's first configure", |session| {
+        session.size(dropdown).is_some()
+    });
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, dropdown).expect("map");
+    session.settle(Duration::from_millis(200));
+    session.take_names();
+
+    input.tap(evdev::KEY_A);
+    session.pump_until("the key press", |session| {
+        session.events.iter().any(|event| {
+            matches!(
+                event,
+                ShellEvent::Key {
+                    state: ButtonState::Pressed,
+                    ..
+                }
+            )
+        })
+    });
+    let heard: Vec<WindowId> = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::Key {
+                window,
+                state: ButtonState::Pressed,
+                ..
+            } => Some(*window),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        heard,
+        [dropdown],
+        "the grabbing popup hears the key, not its bar: {:?}",
+        session.events
+    );
+
+    drop(input);
+    session.shell.destroy_window(bar).expect("destroy");
+}
+
 /// S14 on Wayland: a window's tree read and acted on over AT-SPI, the way Orca
 /// would; see [`atspi`] for the reader and why it needs a private bus.
 #[cfg(feature = "accesskit")]
