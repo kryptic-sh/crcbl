@@ -125,7 +125,8 @@ echo "crcbl e2e: reading a transparent window back through sway with grim"
 TRANSPARENCY_LOG="${SWAY_RUNTIME_DIR}/transparency.log"
 set +e
 # The second test puts the window on sway's Xwayland, whose `DISPLAY` only sway
-# knows: a command it runs inherits it, so one writes it down.
+# knows: a command it runs inherits it, so one writes it down. The third needs a
+# plain X server with a compositing manager, which this session is not.
 DISPLAY_FILE="${SWAY_RUNTIME_DIR}/xwayland-display"
 swaymsg exec "printenv DISPLAY > ${DISPLAY_FILE}" >/dev/null
 for _ in $(seq 50); do
@@ -139,7 +140,9 @@ if [ ! -s "$DISPLAY_FILE" ]; then
 fi
 DISPLAY="$(cat "$DISPLAY_FILE")" CRCBL_SHELL=wayland \
     cargo test --locked -q -p crcbl-app --test wayland_transparency \
-    -- --ignored --nocapture --test-threads=1 2>&1 | tee "$TRANSPARENCY_LOG"
+    -- --ignored --nocapture --test-threads=1 \
+    --skip a_window_under_an_x_compositing_manager_is_blended_premultiplied \
+    2>&1 | tee "$TRANSPARENCY_LOG"
 STATUS=${PIPESTATUS[0]}
 set -e
 TRANSPARENCY_PLAIN="${SWAY_RUNTIME_DIR}/transparency.plain.log"

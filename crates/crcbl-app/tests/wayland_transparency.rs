@@ -28,6 +28,14 @@
 //! offers no premultiplied alpha, and the Intel adapter's swapchain for an X
 //! server rendering on NVIDIA fails (`ERROR_INITIALIZATION_FAILED`), so the
 //! presenter refuses the window.
+//!
+//! The third is a plain X server with a compositing manager: Xvfb with picom
+//! (`picom --backend xrender`), both windows on X, the screen read with
+//! ImageMagick's `import`. Verified on the office laptop on 2026-10-24 with
+//! lavapipe pinned (`VK_DRIVER_FILES=…/lvp_icd.json`): without the pin the
+//! backdrop opens on the NVIDIA MX550, whose surface for an Xvfb window offers
+//! only opaque alpha, and the Intel adapter cannot present to an X server
+//! without DRI3. It fails without picom, at the capability check.
 
 #![cfg(target_os = "linux")]
 
@@ -47,8 +55,12 @@ use crcbl_shell::{
 
 /// The app id the e2e sway config floats, so the window sits at the centre.
 const APP_ID: &str = "sh.kryptic.crcbl.e2e";
-/// Where the floating window is, in the first headless output's 1920x1080.
-const PROBE: (u32, u32) = (960, 540);
+/// Where sway's floating window is, in the first headless output's
+/// 1920x1080.
+const SWAY_PROBE: (u32, u32) = (960, 540);
+/// Inside both windows on a plain X server with no window manager, where
+/// every window opens at the screen's origin.
+const X_PROBE: (u32, u32) = (200, 150);
 /// The window's colour, premultiplied: blue at half alpha.
 const WINDOW: [f32; 4] = [0.0, 0.0, 0.5, 0.5];
 /// How far a channel may sit from the expected value: the compositor's blend
@@ -149,17 +161,34 @@ impl Solid {
     }
 }
 
-/// The pixel at `PROBE`, read through the compositor by `grim`.
-fn screen_pixel() -> [u8; 3] {
-    let geometry = format!("{},{} 1x1", PROBE.0, PROBE.1);
+/// The pixel at `at`, read through a Wayland compositor by `grim`.
+fn grim_pixel(at: (u32, u32)) -> [u8; 3] {
+    let geometry = format!("{},{} 1x1", at.0, at.1);
     let output = crcbl_spawn::command("grim")
         .args(["-t", "ppm", "-g", &geometry, "-"])
         .output()
         .expect("grim is installed");
     assert!(output.status.success(), "grim failed: {output:?}");
-    // A binary PPM: three whitespace-separated header fields after the magic,
-    // then the pixels.
-    let bytes = output.stdout;
+    ppm_pixel(&output.stdout)
+}
+
+/// The pixel at `at` on `DISPLAY`'s root window, read by ImageMagick's
+/// `import`: what the compositing manager drew there, since the root's
+/// image includes the overlay window it draws on.
+fn import_pixel(at: (u32, u32)) -> [u8; 3] {
+    let crop = format!("1x1+{}+{}", at.0, at.1);
+    let output = crcbl_spawn::command("import")
+        .args(["-window", "root", "-crop", &crop, "-depth", "8", "ppm:-"])
+        .output()
+        .expect("ImageMagick's import is installed");
+    assert!(output.status.success(), "import failed: {output:?}");
+    ppm_pixel(&output.stdout)
+}
+
+/// The first pixel of a binary PPM.
+fn ppm_pixel(bytes: &[u8]) -> [u8; 3] {
+    // Three whitespace-separated header fields after the magic, then the
+    // pixels.
     let mut fields = 0;
     let mut at = 0;
     while fields < 4 {
@@ -187,30 +216,46 @@ fn stored(value: f32, srgb: bool) -> i32 {
     (encoded * 255.0).round() as i32
 }
 
-/// The red bar on `shell`, the half-alpha blue window on `glass_shell` — the
-/// same Wayland shell, or an X11 one on sway's Xwayland — and the pixel the
-/// screen shows where the window is, which must be the premultiplied blend.
-fn assert_blended(shell: &mut dyn Shell, mut glass_shell: Option<&mut dyn Shell>) {
-    let mut backdrop = Solid::open(
-        shell,
-        &WindowDesc {
-            title: "crcbl s16 backdrop",
-            app_id: APP_ID,
-            size: LogicalSize::new(0.0, 0.0),
-            role: WindowRole::Panel(PanelDesc {
-                namespace: "crcbl-s16-backdrop",
-                layer: PanelLayer::Background,
-                anchor: PanelAnchor::TOP
-                    | PanelAnchor::BOTTOM
-                    | PanelAnchor::LEFT
-                    | PanelAnchor::RIGHT,
-                ..PanelDesc::default()
-            }),
-            ..WindowDesc::default()
-        },
-        [1.0, 0.0, 0.0, 1.0],
-        None,
-    );
+/// How a test reads the screen back, and where on it the glass is.
+#[derive(Clone, Copy)]
+struct Readback {
+    probe: (u32, u32),
+    pixel: fn((u32, u32)) -> [u8; 3],
+}
+
+/// Through sway, with `grim`.
+const SWAY: Readback = Readback {
+    probe: SWAY_PROBE,
+    pixel: grim_pixel,
+};
+
+/// A red background panel filling sway's output.
+fn sway_backdrop() -> WindowDesc<'static> {
+    WindowDesc {
+        title: "crcbl s16 backdrop",
+        app_id: APP_ID,
+        size: LogicalSize::new(0.0, 0.0),
+        role: WindowRole::Panel(PanelDesc {
+            namespace: "crcbl-s16-backdrop",
+            layer: PanelLayer::Background,
+            anchor: PanelAnchor::TOP | PanelAnchor::BOTTOM | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+            ..PanelDesc::default()
+        }),
+        ..WindowDesc::default()
+    }
+}
+
+/// The red `backdrop` on `shell`, the half-alpha blue window on
+/// `glass_shell` — the same shell, or an X11 one on sway's Xwayland — and the
+/// pixel `screen` reads where the window is, which must be the premultiplied
+/// blend.
+fn assert_blended(
+    shell: &mut dyn Shell,
+    mut glass_shell: Option<&mut dyn Shell>,
+    backdrop: &WindowDesc<'_>,
+    screen: Readback,
+) {
+    let mut backdrop = Solid::open(shell, backdrop, [1.0, 0.0, 0.0, 1.0], None);
     let glass_desc = WindowDesc {
         title: "crcbl s16 glass",
         app_id: APP_ID,
@@ -258,13 +303,14 @@ fn assert_blended(shell: &mut dyn Shell, mut glass_shell: Option<&mut dyn Shell>
         backdrop.present();
         glass.present();
         std::thread::sleep(Duration::from_millis(50));
-        let pixel = screen_pixel();
+        let pixel = (screen.pixel)(screen.probe);
         if i32::from(pixel[2]) > 0 || Instant::now() > deadline {
             break pixel;
         }
     };
     println!(
-        "crcbl s16: the screen shows {pixel:?} at {PROBE:?} (stored blue {blue}) on {:?}",
+        "crcbl s16: the screen shows {pixel:?} at {:?} (stored blue {blue}) on {:?}",
+        screen.probe,
         glass.presenter.adapter().map(|adapter| adapter.name)
     );
     let [red, green, observed_blue] = pixel.map(i32::from);
@@ -287,7 +333,7 @@ fn assert_blended(shell: &mut dyn Shell, mut glass_shell: Option<&mut dyn Shell>
 #[ignore = "needs headless sway, grim and a Vulkan driver; see the module docs"]
 fn a_transparent_window_is_blended_premultiplied_by_the_compositor() {
     let mut shell = crcbl_shell::open_backend(ShellBackend::Wayland).expect("a Wayland session");
-    assert_blended(shell.as_mut(), None);
+    assert_blended(shell.as_mut(), None, &sway_backdrop(), SWAY);
 }
 
 /// **The same through X11**: the window on sway's Xwayland, created on the
@@ -301,5 +347,32 @@ fn an_xwayland_window_is_blended_premultiplied_too() {
         x11.caps().contains(ShellCaps::TRANSPARENT),
         "Xwayland composites, so the X11 backend offers transparent windows"
     );
-    assert_blended(shell.as_mut(), Some(x11.as_mut()));
+    assert_blended(shell.as_mut(), Some(x11.as_mut()), &sway_backdrop(), SWAY);
+}
+
+/// **The same on a plain X server** whose compositing manager owns
+/// `_NET_WM_CM_S0` (picom on Xvfb, say): the 32-bit visual is offered
+/// because something composites, and the manager blends the window by its
+/// alpha. Both windows are on the X server, with no window manager, so each
+/// opens at the screen's origin, the glass above the opaque red one.
+#[test]
+#[ignore = "needs an X server with a compositing manager, DISPLAY naming it, ImageMagick and a Vulkan driver"]
+fn a_window_under_an_x_compositing_manager_is_blended_premultiplied() {
+    let mut x11 = crcbl_shell::open_backend(ShellBackend::X11).expect("an X server");
+    assert!(
+        x11.caps().contains(ShellCaps::TRANSPARENT),
+        "a compositing manager owns _NET_WM_CM_S0, so the X11 backend offers \
+         transparent windows"
+    );
+    let backdrop = WindowDesc {
+        title: "crcbl s16 backdrop",
+        app_id: APP_ID,
+        size: LogicalSize::new(800.0, 600.0),
+        ..WindowDesc::default()
+    };
+    let screen = Readback {
+        probe: X_PROBE,
+        pixel: import_pixel,
+    };
+    assert_blended(x11.as_mut(), None, &backdrop, screen);
 }

@@ -732,9 +732,12 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    `_NET_WM_CM_S<n>` — since a bare X server draws alpha as opaque
    (`x11::connect::setup_argb`). `crcbl-app`'s `wayland_transparency` reads an
    Xwayland window back with `grim` as it does a Wayland one, in
-   `run-wayland-e2e.sh`, green in main CI run 39815909663 on llvmpipe. Not run:
-   a compositing manager on a plain X server (picom, say), whose `_NET_WM_CM_S0`
-   path is written but untested.
+   `run-wayland-e2e.sh`, green in main CI run 39815909663 on llvmpipe. The
+   `_NET_WM_CM_S0` path, a compositing manager on a plain X server, passes
+   `a_window_under_an_x_compositing_manager_is_blended_premultiplied` on the
+   office laptop (2026-10-24: Xvfb, picom's xrender backend, lavapipe pinned;
+   red without picom). Not in CI: it would need `picom` and ImageMagick in an
+   Xvfb job and the lavapipe pin.
 4. **Implemented, untested:** S17 panel focus on Win32 and AppKit, and on
    Hyprland in CI (a job of its own, M to L; on the office laptop's nested
    Hyprland 0.56.2, 2026-10-21, an exclusive panel took the keyboard as on sway,
