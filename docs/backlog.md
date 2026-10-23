@@ -3921,19 +3921,6 @@ deadline, and which no deadline changes. If it recurs, give the grass tests a
 smaller field on that runner (the `bucket_price` gate-scene pattern) or split
 the frame's submission so no one command buffer runs long.
 
-## `crcbl-font`'s fontconfig tests assume CI's fonts (2026-10-20)
-
-`crcbl-font --test system`'s
-`fontconfig::dejavu_sans_is_found_in_its_regular_and_bold_faces` and
-`fontconfig::monospace_resolves_to_fontconfigs_choice` fail on any desktop
-without DejaVu: on the office laptop (Arch, no `ttf-dejavu`) `monospace`
-resolves to Nimbus Mono PS and DejaVu Sans is not found. They are right on CI's
-image and say nothing about the code elsewhere. A local `cargo test --workspace`
-stops at them unless run with `--no-fail-fast` or with `ttf-dejavu` installed.
-Options, undecided: skip loudly when `fc-list` has no DejaVu (a skip that reads
-as a pass, which the verification rules warn against), or ask fontconfig for
-whatever face it picks and assert only that `find` agrees with `fc-match`.
-
 ## Checks that fail without a defect (2026-10-06)
 
 Each of these has failed once and passed on a rerun with the code unchanged. A

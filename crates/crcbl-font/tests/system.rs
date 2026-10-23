@@ -1,17 +1,13 @@
-//! Lookups against the fonts of the machine the tests run on: each platform
-//! asks for families its CI image certainly has, so a lookup that breaks
-//! fails here rather than reading as a font that happens to be missing.
+//! Lookups against the fonts of the machine the tests run on, so a lookup
+//! that breaks fails here rather than reading as a font that happens to be
+//! missing. Windows and macOS ask for families every install has; fontconfig
+//! is held to `fc-match`'s answer, since a Linux desktop's fonts are its own.
 
 use crcbl_font::{FontQuery, SystemFonts};
 
 /// The file name of `found`'s path, lower-cased: what a test compares,
 /// since Windows does not keep one case for its font files.
-#[cfg(any(
-    windows,
-    target_os = "linux",
-    target_os = "freebsd",
-    target_os = "macos"
-))]
+#[cfg(any(windows, target_os = "macos"))]
 fn file_name(found: &crcbl_font::FontMatch) -> String {
     found
         .path
@@ -133,6 +129,8 @@ mod windows {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod fontconfig {
+    use std::path::PathBuf;
+
     use crcbl_font::{BOLD_WEIGHT, FontStyle, Source};
 
     use super::*;
@@ -150,28 +148,55 @@ mod fontconfig {
         fonts
     }
 
-    #[test]
-    fn dejavu_sans_is_found_in_its_regular_and_bold_faces() {
-        let fonts = fontconfig();
-        let regular = fonts
-            .find(&FontQuery::new("DejaVu Sans"))
-            .expect("DejaVu Sans is installed");
+    /// What `fc-match` answers for `pattern`: the family, file and face
+    /// index fontconfig picks. The lookups below are held to it rather than
+    /// to one machine's fonts, so they say the same thing on any desktop.
+    fn fc_match(pattern: &str) -> (String, PathBuf, u32) {
+        let output = crcbl_spawn::command("fc-match")
+            .args(["-f", "%{family[0]}\n%{file}\n%{index}", pattern])
+            .output()
+            .expect("fc-match runs: install fontconfig (CI's image has it)");
+        assert!(output.status.success(), "fc-match {pattern}: {output:?}");
+        let text = String::from_utf8(output.stdout).expect("UTF-8");
+        let mut lines = text.lines();
+        let mut next = || lines.next().expect("three lines").to_owned();
+        let (family, file, index) = (next(), next(), next());
+        (
+            family,
+            PathBuf::from(file),
+            index.parse().expect("an index"),
+        )
+    }
+
+    /// `found` is the face `fc-match` picks for `pattern`.
+    fn is_fc_match(found: &crcbl_font::FontMatch, pattern: &str) {
+        let (family, file, index) = fc_match(pattern);
         assert_eq!(
-            (
-                regular.family.as_str(),
-                regular.index,
-                regular.weight,
-                regular.style
-            ),
-            ("DejaVu Sans", 0, 400, FontStyle::Normal)
+            (found.family.as_str(), &found.path, found.index),
+            (family.as_str(), &file, index),
+            "{pattern}"
         );
-        assert_eq!(file_name(&regular), "dejavusans.ttf");
-        reads_as(&regular, "DejaVu Sans");
+    }
+
+    #[test]
+    fn the_default_sans_family_is_found_in_its_regular_and_bold_faces() {
+        let fonts = fontconfig();
+        let (family, _, _) = fc_match("sans-serif");
+        let regular = fonts
+            .find(&FontQuery::new(&family))
+            .unwrap_or_else(|| panic!("{family} is installed"));
+        is_fc_match(&regular, &family);
+        assert_eq!(
+            (regular.weight, regular.style),
+            (400, FontStyle::Normal),
+            "{regular:?}"
+        );
+        reads_as(&regular, &family);
+        // Family names match without regard to case, as fontconfig's do.
         let bold = fonts
-            .find(&FontQuery::new("dejavu sans").weight(BOLD_WEIGHT))
-            .expect("DejaVu Sans Bold is installed");
-        assert_eq!(file_name(&bold), "dejavusans-bold.ttf");
-        assert_eq!(bold.weight, BOLD_WEIGHT);
+            .find(&FontQuery::new(family.to_lowercase()).weight(BOLD_WEIGHT))
+            .unwrap_or_else(|| panic!("{family} has a bold face"));
+        is_fc_match(&bold, &format!("{family}:weight=bold"));
     }
 
     #[test]
@@ -180,12 +205,11 @@ mod fontconfig {
         let mono = fonts
             .find(&FontQuery::new("monospace"))
             .expect("a monospace face");
-        assert_eq!(mono.family, "DejaVu Sans Mono");
-        assert_eq!(file_name(&mono), "dejavusansmono.ttf");
+        is_fc_match(&mono, "monospace");
         let bold = fonts
             .find(&FontQuery::new("monospace").weight(BOLD_WEIGHT))
             .expect("a bold monospace face");
-        assert_eq!(file_name(&bold), "dejavusansmono-bold.ttf");
+        is_fc_match(&bold, "monospace:weight=bold");
     }
 
     #[test]
@@ -201,9 +225,10 @@ mod fontconfig {
     #[test]
     fn fallbacks_are_fontconfigs_sort_without_the_family_itself() {
         let fonts = fontconfig();
-        let list = fonts.fallbacks(&FontQuery::new("DejaVu Sans"));
+        let (family, _, _) = fc_match("sans-serif");
+        let list = fonts.fallbacks(&FontQuery::new(&family));
         assert!(!list.is_empty(), "fontconfig sorted no other face");
-        assert!(list.iter().all(|m| m.family != "DejaVu Sans"), "{list:?}");
+        assert!(list.iter().all(|m| m.family != family), "{list:?}");
         assert!(list.iter().all(|m| m.path.is_file()), "{list:?}");
         for (at, m) in list.iter().enumerate() {
             let repeated = list[..at].iter().any(|known| known.family == m.family);

@@ -766,6 +766,7 @@ dependencies = [
 name = "crcbl-font"
 version = "0.9.0"
 dependencies = [
+ "crcbl-spawn",
  "skrifa",
 ]
 

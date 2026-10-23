@@ -834,14 +834,16 @@ jobs:
       # `dlopen` and fail without: a test that skipped itself would pass
       # whether compose works or not. fontconfig and DejaVu for crcbl-font's
       # system tests, on the same terms: they fail rather than skip without
-      # `libfontconfig.so.1`, and look up DejaVu Sans by name, so the image's
-      # incidental packages are not what they rest on.
+      # `libfontconfig.so.1` or the `fc-match` they are held to, and need a
+      # sans family with a bold face, so the image's incidental packages are
+      # not what they rest on.
       - name: Install the ALSA headers, libxkbcommon, fontconfig and DejaVu
         timeout-minutes: 8
         uses: ./.github/actions/apt-packages
         with:
           packages:
-            libasound2-dev libxkbcommon0 libfontconfig1 fonts-dejavu-core
+            libasound2-dev libxkbcommon0 libfontconfig1 fontconfig
+            fonts-dejavu-core
       # THE VIEWER'S MODEL SHELF, and this is the only job that fetches it.
       #
       # `apps/viewer` ships a shelf of Khronos CC0 models — about 138 MB, of
@@ -3591,7 +3593,7 @@ jobs:
         with:
           packages: >-
             libasound2-dev libvulkan1 mesa-vulkan-drivers libxkbcommon0
-            libfontconfig1 fonts-dejavu-core
+            libfontconfig1 fontconfig fonts-dejavu-core
       # Pinned to the software ICD for the reason `vk-e2e` pins it: a runner
       # that grew a GPU tomorrow would otherwise change what this job measures
       # without a commit.
