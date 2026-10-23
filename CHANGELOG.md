@@ -13,6 +13,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **Sandbox stress fixtures and real-clock timing.** `sandbox --stress <NAME>`
+  draws a fixed renderer workload in the cube's place and holds it for the whole
+  run: `instances` (a screen-filling static grid), `moving` (the grid with every
+  transform rewritten and uploaded each frame), `lights-fit` (fill point lights
+  that, with the sun, exactly fill one froxel's list), `specular-lights-fit`
+  (the same lights with specular on), `area-lights-fit` and
+  `area-fill-lights-fit` (rectangular lights at the same occupancy, with and
+  without specular) and `lights` (an overlapping field that overflows the froxel
+  lists). `--wall-clock` drives a headless run from the real clock, so the CPU
+  frame line printed at exit measures the frame instead of the fixed step.
+  Together with `CRCBL_LOG=info` and the per-pass GPU report, they are the
+  sandbox's benchmark.
+
 ### Changed
 
 - **`crcbl_image::theme::IconThemes::lookup` is faster on a lookup it has not

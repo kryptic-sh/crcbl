@@ -11,6 +11,7 @@ use crcbl::backend::GpuBackend;
 use crcbl::engine::{FrameLimit, Pacing};
 
 use crate::app::{CameraMode, Options};
+use crate::stress::Stress;
 
 /// `--help` text, and the definition of the flag set.
 pub const USAGE: &str = "\
@@ -27,6 +28,16 @@ USAGE:
 OPTIONS:
         --headless        Run against HeadlessShell with a hand-driven clock.
                           Deterministic, needs no display, always terminates.
+        --wall-clock      Drive a headless run from the real monotonic clock,
+                          so the CPU frame line printed at exit measures the
+                          frame rather than reporting the fixed step. Windowed
+                          runs already do this.
+        --stress <NAME>   Draw a fixed renderer workload in the cube's place:
+                          `instances`, `moving`, `lights-fit`,
+                          `specular-lights-fit`, `area-lights-fit`,
+                          `area-fill-lights-fit` or `lights`. Each holds its
+                          load for the complete run, so tail timings taken
+                          under --wall-clock are comparable between runs.
         --backend <NAME>  GPU backend: `vk`, `mtl`, `dx12`, `wgpu`, `webgpu` or
                           `null`.
                           Default: choose one, which means Metal on macOS and
@@ -128,6 +139,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
         }
         match arg.as_str() {
             "--headless" => options.headless = true,
+            "--wall-clock" => options.wall_clock = true,
             "--fullscreen" => options.fullscreen = true,
             "--wait-unpresented" => options.wait_unpresented = true,
             "--debug-overlay" => options.debug_overlay = Some(true),
@@ -199,6 +211,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                 },
                 Err(message) => return Invocation::BadUsage(message),
             },
+            "--stress" => match args.next() {
+                Some(name) => match Stress::from_name(&name) {
+                    Some(stress) => options.stress = Some(stress),
+                    None => {
+                        return Invocation::BadUsage(format!(
+                            "unknown --stress `{name}`; try {}",
+                            Stress::name_list()
+                        ));
+                    }
+                },
+                None => return Invocation::BadUsage("--stress needs a value".to_string()),
+            },
             "--title" => match args.next() {
                 Some(title) => options.title = title,
                 None => return Invocation::BadUsage("--title needs a value".to_string()),
@@ -262,6 +286,9 @@ mod tests {
     fn no_arguments_is_a_windowed_run() {
         let options = options(&[]);
         assert!(!options.headless);
+        assert!(!options.wall_clock);
+        assert!(options.real_clock());
+        assert_eq!(options.stress, None);
         assert_eq!(options.frames, None);
         assert_eq!(options.tick_hz, 60);
         assert_eq!(options.size, crcbl::shell::PhysicalSize::new(1280, 720));
@@ -310,10 +337,48 @@ mod tests {
         }
     }
 
+    /// **Both places this app names a stress fixture name every fixture**,
+    /// for the reason the backend test above gives.
+    #[test]
+    fn every_stress_fixture_is_reachable_and_unknown_names_are_refused() {
+        for stress in Stress::ALL {
+            assert_eq!(options(&["--stress", stress.name()]).stress, Some(stress));
+            assert!(
+                USAGE.contains(&format!("`{}`", stress.name())),
+                "`{}` is a fixture and USAGE does not list it",
+                stress.name(),
+            );
+        }
+        match parse_args(&["--stress", "cube"]) {
+            Invocation::BadUsage(message) => {
+                assert!(message.contains("unknown --stress `cube`"), "{message}");
+                assert!(message.contains("`lights-fit`"), "{message}");
+            }
+            other => panic!("`--stress cube` is not a fixture: {other:?}"),
+        }
+        assert_eq!(
+            parse_args(&["--stress"]),
+            Invocation::BadUsage("--stress needs a value".to_string())
+        );
+    }
+
+    /// A headless run keeps the fixed step unless `--wall-clock` asks for the
+    /// real clock; a windowed run always reads it.
+    #[test]
+    fn only_a_headless_run_without_wall_clock_gets_the_fixed_step() {
+        assert!(!options(&["--headless"]).real_clock());
+        assert!(options(&["--headless", "--wall-clock"]).real_clock());
+        assert!(options(&["--wall-clock"]).real_clock());
+        assert!(USAGE.contains("--wall-clock"));
+    }
+
     #[test]
     fn every_flag_the_sandbox_accepts_reaches_its_option_field() {
         let options = options(&[
             "--headless",
+            "--wall-clock",
+            "--stress",
+            "moving",
             "--frames",
             "12",
             "--tick-hz",
@@ -334,6 +399,8 @@ mod tests {
             "some.scn",
         ]);
         assert_eq!(options.scene, Some(std::path::PathBuf::from("some.scn")));
+        assert!(options.wall_clock);
+        assert_eq!(options.stress, Some(Stress::Moving));
         assert_eq!(options.pacing, crcbl::engine::Pacing::Adaptive);
         assert_eq!(options.limit, crcbl::engine::FrameLimit::fps(144));
         assert!(options.headless);

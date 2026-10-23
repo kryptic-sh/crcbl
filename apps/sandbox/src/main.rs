@@ -3,6 +3,7 @@
 //! ```text
 //! sandbox [--headless] [--frames N] [--tick-hz N] [--title T] [--camera MODE]
 //!         [--host [PORT] | --join IP:PORT | --browse]
+//!         [--wall-clock] [--stress NAME]
 //! ```
 //!
 //! Opens a window through `crcbl-shell`, joins it to `crcbl-hal` through
@@ -11,7 +12,9 @@
 //! HDR target, tonemapped to the swapchain, with every barrier computed rather
 //! than written. `--headless` runs the *same* loop against `HeadlessShell` for a
 //! fixed number of frames and exits, which is what makes it a CI job rather than
-//! a demo.
+//! a demo. `--stress` swaps the cube for a fixed renderer workload and
+//! `--wall-clock` makes a headless run's timings real, which together make it a
+//! benchmark — see [`stress`].
 //!
 //! Exit codes match the `crcbl` CLI's, because a sample is something CI runs:
 //! **0** ran, **1** it failed, **2** the arguments were wrong.
@@ -26,6 +29,7 @@ mod menu;
 mod scene;
 mod spin;
 mod steam;
+mod stress;
 
 use std::process::ExitCode;
 
@@ -61,6 +65,11 @@ fn main() -> ExitCode {
                     summary.effects.row(),
                     summary.run.exit,
                 );
+                // Beside the line rather than in it, so a run without
+                // `--stress` prints exactly what it always did.
+                if let Some(stress) = options.stress {
+                    println!("sandbox: stress fixture {}", stress.name());
+                }
                 ExitCode::SUCCESS
             }
             Err(error) => {

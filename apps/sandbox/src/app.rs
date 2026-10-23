@@ -80,6 +80,7 @@ use crcbl::ui::draw_list::DrawList;
 use crate::gpu::Gpu;
 use crate::menu::{self, MenuKind, Menus, SandboxAction};
 use crate::scene::Scene;
+use crate::stress::Stress;
 
 /// Which projection the camera uses.
 ///
@@ -135,6 +136,12 @@ pub struct Options {
     /// Run against [`HeadlessShell`](crcbl::shell::HeadlessShell) with a
     /// hand-driven clock instead of opening a window.
     pub headless: bool,
+    /// Whether a headless run reads the real clock — see
+    /// [`Options::real_clock`].
+    pub wall_clock: bool,
+    /// The fixed renderer workload `--stress` named, drawn in the cube's
+    /// place — see [`crate::stress`].
+    pub stress: Option<Stress>,
     /// GPU backend to force, or `None` to let [`crcbl::backend`]'s own table
     /// choose.
     ///
@@ -213,6 +220,8 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             headless: false,
+            wall_clock: false,
+            stress: None,
             backend: None,
             frames: None,
             tick_hz: 60,
@@ -237,6 +246,17 @@ impl Default for Options {
 }
 
 impl Options {
+    /// Whether the loop reads the real monotonic clock.
+    ///
+    /// Windowed runs always do. A headless one does only when `--wall-clock`
+    /// asked for it, because the fixed step is what makes a scripted headless
+    /// run reproducible, and the CPU frame line the engine prints at exit
+    /// reports that step rather than the frame on every other headless run.
+    #[must_use]
+    pub const fn real_clock(&self) -> bool {
+        !self.headless || self.wall_clock
+    }
+
     /// What the command line contributes to opening a GPU.
     ///
     /// The same value [`crcbl::args::Common::gpu`] gives every sample that
@@ -524,7 +544,9 @@ pub fn with_shell<S: Shell + ?Sized>(
     mut shell: Box<S>,
     options: &Options,
 ) -> Result<Loop<S>, SandboxError> {
-    let clock_source = Clock::new(options.headless);
+    // `apps/horde`'s reason for not writing `Clock::new(options.headless)`:
+    // a measurement under `--wall-clock` needs the real clock headless too.
+    let clock_source = Clock::new(!options.real_clock());
     crcbl::log::info!(
         "shell: {} backend, caps {:?}",
         shell.backend(),
@@ -555,6 +577,7 @@ pub fn with_shell<S: Shell + ?Sized>(
         extent,
         options.gpu(),
         options.camera.projection(),
+        options.stress,
     )?;
 
     // Read before the GPU moves into the loop, and off the renderer rather than
@@ -982,6 +1005,8 @@ mod tests {
     fn headless(frames: u64) -> Options {
         Options {
             headless: true,
+            wall_clock: false,
+            stress: None,
             backend: Some(GpuBackend::Null),
             frames: Some(frames),
             tick_hz: 60,
@@ -1002,6 +1027,58 @@ mod tests {
             #[cfg(not(target_arch = "wasm32"))]
             lobby: false,
         }
+    }
+
+    /// **`--wall-clock` is a wiring fact, not a parser fact**, as it is in
+    /// `apps/horde`: the parser test proves the flag is read, and this proves
+    /// the loop's clock obeys it.
+    #[test]
+    fn wall_clock_switches_a_headless_measurement_to_real_time() {
+        let fixed = scripted(&headless(8));
+        assert!(
+            matches!(fixed.clock_source(), Clock::Manual { .. }),
+            "a headless run without --wall-clock must keep the fixed step"
+        );
+        fixed
+            .finish(ExitReason::CloseRequested)
+            .expect("the fixed loop tears down");
+
+        let mut options = headless(8);
+        options.wall_clock = true;
+        let real = scripted(&options);
+        assert!(
+            matches!(real.clock_source(), Clock::Real(_)),
+            "--wall-clock must hand the loop the real clock"
+        );
+        real.finish(ExitReason::CloseRequested)
+            .expect("the real-time loop tears down");
+    }
+
+    /// **`--stress` reaches the renderer the loop draws with**, in the cube's
+    /// place: the frame submits the fixture's grid rather than one cube.
+    #[test]
+    fn a_stress_fixture_replaces_the_cube_in_the_drawn_frame() {
+        let submitted = |stress| {
+            let mut engine = scripted(&Options {
+                stress,
+                ..headless(8)
+            });
+            run_frames(&mut engine, 2);
+            let instances = engine.gpu().counters().instances;
+            engine
+                .finish(ExitReason::CloseRequested)
+                .expect("the loop tears down");
+            instances
+        };
+        let grid = u64::try_from(crate::stress::INSTANCE_COUNT).expect("the grid fits u64");
+        assert!(
+            submitted(None) < grid,
+            "the control must draw the cube alone, or the comparison below proves nothing"
+        );
+        assert!(
+            submitted(Some(Stress::Instances)) >= grid,
+            "the fixture's grid did not reach the frame"
+        );
     }
 
     /// **The sandbox can turn the panel on too, and F3 is all it takes.**

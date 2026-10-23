@@ -119,17 +119,28 @@ use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::menu::MenuSkin;
 use crcbl::ui::text::FontAtlas;
 
+use crate::stress::{Fixture, Stress};
+
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
+
+/// What the sandbox placed in the renderer, and rewrites each frame.
+#[derive(Debug)]
+enum Subject {
+    /// The cube the sandbox spins — an object it placed, not one the renderer
+    /// came with. [`Gpu::frame`] rewrites its transform per frame, which is
+    /// the whole of the sandbox's animation.
+    Cube(InstanceHandle),
+    /// A `--stress` fixture in the cube's place; see [`crate::stress`].
+    Stress(Fixture),
+}
 
 /// The sandbox's GPU side: the shared join plus the milestone 3–5 renderer.
 #[derive(Debug)]
 pub struct Gpu {
     ctx: GpuContext,
     renderer: ForwardRenderer,
-    /// The cube the sandbox spins — an object it placed, not one the renderer
-    /// came with. [`Gpu::frame`] rewrites its transform per frame, which is the
-    /// whole of the sandbox's animation.
-    cube: InstanceHandle,
+    /// The cube, or the stress fixture standing in for it.
+    subject: Subject,
     pool: TransientPool,
     /// `None` on a device without timestamp queries — the report degrades, the
     /// frame does not.
@@ -181,7 +192,7 @@ impl Gpu {
     /// Opens the join and builds the forward renderer on top of it.
     ///
     /// `extent` must come from the window system — call this only after the
-    /// first configure.
+    /// first configure. `stress` replaces the cube with that fixture.
     ///
     /// # Errors
     ///
@@ -193,10 +204,12 @@ impl Gpu {
         extent: (u32, u32),
         gpu: GpuOptions,
         projection: crcbl::render::Projection,
+        stress: Option<Stress>,
     ) -> Result<Self, GpuError> {
         Self::from_context(
             GpuContext::open(shell, window, extent, &desc(gpu))?,
             projection,
+            stress,
         )
     }
 
@@ -212,6 +225,7 @@ impl Gpu {
     fn from_context(
         ctx: GpuContext,
         projection: crcbl::render::Projection,
+        stress: Option<Stress>,
     ) -> Result<Self, GpuError> {
         // Milestones 3–5. Built after the swapchain because the tonemap
         // pipeline has to name the colour format the pass will render to.
@@ -224,13 +238,18 @@ impl Gpu {
         renderer.set_effect_request(ctx.effect_request());
         // Milestone 3's subject, placed by the application like any other
         // object. The pool is empty and thousands wide, so this cannot fail.
-        let cube = renderer
-            .add_instance(&InstanceDesc {
-                mesh: DEMO_CUBE,
-                material: DEMO_UNTINTED,
-                transform: ForwardRenderer::spin(0.0),
-            })
-            .expect("an empty instance pool has room for the cube");
+        let subject = match stress {
+            None => Subject::Cube(
+                renderer
+                    .add_instance(&InstanceDesc {
+                        mesh: DEMO_CUBE,
+                        material: DEMO_UNTINTED,
+                        transform: ForwardRenderer::spin(0.0),
+                    })
+                    .expect("an empty instance pool has room for the cube"),
+            ),
+            Some(stress) => Subject::Stress(Fixture::populate(&mut renderer, stress)),
+        };
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
         if timers.is_none() {
             crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
@@ -248,7 +267,7 @@ impl Gpu {
         Ok(Self {
             ctx,
             renderer,
-            cube,
+            subject,
             pool: TransientPool::new(),
             timers,
             camera: Camera::default().with_projection(projection),
@@ -389,15 +408,19 @@ impl Gpu {
         let extent = acquired.extent;
 
         // The animation, and the only object this sample moves: a rewrite of
-        // one instance, which the pool uploads and nothing else.
-        self.renderer.set_instance(
-            self.cube,
-            &InstanceDesc {
-                mesh: DEMO_CUBE,
-                material: DEMO_UNTINTED,
-                transform: ForwardRenderer::spin(self.elapsed),
-            },
-        );
+        // one instance, which the pool uploads and nothing else. A stress
+        // fixture says for itself how much of its grid moves.
+        match &self.subject {
+            Subject::Cube(cube) => self.renderer.set_instance(
+                *cube,
+                &InstanceDesc {
+                    mesh: DEMO_CUBE,
+                    material: DEMO_UNTINTED,
+                    transform: ForwardRenderer::spin(self.elapsed),
+                },
+            ),
+            Subject::Stress(fixture) => fixture.animate(&mut self.renderer, self.elapsed),
+        }
         self.renderer
             .begin_frame(self.ctx.device(), &self.camera, &self.light, extent)?;
         // Upload this frame's UI geometry: the debug overlay, and only that.
@@ -688,7 +711,7 @@ mod tests {
         )
         .expect("the null backend opens everywhere");
 
-        let gpu = Gpu::from_context(ctx, crcbl::render::Projection::default())
+        let gpu = Gpu::from_context(ctx, crcbl::render::Projection::default(), None)
             .expect("the null device builds the sandbox's renderer");
         let effects = gpu.effects();
         gpu.destroy().expect("teardown");
