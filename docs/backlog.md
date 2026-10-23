@@ -338,16 +338,20 @@ driver to an ICD manifest, L-sized).
   match removed. The two-GPU case ran on 2026-10-21, after a reboot loaded the
   matching NVIDIA module: with the MX550 listed beside the iGPU, the test still
   named the Intel adapter (226:128), which drives both the panel and the HDMI
-  output on that laptop. Not seen: a laptop whose external output is wired to
-  the dGPU. Not built: per-surface feedback (`get_surface_feedback`), which may
-  name a different main device for a window on another GPU's output, and a
-  feedback change after the window exists (the target is read once, at surface
-  creation). **X11 built 2026-10-20**: DRI3 `Open` on the screen's root and
-  `fstat` of the descriptor (`x11::Conn::dri3_device`) fill
-  `SurfaceTarget::Xcb::main_device`, matched the same way; verified by
-  `vulkan_names_the_adapter_an_x_server_renders_on` on Xwayland under headless
-  sway (Intel, red with DRI3 suppressed). Not in CI: Xvfb has no DRI3. macOS
-  still needs `CGDirectDisplayCopyCurrentMetalDevice` matched by `registryID`.
+  output on that laptop. A compositor that composites on the dGPU was run on
+  2026-10-23: headless sway with `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD129`
+  named 226:129, and both tests (the X11 one through an Xwayland on that sway)
+  chose the MX550; with `renderD128`, the Intel adapter. Not seen: a laptop
+  whose external output is wired to the dGPU. Not built: per-surface feedback
+  (`get_surface_feedback`), which may name a different main device for a window
+  on another GPU's output, and a feedback change after the window exists (the
+  target is read once, at surface creation). **X11 built 2026-10-20**: DRI3
+  `Open` on the screen's root and `fstat` of the descriptor
+  (`x11::Conn::dri3_device`) fill `SurfaceTarget::Xcb::main_device`, matched the
+  same way; verified by `vulkan_names_the_adapter_an_x_server_renders_on` on
+  Xwayland under headless sway (Intel, red with DRI3 suppressed). Not in CI:
+  Xvfb has no DRI3. macOS still needs `CGDirectDisplayCopyCurrentMetalDevice`
+  matched by `registryID`.
 - **Verified on one desktop only**: an RX 7900 XTX driving the monitor, an AMD
   Raphael iGPU and WARP, Windows 11. There D3D12 and Vulkan both name the RX
   7900 XTX as the display adapter (the cross-check is

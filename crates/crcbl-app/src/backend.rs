@@ -1197,7 +1197,8 @@ mod tests {
     /// offers `zwp_linux_dmabuf_v1` at version 4 and a Vulkan driver with
     /// `VK_EXT_physical_device_drm`; there it fails rather than skips when
     /// either is missing. Verified on Hyprland with an Intel Raptor Lake iGPU
-    /// beside an NVIDIA MX550.
+    /// beside an NVIDIA MX550, and on headless sway rendering on either one
+    /// (`WLR_RENDER_DRM_DEVICE`), which it named each time.
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "needs a Wayland session with dmabuf feedback; run with --ignored on a desktop"]
@@ -1208,7 +1209,7 @@ mod tests {
     /// The same on X11, where the device is the one DRI3 `Open` says the X
     /// server renders on. Ignored for the same reasons, and Xvfb has no DRI3,
     /// so it needs a real X server or Xwayland. Verified on Xwayland under
-    /// headless sway on the same laptop.
+    /// headless sway on the same laptop, with sway on either GPU.
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "needs an X server with DRI3; run with --ignored on a desktop"]
