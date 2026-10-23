@@ -4192,11 +4192,11 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   on the current tree since the numbers in the branch's backlog predate a month
   of renderer work): half-resolution SSR march (re-blesses `golden/ssr.png`),
   local exposure-tile merge, sun-only light-cluster fast path, pre-scaled and
-  force-unrolled shadow blocker taps, reused shadow probe comparisons, skipped
-  empty probe gathers, degraded-broadphase BVH rebuild (`crcbl-phys`), parallel
-  sandbox crowd queries, and the `combined` stress scene with its simulation
-  tick-timing report (`020447e2`, `1286e3ca`, `e957219b`, `3d61e0e1`) and the
-  many-bucket fixture (`cc3371d6`).
+  force-unrolled shadow blocker taps, reused shadow probe comparisons,
+  degraded-broadphase BVH rebuild (`crcbl-phys`), parallel sandbox crowd
+  queries, and the `combined` stress scene with its simulation tick-timing
+  report (`020447e2`, `1286e3ca`, `e957219b`, `3d61e0e1`) and the many-bucket
+  fixture (`cc3371d6`).
 - **Ported: the render stress fixtures and `--wall-clock`** (2026-10-24), as
   `sandbox --stress <NAME>` in `apps/sandbox/src/stress.rs`, because `--scene`
   already opens a `.scn/` directory on main. The fixtures replace the cube; the
@@ -4220,6 +4220,13 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   and 1.5% in Vulkan's `specular-lights-fit` (0.01–0.04 ms), the branch's own
   cost where no light skips anything. Kept, because fill lights are the ones
   scenes hold many of. Not measured on the MX550 or any non-AMD adapter yet.
+- **The empty-probe early return is unmeasured on a populated volume.** Ported
+  2026-10-24: `probe_irradiance` (mesh) and `probe_environment` (SSR, water)
+  return zero when `probe_counts.w`, the host-written total, is zero. Every
+  stress fixture has no probes, so only the skip was timed (forward 14–23% and
+  SSR about 60% cheaper on the RX 7900 XTX); a scene with a populated clipmap
+  pays one uniform branch, which no fixture measures. Water's own pass was not
+  timed either.
 - **Carried over from the branch about the fixtures:** at 1920x1080 `moving`'s
   whole-grid rotation changes pixel coverage, so its GPU rows are not upload
   evidence; only its CPU frame interval is. The MX550 showed the host upload

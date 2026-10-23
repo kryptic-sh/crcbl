@@ -436,6 +436,10 @@ fn probe_level_environment_0( level_3 : u32,  world_position_4 : vec3<f32>,  nor
 
 fn probe_environment_0( world_position_5 : vec3<f32>,  normal_4 : vec3<f32>,  direction_3 : vec3<f32>) -> vec3<f32>
 {
+    if((camera_0.probe_counts_0.w) == u32(0))
+    {
+        return vec3<f32>(0.0f, 0.0f, 0.0f);
+    }
     var pick_0 : vec2<f32> = probe_level_of_0(probe_level_reach_0(world_position_5, camera_0.probe_level_origin_0[i32(0)].xyz, camera_0.probe_level_inv_spacing_0[i32(0)].xyz, max(vec3<f32>(camera_0.probe_counts_0.xyz) - vec3<f32>(1.0f), vec3<f32>(0.0f, 0.0f, 0.0f))), clamp(camera_0.probe_levels_0.x, u32(1), u32(4)));
     var level_4 : u32 = u32(pick_0.x);
     var share_0 : f32 = pick_0.y;

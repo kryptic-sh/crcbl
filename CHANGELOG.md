@@ -30,6 +30,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A scene with no light probes no longer gathers them.** The forward, SSR and
+  water shaders ran the full eight-corner probe gather for every fragment and
+  summed the zeros an empty volume holds; they now return before it when the
+  volume's total is zero. On an RX 7900 XTX the forward pass is 14–23% cheaper
+  and SSR about 60% cheaper in a probe-less scene.
 - **`crcbl_image::theme::IconThemes::lookup` is faster on a lookup it has not
   cached.** It cloned each theme's parsed `index.theme`, every directory of it,
   on every lookup, and rebuilt and hashed each directory's path once per file

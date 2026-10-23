@@ -722,8 +722,8 @@ pub struct FrameUniforms {
     /// before it knows which row to fetch.
     ///
     /// **[`ProbeVolume::default`] is a grid of nothing**, and the whole feature
-    /// is additive: a scene with no probes evaluates to exactly zero and the
-    /// shader has no branch for it. See [`crate::probe`].
+    /// is additive: a scene with no probes evaluates to exactly zero and skips
+    /// the gather using the volume's zero total. See [`crate::probe`].
     ///
     /// **The members after it were appended**, for
     /// [`light_view_proj`](Self::light_view_proj)'s reason exactly: no existing
@@ -767,10 +767,9 @@ pub struct FrameUniforms {
     /// is then exactly zero, [`crate::fog::transmittance`] of zero is exactly
     /// one, and `mesh.slang` composites as `lit * t + fog * (1 - t)` rather
     /// than as a `lerp` — which at `t = 1` is `lit + (fog - lit)` and is *not*
-    /// `lit` for an HDR value far from the fog colour. So the feature is data
-    /// with no branch selecting it, on
-    /// [`probes`](Self::probes)' terms, and every golden blessed before fog
-    /// existed still matches.
+    /// `lit` for an HDR value far from the fog colour. So the feature's off
+    /// value preserves the old frame exactly, on [`probes`](Self::probes)'
+    /// terms, and every golden blessed before fog existed still matches.
     ///
     /// `crcbl_render::ForwardRenderer::set_fog` is what writes it, and
     /// [`crate::fog`] is the arithmetic both sides run.

@@ -1907,6 +1907,10 @@ fn probe_level_irradiance_0( level_3 : u32,  world_position_13 : vec3<f32>,  nor
 
 fn probe_irradiance_0( world_position_14 : vec3<f32>,  normal_13 : vec3<f32>) -> vec3<f32>
 {
+    if((frame_0.probe_counts_0.w) == u32(0))
+    {
+        return vec3<f32>(0.0f, 0.0f, 0.0f);
+    }
     var pick_0 : vec2<f32> = probe_level_of_0(probe_level_reach_0(world_position_14, frame_0.probe_level_origin_0[i32(0)].xyz, frame_0.probe_level_inv_spacing_0[i32(0)].xyz, max(vec3<f32>(frame_0.probe_counts_0.xyz) - vec3<f32>(1.0f), vec3<f32>(0.0f, 0.0f, 0.0f))), clamp(frame_0.probe_levels_0.x, u32(1), u32(4)));
     var level_4 : u32 = u32(pick_0.x);
     var share_0 : f32 = pick_0.y;

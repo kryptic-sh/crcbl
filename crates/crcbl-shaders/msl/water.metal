@@ -22,7 +22,7 @@ constant array<uint, int(16)> SHADOW_DITHER_0 = { { 0U, 8U, 2U, 10U, 12U, 4U, 14
 #line 258
 constant array<float, int(8)> FOG_KERNEL_0 = { { 1.0f, 1.0f, 0.5f, 0.1666666716337204f, 0.0416666679084301f, 0.00833333376795053f, 0.00138888892251998f, 0.0001984127011383f } };
 
-#line 1204
+#line 1207
 float2 water_ndc_0(int2 pixel_0, float2 extent_0)
 {
     return float2((float(pixel_0.x) + 0.5f) / extent_0.x * 2.0f - 1.0f, 1.0f - (float(pixel_0.y) + 0.5f) / extent_0.y * 2.0f);
@@ -195,7 +195,7 @@ float3 volumetric_unproject_1(float2 ndc_1, float depth_1, KernelContext_0 threa
 }
 
 
-#line 1213
+#line 1216
 float3 water_opaque_point_0(int2 pixel_1, float depth_2, float2 extent_1, float3 surface_0, float3 direction_0, KernelContext_0 thread* kernelContext_2)
 {
 
@@ -204,14 +204,14 @@ float3 water_opaque_point_0(int2 pixel_1, float depth_2, float2 extent_1, float3
         return surface_0 + direction_0 * float3(1000.0f) ;
     }
 
-#line 1218
+#line 1221
     float3 _S1 = volumetric_unproject_1(water_ndc_0(pixel_1, extent_1), depth_2, kernelContext_2);
 
     return _S1;
 }
 
 
-#line 1194
+#line 1197
 float3 water_refract_0(float3 incident_0, float3 normal_0, float eta_0)
 {
     float cos_incident_0 = - dot(incident_0, normal_0);
@@ -1460,24 +1460,30 @@ float3 probe_level_environment_0(uint level_3, float3 world_position_6, float3 n
 
 float3 probe_environment_0(float3 world_position_7, float3 normal_6, float3 direction_4, KernelContext_0 thread* kernelContext_22)
 {
+    if((kernelContext_22->camera_0->probe_counts_1.w) == 0U)
+    {
 
-#line 1054
+#line 1049
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+#line 1057
     float2 pick_0 = probe_level_of_0(probe_level_reach_0(world_position_7, kernelContext_22->camera_0->probe_level_origin_1[int(0)].xyz, kernelContext_22->camera_0->probe_level_inv_spacing_1[int(0)].xyz, max(float3(kernelContext_22->camera_0->probe_counts_1.xyz) - float3(1.0f) , float3(0.0f, 0.0f, 0.0f))), clamp(kernelContext_22->camera_0->probe_levels_1.x, 1U, 4U));
     uint level_4 = uint(pick_0.x);
     float share_0 = pick_0.y;
 
-#line 1056
+#line 1059
     float3 _S125 = probe_level_environment_0(level_4, world_position_7, normal_6, direction_4, kernelContext_22);
 
 
     if(share_0 >= 1.0f)
     {
 
-#line 1060
+#line 1063
         return _S125;
     }
 
-#line 1060
+#line 1063
     float3 _S126 = probe_level_environment_0(level_4 + 1U, world_position_7, normal_6, direction_4, kernelContext_22);
 
     return _S126 * float3((1.0f - share_0))  + _S125 * float3(share_0) ;
@@ -1812,7 +1818,7 @@ float3 volumetric_source_0(float3 view_direction_0, float4 lit_0, KernelContext_
 }
 
 
-#line 1067
+#line 1070
 struct WaterAir_0
 {
     float survives_0;
@@ -1820,7 +1826,7 @@ struct WaterAir_0
 };
 
 
-#line 1081
+#line 1084
 WaterAir_0 water_froxel_air_0(int2 pixel_7, float depth_4, KernelContext_0 thread* kernelContext_29)
 {
     thread WaterAir_0 air_0;
@@ -1837,10 +1843,10 @@ WaterAir_0 water_froxel_air_0(int2 pixel_7, float depth_4, KernelContext_0 threa
     int _S165 = pixel_7.x;
     int _S166 = pixel_7.y;
 
-#line 1093
+#line 1096
     float2 ndc_3 = float2((float(_S165) + 0.5f) / float(max(kernelContext_29->params_0->viewport_x_0, 1U)) * 2.0f - 1.0f, 1.0f - (float(_S166) + 0.5f) / float(max(kernelContext_29->params_0->viewport_y_0, 1U)) * 2.0f);
 
-#line 1093
+#line 1096
     float view_depth_0;
 
 
@@ -1848,92 +1854,92 @@ WaterAir_0 water_froxel_air_0(int2 pixel_7, float depth_4, KernelContext_0 threa
     if(depth_4 > 0.0f)
     {
 
-#line 1097
+#line 1100
         float3 _S167 = volumetric_unproject_0(ndc_3, depth_4, kernelContext_29);
 
-#line 1097
+#line 1100
         view_depth_0 = dot(kernelContext_29->params_0->depth_row_0, float4(_S167, 1.0f));
 
-#line 1097
+#line 1100
     }
     else
     {
 
-#line 1097
+#line 1100
         view_depth_0 = 1000.0f;
 
-#line 1097
+#line 1100
     }
 
-#line 1102
+#line 1105
     float view_depth_1 = clamp(view_depth_0, 0.0f, 1000.0f);
 
-#line 1102
+#line 1105
     float slice_start_0 = 0.0f;
 
-#line 1102
+#line 1105
     uint slice_0 = 0U;
 
-#line 1102
+#line 1105
     float next_start_0 = 0.14677993953227997f;
 
-#line 1120
+#line 1123
     for(;;)
     {
 
-#line 1120
+#line 1123
         uint _S168 = slice_0 + 1U;
 
-#line 1120
+#line 1123
         bool _S169;
 
-#line 1120
+#line 1123
         if(_S168 < _S163)
         {
 
-#line 1120
+#line 1123
             _S169 = next_start_0 <= view_depth_1;
 
-#line 1120
+#line 1123
         }
         else
         {
 
-#line 1120
+#line 1123
             _S169 = false;
 
-#line 1120
+#line 1123
         }
 
-#line 1120
+#line 1123
         if(_S169)
         {
         }
         else
         {
 
-#line 1120
+#line 1123
             break;
         }
 
         float next_start_1 = next_start_0 * 1.46779930591583252f;
 
-#line 1123
+#line 1126
         slice_start_0 = next_start_0;
 
-#line 1123
+#line 1126
         next_start_0 = next_start_1;
 
-#line 1123
+#line 1126
         slice_0 = _S168;
 
-#line 1120
+#line 1123
     }
 
-#line 1130
+#line 1133
     uint _S170 = uint(max(_S165, int(0))) / _S164;
 
-#line 1130
+#line 1133
     uint _S171 = min(_S170, _S161 - 1U);
     uint _S172 = uint(max(_S166, int(0))) / _S164;
     uint froxel_0 = _S171 + min(_S172, _S162 - 1U) * _S161 + slice_0 * tiles_0;
@@ -1942,13 +1948,13 @@ WaterAir_0 water_froxel_air_0(int2 pixel_7, float depth_4, KernelContext_0 threa
         return air_0;
     }
 
-#line 1135
+#line 1138
     float4 _S173 = float4(*(kernelContext_29->volumetrics_0+froxel_0)) ;
 
-#line 1135
+#line 1138
     float3 _S174 = volumetric_unproject_0(ndc_3, 1.0f, kernelContext_29);
 
-#line 1144
+#line 1147
     float3 along_0 = (_S174 - kernelContext_29->params_0->eye_0.xyz) / float3(max(dot(kernelContext_29->params_0->depth_row_0, float4(_S174, 1.0f)), 9.99999997475242708e-07f)) ;
     float3 from_0 = kernelContext_29->params_0->eye_0.xyz + along_0 * float3(slice_start_0) ;
     float3 to_0 = kernelContext_29->params_0->eye_0.xyz + along_0 * float3(max(view_depth_1, slice_start_0)) ;
@@ -1959,36 +1965,36 @@ WaterAir_0 water_froxel_air_0(int2 pixel_7, float depth_4, KernelContext_0 threa
 
     float partial_survives_0 = fog_exp_neg_0(fog_optical_depth_0(kernelContext_29->params_0->fog_params_1.x, kernelContext_29->params_0->fog_params_1.y, from_0.y - reference_4, to_0.y - reference_4, length_of_0));
 
-#line 1152
+#line 1155
     float3 view_direction_1;
 
-#line 1158
+#line 1161
     if(length_of_0 > 9.99999997475242708e-07f)
     {
 
-#line 1158
+#line 1161
         view_direction_1 = segment_0 / float3(length_of_0) ;
 
-#line 1158
+#line 1161
     }
     else
     {
 
-#line 1158
+#line 1161
         view_direction_1 = float3(0.0f, 0.0f, 1.0f);
 
-#line 1158
+#line 1161
     }
 
-#line 1158
+#line 1161
     float3 _S175 = volumetric_source_0(view_direction_1, float4(*(kernelContext_29->lighting_0+froxel_0)) , kernelContext_29);
 
-#line 1165
+#line 1168
     float3 partial_radiance_0 = _S175 * float3((1.0f - partial_survives_0)) ;
 
     float _S176 = _S173.w;
 
-#line 1167
+#line 1170
     (&air_0)->survives_0 = _S176 * partial_survives_0;
     (&air_0)->inscatter_0 = _S173.xyz + float3(_S176)  * partial_radiance_0;
     return air_0;
@@ -2002,11 +2008,11 @@ float fog_transmittance_0(float optical_depth_0)
 }
 
 
-#line 1174
+#line 1177
 WaterAir_0 water_analytic_air_0(float3 surface_1, KernelContext_0 thread* kernelContext_30)
 {
 
-#line 1181
+#line 1184
     float fog_survives_0 = fog_transmittance_0(fog_optical_depth_0(kernelContext_30->frame_0->fog_params_0.x, kernelContext_30->frame_0->fog_params_0.y, kernelContext_30->frame_0->camera_position_0.y - kernelContext_30->frame_0->fog_params_0.z, surface_1.y - kernelContext_30->frame_0->fog_params_0.z, length(kernelContext_30->frame_0->camera_position_0.xyz - surface_1)));
 
     thread WaterAir_0 air_1;
@@ -2016,14 +2022,14 @@ WaterAir_0 water_analytic_air_0(float3 surface_1, KernelContext_0 thread* kernel
 }
 
 
-#line 1186
+#line 1189
 struct pixelOutput_0
 {
     float4 output_0 [[color(0)]];
 };
 
 
-#line 1186
+#line 1189
 struct pixelInput_0
 {
     float3 world_position_8 [[user(TEXCOORD)]];
@@ -2031,59 +2037,59 @@ struct pixelInput_0
 };
 
 
-#line 1247
+#line 1250
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S177 [[stage_in]], float4 position_1 [[position]], WaterVertex_natural_0 device* water_vertices_1 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_1 [[buffer(1)]], depth2d<float, access::sample> scene_depth_1 [[texture(1)]], WaterMedium_natural_0 device* media_1 [[buffer(5)]], texture2d<float, access::sample> scene_color_1 [[texture(0)]], VolumetricParams_natural_0 constant* params_1 [[buffer(3)]], WaterParams_0 constant* water_1 [[buffer(0)]], depth2d<float, access::sample> shadow_atlas_1 [[texture(2)]], sampler shadow_sampler_1 [[sampler(0)]], SsrParams_natural_0 constant* camera_1 [[buffer(2)]], GpuProbe_natural_0 device* probes_1 [[buffer(6)]], texture2d_array<float, access::sample> probe_visibility_1 [[texture(4)]], texture2d<float, access::sample> sky_prefilter_1 [[texture(3)]], packed_float4 device* sky_view_1 [[buffer(7)]], packed_float4 device* volumetrics_1 [[buffer(8)]], packed_float4 device* lighting_1 [[buffer(9)]])
 {
 
-#line 1247
+#line 1250
     thread KernelContext_0 kernelContext_31;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->water_vertices_0 = water_vertices_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->frame_0 = frame_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->scene_depth_0 = scene_depth_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->media_0 = media_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->scene_color_0 = scene_color_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->params_0 = params_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->water_0 = water_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->shadow_atlas_0 = shadow_atlas_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->shadow_sampler_0 = shadow_sampler_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->camera_0 = camera_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->probes_0 = probes_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->probe_visibility_0 = probe_visibility_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->sky_prefilter_0 = sky_prefilter_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->sky_view_0 = sky_view_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->volumetrics_0 = volumetrics_1;
 
-#line 1247
+#line 1250
     (&kernelContext_31)->lighting_0 = lighting_1;
 
     thread uint width_2;
@@ -2093,7 +2099,7 @@ struct pixelInput_0
     int2 last_2 = int2(int(width_2) - int(1), int(height_2) - int(1));
     float2 _S178 = position_1.xy;
 
-#line 1254
+#line 1257
     int2 _S179 = int2(_S178);
     float surface_depth_0 = position_1.z;
 
@@ -2105,19 +2111,19 @@ struct pixelInput_0
     float3 incident_1 = normalize(_S177.world_position_8 - frame_1->camera_position_0.xyz);
     float _S180 = - incident_1.y;
 
-#line 1263
+#line 1266
     float cos_incident_1 = saturate(_S180);
 
-#line 1270
+#line 1273
     int3 _S181 = int3(_S179, int(0));
 
-#line 1270
+#line 1273
     float4 straight_0 = ((scene_color_1).read(vec<uint,2>(((_S181)).xy), uint(((_S181)).z)));
 
-#line 1270
+#line 1273
     float3 _S182 = water_opaque_point_0(_S179, ((scene_depth_1).read(vec<uint,2>(((_S181)).xy), uint(((_S181)).z))), extent_3, _S177.world_position_8, incident_1, &kernelContext_31);
 
-#line 1280
+#line 1283
     float3 refracted_0 = water_refract_0(incident_1, up_3, 0.75f);
 
     float4 landing_clip_0 = (((float4(_S177.world_position_8 + refracted_0 * float3((max(_S177.world_position_8.y - _S182.y, 0.0f) / max(- refracted_0.y, 9.99999997475242708e-07f))) , 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_31)->frame_0->view_proj_0.data_0[int(0)][int(0)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(1)][int(0)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(2)][int(0)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(3)][int(0)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(0)][int(1)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(1)][int(1)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(2)][int(1)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(3)][int(1)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(0)][int(2)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(1)][int(2)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(2)][int(2)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(3)][int(2)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(0)][int(3)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(1)][int(3)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(2)][int(3)], (&kernelContext_31)->frame_0->view_proj_0.data_0[int(3)][int(3)]))));
@@ -2126,13 +2132,13 @@ struct pixelInput_0
 
     float _S183 = landing_clip_0.w;
 
-#line 1286
+#line 1289
     float3 behind_point_0;
 
-#line 1286
+#line 1289
     float4 behind_1;
 
-#line 1286
+#line 1289
     if(_S183 > 0.0f)
     {
         float2 landing_ndc_0 = landing_clip_0.xy / float2(_S183) ;
@@ -2141,124 +2147,124 @@ struct pixelInput_0
 
         int3 _S184 = int3(bent_0, int(0));
 
-#line 1292
+#line 1295
         float bent_depth_0 = (((&kernelContext_31)->scene_depth_0).read(vec<uint,2>(((_S184)).xy), uint(((_S184)).z)));
 
-#line 1298
+#line 1301
         if(bent_depth_0 < surface_depth_0)
         {
             float4 _S185 = (((&kernelContext_31)->scene_color_0).read(vec<uint,2>(((_S184)).xy), uint(((_S184)).z)));
 
-#line 1300
+#line 1303
             float3 _S186 = water_opaque_point_0(bent_0, bent_depth_0, extent_3, _S177.world_position_8, refracted_0, &kernelContext_31);
 
-#line 1300
+#line 1303
             behind_point_0 = _S186;
 
-#line 1300
+#line 1303
             behind_1 = _S185;
 
-#line 1298
+#line 1301
         }
         else
         {
 
-#line 1298
+#line 1301
             behind_point_0 = _S182;
 
-#line 1298
+#line 1301
             behind_1 = straight_0;
 
-#line 1298
+#line 1301
         }
 
-#line 1286
+#line 1289
     }
     else
     {
 
-#line 1286
+#line 1289
         behind_point_0 = _S182;
 
-#line 1286
+#line 1289
         behind_1 = straight_0;
 
-#line 1286
+#line 1289
     }
 
-#line 1306
+#line 1309
     float thickness_0 = length(behind_point_0 - _S177.world_position_8);
 
-#line 1306
+#line 1309
     float4 _S187 = float4(medium_0.scattering_0) ;
     float3 extinction_0 = (float4(medium_0.absorption_0) ).xyz + _S187.xyz;
     float _S188 = extinction_0.x;
     float _S189 = extinction_0.y;
     float _S190 = extinction_0.z;
 
-#line 1308
+#line 1311
     float3 transmittance_0 = float3(fog_exp_neg_0(_S188 * thickness_0), fog_exp_neg_0(_S189 * thickness_0), fog_exp_neg_0(_S190 * thickness_0));
 
-#line 1308
+#line 1311
     float _S191;
 
-#line 1316
+#line 1319
     if(_S188 > 0.0f)
     {
 
-#line 1316
+#line 1319
         _S191 = _S187.x / _S188;
 
-#line 1316
+#line 1319
     }
     else
     {
 
-#line 1316
+#line 1319
         _S191 = 0.0f;
 
-#line 1316
+#line 1319
     }
 
-#line 1316
+#line 1319
     float _S192;
     if(_S189 > 0.0f)
     {
 
-#line 1317
+#line 1320
         _S192 = _S187.y / _S189;
 
-#line 1317
+#line 1320
     }
     else
     {
 
-#line 1317
+#line 1320
         _S192 = 0.0f;
 
-#line 1317
+#line 1320
     }
 
-#line 1317
+#line 1320
     float _S193;
     if(_S190 > 0.0f)
     {
 
-#line 1318
+#line 1321
         _S193 = _S187.z / _S190;
 
-#line 1318
+#line 1321
     }
     else
     {
 
-#line 1318
+#line 1321
         _S193 = 0.0f;
 
-#line 1318
+#line 1321
     }
 
-#line 1316
+#line 1319
     float3 albedo_0 = float3(_S191, _S192, _S193);
 
 
@@ -2267,31 +2273,31 @@ struct pixelInput_0
 
     float _S194 = to_sun_0.y;
 
-#line 1320
+#line 1323
     thread uint cascade_3;
     thread float cascade_fade_0;
 
-#line 1321
+#line 1324
     float _S195 = sun_visibility_0(_S177.world_position_8, to_sun_0, _S194, up_3, _S178, &cascade_3, &cascade_fade_0, &kernelContext_31);
 
 
     float3 _S196 = (&kernelContext_31)->frame_0->ambient_0.xyz;
 
-#line 1324
+#line 1327
     float3 _S197 = sky_irradiance_0(up_3, &kernelContext_31);
 
-#line 1324
+#line 1327
     float3 _S198 = float3(1.0f) ;
 
     float3 scattered_0 = albedo_0 * (_S196 + _S197 + (&kernelContext_31)->water_0->sun_color_0.xyz * float3((max(_S194, 0.0f) * _S195)) ) * (_S198 - transmittance_0);
 
-#line 1333
+#line 1336
     float3 mirrored_0 = float3(incident_1.x, _S180, incident_1.z);
 
-#line 1333
+#line 1336
     float3 _S199 = probe_environment_0(_S177.world_position_8, up_3, mirrored_0, &kernelContext_31);
 
-#line 1333
+#line 1336
     float3 _S200 = sky_environment_0(mirrored_0, 0.0f, 1.0f, &kernelContext_31);
 
     float3 environment_0 = _S199 + _S200;
@@ -2299,48 +2305,48 @@ struct pixelInput_0
     float grazing2_0 = grazing_0 * grazing_0;
     float fresnel_0 = 0.01999999955296516f + 0.98000001907348633f * (grazing2_0 * grazing2_0 * grazing_0);
 
-#line 1338
+#line 1341
     WaterAir_0 air_2;
 
-#line 1349
+#line 1352
     if(((&kernelContext_31)->water_0->froxels_0.x) != 0U)
     {
 
-#line 1349
+#line 1352
         WaterAir_0 _S201 = water_froxel_air_0(_S179, surface_depth_0, &kernelContext_31);
 
-#line 1349
+#line 1352
         air_2 = _S201;
 
-#line 1349
+#line 1352
     }
     else
     {
 
-#line 1349
+#line 1352
         WaterAir_0 _S202 = water_analytic_air_0(_S177.world_position_8, &kernelContext_31);
 
-#line 1349
+#line 1352
         air_2 = _S202;
 
-#line 1349
+#line 1352
     }
 
-#line 1349
+#line 1352
     float3 _S203 = float3((1.0f - fresnel_0)) ;
 
-#line 1366
+#line 1369
     float fade_1 = saturate(thickness_0 / 0.25f);
 
-#line 1366
+#line 1369
     pixelOutput_0 _S204 = { float4(straight_0.xyz * float3((1.0f - fade_1))  + (behind_1.xyz * transmittance_0 * _S203 + (environment_0 * float3(fresnel_0)  + scattered_0 * _S203) * float3(air_2.survives_0)  + air_2.inscatter_0 * (_S198 - transmittance_0 * _S203)) * float3(fade_1) , max(straight_0.w, fade_1)) };
 
-#line 1371
+#line 1374
     return _S204;
 }
 
 
-#line 1371
+#line 1374
 struct vertexMain_Result_0
 {
     float4 position_2 [[position]];
@@ -2349,7 +2355,7 @@ struct vertexMain_Result_0
 };
 
 
-#line 1223
+#line 1226
 struct SurfaceOutput_0
 {
     float4 position_3;
@@ -2358,84 +2364,84 @@ struct SurfaceOutput_0
 };
 
 
-#line 1223
+#line 1226
 [[vertex]] vertexMain_Result_0 vertexMain(uint index_6 [[vertex_id]], WaterVertex_natural_0 device* water_vertices_2 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_2 [[buffer(1)]], depth2d<float, access::sample> scene_depth_2 [[texture(1)]], WaterMedium_natural_0 device* media_2 [[buffer(5)]], texture2d<float, access::sample> scene_color_2 [[texture(0)]], VolumetricParams_natural_0 constant* params_2 [[buffer(3)]], WaterParams_0 constant* water_2 [[buffer(0)]], depth2d<float, access::sample> shadow_atlas_2 [[texture(2)]], sampler shadow_sampler_2 [[sampler(0)]], SsrParams_natural_0 constant* camera_2 [[buffer(2)]], GpuProbe_natural_0 device* probes_2 [[buffer(6)]], texture2d_array<float, access::sample> probe_visibility_2 [[texture(4)]], texture2d<float, access::sample> sky_prefilter_2 [[texture(3)]], packed_float4 device* sky_view_2 [[buffer(7)]], packed_float4 device* volumetrics_2 [[buffer(8)]], packed_float4 device* lighting_2 [[buffer(9)]])
 {
 
-#line 1223
+#line 1226
     thread KernelContext_0 kernelContext_32;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->water_vertices_0 = water_vertices_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->frame_0 = frame_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->scene_depth_0 = scene_depth_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->media_0 = media_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->scene_color_0 = scene_color_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->params_0 = params_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->water_0 = water_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->shadow_atlas_0 = shadow_atlas_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->shadow_sampler_0 = shadow_sampler_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->camera_0 = camera_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->probes_0 = probes_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->probe_visibility_0 = probe_visibility_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->sky_prefilter_0 = sky_prefilter_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->sky_view_0 = sky_view_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->volumetrics_0 = volumetrics_2;
 
-#line 1223
+#line 1226
     (&kernelContext_32)->lighting_0 = lighting_2;
 
-#line 1238
+#line 1241
     WaterVertex_natural_0 vertex_0 = water_vertices_2[index_6];
     thread SurfaceOutput_0 output_1;
     float3 _S205 = (float4(vertex_0.position_0) ).xyz;
 
-#line 1240
+#line 1243
     (&output_1)->world_position_10 = _S205;
     (&output_1)->position_3 = (((float4(_S205, 1.0f)) * (matrix<float,int(4),int(4)> (frame_2->view_proj_0.data_0[int(0)][int(0)], frame_2->view_proj_0.data_0[int(1)][int(0)], frame_2->view_proj_0.data_0[int(2)][int(0)], frame_2->view_proj_0.data_0[int(3)][int(0)], frame_2->view_proj_0.data_0[int(0)][int(1)], frame_2->view_proj_0.data_0[int(1)][int(1)], frame_2->view_proj_0.data_0[int(2)][int(1)], frame_2->view_proj_0.data_0[int(3)][int(1)], frame_2->view_proj_0.data_0[int(0)][int(2)], frame_2->view_proj_0.data_0[int(1)][int(2)], frame_2->view_proj_0.data_0[int(2)][int(2)], frame_2->view_proj_0.data_0[int(3)][int(2)], frame_2->view_proj_0.data_0[int(0)][int(3)], frame_2->view_proj_0.data_0[int(1)][int(3)], frame_2->view_proj_0.data_0[int(2)][int(3)], frame_2->view_proj_0.data_0[int(3)][int(3)]))));
     (&output_1)->body_3 = (uint4(vertex_0.body_0) ).x;
 
-#line 1242
+#line 1245
     thread vertexMain_Result_0 _S206;
 
-#line 1242
+#line 1245
     (&_S206)->position_2 = output_1.position_3;
 
-#line 1242
+#line 1245
     (&_S206)->world_position_9 = output_1.world_position_10;
 
-#line 1242
+#line 1245
     (&_S206)->body_2 = output_1.body_3;
 
-#line 1242
+#line 1245
     return _S206;
 }
 
