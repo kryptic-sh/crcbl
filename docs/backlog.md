@@ -4193,125 +4193,21 @@ migrates every caller and deletes its own copy in the same change.
   `MenuStyle`'s fields only restate the sheet. Giving those trees the game's
   sheets would fix it. Nobody has asked yet.
 
-## The September perf campaign sits unported on an archive branch (2026-10-20)
+## What the September perf campaign's port left (2026-10-24)
 
-On 2026-10-20 a local `main` turned out to hold a 56-commit performance campaign
-from 2026-09-22/23, never pushed and by then 974 commits behind `origin/main`.
-It is preserved, with the uncommitted draw-starts trial as its last commit, on
-**`archive/perf-campaign-2026-09`** (forked from `e5b5a5b4`); `main` was reset
-to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
-`docs/backlog.md`, `apps/sandbox/src/{app,main}.rs`, `crcbl-phys/src/world.rs`,
-`crcbl-render/src/{draw_gen,ssr,forward/view}.rs`, `draw_gen.slang` and
-`mesh.slang`.
+The 56-commit campaign of 2026-09-22/23 (the MX550 laptop, never pushed) was
+ported to `main` on 2026-10-24, one slice at a time and re-measured on the RX
+7900 XTX. The original stays on **`archive/perf-campaign-2026-09`** (forked from
+`e5b5a5b4`) until the half-resolution SSR decision below is made; delete it
+then. Its own `docs/backlog.md` holds the September measurements, and every
+trial it rejected is folded into "Declined" below.
 
-- **Superseded, do not port:** `perf(render): route draws through direct table`
-  and the draw-starts WIP. Upstream rebuilt draw-gen routing as a bucket lookup
-  with a workgroup scan (`eba4dc1d`, `5e2e0852`).
-- **Not upstream, worth porting one commit at a time** (cherry-pick, re-run
-  `crcbl-shaders`' generator rather than resolving generated files, re-measure
-  on the current tree since the numbers in the branch's backlog predate a month
-  of renderer work): the many-bucket fixture (`cc3371d6`).
-- **Ported: the `combined` fixture and its simulation tick timings**
-  (2026-10-24), as `sandbox --stress combined`: the `lights-fit` frame plus
-  `apps/sandbox/src/stress/simulation.rs`'s crowd, stepped from `Sandbox::tick`.
-  Under `--wall-clock` the summary prints the tick's p50/p95, whole and split
-  into move+refit and queries. The phase split is not guarded by a test beyond
-  each phase being non-zero and no larger than the whole: a refit timed as part
-  of the queries would still pass.
-- **Ported: parallel crowd queries** (2026-10-24). The `combined` fixture's
-  overlap queries run through `crcbl::jobs::Pool::par_for` over one
-  `PhysicsWorld::overlap_queries` view, scratch in a thread-local, in 64-body
-  chunks, the same shape as `apps/horde`'s `steer_enemies`; main already had the
-  shared view, so `crcbl-phys` gained no API. Measured on the RX 7900 XTX box
-  (Ryzen 9 9950X3D, 32 threads, so 31 workers) with
-  `CRCBL_LOG=info sandbox --headless --wall-clock --backend vk --stress combined --pacing off --fps 0 --frames 1800 --size WxH --debug-overlay`,
-  serial and parallel binaries alternating, two runs each:
-
-  | Size      | Build    | Complete p50/p95 ms       | Move+refit p50 ms | Queries p50 ms | Frame CPU mean / worst ms |
-  | --------- | -------- | ------------------------- | ----------------- | -------------- | ------------------------- |
-  | 320x180   | serial   | 2.562–2.572 / 2.864–2.897 | 0.377–0.398       | 2.173–2.185    | 0.571–0.574 / 3.24–3.25   |
-  | 320x180   | parallel | 0.924–0.936 / 1.052–1.068 | 0.653–0.656       | 0.268–0.286    | 0.489–0.499 / 1.44–1.52   |
-  | 1920x1080 | serial   | 2.671–2.673 / 3.100–3.103 | 0.398–0.405       | 2.230–2.237    | 0.894–0.927 / 3.47–3.70   |
-  | 1920x1080 | parallel | 0.939–0.951 / 1.167       | 0.663–0.667       | 0.265–0.285    | 0.823–0.833 / 1.86–1.94   |
-
-  Workers ran 4,220–7,028 of each run's query chunks against 161–230 on the
-  ticking thread. The GPU pass sum stayed at 0.309–0.311 ms at 320x180 and rose
-  0.02 ms at 1080p (0.715–0.718 to 0.736–0.738 ms), so the frame gain is the
-  tick's CPU time. 320x180 runs held only 56–62 ticks, short of the 120-tick
-  window.
-
-- **Unexplained: the serial move+refit phase slows by about 0.26 ms once the
-  queries are parallel** (table above). Not the worker count: 7- and 15-worker
-  builds showed the same 0.64–0.68 ms. A guess, unverified: the refit writes BVH
-  nodes and collider slots that the query workers just read into other cores'
-  caches (this Ryzen 9 9950X3D has two CCDs), so each write pays an
-  invalidation. Worth profiling before parallelising the refit itself. Fewer
-  workers cost query time: 7 workers measured 0.457–0.502 ms query p50, 15
-  measured 0.331–0.359 ms.
-- **Not guarded: `StartError::Pool`.** A pool that fails to start stops the
-  sandbox with `--stress: <SpawnError>`; no test makes the spawner refuse, so
-  that path is unexercised.
-- **Ported: the render stress fixtures and `--wall-clock`** (2026-10-24), as
-  `sandbox --stress <NAME>` in `apps/sandbox/src/stress.rs`, because `--scene`
-  already opens a `.scn/` directory on main. The fixtures replace the cube; the
-  scene's sun and spin still drive them. The measuring command is
-  `CRCBL_LOG=info sandbox --headless --wall-clock --backend vk --stress NAME --pacing off --fps 0 --frames 900 --size 1920x1080 --debug-overlay`:
-  the engine logs per-pass GPU p50/p95 over the last 120 frames and the
-  real-clock CPU frame line at exit, at `info`, which the sandbox's default
-  `warn` filter hides. The sandbox's default camera layer has no auto-exposure,
-  so only `--stress exposure` prints the exposure rows. First baselines on the
-  RX 7900 XTX (Vulkan and D3D12, 2026-10-24) showed what the next slices start
-  from: `lights` costs `light-cluster` about 0.07 ms (vk) and 0.14 ms (dx12)
-  over `lights-fit` for the overflow scan; and D3D12's `cull` row is 0.12–0.19
-  ms against Vulkan's 0.01 ms on the same grid, alternating between two levels
-  from run to run. That last gap was not investigated.
-- **Skipping a fill light's specular costs ordinary lights a little.** Ported
-  2026-10-24: `mesh.slang`'s light loop tests `FLAG_FILL` before either specular
-  lobe instead of zeroing it afterwards. On the RX 7900 XTX (two mirrored pairs
-  per backend), `forward` fell 26–29% in `area-fill-lights-fit` and 6% in
-  `lights-fit`, but rose 0.6–0.9% (Vulkan) and 3–4% (D3D12) in `area-lights-fit`
-  and 1.5% in Vulkan's `specular-lights-fit` (0.01–0.04 ms), the branch's own
-  cost where no light skips anything. Kept, because fill lights are the ones
-  scenes hold many of. On the office laptop's MX550 (Vulkan, NVIDIA 615.78,
-  2026-10-24, three mirrored pairs at `2ac4b17e` against `09780bf0`) nothing
-  rose: `forward` p50 fell 27.5% in `area-fill-lights-fit` (9.161 to 6.643 ms),
-  9.5% in `lights-fit`, 1.2% in `specular-lights-fit` and 0.8% in
-  `area-lights-fit`. Not measured on Intel.
-- **The empty-probe early return is unmeasured on a populated volume.** Ported
-  2026-10-24: `probe_irradiance` (mesh) and `probe_environment` (SSR, water)
-  return zero when `probe_counts.w`, the host-written total, is zero. Every
-  stress fixture has no probes, so only the skip was timed (forward 14–23% and
-  SSR about 60% cheaper on the RX 7900 XTX); a scene with a populated clipmap
-  pays one uniform branch, which no fixture measures. Water's own pass was not
-  timed either.
-- **Pre-scaled blocker offsets are neutral on the RX 7900 XTX.** Ported
-  2026-10-24: `SHADOW_SEARCH_OFFSET` stores the search disc already multiplied
-  by `SHADOW_SEARCH_TEXELS`, bit-identical to the old product. `forward` did not
-  move on Vulkan or D3D12 in `instances` or `specular-lights-fit` (two mirrored
-  pairs); the September campaign measured 1.0–1.1% on the MX550's `instances`.
-  Kept as exact work removed. Re-run on the MX550 (2026-10-24, three mirrored
-  pairs at `15a82dc1` against `dd3d36ff`): `forward` p50 fell 1.1% in
-  `lights-fit` (2.583 to 2.555 ms, the two commits' runs not overlapping) and
-  0.4% in `specular-lights-fit`, within a run's spread; `instances` was not
-  re-run.
-- **Declined: forcing the blocker search to unroll (2026-10-24).** The
-  campaign's `[ForceUnroll]` on `sun_penumbra_texels`' loop (`5f511756`) grew
-  mesh SPIR-V 212,564 → 231,112 bytes, grass 263,456 → 319,892 and water 150,800
-  → 169,332. Three mirrored pairs on the RX 7900 XTX left Vulkan's `forward`
-  flat and made D3D12's 1.5% slower in `specular-lights-fit` (0.607–0.610 →
-  0.617–0.619 ms); the MX550 had shown a 0.6–0.7% mean gain. A regression on one
-  adapter and the code growth outweigh that. Plain `[unroll]` does not expand
-  the loop at all in Slang (the campaign checked), so do not retry a loop hint
-  either.
-- **The tile-local exposure histogram is unmeasured on Metal.** Ported
-  2026-10-24. Slang's MSL output allocates the module-scope `tile_histogram`
-  threadgroup array in `clearMain` and `reduceMain` too, not only in
-  `histogramMain`; whether that costs occupancy on Apple GPUs is unknown.
 - **Decision needed: march screen-space reflections at half resolution?** The
   campaign's `3ac980e8` marches SSR over one pixel per 2×2 block (the nearest
-  surface in it) and reconstructs at full resolution. Ported and parked
-  2026-10-24 on the local branch `port/ssr-half` (commit "wip: half-resolution
-  SSR march"), because it is an image-quality trade, not a free win:
+  surface in it) and reconstructs at full resolution. Ported and parked on the
+  Windows box's local branch `port/ssr-half` ("wip: half-resolution SSR march");
+  `3ac980e8` on the archive branch is the original. It is an image-quality
+  trade, not a free win:
   - **Gain.** `ssr` + `ssr-blur` p50 on the RX 7900 XTX, after the empty-probe
     skip: 0.061 → 0.032 ms (Vulkan) and 0.044 → 0.029 ms (D3D12) at 1080p, 0.400
     → 0.260 and 0.184 → 0.121 ms at 4K. The MX550 measured 2.142 → 0.885 ms at
@@ -4326,19 +4222,82 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
     most, grass reflections soften); decline it and keep full resolution; or
     make the march resolution an `[engine.video]` quality setting so both exist,
     which needs a setting, a second pipeline path and tests of both.
-- **Carried over from the branch about the fixtures:** at 1920x1080 `moving`'s
-  whole-grid rotation changes pixel coverage, so its GPU rows are not upload
-  evidence; only its CPU frame interval is. The MX550 showed the host upload
-  path did not limit the real-device frame, and a bulk instance-update API was
-  declined on that evidence. `lights` overflows the froxel lists and drops
-  assignments, so it measures the capped fragment loop and the overflow scan,
-  not shading every light; `lights-fit` is the matched control.
-- **The branch's own `docs/backlog.md`** records each trial's measurement and
-  the trials it rejected (LTC transform/corner/frame caches, Smith-term hoist,
-  carried froxel depth, backface light exit, shared frame buffers, blocker
-  unroll hint). Read it before re-proposing any of them, and fold the surviving
-  rejections into this file as each item is ported.
-- Delete the branch once everything worth keeping is ported or declined here.
+- **How the sandbox measures.**
+  `CRCBL_LOG=info sandbox --headless --wall-clock --backend vk --stress NAME --pacing off --fps 0 --frames 900 --size 1920x1080 --debug-overlay`
+  logs per-pass GPU p50/p95 over the last 120 frames and the real-clock CPU
+  frame line at exit, at `info`, which the sandbox's default `warn` filter
+  hides; `--stress combined` adds the simulation tick line. Compare builds in
+  mirrored pairs (A, B then B, A), and give every worktree its own
+  `CARGO_TARGET_DIR`. Only `--stress exposure` prints the exposure rows, because
+  the sandbox's default camera layer has no auto-exposure. At 1920x1080
+  `moving`'s whole-grid rotation changes pixel coverage, so only its CPU frame
+  interval is upload evidence. `lights` overflows the froxel lists, so it
+  measures the capped fragment loop and the overflow scan rather than shading
+  every light; `lights-fit` is the matched control.
+- **Not investigated: D3D12's `cull` row** is 0.12–0.19 ms against Vulkan's 0.01
+  ms on the same grid, alternating between two levels from run to run.
+- **Owed on other hardware.** The fill-light specular skip costs ordinary lights
+  0.6–0.9% (Vulkan) and 3–4% (D3D12) of `forward` in `area-lights-fit` on the RX
+  7900 XTX, against 26–29% saved under rectangular fill lights; kept for that,
+  and not yet timed on the MX550 or any non-AMD adapter. The pre-scaled blocker
+  offsets were neutral here (the MX550 measured 1.0–1.1% in September); an MX550
+  re-run is owed.
+- **Unmeasured paths.** A populated probe volume pays the empty-probe early
+  return's uniform branch, which no fixture has probes to time; water's own pass
+  was not timed either. Slang's MSL output allocates the tile-local exposure
+  histogram's threadgroup array in `clearMain` and `reduceMain` too; whether
+  that costs occupancy on Apple GPUs is unknown.
+- **Unexplained: the `combined` fixture's serial move+refit phase slows by about
+  0.26 ms once its queries are parallel.** Not the worker count: 7- and
+  15-worker builds showed the same 0.64–0.68 ms. A guess, unverified: the refit
+  writes BVH nodes and collider slots the query workers just pulled into other
+  cores' caches (the Ryzen 9 9950X3D has two CCDs). Worth profiling before
+  parallelising the refit itself. Serial against parallel, two runs each:
+
+  | Size      | Build    | Complete p50/p95 ms       | Move+refit p50 ms | Queries p50 ms | Frame CPU mean / worst ms |
+  | --------- | -------- | ------------------------- | ----------------- | -------------- | ------------------------- |
+  | 320x180   | serial   | 2.562–2.572 / 2.864–2.897 | 0.377–0.398       | 2.173–2.185    | 0.571–0.574 / 3.24–3.25   |
+  | 320x180   | parallel | 0.924–0.936 / 1.052–1.068 | 0.653–0.656       | 0.268–0.286    | 0.489–0.499 / 1.44–1.52   |
+  | 1920x1080 | serial   | 2.671–2.673 / 3.100–3.103 | 0.398–0.405       | 2.230–2.237    | 0.894–0.927 / 3.47–3.70   |
+  | 1920x1080 | parallel | 0.939–0.951 / 1.167       | 0.663–0.667       | 0.265–0.285    | 0.823–0.833 / 1.86–1.94   |
+
+- **Not guarded by a test:** the `combined` fixture's move+refit / query split
+  (a refit timed as part of the queries would still pass), and
+  `StartError::Pool`, since nothing makes the spawner refuse.
+- **Declined, with the evidence** (MX550 unless stated; re-propose only with new
+  evidence, on other hardware or a different workload):
+  - **Forcing the blocker search to unroll** (`5f511756`, 2026-10-24 on the RX
+    7900 XTX): mesh SPIR-V grew 212,564 → 231,112 bytes and grass 263,456 →
+    319,892; Vulkan `forward` stayed flat and D3D12's rose 1.5% in
+    `specular-lights-fit`. Plain `[unroll]` does not expand the loop in Slang at
+    all, so a loop hint is not an alternative.
+  - **The many-bucket sandbox fixture** (`cc3371d6`): `mesh_e2e::bucket_price`
+    already prices many buckets against few at the EW scene's count, and the
+    routing it was built to time was rebuilt (`eba4dc1d`, `5e2e0852`), which
+    also supersedes the campaign's direct-table routing and draw-starts trial.
+  - **An 8×8 CMAA2 dispatch**: edge p50 rose to 0.639 ms and shape to 0.923 ms;
+    the flat 64-thread dispatch stays.
+  - **An early exit for back-facing punctual lights** in `fragmentMain`:
+    `forward` rose 2.4–3.2% despite skipping zero-result work.
+  - **Reusing the carried `clip_position.w`** for `froxel_of` instead of
+    re-multiplying by `view_proj`: `forward` rose 0.7–1.8%.
+  - **Caching the LTC transform, or `ltc_shading_frame`, on first use** inside
+    the rectangle arm: neutral in `area-lights-fit`, and the frame cache made
+    `area-fill-lights-fit` slower.
+  - **Normalising only an LTC polygon's real corners**: a dynamic loop bound
+    lost the compiler's unrolling (`forward` 22.6–25.8% slower); fixed slots
+    with conditional copies were neutral.
+  - **Hoisting `ggx_lobe`'s view-side Smith term** out of the light loop: both
+    the specular and the fill controls got slower.
+  - **Sharing `cascade_visibility`'s fetched atlas rectangle and texel step**
+    with the sun penumbra and filters: smaller SPIR-V, but `specular-lights-fit`
+    `forward` rose 1.1–1.2%.
+  - **A bulk instance-update API**: the host upload path did not limit the
+    real-device frame.
+  - **Raising cluster capacity on `lights`' overflow**: the overflow scan cost
+    about 0.15 ms and changed no fragment work.
+  - **A smaller SSAO tap set**: none found that keeps the nearer-neighbour
+    normal reconstruction and the horizon march's banding quality.
 
 ## Performance review and execution priority (2026-09-17)
 
@@ -8850,14 +8809,18 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   count and index by the local group; `ClusterDrawConstants::group_stride` and
   `mesh_cluster.slang` change together. Log the stride for a real scene first —
   an all-flat scene has a stride of one and this is moot there.
-- **P3 — GPU-only buffers are rings for no stated reason.** `runs`, `args`,
-  `counts` and `cull stats` in `DrawGen`, the light grid's froxel grid, the
-  cluster-selection rings (`View::cluster_selection`, and `shadow selection`
-  over `SHADOW_VIEWS`) are written and read by shaders inside one frame, unlike
-  host-written rings. **Fix:** one buffer each, imported per frame in
-  `ShaderReadWrite` as `group_state` already is; keep rings for host-written
-  data. Check the `cull_stats` copy stays inside its producing frame, and leave
-  the volumetric rings until they are shown not to be history.
+- **P3 — considered and declined: sharing GPU frame buffers across frames.**
+  `runs`, `args`, `counts` and `visible_count` in `DrawGen` stay live after
+  their shader writes: later passes consume the indirect data and the statistics
+  copy completes asynchronously, and the light grid, cluster selection, shadow
+  selection and prepass statistics carry the same previous-submission hazard.
+  `GpuContext::submit_and_present` keeps `FRAMES_IN_FLIGHT` submissions
+  overlapping and retires the oldest only once it completes, so a later frame
+  records and submits without waiting for the previous one. Collapsing the rings
+  would race storage still in use, or need a cross-frame wait that serialises
+  rendering. `group_state` differs on purpose: it is history with explicit
+  cross-frame state. Reopen only if frame scheduling changes and a memory saving
+  is measured against the lost overlap.
 - **P4 — every light-slot generator is built whether or not a light is
   shadowed.** Four `DrawGen`s in `build` ("the unused ones cost memory"). Cheap
   once P2–P3 land; otherwise build a slot when a shadowed light first needs it,
