@@ -4191,11 +4191,11 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   `crcbl-shaders`' generator rather than resolving generated files, re-measure
   on the current tree since the numbers in the branch's backlog predate a month
   of renderer work): half-resolution SSR march (re-blesses `golden/ssr.png`),
-  local exposure-tile merge, sun-only light-cluster fast path, pre-scaled and
-  force-unrolled shadow blocker taps, degraded-broadphase BVH rebuild
-  (`crcbl-phys`), parallel sandbox crowd queries, and the `combined` stress
-  scene with its simulation tick-timing report (`020447e2`, `1286e3ca`,
-  `e957219b`, `3d61e0e1`) and the many-bucket fixture (`cc3371d6`).
+  local exposure-tile merge, sun-only light-cluster fast path,
+  degraded-broadphase BVH rebuild (`crcbl-phys`), parallel sandbox crowd
+  queries, and the `combined` stress scene with its simulation tick-timing
+  report (`020447e2`, `1286e3ca`, `e957219b`, `3d61e0e1`) and the many-bucket
+  fixture (`cc3371d6`).
 - **Ported: the render stress fixtures and `--wall-clock`** (2026-10-24), as
   `sandbox --stress <NAME>` in `apps/sandbox/src/stress.rs`, because `--scene`
   already opens a `.scn/` directory on main. The fixtures replace the cube; the
@@ -4226,6 +4226,21 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   SSR about 60% cheaper on the RX 7900 XTX); a scene with a populated clipmap
   pays one uniform branch, which no fixture measures. Water's own pass was not
   timed either.
+- **Pre-scaled blocker offsets are neutral on the RX 7900 XTX.** Ported
+  2026-10-24: `SHADOW_SEARCH_OFFSET` stores the search disc already multiplied
+  by `SHADOW_SEARCH_TEXELS`, bit-identical to the old product. `forward` did not
+  move on Vulkan or D3D12 in `instances` or `specular-lights-fit` (two mirrored
+  pairs); the September campaign measured 1.0–1.1% on the MX550's `instances`.
+  Kept as exact work removed; an MX550 re-run on the current tree is owed.
+- **Declined: forcing the blocker search to unroll (2026-10-24).** The
+  campaign's `[ForceUnroll]` on `sun_penumbra_texels`' loop (`5f511756`) grew
+  mesh SPIR-V 212,564 → 231,112 bytes, grass 263,456 → 319,892 and water 150,800
+  → 169,332. Three mirrored pairs on the RX 7900 XTX left Vulkan's `forward`
+  flat and made D3D12's 1.5% slower in `specular-lights-fit` (0.607–0.610 →
+  0.617–0.619 ms); the MX550 had shown a 0.6–0.7% mean gain. A regression on one
+  adapter and the code growth outweigh that. Plain `[unroll]` does not expand
+  the loop at all in Slang (the campaign checked), so do not retry a loop hint
+  either.
 - **Carried over from the branch about the fixtures:** at 1920x1080 `moving`'s
   whole-grid rotation changes pixel coverage, so its GPU rows are not upload
   evidence; only its CPU frame interval is. The MX550 showed the host upload

@@ -311,15 +311,15 @@ static const float SHADOW_CASTER_REACH = 40.0;
 static const float SHADOW_SUN_TAN_RADIUS = 0.02;
 static const float SHADOW_SEARCH_TEXELS = 8.0;
 static const uint SHADOW_SEARCH_TAPS = 16;
-static const float2 SHADOW_SEARCH_DISC[SHADOW_SEARCH_TAPS] = {
-    float2(+0.176777, +0.000000), float2(-0.225772, +0.206826),
-    float2(+0.034558, -0.393771), float2(+0.284571, +0.371173),
-    float2(-0.522223, -0.092374), float2(+0.494695, -0.314685),
-    float2(-0.165466, +0.615525), float2(-0.315561, -0.607594),
-    float2(+0.684642, +0.250030), float2(-0.712256, +0.294009),
-    float2(+0.343354, -0.733729), float2(+0.253730, +0.808932),
-    float2(-0.764746, -0.443186), float2(+0.897134, -0.197232),
-    float2(-0.547507, +0.778772), float2(-0.126487, -0.976090),
+static const float2 SHADOW_SEARCH_OFFSET[SHADOW_SEARCH_TAPS] = {
+    float2(+1.414216, +0.000000), float2(-1.806176, +1.654608),
+    float2(+0.276464, -3.150168), float2(+2.276568, +2.969384),
+    float2(-4.177784, -0.738992), float2(+3.957560, -2.517480),
+    float2(-1.323728, +4.924200), float2(-2.524488, -4.860752),
+    float2(+5.477136, +2.000240), float2(-5.698048, +2.352072),
+    float2(+2.746832, -5.869832), float2(+2.029840, +6.471456),
+    float2(-6.117968, -3.545488), float2(+7.177072, -1.577856),
+    float2(-4.380056, +6.230176), float2(-1.011896, -7.808720),
 };
 static const uint SHADOW_FILTER_PCSS = 0u;
 static const uint SHADOW_FILTER_DISC = 1u;
@@ -580,7 +580,7 @@ float sun_penumbra_texels(uint cascade, float2 tile_uv, float reference, float2 
     float found = 0.0;
     for (uint index = 0u; index < SHADOW_SEARCH_TAPS; ++index)
     {
-        float2 spoke = SHADOW_SEARCH_DISC[index] * SHADOW_SEARCH_TEXELS;
+        float2 spoke = SHADOW_SEARCH_OFFSET[index];
         float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
                                spoke.x * rotation.y + spoke.y * rotation.x);
         float2 tap = clamp(tile_uv + turned * texel_step, tile_min, 1.0 - tile_min);
