@@ -35,7 +35,9 @@ OPTIONS:
         --stress <NAME>   Draw a fixed renderer workload in the cube's place:
                           `instances`, `moving`, `lights-fit`,
                           `specular-lights-fit`, `area-lights-fit`,
-                          `area-fill-lights-fit`, `lights` or `exposure`.
+                          `area-fill-lights-fit`, `lights`, `exposure` or
+                          `combined` (`lights-fit` plus a broadphase crowd
+                          on the fixed tick).
                           Each holds its load for the complete run, so tail
                           timings taken under --wall-clock are comparable
                           between runs.

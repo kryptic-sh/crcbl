@@ -70,6 +70,22 @@ fn main() -> ExitCode {
                 if let Some(stress) = options.stress {
                     println!("sandbox: stress fixture {}", stress.name());
                 }
+                if let Some(timings) = summary.simulation {
+                    let millis =
+                        |nanos| std::time::Duration::from_nanos(nanos).as_secs_f64() * 1_000.0;
+                    println!(
+                        "sandbox: simulation p50 / p95 over the last {} ticks: complete \
+                         {:.3} / {:.3} ms, move+refit {:.3} / {:.3} ms, queries {:.3} / \
+                         {:.3} ms",
+                        timings.samples,
+                        millis(timings.complete_ns.0),
+                        millis(timings.complete_ns.1),
+                        millis(timings.refit_ns.0),
+                        millis(timings.refit_ns.1),
+                        millis(timings.query_ns.0),
+                        millis(timings.query_ns.1),
+                    );
+                }
                 ExitCode::SUCCESS
             }
             Err(error) => {

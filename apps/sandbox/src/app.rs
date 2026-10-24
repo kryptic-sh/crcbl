@@ -80,7 +80,7 @@ use crcbl::ui::draw_list::DrawList;
 use crate::gpu::Gpu;
 use crate::menu::{self, MenuKind, Menus, SandboxAction};
 use crate::scene::Scene;
-use crate::stress::Stress;
+use crate::stress::{Simulation, SimulationTimings, Stress};
 
 /// Which projection the camera uses.
 ///
@@ -313,6 +313,9 @@ pub struct Summary {
     /// `renderer.set_effect_request(ctx.effect_request())`: without it that line
     /// could be deleted and every test here would stay green.
     pub effects: RenderEffects,
+    /// The `combined` fixture's simulation-tick percentiles, when the run read
+    /// the real clock and ticked often enough for a p95.
+    pub simulation: Option<SimulationTimings>,
 }
 
 /// Anything that can stop the sandbox before it starts.
@@ -421,6 +424,9 @@ pub struct Sandbox {
     /// `Sandbox::follow_session`. Native only.
     #[cfg(not(target_arch = "wasm32"))]
     parked: Option<crate::lobby::Lobby>,
+    /// The `--stress` fixture's crowd, stepped on every tick; `None` for a
+    /// fixture that only draws. See [`crate::stress::Simulation`].
+    simulation: Option<Simulation>,
 }
 
 impl Sandbox {
@@ -456,6 +462,7 @@ impl Sandbox {
             lobby: None,
             #[cfg(not(target_arch = "wasm32"))]
             parked: None,
+            simulation: None,
         }
     }
 
@@ -619,6 +626,10 @@ pub fn with_shell<S: Shell + ?Sized>(
             sandbox.lobby = Some(crate::lobby::Lobby::on_the_lan(options.tick_hz));
         }
     }
+    // Timed only on the real clock: a deterministic run reads no clock.
+    sandbox.simulation = options
+        .stress
+        .and_then(|stress| Simulation::for_stress(stress, options.real_clock()));
     let steam_pads = sandbox.steam.pad_source();
 
     let mut engine = Loop::new(
@@ -726,6 +737,9 @@ impl HostedGame for Sandbox {
         }
         if let Some(light) = self.scene.light() {
             gpu.light = light;
+        }
+        if let Some(simulation) = &mut self.simulation {
+            simulation.step(tick_dt);
         }
         // The menu's pacing row changes this only while paused; the change
         // lands on the first tick after resume, and only when it differs —
@@ -894,6 +908,7 @@ impl HostedGame for Sandbox {
         Summary {
             run,
             effects: self.effects,
+            simulation: self.simulation.as_ref().and_then(Simulation::timings),
         }
     }
 
@@ -1078,6 +1093,66 @@ mod tests {
         assert!(
             submitted(Some(Stress::Instances)) >= grid,
             "the fixture's grid did not reach the frame"
+        );
+    }
+
+    /// **The `combined` fixture's crowd runs on the loop's tick**, and a
+    /// fixture that only draws has none.
+    #[test]
+    fn the_combined_fixture_steps_its_crowd_on_every_tick() {
+        let results = |stress| {
+            let mut engine = scripted(&Options {
+                stress: Some(stress),
+                ..headless(8)
+            });
+            run_frames(&mut engine, 2);
+            let results = engine
+                .game()
+                .simulation
+                .as_ref()
+                .map(Simulation::last_results);
+            engine
+                .finish(ExitReason::CloseRequested)
+                .expect("the loop tears down");
+            results
+        };
+        assert_eq!(results(Stress::LightsFit), None);
+        assert!(
+            results(Stress::Combined).is_some_and(|found| found > 0),
+            "the crowd never ran a query on a tick",
+        );
+    }
+
+    /// **Only a real-clock run reports the crowd's tick timings**: the summary
+    /// carries them under `--wall-clock`, and a deterministic run never reads
+    /// the clock to have any.
+    #[test]
+    fn the_summary_reports_simulation_timings_only_on_the_real_clock() {
+        let reported = |wall_clock| {
+            let mut engine = scripted(&Options {
+                stress: Some(Stress::Combined),
+                wall_clock,
+                ..headless(8)
+            });
+            // Stepped here rather than by frames, because how many ticks a
+            // real-clock frame runs is up to the clock.
+            let simulation = engine
+                .game_mut()
+                .simulation
+                .as_mut()
+                .expect("the combined fixture has a crowd");
+            for _ in 0..crcbl::core::stats::MIN_PERCENTILE_SAMPLES {
+                simulation.step(1.0 / 60.0);
+            }
+            engine
+                .finish(ExitReason::CloseRequested)
+                .expect("the loop tears down")
+                .simulation
+        };
+        assert_eq!(reported(false), None);
+        assert!(
+            reported(true).is_some(),
+            "a --wall-clock run's summary lost the simulation timings",
         );
     }
 

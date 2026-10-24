@@ -4210,9 +4210,15 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
 - **Not upstream, worth porting one commit at a time** (cherry-pick, re-run
   `crcbl-shaders`' generator rather than resolving generated files, re-measure
   on the current tree since the numbers in the branch's backlog predate a month
-  of renderer work): parallel sandbox crowd queries, and the `combined` stress
-  scene with its simulation tick-timing report (`020447e2`, `1286e3ca`,
-  `e957219b`, `3d61e0e1`) and the many-bucket fixture (`cc3371d6`).
+  of renderer work): parallel sandbox crowd queries (`3d61e0e1`) and the
+  many-bucket fixture (`cc3371d6`).
+- **Ported: the `combined` fixture and its simulation tick timings**
+  (2026-10-24), as `sandbox --stress combined`: the `lights-fit` frame plus
+  `apps/sandbox/src/stress/simulation.rs`'s crowd, stepped from `Sandbox::tick`.
+  Under `--wall-clock` the summary prints the tick's p50/p95, whole and split
+  into move+refit and queries. The phase split is not guarded by a test beyond
+  each phase being non-zero and no larger than the whole: a refit timed as part
+  of the queries would still pass.
 - **Ported: the render stress fixtures and `--wall-clock`** (2026-10-24), as
   `sandbox --stress <NAME>` in `apps/sandbox/src/stress.rs`, because `--scene`
   already opens a `.scn/` directory on main. The fixtures replace the cube; the

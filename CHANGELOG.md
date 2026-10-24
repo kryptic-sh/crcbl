@@ -33,11 +33,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   (the same lights with specular on), `area-lights-fit` and
   `area-fill-lights-fit` (rectangular lights at the same occupancy, with and
   without specular), `lights` (an overlapping field that overflows the froxel
-  lists) and `exposure` (the grid with auto-exposure metering every frame).
-  `--wall-clock` drives a headless run from the real clock, so the CPU frame
-  line printed at exit measures the frame instead of the fixed step. Together
-  with `CRCBL_LOG=info` and the per-pass GPU report, they are the sandbox's
-  benchmark.
+  lists), `exposure` (the grid with auto-exposure metering every frame) and
+  `combined` (the `lights-fit` frame while 5,000 sphere bodies move, refit the
+  broadphase and run one overlap query each on every fixed tick). `--wall-clock`
+  drives a headless run from the real clock, so the CPU frame line printed at
+  exit measures the frame instead of the fixed step, and a `combined` run also
+  prints its simulation tick's p50/p95, whole and split into move+refit and
+  queries. Together with `CRCBL_LOG=info` and the per-pass GPU report, they are
+  the sandbox's benchmark.
 
 ### Changed
 

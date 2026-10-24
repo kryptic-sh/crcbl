@@ -10,6 +10,10 @@
 //! the same work as one over its first. The grid takes the cube's place; the
 //! scene's sun still lights it and its spin still turns the animated cells,
 //! so the clock that drives the cube drives the fixture too.
+//!
+//! One fixture, [`Stress::Combined`], also loads the CPU on the fixed tick: a
+//! crowd of broadphase bodies, owned by [`Simulation`] rather than by the
+//! renderer.
 
 use crcbl::math::{Mat4, Quat, Vec3};
 use crcbl::render::{
@@ -28,6 +32,10 @@ const LIGHT_ROWS: usize = 16;
 pub const LIGHT_COUNT: usize = LIGHT_COLUMNS * LIGHT_ROWS;
 /// Local lights that, with the sun, exactly fill one froxel's list.
 const WITHIN_BUDGET_LIGHT_COUNT: usize = CLUSTER_LIGHT_CAPACITY as usize - 1;
+
+mod simulation;
+
+pub use simulation::{Simulation, SimulationTimings};
 
 /// A fixed renderer workload `--stress` can select.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,11 +57,15 @@ pub enum Stress {
     /// The instance grid with auto-exposure metering every frame, which the
     /// sandbox's default camera layer leaves off.
     Exposure,
+    /// The [`LightsFit`](Self::LightsFit) frame while a dense crowd of
+    /// broadphase bodies moves, refits and queries on every fixed tick — see
+    /// [`Simulation`].
+    Combined,
 }
 
 impl Stress {
     /// Every fixture, in the order `--help` lists them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Instances,
         Self::Moving,
         Self::LightsFit,
@@ -62,6 +74,7 @@ impl Stress {
         Self::AreaFillLightsFit,
         Self::Lights,
         Self::Exposure,
+        Self::Combined,
     ];
 
     /// Parses the spelling accepted by `sandbox --stress`.
@@ -82,6 +95,7 @@ impl Stress {
             Self::AreaFillLightsFit => "area-fill-lights-fit",
             Self::Lights => "lights",
             Self::Exposure => "exposure",
+            Self::Combined => "combined",
         }
     }
 
@@ -103,9 +117,16 @@ impl Stress {
             Self::LightsFit
             | Self::SpecularLightsFit
             | Self::AreaLightsFit
-            | Self::AreaFillLightsFit => WITHIN_BUDGET_LIGHT_COUNT,
+            | Self::AreaFillLightsFit
+            | Self::Combined => WITHIN_BUDGET_LIGHT_COUNT,
             Self::Lights => LIGHT_COUNT,
         }
+    }
+
+    /// Whether the fixture runs a [`Simulation`] on the fixed tick.
+    #[must_use]
+    pub const fn simulates(self) -> bool {
+        matches!(self, Self::Combined)
     }
 }
 
@@ -274,6 +295,30 @@ mod tests {
         assert!(Stress::Lights.light_count() > Stress::LightsFit.light_count());
         assert_eq!(Stress::Instances.light_count(), 0);
         assert_eq!(Stress::Moving.light_count(), 0);
+    }
+
+    #[test]
+    fn only_the_combined_fixture_simulates_and_it_draws_the_lights_fit_frame() {
+        for stress in Stress::ALL {
+            assert_eq!(
+                stress.simulates(),
+                stress == Stress::Combined,
+                "{}",
+                stress.name()
+            );
+            assert_eq!(
+                Simulation::for_stress(stress, false).is_some(),
+                stress.simulates(),
+                "{}",
+                stress.name()
+            );
+        }
+        assert_eq!(
+            lights(Stress::Combined),
+            lights(Stress::LightsFit),
+            "the combined frame must be the lights-fit frame, or its CPU cost \
+             is not the only difference",
+        );
     }
 
     #[test]
