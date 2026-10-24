@@ -7,9 +7,13 @@
 //! theme, then each theme it `Inherits`, depth first, then the caller's
 //! fallback themes, then `hicolor`, and last the icon as a bare file in a
 //! base directory (`/usr/share/pixmaps`). Within a theme, a directory whose
-//! size and scale match exactly wins; otherwise the file in the directory
-//! nearest by the specification's `DirectorySizeDistance`. Each directory is
-//! tried for PNG, then SVG, then XPM. A name that misses everywhere is tried
+//! size and scale match wins over one that does not, and among those that do,
+//! the one whose nominal size is nearest the request: a threshold `22x22`
+//! directory matches 24, but a `24x24` one beside it is the sharper answer, so
+//! this departs from the specification's first-match rule as GTK does.
+//! Otherwise the file in the directory nearest by the specification's
+//! `DirectorySizeDistance`, the nominal size again breaking a tie. Each
+//! directory is tried for PNG, then SVG, then XPM. A name that misses everywhere is tried
 //! again as each of the caller's generic fallback names, so an application
 //! with no icon still gets the generic one. An absolute path is returned as it
 //! is, if the file exists, since `Icon=` and a notification's `app_icon` may
@@ -172,6 +176,12 @@ impl ThemeDir {
                 ..=self.size.saturating_add(threshold))
                 .contains(&size),
         }
+    }
+
+    /// How far the directory's nominal size is from the request, in device
+    /// pixels: which of several matching directories is the sharper answer.
+    fn nominal_gap(&self, size: u32, scale: u32) -> u64 {
+        (u64::from(self.size) * u64::from(self.scale)).abs_diff(u64::from(size) * u64::from(scale))
     }
 
     /// The specification's `DirectorySizeDistance`, in device pixels. Its
@@ -435,7 +445,8 @@ impl IconThemes {
             .find_map(|parent| self.find_in_theme(query, parent, depth + 1, visited))
     }
 
-    /// The specification's `LookupIcon` in one theme.
+    /// The specification's `LookupIcon` in one theme, ranking matching
+    /// directories by nominal size as the [module docs](self) say.
     fn lookup_in(&mut self, query: Query<'_>, theme: &Theme) -> Option<PathBuf> {
         let Query {
             name,
@@ -447,24 +458,34 @@ impl IconThemes {
             .iter()
             .map(|extension| format!("{name}.{extension}").into())
             .collect();
-        let mut closest: Option<(u64, PathBuf)> = None;
+        // Lower is better: a match before a miss, then the specification's
+        // distance (zero for a match), then the nominal size's gap. The first
+        // directory and extension keep a tie.
+        let mut best: Option<((bool, u64, u64), PathBuf)> = None;
         for (dir, directories) in &theme.dirs {
-            let exact = dir.matches(size, scale);
+            let rank = (
+                !dir.matches(size, scale),
+                dir.distance(size, scale),
+                dir.nominal_gap(size, scale),
+            );
+            if best.as_ref().is_some_and(|(known, _)| *known <= rank) {
+                continue;
+            }
             for directory in directories {
                 let listing = self.listing(directory, now);
-                for file in files.iter().filter(|file| listing.contains(*file)) {
-                    let path = directory.join(file);
-                    if exact {
-                        return Some(path);
-                    }
-                    let distance = dir.distance(size, scale);
-                    if closest.as_ref().is_none_or(|(best, _)| distance < *best) {
-                        closest = Some((distance, path));
-                    }
+                if let Some(file) = files.iter().find(|file| listing.contains(*file)) {
+                    best = Some((rank, directory.join(file)));
+                    break;
                 }
             }
+            if best
+                .as_ref()
+                .is_some_and(|(known, _)| *known == (false, 0, 0))
+            {
+                break;
+            }
         }
-        closest.map(|(_, path)| path)
+        best.map(|(_, path)| path)
     }
 
     /// `theme`'s description, read once; `None` for a theme with no
@@ -729,6 +750,48 @@ Type=Scalable
             Some(svg.clone())
         );
         assert_eq!(themes.lookup("application-x-executable", 24, 2), Some(svg));
+    }
+
+    /// hicolor lists `22x22/apps`, whose threshold takes 24, before
+    /// `24x24/apps`: the 24-pixel file is the answer for 24, and among two
+    /// scalable directories that both range over 96, the one whose nominal
+    /// size is nearer. By the specification's first match, each was the
+    /// other file.
+    #[test]
+    fn the_nearest_nominal_size_wins_among_matching_directories() {
+        let scratch = Scratch::new();
+        scratch.write(
+            "icons/hicolor/index.theme",
+            "[Icon Theme]
+Directories=22x22/apps,24x24/apps,256x256/apps,scalable/apps
+             [22x22/apps]
+Size=22
+Type=Threshold
+             [24x24/apps]
+Size=24
+Type=Threshold
+             [256x256/apps]
+Size=256
+MinSize=64
+MaxSize=256
+Type=Scalable
+             [scalable/apps]
+Size=128
+MinSize=1
+MaxSize=256
+Type=Scalable
+",
+        );
+        scratch.write("icons/hicolor/22x22/apps/firefox.png", "");
+        let exact = scratch.write("icons/hicolor/24x24/apps/firefox.png", "");
+        scratch.write("icons/hicolor/256x256/apps/firefox.png", "");
+        let svg = scratch.write("icons/hicolor/scalable/apps/firefox.svg", "");
+        let mut themes = IconThemes::new(search(&scratch), "hicolor", Duration::ZERO);
+        assert_eq!(themes.lookup("firefox", 24, 1), Some(exact));
+        assert_eq!(themes.lookup("firefox", 96, 1), Some(svg.clone()));
+        // No directory is at scale 2, so none matches; both scalable ones are
+        // at distance 0 from 96 pixels, and the nominal size breaks the tie.
+        assert_eq!(themes.lookup("firefox", 48, 2), Some(svg));
     }
 
     /// The same device pixels at the wrong scale are no match: the

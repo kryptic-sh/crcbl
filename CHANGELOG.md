@@ -70,6 +70,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   extension. Themes are now shared and each directory's path is built once. On
   an Arch desktop's Adwaita, Breeze, Papirus and hicolor, 4,488 lookups per
   theme took 2.4 to 3.4 times less time, with the same answers.
+- **`crcbl_image::theme::IconThemes::lookup` prefers the nearest size among
+  matching directories.** The specification takes the first directory in a
+  theme's `Directories` list that matches; hicolor lists `22x22/apps`, whose
+  threshold takes 24, before `24x24/apps`, so a 24-pixel lookup returned the
+  22-pixel file. A theme's matching directory with the nearest nominal size now
+  wins, as in GTK, which gives sharper icons. On an Arch desktop's installed
+  themes, answers whose bytes differ from GTK 3's fell from 153 to 138 of 17,952
+  lookups, with no lookup that agreed before now differing.
 - **CMAA2's shape pass no longer divides per blend share.** It recovered each
   source texel from a flat index with an integer division for every share it
   emitted, although the line walk already held the coordinate; it now carries it

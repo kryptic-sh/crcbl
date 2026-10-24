@@ -1975,17 +1975,19 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       names, 11 size and scale pairs each, 17,952 lookups, against
       `Gtk.IconTheme.lookup_icon_for_scale` through Python): with Adwaita given
       as a fallback theme, which GTK always adds, crcbl found everything GTK
-      found. 1,624 answers name another file: 1,383 of those hold the same bytes
-      (an icon in two context directories), and the rest are GTK's own choices,
-      not the specification's — its built-in `/org/gtk/libgtk` icons, a
-      preference for the nearest nominal size over the first directory that
-      matches (hicolor lists `22x22/apps`, whose threshold takes 24, before
-      `24x24/apps`, so a 24-pixel `firefox` is the 22-pixel file here and the
-      24-pixel one in GTK), and for a larger file or a matching scale when none
-      matches exactly. **Decision open:** keep the specification's first-match
-      rule, or prefer the nearest nominal size among matching directories as GTK
-      does, which gives sharper icons. Not tested in CI: its Linux runner has
-      `hicolor` at most.
+      found. **Decided 2026-10-24: among matching directories the nearest
+      nominal size wins**, as GTK does, rather than the specification's first
+      match (hicolor lists `22x22/apps`, whose threshold takes 24, before
+      `24x24/apps`, so a 24-pixel `firefox` was the 22-pixel file). Rerun after
+      that change, leaving out `compton`, whose icon was installed after GTK's
+      answers were recorded: 1,600 answers name another file, 88 of them GTK's
+      built-in `/org/gtk/libgtk` icons and 1,374 the same bytes (an icon in two
+      context directories); 138 hold different bytes, down from 153 under first
+      match, with none that agreed before now differing. The rest are GTK's
+      tie-breaking when no directory matches exactly, a larger file or a
+      matching scale (breeze's `24@2x` over `16@3x` at 48 pixels). Lookup time
+      over each theme's queries stayed within 8% of first match. Not tested in
+      CI: its Linux runner has `hicolor` at most.
     - **An uncached lookup still walks every directory of each theme it
       reaches**: about 0.2 ms through hicolor's 649 directories in two roots on
       the office laptop, mostly hashing each directory's path to find its
