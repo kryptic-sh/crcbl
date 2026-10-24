@@ -2815,9 +2815,12 @@ host it either (`xdg_wm_base` 5 against the 6 it binds). A self-hosted runner
 with a GPU and a running Hyprland could run this script; that is the owner's
 call. The sandbox passes stay sway-only (they drive `swaymsg` from the shell).
 
-The X11 e2e suite runs on the office laptop since 2026-10-21 (Xvfb and openbox
-installed): 50 of 50 with no window manager and 50 of 50 under openbox, the
-AT-SPI step and every sandbox step passing in both.
+The X11 e2e suite runs on the office laptop since 2026-10-21 (Xvfb, Xorg's dummy
+driver and openbox installed). Last run 2026-10-24 at `de958005`:
+`run-x11-e2e.sh` 57 of 57 with no window manager and 57 of 57 under openbox
+(`CRCBL_E2E_X11_WM=openbox`), the AT-SPI step and every sandbox step passing in
+both, fullscreen and F11 refused without a window manager and granted under it;
+`run-x11-xorg-e2e.sh`'s five `xorg_` tests pass both ways.
 
 ## HIGH PRIORITY: EW engine requirements
 
