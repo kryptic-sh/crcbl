@@ -55,6 +55,10 @@ pub enum CompoundError {
     },
     /// Every part of a collision shape is flat, so a density weighs nothing.
     NoVolume,
+    /// A collision shape's parts are so large or so small that their mass
+    /// properties overflow or underflow an `f64`: no rigid body can carry
+    /// them, and [`crate::RigidBody::with_inertia`] would refuse the tensor.
+    UnweighableMass,
 }
 
 impl fmt::Display for CompoundError {
@@ -79,6 +83,10 @@ impl fmt::Display for CompoundError {
                 )
             }
             Self::NoVolume => write!(f, "every part of a compound shape is flat"),
+            Self::UnweighableMass => write!(
+                f,
+                "a compound shape's mass properties are out of an f64's range"
+            ),
         }
     }
 }

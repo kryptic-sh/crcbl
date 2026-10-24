@@ -17,6 +17,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 - **`crcbl_phys::BroadphaseStats` is no longer `Eq`**, only `PartialEq`, because
   it now carries the floating-point `surface_area_cost`.
+- **`crcbl_phys::CompoundError` has a new variant, `UnweighableMass`**, so an
+  exhaustive `match` on it needs an arm for it.
 
 ### Added
 
@@ -115,6 +117,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the stream's caps, then sent only the WGSL. Once the grass shader's SPIR-V
   passed the stream's array cap, every browser scene that draws grass failed to
   build. It now measures only what crosses.
+- **A compound shape no body can weigh is refused instead of panicking later.**
+  `CompoundShape::new` and `from_aabbs` accepted finite parts so large or so
+  small that their inertia overflowed or underflowed an `f64`, and
+  `RigidBody::with_inertia` then panicked on the `NaN` or zero tensor (reported
+  by EW from a fuzzed save whose item reached `1e300` m). They now return
+  `CompoundError::UnweighableMass`.
 - **A character no longer stands on air past a box's edge.** A capsule's
   straight sweep against an unturned box met the box inflated by its radius,
   with square edges, so a character whose axis was nearly a radius past a top

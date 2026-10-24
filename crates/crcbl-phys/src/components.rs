@@ -130,10 +130,8 @@ impl RigidBody {
             m.x_axis.y == m.y_axis.x && m.x_axis.z == m.z_axis.x && m.y_axis.z == m.z_axis.y,
             "an inertia tensor is symmetric: {m:?}"
         );
-        // Sylvester's criterion: every leading principal minor is positive.
-        let minor2 = m.x_axis.x * m.y_axis.y - m.y_axis.x * m.x_axis.y;
         assert!(
-            m.x_axis.x > 0.0 && minor2 > 0.0 && m.determinant() > 0.0,
+            is_positive_definite(m),
             "an inertia tensor is positive definite: {m:?}"
         );
         Self {
@@ -212,6 +210,14 @@ impl Default for RigidBody {
     fn default() -> Self {
         Self::new_kinematic()
     }
+}
+
+/// Whether `m` is positive definite, as [`RigidBody::with_inertia`] requires,
+/// by Sylvester's criterion: every leading principal minor is positive. A
+/// minor that underflows to zero or is `NaN` fails it.
+pub(crate) fn is_positive_definite(m: DMat3) -> bool {
+    let minor2 = m.x_axis.x * m.y_axis.y - m.y_axis.x * m.x_axis.y;
+    m.x_axis.x > 0.0 && minor2 > 0.0 && m.determinant() > 0.0
 }
 
 // ---------------------------------------------------------------------------

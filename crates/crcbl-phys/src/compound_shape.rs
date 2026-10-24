@@ -30,7 +30,7 @@ use std::sync::Arc;
 use glam::{DMat3, DQuat, DVec3};
 
 use crate::collider::{Aabb, BoxCollider};
-use crate::components::{ColliderComponent, RigidBody, Transform};
+use crate::components::{ColliderComponent, RigidBody, Transform, is_positive_definite};
 use crate::compound::{AabbCompound, CompoundError};
 use crate::contact::shape::ContactShape;
 use crate::mass::MassProperties;
@@ -186,8 +186,11 @@ impl CompoundShape {
     /// [`CompoundError::NoParts`], [`CompoundError::TooManyParts`],
     /// [`CompoundError::NonFinitePart`] for a `NaN` or infinity anywhere in a
     /// part, [`CompoundError::InvertedPart`] for a negative half-extent,
-    /// [`CompoundError::NonUnitRotation`], and [`CompoundError::NoVolume`]
-    /// when every part is flat, which leaves nothing for a density to weigh.
+    /// [`CompoundError::NonUnitRotation`], [`CompoundError::NoVolume`] when
+    /// every part is flat, which leaves nothing for a density to weigh, and
+    /// [`CompoundError::UnweighableMass`] when the parts weighed at unit
+    /// density give an inertia tensor [`RigidBody::with_inertia`] would
+    /// refuse: one overflowed or underflowed out of an `f64`'s range.
     pub fn new(parts: impl Into<Arc<[CompoundPart]>>) -> Result<Self, CompoundError> {
         let parts: Arc<[CompoundPart]> = parts.into();
         if parts.is_empty() {
@@ -213,6 +216,11 @@ impl CompoundShape {
         if parts.iter().all(|part| part.volume() == 0.0) {
             return Err(CompoundError::NoVolume);
         }
+        // A flat part's volume is `inf * 0` once its other extents overflow,
+        // and `combine` refuses the `NaN` mass that would sum to.
+        if parts.iter().any(|part| !part.volume().is_finite()) {
+            return Err(CompoundError::UnweighableMass);
+        }
         let parts = parts
             .iter()
             .map(|part| CompoundPart {
@@ -220,7 +228,13 @@ impl CompoundShape {
                 ..*part
             })
             .collect();
-        Ok(Self { parts })
+        let shape = Self { parts };
+        // Checked on the tensor alone: parts whose centre of mass is out of
+        // range reach it through the parallel-axis shift.
+        if !is_positive_definite(shape.mass_properties(1.0).inertia) {
+            return Err(CompoundError::UnweighableMass);
+        }
+        Ok(shape)
     }
 
     /// A shape of axis-aligned boxes in the body's frame — what
@@ -282,7 +296,8 @@ impl CompoundShape {
     ///
     /// # Panics
     ///
-    /// Panics if `density` is not positive and finite.
+    /// Panics if `density` is not positive and finite, or so large that the
+    /// inertia it weighs leaves an `f64`'s range.
     #[must_use]
     pub fn dynamic_body(&self, density: f64) -> CompoundBody {
         let props = self.mass_properties(density);
@@ -533,5 +548,58 @@ mod tests {
             Err(CompoundError::InvertedPart { index: 0 }),
             "AabbCompound's own refusals come first"
         );
+    }
+
+    /// **Bounds no body can weigh are refused, not left for the solver.** EW
+    /// loaded a fuzzed save whose item reached to `1e300` m: the parts were
+    /// finite, the inertia was not, and `with_inertia` panicked on the `NaN`.
+    #[test]
+    fn parts_whose_mass_leaves_the_f64_range_are_refused() {
+        let unit = CompoundPart::new(DVec3::ZERO, DQuat::IDENTITY, DVec3::splat(0.5));
+        assert_eq!(
+            CompoundShape::from_aabbs(&[Aabb::new(DVec3::ZERO, DVec3::new(1e300, 1.0, 1.0))]),
+            Err(CompoundError::UnweighableMass),
+            "a volume that overflows"
+        );
+        assert_eq!(
+            CompoundShape::new(vec![
+                unit,
+                CompoundPart::new(DVec3::ZERO, DQuat::IDENTITY, DVec3::new(1e70, 1e70, 1e70)),
+            ]),
+            Err(CompoundError::UnweighableMass),
+            "a finite volume whose second moment overflows"
+        );
+        assert_eq!(
+            CompoundShape::new(vec![
+                unit,
+                CompoundPart::new(DVec3::ZERO, DQuat::IDENTITY, DVec3::new(1e300, 1e300, 0.0)),
+            ]),
+            Err(CompoundError::UnweighableMass),
+            "a flat part whose volume is inf * 0"
+        );
+        assert_eq!(
+            CompoundShape::new(vec![CompoundPart::new(
+                DVec3::ZERO,
+                DQuat::IDENTITY,
+                DVec3::splat(1e-30),
+            )]),
+            Err(CompoundError::UnweighableMass),
+            "a tensor whose determinant underflows to zero"
+        );
+        assert_eq!(
+            CompoundShape::new(vec![
+                CompoundPart::new(DVec3::splat(-1e200), DQuat::IDENTITY, DVec3::splat(0.5)),
+                CompoundPart::new(DVec3::splat(1e200), DQuat::IDENTITY, DVec3::splat(0.5)),
+            ]),
+            Err(CompoundError::UnweighableMass),
+            "unit parts whose parallel-axis shift overflows"
+        );
+        let big = CompoundShape::new(vec![CompoundPart::new(
+            DVec3::ZERO,
+            DQuat::IDENTITY,
+            DVec3::splat(1e4),
+        )])
+        .expect("a twenty-kilometre box is weighable");
+        let _ = big.dynamic_body(CompoundShape::DEFAULT_DENSITY);
     }
 }
