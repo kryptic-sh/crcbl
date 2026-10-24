@@ -321,8 +321,8 @@ pub struct Summary {
 /// Anything that can stop the sandbox before it starts.
 ///
 /// An alias rather than an enum: [`crcbl::engine::LoopError`] owns these
-/// variants for every sample. The sandbox has no simulation of its own to
-/// fail; its `Game` variant is [`StartError`].
+/// variants for every sample. Nothing the sandbox runs can fail once it has
+/// started; its `Game` variant is [`StartError`].
 pub type SandboxError = crcbl::engine::LoopError<StartError>;
 
 /// The clock the scene's systems' ticks are timed on — the built-in scene's
@@ -336,11 +336,12 @@ fn scene_clock() -> Option<crcbl::ecs::ScheduleClock> {
     Some(Box::new(crcbl::core::time::MonotonicTime::new()))
 }
 
-/// What can stop the sandbox's own half from starting. In a web build,
-/// which starts no LAN session and opens no directory, nothing can, and the
-/// type is uninhabited.
+/// What can stop the sandbox's own half from starting. A web build starts no
+/// LAN session and opens no directory, so only the stress pool can.
 #[derive(Debug)]
 pub enum StartError {
+    /// The `--stress` fixture's query pool could not start a worker thread.
+    Pool(crcbl::jobs::SpawnError),
     /// A LAN session could not start. Native only.
     #[cfg(not(target_arch = "wasm32"))]
     Lan(LanError),
@@ -350,21 +351,15 @@ pub enum StartError {
     Scene(crcbl::scene::scn::ScnError),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Display for StartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Pool(error) => write!(f, "--stress: {error}"),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Lan(error) => write!(f, "{error}"),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Scene(error) => write!(f, "--scene: {error}"),
         }
-    }
-}
-
-/// Nothing to say: a web build's `StartError` has no value.
-#[cfg(target_arch = "wasm32")]
-impl std::fmt::Display for StartError {
-    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {}
     }
 }
 
@@ -627,9 +622,10 @@ pub fn with_shell<S: Shell + ?Sized>(
         }
     }
     // Timed only on the real clock: a deterministic run reads no clock.
-    sandbox.simulation = options
-        .stress
-        .and_then(|stress| Simulation::for_stress(stress, options.real_clock()));
+    if let Some(stress) = options.stress {
+        sandbox.simulation = Simulation::for_stress(stress, options.real_clock())
+            .map_err(|error| SandboxError::Game(StartError::Pool(error)))?;
+    }
     let steam_pads = sandbox.steam.pad_source();
 
     let mut engine = Loop::new(
@@ -664,8 +660,8 @@ pub fn with_shell<S: Shell + ?Sized>(
 /// cube on the fixed timestep so a `--headless --frames N` run is a
 /// bit-reproducible picture on every machine.
 impl HostedGame for Sandbox {
-    /// The sandbox has no simulation, so all it can fail at is starting: a
-    /// LAN session, or the scene `--scene` named.
+    /// All the sandbox can fail at is starting: a LAN session, the scene
+    /// `--scene` named, or the `--stress` fixture's query pool.
     type Error = StartError;
     type Gpu = Gpu;
     /// Paused, in the lobby, or neither.

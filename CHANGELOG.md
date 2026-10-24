@@ -44,6 +44,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The sandbox's `combined` fixture runs its crowd's overlap queries on the
+  engine job pool**, through one shared `OverlapQueries` view with per-thread
+  scratch, and its `--wall-clock` simulation line reports the pool's workers and
+  how many query chunks the ticking thread and the workers ran. On an RX 7900
+  XTX machine with 32 hardware threads (alternating headless Vulkan runs,
+  2026-10-24), the query phase's p50 fell from 2.17–2.24 ms to 0.27–0.29 ms and
+  the complete tick's from 2.56–2.67 ms to 0.92–0.95 ms, at 320x180 and
+  1920x1080 alike. The move+refit phase, still serial, rose from 0.38–0.41 ms to
+  0.65–0.67 ms in the same runs, which is not explained yet.
 - **`crcbl_phys::PhysicsWorld` rebuilds a broadphase tree that refits have
   loosened.** Every few full-tree passes of refits it compares the tree's
   surface-area cost, normalised by its root's, with the value at the last build,

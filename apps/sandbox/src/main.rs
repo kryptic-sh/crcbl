@@ -76,7 +76,8 @@ fn main() -> ExitCode {
                     println!(
                         "sandbox: simulation p50 / p95 over the last {} ticks: complete \
                          {:.3} / {:.3} ms, move+refit {:.3} / {:.3} ms, queries {:.3} / \
-                         {:.3} ms",
+                         {:.3} ms ({} workers; {} / {} query chunks on the ticking \
+                         thread / workers)",
                         timings.samples,
                         millis(timings.complete_ns.0),
                         millis(timings.complete_ns.1),
@@ -84,6 +85,9 @@ fn main() -> ExitCode {
                         millis(timings.refit_ns.1),
                         millis(timings.query_ns.0),
                         millis(timings.query_ns.1),
+                        timings.workers,
+                        timings.query_chunks.0,
+                        timings.query_chunks.1,
                     );
                 }
                 ExitCode::SUCCESS

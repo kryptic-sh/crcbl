@@ -4,10 +4,18 @@
 //! the other half, a crowd of spheres that move, refit the broadphase and run
 //! one overlap query each on every fixed tick. It competes with the frame for
 //! the CPU, which is what the fixture exists to measure.
+//!
+//! The queries are independent of one another, so they run on a
+//! [`crcbl::jobs::Pool`] through the one shared
+//! [`OverlapQueries`](crcbl::phys::OverlapQueries) view, each worker thread
+//! querying into scratch of its own — the shape `apps/horde`'s steering pass
+//! has.
 
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use crcbl::core::stats::Window;
+use crcbl::jobs::{Pool, SpawnError, default_spawner};
 use crcbl::math::DVec3;
 use crcbl::phys::{ColliderId, PhysicsWorld, QueryScratch, Sphere};
 
@@ -24,12 +32,31 @@ const QUERY_RADIUS: f64 = 1.0;
 const SPEED: f64 = 1.5;
 /// Ticks the rolling timing windows hold.
 const TIMING_SAMPLES: usize = 120;
+/// Bodies one pool chunk queries for.
+///
+/// A constant rather than a function of the worker count, so every pool runs
+/// the same chunks and the counts come out the same at any worker count.
+const QUERY_CHUNK: usize = 64;
+
+thread_local! {
+    /// The buffers one thread's query chunks work in, reused for the life of
+    /// the thread: a `par_for` closure cannot own mutable state, and a set per
+    /// chunk would allocate on every tick. Every query clears both before it
+    /// writes them, so what a chunk finds here never changes an answer.
+    static QUERY_SCRATCH: RefCell<(QueryScratch, Vec<ColliderId>)> =
+        RefCell::new((QueryScratch::new(), Vec::new()));
+}
 
 /// Recent simulation-tick latency, as nearest-rank p50 and p95 pairs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SimulationTimings {
     /// Ticks currently in the rolling window.
     pub samples: usize,
+    /// Worker threads the query pool has, not counting the ticking thread.
+    pub workers: usize,
+    /// Query chunks the ticking thread ran and chunks a worker ran, over the
+    /// whole run.
+    pub query_chunks: (u64, u64),
     /// The complete tick, in nanoseconds.
     pub complete_ns: (u64, u64),
     /// Moving the crowd and refitting the broadphase, in nanoseconds.
@@ -53,8 +80,9 @@ pub struct Simulation {
     ids: Vec<ColliderId>,
     positions: Vec<DVec3>,
     velocities: Vec<DVec3>,
-    scratch: QueryScratch,
-    neighbours: Vec<ColliderId>,
+    pool: Pool,
+    /// Overlaps each body's query found in the last step, itself included.
+    neighbour_counts: Vec<usize>,
     /// Overlaps the last step's queries found, every body counting itself.
     last_results: usize,
     /// Present only when the run reads the real clock: a deterministic run
@@ -65,17 +93,33 @@ pub struct Simulation {
 impl Simulation {
     /// The crowd `stress` runs, or `None` for a render-only fixture. `measure`
     /// times every step, for [`timings`](Self::timings).
-    #[must_use]
-    pub fn for_stress(stress: Stress, measure: bool) -> Option<Self> {
-        stress
-            .simulates()
-            .then(|| Self::with_count(BODY_COUNT, measure))
+    ///
+    /// The queries run on a pool sized to the machine.
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnError`] if the platform refused a worker thread.
+    pub fn for_stress(stress: Stress, measure: bool) -> Result<Option<Self>, SpawnError> {
+        if !stress.simulates() {
+            return Ok(None);
+        }
+        let pool = Pool::new(default_spawner().as_ref())?;
+        Ok(Some(Self::with_pool(BODY_COUNT, measure, pool)))
+    }
+
+    /// [`with_pool`](Self::with_pool) on a pool with no workers, which runs
+    /// every chunk on the calling thread in order.
+    #[cfg(test)]
+    fn with_count(count: usize, measure: bool) -> Self {
+        let pool = Pool::new(&crcbl::jobs::Inline).expect("an inline pool starts no thread");
+        Self::with_pool(count, measure, pool)
     }
 
     /// A crowd of `count` bodies on a square grid, each with its own fixed
-    /// velocity, and the broadphase already built over them.
+    /// velocity, and the broadphase already built over them; `pool` runs the
+    /// queries.
     #[allow(clippy::cast_precision_loss)]
-    fn with_count(count: usize, measure: bool) -> Self {
+    fn with_pool(count: usize, measure: bool, pool: Pool) -> Self {
         assert!(count > 0, "a stress crowd must contain a body");
         let columns = (count as f64).sqrt().ceil() as usize;
         let mut world = PhysicsWorld::new();
@@ -103,8 +147,8 @@ impl Simulation {
             ids,
             positions,
             velocities,
-            scratch: QueryScratch::new(),
-            neighbours: Vec::new(),
+            pool,
+            neighbour_counts: vec![0; count],
             last_results: 0,
             profiler: measure.then(Profiler::default),
         }
@@ -141,17 +185,29 @@ impl Simulation {
         }
         let refitted = started.map(|_| Instant::now());
 
+        // The exclusive borrow is spent once, on building the tree, and buys a
+        // view every chunk can query at the same time.
         let queries = self.world.overlap_queries();
-        let mut results = 0usize;
-        for &position in &self.positions {
-            queries.overlap_sphere_ids_into(
-                position,
-                QUERY_RADIUS,
-                &mut self.scratch,
-                &mut self.neighbours,
-            );
-            results = results.saturating_add(self.neighbours.len());
-        }
+        let positions = &self.positions;
+        self.pool
+            .par_for(&mut self.neighbour_counts, QUERY_CHUNK, |start, counts| {
+                QUERY_SCRATCH.with_borrow_mut(|(scratch, neighbours)| {
+                    for (offset, count) in counts.iter_mut().enumerate() {
+                        queries.overlap_sphere_ids_into(
+                            positions[start + offset],
+                            QUERY_RADIUS,
+                            scratch,
+                            neighbours,
+                        );
+                        *count = neighbours.len();
+                    }
+                });
+            });
+        let results = self
+            .neighbour_counts
+            .iter()
+            .copied()
+            .fold(0usize, usize::saturating_add);
         // Kept, and kept opaque, so the queries are work the optimiser must do.
         self.last_results = std::hint::black_box(results);
 
@@ -171,8 +227,11 @@ impl Simulation {
     #[must_use]
     pub fn timings(&self) -> Option<SimulationTimings> {
         let profiler = self.profiler.as_ref()?;
+        let pool = self.pool.stats();
         Some(SimulationTimings {
             samples: profiler.complete.len(),
+            workers: self.pool.workers(),
+            query_chunks: (pool.chunks_run_by_driver, pool.chunks_run_by_workers),
             complete_ns: profiler.complete.percentiles()?,
             refit_ns: profiler.refit.percentiles()?,
             query_ns: profiler.query.percentiles()?,
@@ -191,6 +250,7 @@ mod tests {
     use super::*;
 
     use crcbl::core::stats::MIN_PERCENTILE_SAMPLES;
+    use crcbl::phys::sphere_overlaps_sphere;
 
     const DT: f64 = 1.0 / 60.0;
 
@@ -237,6 +297,15 @@ mod tests {
 
         let timings = simulation.timings().expect("enough ticks for a p95");
         assert_eq!(timings.samples, MIN_PERCENTILE_SAMPLES);
+        // One chunk a step, on an inline pool, so every one on this thread.
+        assert_eq!(timings.workers, 0);
+        assert_eq!(
+            timings.query_chunks,
+            (
+                u64::try_from(MIN_PERCENTILE_SAMPLES).expect("the step count fits u64"),
+                0
+            ),
+        );
         for (p50_ns, p95_ns) in [timings.complete_ns, timings.refit_ns, timings.query_ns] {
             assert!(p50_ns > 0);
             assert!(p95_ns >= p50_ns);
@@ -270,5 +339,53 @@ mod tests {
             pinned * 4 < simulation.positions.len(),
             "{pinned} bodies sit on an edge: the crowd is clamped, not bouncing",
         );
+    }
+
+    /// **A threaded pool finds exactly what a scan of every body finds**, and
+    /// it really is threaded: steps repeat until a worker has run a chunk,
+    /// checking every one, so a pool that ran everything on the ticking thread
+    /// goes red rather than passing as a serial run.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn threaded_queries_count_exactly_what_a_scan_finds() {
+        let pool = Pool::with_workers(default_spawner().as_ref(), 3).expect("native query workers");
+        let mut simulation = Simulation::with_pool(BODY_COUNT, false, pool);
+        assert!(
+            BODY_COUNT.div_ceil(QUERY_CHUNK) > 1,
+            "one chunk runs on the calling thread by construction",
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            simulation.step(DT);
+
+            let expected: Vec<_> = simulation
+                .positions
+                .iter()
+                .map(|centre| {
+                    let query = Sphere::new(*centre, QUERY_RADIUS);
+                    simulation
+                        .positions
+                        .iter()
+                        .filter(|other| {
+                            sphere_overlaps_sphere(&query, &Sphere::new(**other, BODY_RADIUS))
+                        })
+                        .count()
+                })
+                .collect();
+            assert!(
+                expected.iter().any(|&count| count > 1),
+                "every body is alone, so a query that found only itself would match",
+            );
+            assert_eq!(simulation.neighbour_counts, expected);
+            assert_eq!(simulation.last_results, expected.iter().sum::<usize>());
+
+            if simulation.pool.stats().chunks_run_by_workers > 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no worker ran a query chunk, so this compared a serial run",
+            );
+        }
     }
 }

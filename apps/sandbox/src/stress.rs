@@ -307,7 +307,9 @@ mod tests {
                 stress.name()
             );
             assert_eq!(
-                Simulation::for_stress(stress, false).is_some(),
+                Simulation::for_stress(stress, false)
+                    .expect("the query pool starts")
+                    .is_some(),
                 stress.simulates(),
                 "{}",
                 stress.name()

@@ -4210,8 +4210,7 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
 - **Not upstream, worth porting one commit at a time** (cherry-pick, re-run
   `crcbl-shaders`' generator rather than resolving generated files, re-measure
   on the current tree since the numbers in the branch's backlog predate a month
-  of renderer work): parallel sandbox crowd queries (`3d61e0e1`) and the
-  many-bucket fixture (`cc3371d6`).
+  of renderer work): the many-bucket fixture (`cc3371d6`).
 - **Ported: the `combined` fixture and its simulation tick timings**
   (2026-10-24), as `sandbox --stress combined`: the `lights-fit` frame plus
   `apps/sandbox/src/stress/simulation.rs`'s crowd, stepped from `Sandbox::tick`.
@@ -4219,6 +4218,39 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   into move+refit and queries. The phase split is not guarded by a test beyond
   each phase being non-zero and no larger than the whole: a refit timed as part
   of the queries would still pass.
+- **Ported: parallel crowd queries** (2026-10-24). The `combined` fixture's
+  overlap queries run through `crcbl::jobs::Pool::par_for` over one
+  `PhysicsWorld::overlap_queries` view, scratch in a thread-local, in 64-body
+  chunks, the same shape as `apps/horde`'s `steer_enemies`; main already had the
+  shared view, so `crcbl-phys` gained no API. Measured on the RX 7900 XTX box
+  (Ryzen 9 9950X3D, 32 threads, so 31 workers) with
+  `CRCBL_LOG=info sandbox --headless --wall-clock --backend vk --stress combined --pacing off --fps 0 --frames 1800 --size WxH --debug-overlay`,
+  serial and parallel binaries alternating, two runs each:
+
+  | Size      | Build    | Complete p50/p95 ms       | Move+refit p50 ms | Queries p50 ms | Frame CPU mean / worst ms |
+  | --------- | -------- | ------------------------- | ----------------- | -------------- | ------------------------- |
+  | 320x180   | serial   | 2.562–2.572 / 2.864–2.897 | 0.377–0.398       | 2.173–2.185    | 0.571–0.574 / 3.24–3.25   |
+  | 320x180   | parallel | 0.924–0.936 / 1.052–1.068 | 0.653–0.656       | 0.268–0.286    | 0.489–0.499 / 1.44–1.52   |
+  | 1920x1080 | serial   | 2.671–2.673 / 3.100–3.103 | 0.398–0.405       | 2.230–2.237    | 0.894–0.927 / 3.47–3.70   |
+  | 1920x1080 | parallel | 0.939–0.951 / 1.167       | 0.663–0.667       | 0.265–0.285    | 0.823–0.833 / 1.86–1.94   |
+
+  Workers ran 4,220–7,028 of each run's query chunks against 161–230 on the
+  ticking thread. The GPU pass sum stayed at 0.309–0.311 ms at 320x180 and rose
+  0.02 ms at 1080p (0.715–0.718 to 0.736–0.738 ms), so the frame gain is the
+  tick's CPU time. 320x180 runs held only 56–62 ticks, short of the 120-tick
+  window.
+
+- **Unexplained: the serial move+refit phase slows by about 0.26 ms once the
+  queries are parallel** (table above). Not the worker count: 7- and 15-worker
+  builds showed the same 0.64–0.68 ms. A guess, unverified: the refit writes BVH
+  nodes and collider slots that the query workers just read into other cores'
+  caches (this Ryzen 9 9950X3D has two CCDs), so each write pays an
+  invalidation. Worth profiling before parallelising the refit itself. Fewer
+  workers cost query time: 7 workers measured 0.457–0.502 ms query p50, 15
+  measured 0.331–0.359 ms.
+- **Not guarded: `StartError::Pool`.** A pool that fails to start stops the
+  sandbox with `--stress: <SpawnError>`; no test makes the spawner refuse, so
+  that path is unexercised.
 - **Ported: the render stress fixtures and `--wall-clock`** (2026-10-24), as
   `sandbox --stress <NAME>` in `apps/sandbox/src/stress.rs`, because `--scene`
   already opens a `.scn/` directory on main. The fixtures replace the cube; the
