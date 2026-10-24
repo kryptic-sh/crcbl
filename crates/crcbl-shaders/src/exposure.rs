@@ -94,13 +94,15 @@ pub const MAX_EXPOSURE: f32 = 32.0;
 /// tonemap is to apply.
 pub const MEASURED_SIZE: usize = 4;
 
-/// Invocations per workgroup in `clearMain` and `histogramMain`, matching the
-/// `numthreads` both declare.
+/// Invocations per workgroup in `clearMain`, matching its `numthreads`.
 ///
 /// `reduceMain` is the exception and runs on one invocation, for the reason
 /// `exposure.slang` gives: a tree would sum the bins in an order a device
 /// schedules, and float addition is not associative.
 pub const WORKGROUP_SIZE: u32 = 64;
+
+/// Width and height of `histogramMain`'s square workgroup.
+pub const HISTOGRAM_TILE_SIDE: u32 = 16;
 
 /// Rec. 709 relative luminance of a **linear** colour, the weights
 /// `exposure.slang` and `bloom_down.slang` both declare.
@@ -294,6 +296,25 @@ mod tests {
     /// Hash-pinned by the manifest, so it is the same file the committed
     /// artifacts were built from — `crate::bloom`'s guards say why that matters.
     const SOURCE: &str = include_str!("../shaders/exposure.slang");
+
+    /// The profiled histogram merges each tile locally before touching the
+    /// frame-wide atomic bins. This is a source-shape guard because the exact
+    /// pixel population is already checked by the GPU readback fixture; its
+    /// job is to fail if that result is obtained through one global atomic per
+    /// texel again.
+    #[test]
+    fn the_histogram_merges_each_tile_before_the_global_bins() {
+        let shared = SOURCE
+            .find("groupshared Atomic<uint> tile_histogram[BIN_COUNT]")
+            .expect("the histogram has a workgroup-local tile");
+        let local_add = SOURCE
+            .find("tile_histogram[bin_of(luma(color))].add(1)")
+            .expect("each texel increments the tile-local histogram");
+        let global_add = SOURCE
+            .find("histogram[bin].add(count)")
+            .expect("the tile's populated bins merge into the frame histogram");
+        assert!(shared < local_add && local_add < global_add);
+    }
 
     /// The anchors of the binning, spelled out rather than derived: a value at
     /// the bottom of the range, middle grey, one, and the two ends.
@@ -516,6 +537,16 @@ mod tests {
             format!("static const float HIGH_FRACTION = {HIGH_FRACTION:?};"),
             format!("static const float MIN_EXPOSURE = {MIN_EXPOSURE:?};"),
             format!("static const float MAX_EXPOSURE = {MAX_EXPOSURE:?};"),
+            // The host sizes the histogram dispatch in tiles of this side, so a
+            // shader tile of another shape would leave texels unmetered.
+            format!(
+                "static const uint HISTOGRAM_TILE_SIDE = {};",
+                super::HISTOGRAM_TILE_SIDE
+            ),
+            format!(
+                "[numthreads({side}, {side}, 1)]\nvoid histogramMain(",
+                side = super::HISTOGRAM_TILE_SIDE
+            ),
         ] {
             assert!(
                 SOURCE.contains(&declaration),

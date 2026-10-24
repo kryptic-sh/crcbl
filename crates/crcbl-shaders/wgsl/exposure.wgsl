@@ -128,6 +128,8 @@ fn reduceMain()
     return;
 }
 
+var<workgroup> tile_histogram_0 : array<atomic<u32>, i32(96)>;
+
 fn luma_0( color_0 : vec3<f32>) -> f32
 {
     return dot(color_0, vec3<f32>(0.2125999927520752f, 0.71520000696182251f, 0.07220000028610229f));
@@ -140,25 +142,56 @@ fn bin_of_0( luminance_0 : f32) -> u32
 }
 
 @compute
-@workgroup_size(64, 1, 1)
-fn histogramMain(@builtin(global_invocation_id) thread_1 : vec3<u32>)
+@workgroup_size(16, 16, 1)
+fn histogramMain(@builtin(global_invocation_id) thread_1 : vec3<u32>, @builtin(local_invocation_index) lane_0 : u32)
 {
+    var bin_2 : u32 = lane_0;
+    for(;;)
+    {
+        if(bin_2 < u32(96))
+        {
+        }
+        else
+        {
+            break;
+        }
+        atomicStore(&(tile_histogram_0[bin_2]), u32(0));
+        bin_2 = bin_2 + u32(256);
+    }
+    workgroupBarrier();
     var texel_0 : vec2<u32> = thread_1.xy;
     var _S9 : bool;
-    if((texel_0.x) >= (params_0.viewport_x_0))
+    if((texel_0.x) < (params_0.viewport_x_0))
     {
-        _S9 = true;
+        _S9 = (texel_0.y) < (params_0.viewport_y_0);
     }
     else
     {
-        _S9 = (texel_0.y) >= (params_0.viewport_y_0);
+        _S9 = false;
     }
     if(_S9)
     {
-        return;
+        var _S10 : vec3<i32> = vec3<i32>(vec2<i32>(texel_0), i32(0));
+        var _S11 : u32 = atomicAdd(&(tile_histogram_0[bin_of_0(luma_0((textureLoad((scene_0), ((_S10)).xy, ((_S10)).z)).xyz))]), u32(1));
     }
-    var _S10 : vec3<i32> = vec3<i32>(vec2<i32>(texel_0), i32(0));
-    var _S11 : u32 = atomicAdd(&(histogram_0[bin_of_0(luma_0((textureLoad((scene_0), ((_S10)).xy, ((_S10)).z)).xyz))]), u32(1));
+    workgroupBarrier();
+    bin_2 = lane_0;
+    for(;;)
+    {
+        if(bin_2 < u32(96))
+        {
+        }
+        else
+        {
+            break;
+        }
+        var count_0 : u32 = atomicLoad(&(tile_histogram_0[bin_2]));
+        if(count_0 > u32(0))
+        {
+            var _S12 : u32 = atomicAdd(&(histogram_0[bin_2]), count_0);
+        }
+        bin_2 = bin_2 + u32(256);
+    }
     return;
 }
 

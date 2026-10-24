@@ -136,6 +136,11 @@ static const int MIN_EXPONENT = -12;
 /// Bins in the buffer, matching `crcbl_shaders::exposure::BIN_COUNT`.
 static const uint BIN_COUNT = 96;
 
+/// Width and height of one histogram tile. A square tile keeps neighbouring
+/// pixels together in one local histogram while leaving enough lanes to clear
+/// and merge every bin in one pass through the group.
+static const uint HISTOGRAM_TILE_SIDE = 16;
+
 /// The factor from a bin's lower edge to the luminance `reduceMain` weights it
 /// at, matching `crcbl_shaders::exposure::BIN_CENTRE`: the geometric centre of a
 /// quarter-octave bin, written out because computing it would be an `exp2` in
@@ -311,29 +316,44 @@ void reduceMain()
     }
 }
 
-/// One invocation per texel of the scene target, each adding one to its bin.
+/// One invocation per texel of the scene target, each adding one to its tile's
+/// bin. The tile then merges each populated bin into the frame histogram once.
 ///
-/// One dispatch row per image row keeps the group count on each axis within
-/// the portable budget, instead of putting the entire image on the x axis.
-/// The host sizes each row from `WORKGROUP_SIZE`; the edge guard excludes the
-/// unused lanes of its final group.
+/// A square dispatch keeps the group count on each axis within the portable
+/// budget. Edge lanes still reach both barriers and only skip their image load;
+/// returning before either barrier would leave the rest of the workgroup
+/// waiting forever.
 ///
-/// **Straight to the buffer, with no workgroup-local tile in front of it.** The
-/// tile is the standard optimisation and it is deliberately not here yet: a
-/// module-scope `groupshared` changes what Slang's Metal backend emits for
-/// every entry point in the file — `zero_dispatch_probe.slang` carries what
-/// that cost the mesh-shader sources — so it is a change to make with a profile
-/// in hand rather than on the way past. `crcbl_render::timing` is what would
-/// show it.
+/// `Atomic<uint>` rather than `InterlockedAdd` for the same cross-target reason
+/// as the frame histogram. The module-scope declaration also changes Slang's
+/// Metal signatures for the other entry points in this file, so every generated
+/// target is inspected and compiled as part of this profiled change.
+groupshared Atomic<uint> tile_histogram[BIN_COUNT];
+
 [shader("compute")]
-[numthreads(64, 1, 1)]
-void histogramMain(uint3 thread: SV_DispatchThreadID)
+[numthreads(16, 16, 1)]
+void histogramMain(uint3 thread: SV_DispatchThreadID, uint lane: SV_GroupIndex)
 {
-    uint2 texel = thread.xy;
-    if (texel.x >= params.viewport_x || texel.y >= params.viewport_y)
+    for (uint bin = lane; bin < BIN_COUNT; bin += HISTOGRAM_TILE_SIDE * HISTOGRAM_TILE_SIDE)
     {
-        return;
+        tile_histogram[bin].store(0);
     }
-    float3 color = scene.Load(int3(int2(texel), 0)).rgb;
-    histogram[bin_of(luma(color))].add(1);
+    GroupMemoryBarrierWithGroupSync();
+
+    uint2 texel = thread.xy;
+    if (texel.x < params.viewport_x && texel.y < params.viewport_y)
+    {
+        float3 color = scene.Load(int3(int2(texel), 0)).rgb;
+        tile_histogram[bin_of(luma(color))].add(1);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint bin = lane; bin < BIN_COUNT; bin += HISTOGRAM_TILE_SIDE * HISTOGRAM_TILE_SIDE)
+    {
+        uint count = tile_histogram[bin].load();
+        if (count > 0)
+        {
+            histogram[bin].add(count);
+        }
+    }
 }

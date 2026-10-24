@@ -44,14 +44,16 @@ use crcbl_hal::{
 };
 use crcbl_shaders::EXPOSURE;
 use crcbl_shaders::exposure::{
-    BIN_COUNT, BIN_STRIDE, ExposureParams, MEASURED_SIZE, PARAMS_SIZE, WORKGROUP_SIZE,
+    BIN_COUNT, BIN_STRIDE, ExposureParams, HISTOGRAM_TILE_SIDE, MEASURED_SIZE, PARAMS_SIZE,
+    WORKGROUP_SIZE,
 };
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::draw_gen::{
-    UINT_STRIDE, bound, compute_pipeline_entry, fill_at_start_up, storage, uniform,
+    UINT_STRIDE, bound, compute_pipeline_entry, compute_pipeline_entry_with_workgroup,
+    fill_at_start_up, storage, uniform,
 };
 use crate::graph::{ImageId, ImportedBuffer, RenderGraph};
 use crate::ssao::cached_group;
@@ -222,13 +224,13 @@ impl Exposure {
             pipeline_layout,
             WORKGROUP_SIZE,
         )?;
-        let histogram_pipeline = compute_pipeline_entry(
+        let histogram_pipeline = compute_pipeline_entry_with_workgroup(
             device,
             "exposure histogram",
             &EXPOSURE,
             "histogramMain",
             pipeline_layout,
-            WORKGROUP_SIZE,
+            [HISTOGRAM_TILE_SIDE, HISTOGRAM_TILE_SIDE, 1],
         )?;
         let reduce = compute_pipeline_entry(
             device,
@@ -484,11 +486,12 @@ impl Exposure {
                 encoder.dispatch(BIN_COUNT.div_ceil(WORKGROUP_SIZE), 1, 1);
             });
 
-        // One invocation per texel of the scene target, and never zero: the
-        // extent is floored at one texel, and Metal rejects an empty dispatch
-        // outright rather than treating it as a no-op.
-        let row_groups = extent.0.max(1).div_ceil(WORKGROUP_SIZE);
-        let rows = extent.1.max(1);
+        // One invocation per texel of the scene target, grouped into square
+        // tiles that merge their local bins before touching the frame-wide
+        // histogram. Never zero: Metal rejects an empty dispatch outright
+        // rather than treating it as a no-op.
+        let columns = extent.0.max(1).div_ceil(HISTOGRAM_TILE_SIDE);
+        let rows = extent.1.max(1).div_ceil(HISTOGRAM_TILE_SIDE);
         let bind = Rc::clone(&group);
         graph
             .add_compute_pass("exposure-histogram")
@@ -501,7 +504,7 @@ impl Exposure {
                 let encoder = ctx.encoder();
                 encoder.bind_compute_pipeline(histogram);
                 encoder.bind_group(0, group, &[], pipeline_layout);
-                encoder.dispatch(row_groups, rows, 1);
+                encoder.dispatch(columns, rows, 1);
             });
 
         let bind = group;
@@ -618,7 +621,11 @@ mod tests {
             }
             assert_eq!(
                 dispatches[1],
-                [normalized.0.div_ceil(WORKGROUP_SIZE), normalized.1, 1],
+                [
+                    normalized.0.div_ceil(HISTOGRAM_TILE_SIDE),
+                    normalized.1.div_ceil(HISTOGRAM_TILE_SIDE),
+                    1,
+                ],
                 "{extent:?}"
             );
             device.destroy_command_buffer(command_buffer);

@@ -31,6 +31,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Auto-exposure's histogram counts each tile locally first.** Every texel
+  added one to the frame histogram with a global atomic, and a frame whose
+  texels share a few bins serialised on them. Each 16×16 tile now counts in
+  workgroup memory and merges its populated bins once, with the same counts. On
+  an RX 7900 XTX the histogram pass fell from 0.59 to 0.015 ms at 1080p and from
+  2.4 to 0.06–0.09 ms at 4K in the sandbox's exposure fixture.
 - **A shadow edge no longer samples its probe taps twice.** The shadow filter
   takes a few probe taps to find a fully lit or fully shadowed neighbourhood and
   then, on a mixed edge, sampled the whole disc again, probe taps included. It

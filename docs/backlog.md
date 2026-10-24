@@ -4191,10 +4191,10 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   `crcbl-shaders`' generator rather than resolving generated files, re-measure
   on the current tree since the numbers in the branch's backlog predate a month
   of renderer work): half-resolution SSR march (re-blesses `golden/ssr.png`),
-  local exposure-tile merge, degraded-broadphase BVH rebuild (`crcbl-phys`),
-  parallel sandbox crowd queries, and the `combined` stress scene with its
-  simulation tick-timing report (`020447e2`, `1286e3ca`, `e957219b`, `3d61e0e1`)
-  and the many-bucket fixture (`cc3371d6`).
+  degraded-broadphase BVH rebuild (`crcbl-phys`), parallel sandbox crowd
+  queries, and the `combined` stress scene with its simulation tick-timing
+  report (`020447e2`, `1286e3ca`, `e957219b`, `3d61e0e1`) and the many-bucket
+  fixture (`cc3371d6`).
 - **Ported: the render stress fixtures and `--wall-clock`** (2026-10-24), as
   `sandbox --stress <NAME>` in `apps/sandbox/src/stress.rs`, because `--scene`
   already opens a `.scn/` directory on main. The fixtures replace the cube; the
@@ -4202,14 +4202,13 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   `CRCBL_LOG=info sandbox --headless --wall-clock --backend vk --stress NAME --pacing off --fps 0 --frames 900 --size 1920x1080 --debug-overlay`:
   the engine logs per-pass GPU p50/p95 over the last 120 frames and the
   real-clock CPU frame line at exit, at `info`, which the sandbox's default
-  `warn` filter hides. The sandbox's default stack has no exposure pass, so
-  these runs print no exposure rows: a slice porting the exposure-tile merge
-  needs a scene that turns exposure on, or the sandbox has to. First baselines
-  on the RX 7900 XTX (Vulkan and D3D12, 2026-10-24) showed what the next slices
-  start from: `lights` costs `light-cluster` about 0.07 ms (vk) and 0.14 ms
-  (dx12) over `lights-fit` for the overflow scan; and D3D12's `cull` row is
-  0.12–0.19 ms against Vulkan's 0.01 ms on the same grid, alternating between
-  two levels from run to run. That last gap was not investigated.
+  `warn` filter hides. The sandbox's default camera layer has no auto-exposure,
+  so only `--stress exposure` prints the exposure rows. First baselines on the
+  RX 7900 XTX (Vulkan and D3D12, 2026-10-24) showed what the next slices start
+  from: `lights` costs `light-cluster` about 0.07 ms (vk) and 0.14 ms (dx12)
+  over `lights-fit` for the overflow scan; and D3D12's `cull` row is 0.12–0.19
+  ms against Vulkan's 0.01 ms on the same grid, alternating between two levels
+  from run to run. That last gap was not investigated.
 - **Skipping a fill light's specular costs ordinary lights a little.** Ported
   2026-10-24: `mesh.slang`'s light loop tests `FLAG_FILL` before either specular
   lobe instead of zeroing it afterwards. On the RX 7900 XTX (two mirrored pairs
@@ -4240,6 +4239,10 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   adapter and the code growth outweigh that. Plain `[unroll]` does not expand
   the loop at all in Slang (the campaign checked), so do not retry a loop hint
   either.
+- **The tile-local exposure histogram is unmeasured on Metal.** Ported
+  2026-10-24. Slang's MSL output allocates the module-scope `tile_histogram`
+  threadgroup array in `clearMain` and `reduceMain` too, not only in
+  `histogramMain`; whether that costs occupancy on Apple GPUs is unknown.
 - **Carried over from the branch about the fixtures:** at 1920x1080 `moving`'s
   whole-grid rotation changes pixel coverage, so its GPU rows are not upload
   evidence; only its CPU frame interval is. The MX550 showed the host upload
