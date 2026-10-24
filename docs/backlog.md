@@ -445,6 +445,12 @@ driver to an ICD manifest, L-sized).
   queues the last window's leave) is a real defect too, but was not lyr's. Not
   yet re-run in lyr's bar with the fix; lyr re-checks on the release that
   carries it.
+  - **Flaked once on CI's desktop.** Main's CI run 40049613156 (`09780bf0`,
+    2026-10-24) failed
+    `a_leave_dispatched_by_the_waits_own_drain_ends_the_wait`: the wait returned
+    `Wake::Message` after 136 µs instead of `Wake::Recorded`, and the rerun of
+    the job passed. A guess, unverified: another message reached the queue
+    before the posted leave was drained. Not investigated.
 - **AppKit input method: mutants not run.** The `appkit_session` additions went
   red on CI for removing the pre-edit gate in `record_preedit` and the
   end-of-pre-edit block in `insert_text`. Cancelled unrun: the
