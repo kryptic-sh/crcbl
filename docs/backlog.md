@@ -14,10 +14,18 @@ on a node's own props (HDMI3) reach the server, `pactl` sees them, the waker
 fires, and both are put back. **Run against the live server by lyr (2026-10-22,
 at `14babf1f`):** move-a-stream (a silent `pw-play` stream to HDMI3 and back),
 make-default on an input (Mic1 and back), set-profile on the Intel card both
-ways, each agreeing with `pactl`. **Not yet run:** make-default on an output (it
-would move the owner's music) and set-port to a different port. **Fixed from
-lyr's run:** a device with no active route now reports its first port as active,
-and ports are only the routes its card's active profile offers
+ways, each agreeing with `pactl`. **Make-default on an output, run 2026-10-24**
+with no stream playing: the default moved from the USB headset to the Intel
+card's speaker and back through `Action::MakeDefault`, on both backends
+(`CRCBL_MIXER_BACKEND=pulse` too), the mixer seeing each change within about 20
+ms and `pactl get-default-sink` agreeing, and WirePlumber's
+`default.configured.audio.sink` was the headset again afterwards (a scratch
+program, not a committed test, since it moves the owner's default). **Set-port
+to a different port cannot run on this laptop as it is:** under the Intel card's
+UCM `HiFi` profile every sink and source has one port, and the jack's
+`Headphones` and `Mic2` ports are not available with nothing plugged in. **Fixed
+from lyr's run:** a device with no active route now reports its first port as
+active, and ports are only the routes its card's active profile offers
 (`collect_port_info`'s rules), so `pactl` and the mixer agree on every active
 port; an unknown port or profile name is `Invalid`; and wakes are coalesced to
 one per server round trip and made only when what the app's interest shows has
