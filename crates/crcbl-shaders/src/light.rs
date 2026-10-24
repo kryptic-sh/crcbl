@@ -498,6 +498,28 @@ mod tests {
         );
     }
 
+    /// The ordinary one-sun frame needs no froxel geometry: its sole row belongs
+    /// in every list regardless of the camera or depth slice.
+    #[test]
+    fn a_directional_only_grid_exits_before_building_froxel_geometry() {
+        let fast_path = SOURCE
+            .find("if (params.light_count == 1 && lights[0].kind == KIND_DIRECTIONAL)")
+            .expect("the directional-only cluster fast path is missing");
+        let geometry = SOURCE
+            .find("float3 corner_near[4];")
+            .expect("the ordinary froxel geometry is missing");
+        assert!(
+            fast_path < geometry,
+            "the directional-only exit must precede froxel unprojection"
+        );
+        assert!(
+            SOURCE[fast_path..geometry].contains(
+                "cluster_lights[base] = 1;\n        cluster_lights[base + 1] = 0;\n        return;"
+            ),
+            "the fast path must publish the sole directional row before returning"
+        );
+    }
+
     /// Every number this module names and the shaders re-declare, in one sweep.
     ///
     /// A `static const` in Slang and a `pub const` here are two spellings of one

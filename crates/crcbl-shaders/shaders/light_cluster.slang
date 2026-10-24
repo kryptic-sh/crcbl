@@ -299,6 +299,16 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
         return;
     }
 
+    uint base = froxel * CLUSTER_STRIDE;
+    // A directional row belongs to every froxel. The ordinary sun-only frame
+    // can publish that invariant without reconstructing geometry it never tests.
+    if (params.light_count == 1 && lights[0].kind == KIND_DIRECTIONAL)
+    {
+        cluster_lights[base] = 1;
+        cluster_lights[base + 1] = 0;
+        return;
+    }
+
     uint tile_x = froxel % params.grid_x;
     uint tile_y = (froxel / params.grid_x) % params.grid_y;
     uint slice = froxel / tiles;
@@ -363,7 +373,6 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
         ? DEPTH_UNBOUNDED
         : slice_start(slice + 1);
 
-    uint base = froxel * CLUSTER_STRIDE;
     uint kept = 0;
     uint dropped = 0;
     for (uint index = 0; index < params.light_count; ++index)
