@@ -239,34 +239,50 @@ impl Index {
     /// Reads every directory of `theme`; a directory that cannot be read
     /// holds nothing.
     fn read(theme: &Theme, now: Instant) -> Self {
-        let mut icons: HashMap<OsString, Vec<Spot>> = HashMap::new();
+        // Papirus lists each `@2x` directory as a symlink to its 1x one: read
+        // every real directory once, for each place it is listed.
+        let mut places: Vec<(PathBuf, Vec<(usize, usize)>)> = Vec::new();
+        let mut seen: HashMap<PathBuf, usize> = HashMap::new();
         for (dir, (_, directories)) in theme.dirs.iter().enumerate() {
             for (root, directory) in directories.iter().enumerate() {
-                let Ok(entries) = std::fs::read_dir(directory) else {
+                let Ok(real) = std::fs::canonicalize(directory) else {
                     continue;
                 };
-                for entry in entries.filter_map(Result::ok) {
-                    let name = entry.file_name();
-                    let file = Path::new(&name);
-                    let (Some(stem), Some(extension)) = (file.file_stem(), file.extension()) else {
-                        continue;
-                    };
-                    let Some(extension) = EXTENSIONS.iter().position(|known| *known == extension)
-                    else {
-                        continue;
-                    };
-                    let spot = Spot {
-                        dir,
-                        root,
-                        extension,
-                    };
-                    // Most names recur in every size's directory: own the key
-                    // only the first time.
-                    match icons.get_mut(stem) {
-                        Some(spots) => spots.push(spot),
-                        None => {
-                            icons.insert(stem.to_owned(), vec![spot]);
-                        }
+                match seen.get(&real) {
+                    Some(&at) => places[at].1.push((dir, root)),
+                    None => {
+                        seen.insert(real.clone(), places.len());
+                        places.push((real, vec![(dir, root)]));
+                    }
+                }
+            }
+        }
+        let mut icons: HashMap<OsString, Vec<Spot>> = HashMap::new();
+        for (real, listed) in &places {
+            let Ok(entries) = std::fs::read_dir(real) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let name = entry.file_name();
+                let file = Path::new(&name);
+                let (Some(stem), Some(extension)) = (file.file_stem(), file.extension()) else {
+                    continue;
+                };
+                let Some(extension) = EXTENSIONS.iter().position(|known| *known == extension)
+                else {
+                    continue;
+                };
+                let spots = listed.iter().map(|&(dir, root)| Spot {
+                    dir,
+                    root,
+                    extension,
+                });
+                // Most names recur in every size's directory: own the key
+                // only the first time.
+                match icons.get_mut(stem) {
+                    Some(known) => known.extend(spots),
+                    None => {
+                        icons.insert(stem.to_owned(), spots.collect());
                     }
                 }
             }
@@ -898,6 +914,39 @@ Size=48
         scratch.write("icons/hicolor/48x48/apps/phone.png", "");
         let devices = scratch.write("icons/hicolor/48x48/devices/phone.png", "");
         assert_eq!(themes(&scratch).lookup("phone", 48, 1), Some(devices));
+    }
+
+    /// Unix only: creating a symlink on Windows needs a privilege a test runner
+    /// may not have.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_answers_under_its_own_name_and_scale() {
+        let scratch = Scratch::new();
+        scratch.write(
+            "icons/Papirus/index.theme",
+            "[Icon Theme]
+Directories=16x16/apps,16x16@2x/apps
+             [16x16/apps]
+Size=16
+Type=Fixed
+             [16x16@2x/apps]
+Size=16
+Scale=2
+Type=Fixed
+",
+        );
+        scratch.write("icons/Papirus/16x16/apps/mail.png", "");
+        std::os::unix::fs::symlink("16x16", scratch.0.join("icons/Papirus/16x16@2x"))
+            .expect("symlink");
+        let mut themes = IconThemes::new(search(&scratch), "Papirus", Duration::ZERO);
+        assert_eq!(
+            themes.lookup("mail", 16, 2),
+            Some(scratch.0.join("icons/Papirus/16x16@2x/apps/mail.png"))
+        );
+        assert_eq!(
+            themes.lookup("mail", 16, 1),
+            Some(scratch.0.join("icons/Papirus/16x16/apps/mail.png"))
+        );
     }
 
     #[test]

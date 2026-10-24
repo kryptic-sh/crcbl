@@ -1988,14 +1988,6 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       matching scale (breeze's `24@2x` over `16@3x` at 48 pixels). Lookup time
       over each theme's queries stayed within 8% of first match. Not tested in
       CI: its Linux runner has `hicolor` at most.
-    - **A theme's index reads a symlinked directory once per name it is listed
-      under.** Papirus lists 111 directories, its `@2x` ones symlinks to the 1x
-      ones, so `Index::read` takes in 164,716 entries for 84,289 files: about 90
-      ms on the office laptop before the first answer in that theme (Adwaita and
-      hicolor about 5 ms, Breeze about 20). Reading each canonical directory
-      once and reusing its names for an alias would about halve Papirus's.
-      Measured with 20 and 150 lookups at 48 pixels, the walk it replaced read
-      the same and took the same time there, so this is not a regression.
     - **JPEG is in**, `jpeg::decode` behind the `jpeg` feature, written here:
       sequential and progressive Huffman frames with successive approximation,
       restart intervals, grey, YCbCr and RGB (by libjpeg's JFIF, Adobe and

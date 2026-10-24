@@ -69,10 +69,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   on every lookup, and tested every directory for the name. Themes are now
   shared, and each theme's directories are read once into an index of the icons
   they hold, rebuilt on the miss-retry clock, so a lookup ranks only the
-  directories that hold its name. On an Arch desktop's Adwaita, Breeze, Papirus
-  and hicolor, 4,488 lookups per theme took 13 to 116 ms, against 457 to 3,080
-  ms in 0.9.0. The first lookup in a theme pays for reading all of it, about 90
-  ms in Papirus's 111 directories.
+  directories that hold its name; a directory listed under two names, as Papirus
+  lists each `@2x` one as a symlink to its 1x one, is read once. On an Arch
+  desktop's Adwaita, Breeze, Papirus and hicolor, 4,488 lookups per theme took
+  14 to 52 ms, against 457 to 3,080 ms in 0.9.0. The first lookup in a theme
+  pays for reading all of it, from 7 ms in hicolor to 34 ms in Papirus.
 - **`crcbl_image::theme::IconThemes::lookup` prefers the nearest size among
   matching directories.** The specification takes the first directory in a
   theme's `Directories` list that matches; hicolor lists `22x22/apps`, whose
