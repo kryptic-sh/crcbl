@@ -4236,12 +4236,20 @@ trial it rejected is folded into "Declined" below.
   every light; `lights-fit` is the matched control.
 - **Not investigated: D3D12's `cull` row** is 0.12–0.19 ms against Vulkan's 0.01
   ms on the same grid, alternating between two levels from run to run.
-- **Owed on other hardware.** The fill-light specular skip costs ordinary lights
-  0.6–0.9% (Vulkan) and 3–4% (D3D12) of `forward` in `area-lights-fit` on the RX
-  7900 XTX, against 26–29% saved under rectangular fill lights; kept for that,
-  and not yet timed on the MX550 or any non-AMD adapter. The pre-scaled blocker
-  offsets were neutral here (the MX550 measured 1.0–1.1% in September); an MX550
-  re-run is owed.
+- **Re-timed on the MX550 (2026-10-24).** NVIDIA GeForce MX550, driver
+  615.78.08, Vulkan on Arch Linux, AC power and the performance profile; three
+  mirrored pairs per fixture, mean of the per-run `forward` p50s. The fill-light
+  specular skip (`2ac4b17e` → `09780bf0`) costs ordinary lights nothing there:
+  `lights-fit` 4.024 → 3.640 ms (−9.5%), `specular-lights-fit` 5.680 → 5.615 ms
+  (−1.2%), `area-lights-fit` 9.084 → 9.012 ms (−0.8%), `area-fill-lights-fit`
+  9.161 → 6.643 ms (−27.5%). On the RX 7900 XTX it costs ordinary lights
+  0.6–0.9% (Vulkan) and 3–4% (D3D12) of `forward` in `area-lights-fit`, against
+  26–29% saved under rectangular fill lights. The pre-scaled blocker offsets
+  (`15a82dc1` → `dd3d36ff`), neutral on the RX 7900 XTX, measured `lights-fit`
+  2.583 → 2.555 ms (−1.1%, ranges apart, as in September) and
+  `specular-lights-fit` 3.989 → 3.972 ms (−0.4%, within a run's spread).
+  `instances` was not re-run. Not measured: any Intel adapter, and D3D12 on any
+  adapter but the RX 7900 XTX.
 - **Unmeasured paths.** A populated probe volume pays the empty-probe early
   return's uniform branch, which no fixture has probes to time; water's own pass
   was not timed either. Slang's MSL output allocates the tile-local exposure
