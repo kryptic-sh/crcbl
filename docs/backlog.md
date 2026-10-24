@@ -17075,18 +17075,19 @@ the binary (the CLI depends on the editor, so the editor's tests cannot run it);
 the unsaved bar's Save writes the history through the same `save_in_place` as
 Ctrl+S but has no test of its own; a variant switch through the history is held
 at the document level (`variant_tests`), not through the inspector's drop-down
-and a CLI run. The lock: run on Windows only (the macOS `flock` side is
-clippy-checked for `aarch64-apple-darwin`, not run; the
-`x86_64-unknown-linux-gnu` clippy does not build here, since `alsa-sys` wants a
-Linux sysroot for pkg-config), so the holder being named is verified only as
-absent; the CLI's half runs the binary against a lock taken in the test process,
-and the editor's against the same call, never two editor processes; a crashed
-holder is simulated by an unlocked file, as the recovery tests simulate one, not
-by killing a process. The changed-on-disk question after the unsaved bar's Save
-is held through a close and an open (`app/tests/lock.rs`), not a new scene,
-which takes the same `Saving::Then` path; `Editor::overwrite_as`'s branch for a
-save-as that moved the asset source cannot be reached (onto the scene's own
-directory `Document::save_as` moves nothing) and has no test.
+and a CLI run. The lock: run on Windows and, on 2026-10-25, on Linux (the office
+laptop), where two processes calling `lock_scene` on one scene showed the second
+refused with the first named (`locktwo (process …)`), the lock free once the
+first let go, and a first holder killed with `SIGKILL` leaving its line but
+blocking nobody (a scratch program, not a committed test). The macOS `flock`
+side is clippy-checked for `aarch64-apple-darwin`, not run. The CLI's half runs
+the binary against a lock taken in the test process, and the editor's against
+the same call, never two editor processes. The changed-on-disk question after
+the unsaved bar's Save is held through a close and an open
+(`app/tests/lock.rs`), not a new scene, which takes the same `Saving::Then`
+path; `Editor::overwrite_as`'s branch for a save-as that moved the asset source
+cannot be reached (onto the scene's own directory `Document::save_as` moves
+nothing) and has no test.
 
 ### Scene edits over the transport: the server slice and what it leaves (2026-10-04)
 
@@ -18582,12 +18583,14 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     reused. Behaviour that may surprise: on Windows the marker cannot be read
     while held (`LockFileEx` blocks reads); a marker that will not open counts
     as held, so its copy is never listed or removed until a person deletes the
-    marker. **Coverage gaps:** verified on Windows only — the Linux and macOS
-    sides (`flock`) compile but have not run; two processes were never run
-    against one directory (the tests hold the lock in-process, which `flock` and
-    `LockFileEx` both treat as a separate holder); a checker that opens a marker
-    between its creation and its lock sees it unlocked for that instant, which
-    only matters for a slot written in that same instant.
+    marker. **Coverage gaps:** verified on Windows, and on Linux on 2026-10-25
+    with two processes against one directory (a scratch program, not a committed
+    test): a copy the other process had marked was neither listed nor removed
+    (`CopyInUse`), and once that process was killed with `SIGKILL` it was listed
+    and removed with its marker. The macOS side compiles but has not run, and no
+    committed test uses two processes; a checker that opens a marker between its
+    creation and its lock sees it unlocked for that instant, which only matters
+    for a slot written in that same instant.
   - **A recovered copy that would not be removed after a save-as is logged, not
     shown**: the status line says the save landed, and the copy is offered again
     at the next start. Putting the failure on the status line would displace the

@@ -39,9 +39,11 @@
 //!   path leaves nothing behind.
 //!
 //! The lock is `flock` on Linux and macOS and `LockFileEx` on Windows
-//! ([`std::fs::File::try_lock`]'s own docs). Verified on Windows; the macOS
-//! side is the same standard-library calls, compiled but not run, and the
-//! Linux side was not built.
+//! ([`std::fs::File::try_lock`]'s own docs). Verified on Windows and on Linux,
+//! where two processes were run against one scene on 2026-10-25: the second
+//! was refused naming the first, and a holder killed with `SIGKILL` left its
+//! line but blocked nobody. The macOS side is the same standard-library calls,
+//! compiled but not run.
 //!
 //! # A scene changed behind the document's back (decided 2026-10-04)
 //!

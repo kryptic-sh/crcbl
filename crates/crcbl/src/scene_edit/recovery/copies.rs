@@ -35,8 +35,10 @@
 //!
 //! The lock is `flock` on Linux and macOS and `LockFileEx` on Windows
 //! ([`std::fs::File::try_lock`]'s own docs), both released when their
-//! process ends. Verified on Windows; the Linux and macOS sides are the same
-//! standard-library calls, compiled for both targets but not run here.
+//! process ends. Verified on Windows and on Linux, where on 2026-10-25 a copy
+//! another process had marked was neither listed nor removed, and was both
+//! once that process was killed with `SIGKILL`. The macOS side is the same
+//! standard-library calls, compiled but not run.
 //! **What cannot be told is in use**: a marker that is there but would not
 //! open, or whose lock state the platform will not say, keeps its copy out
 //! of the listing and every removal, so nothing live is ever deleted.
