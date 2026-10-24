@@ -504,29 +504,34 @@ left.** Built as decided on 2026-10-19 for lyr: Wayland answers with
 `wl_surface.frame` and sets `ShellCaps::FRAME_CALLBACK`; X11, Win32, AppKit, the
 web and `HeadlessShell` answer at the next pump through `frame::FrameRequests`.
 
-- **`Presenter` has the gate; lyr has to opt in, and nothing has run it on a
-  compositor.** `Presenter::request_frame` / `observe` / `frame_due` (state in
+- **`Presenter` has the gate, and lyr has to opt in.**
+  `Presenter::request_frame` / `observe` / `frame_due` (state in
   `present::frame_gate::FrameGate`) make `acquire` answer `Ok(None)` without
   touching the device from a present that carried a request until the window's
   `FrameReady` or `WindowDestroyed` is observed. A caller that never requests is
   unchanged, so lyr's hang stays until lyr feeds `observe` and calls
   `request_frame` between `acquire` and `submit_and_present`, as the
   `crcbl_app::present` module docs give. Proven on `HeadlessShell` and the null
-  device only (`present::tests::frame_gate`, ten mutants killed); no Wayland e2e
-  drives a `Presenter` through `request_frame`, so that the request rides the
-  commit Mesa's WSI makes in `vkQueuePresentKHR` is read from the protocol, not
-  observed. `Pacing::Auto` still asks for `PresentMode::Fifo` and `crcbl-vk`
-  still acquires with `u64::MAX`, deliberately: a finite acquire timeout was
-  declined in the 2026-10-19 decision, as it turns a hang into a busy retry that
-  still blocks the loop for the timeout.
-- **The engine loop's gate has run on `HeadlessShell` and the null device
-  only.** `crcbl::engine::Loop` requests a frame before each present where the
-  shell has `ShellCaps::FRAME_CALLBACK`, feeds `GpuContext::observe` from its
-  pump, records a held frame as `FrameOutcome::Held` and sleeps in `wait_events`
-  until the answer or `FrameClock::next_tick_due` (`engine::tests::frame_gate`,
-  with `HeadlessShell::set_outputs_powered` standing in for an output that is
-  off). No sample has been run on sway with its output powered off, so that the
-  hang is gone is read from the protocol, not observed. The request is made
+  device (`present::tests::frame_gate`, ten mutants killed), and on sway through
+  the engine loop below, whose sandbox waits for `FrameReady` before it counts
+  as paced: so the request does ride the commit the WSI makes in
+  `vkQueuePresentKHR`, on Mesa's WSI in CI (lavapipe) and on NVIDIA's on the
+  office laptop (2026-10-24, the MX550 presenting to a sway on the Intel GPU in
+  each harness step that logs its adapter). `Pacing::Auto` still asks for
+  `PresentMode::Fifo` and `crcbl-vk` still acquires with `u64::MAX`,
+  deliberately: a finite acquire timeout was declined in the 2026-10-19
+  decision, as it turns a hang into a busy retry that still blocks the loop for
+  the timeout.
+- **The engine loop's gate.** `crcbl::engine::Loop` requests a frame before each
+  present where the shell has `ShellCaps::FRAME_CALLBACK`, feeds
+  `GpuContext::observe` from its pump, records a held frame as
+  `FrameOutcome::Held` and sleeps in `wait_events` until the answer or
+  `FrameClock::next_tick_due` (`engine::tests::frame_gate`, with
+  `HeadlessShell::set_outputs_powered` standing in for an output that is off),
+  and on sway: `run-wayland-e2e.sh`'s `run_sandbox_dark` powers the sandbox's
+  output off for two seconds, fails if more than one frame answer arrives
+  meanwhile, and requires answers and a clean close once it is back (in CI from
+  2026-10-21; passed on the office laptop 2026-10-24). The request is made
   before the bundle's `frame`, not between its acquire and present as the
   `Presenter` docs give, because the loop cannot reach in there; that no commit
   lands between the two on Mesa's WSI is likewise unobserved. A held frame still
@@ -555,8 +560,11 @@ web and `HeadlessShell` answer at the next pump through `frame::FrameRequests`.
   `a_frame_request_waits_while_the_output_is_off` powers `HEADLESS-1` off
   (`swaymsg output HEADLESS-1 power off`), requests a frame and commits: no
   `FrameReady` for 500 ms, then the pending request is answered once the output
-  is powered on, without another commit. Red with the output left on. Other
-  compositors (Hyprland's DPMS) not observed.
+  is powered on, without another commit. Red with the output left on. Hyprland
+  0.56.2 answers differently: it keeps answering frame requests for surfaces it
+  is not showing, at `misc.render_unfocused_fps` (15 by default), so
+  `run-wayland-e2e-hyprland.sh` leaves the test out by name (diagnosed
+  2026-10-21; see the Hyprland harness note).
 - **Two Wayland mechanisms no event can show.** Destroying the window's
   `wl_callback` in `destroy_objects`, and the early return that shares one
   callback between requests, only stop a proxy leaking: without either, the
