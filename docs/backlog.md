@@ -2694,22 +2694,22 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   that are CPU-only (`font::breaks`, UAX #9/#14/#29, `TextLayout::caret`, nav)
   need no per-platform cell.
 
-  | Feature                                       | Wayland                         | X11                                               | Vulkan                        |
-  | --------------------------------------------- | ------------------------------- | ------------------------------------------------- | ----------------------------- |
-  | `request_frame` / `FrameReady`                | CI, laptop                      | CI                                                | n/a                           |
-  | Presenter frame gating                        | CI, laptop (sandbox)            | CI (no frame callback: answered at the next pump) | laptop                        |
-  | `set_panel` in place                          | CI, laptop; lyr on Hyprland     | CI test, laptop (Xvfb, openbox)                   | n/a                           |
-  | `set_input_region`                            | CI, laptop                      | CI                                                | n/a                           |
-  | Cursor shapes                                 | CI, laptop                      | CI (libxcb-cursor)                                | n/a                           |
-  | Escape dismisses a `Grab` popup               | CI, laptop                      | CI test, laptop (Xvfb, openbox)                   | n/a                           |
-  | Popup reposition                              | refusal in CI; real path laptop | CI test, laptop (Xvfb, openbox)                   | n/a                           |
-  | Panel at fractional scale (S21)               | laptop + CI test                | n/a                                               | n/a                           |
-  | Fractional scale without the integer step     | unit test; pikr on Hyprland     | n/a                                               | n/a                           |
-  | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)       | CI, laptop (Xwayland, `grim`)                     | laptop                        |
-  | `display_adapter`                             | laptop (iGPU only)              | laptop (Xwayland, DRI3)                           | laptop                        |
-  | `Presenter::resize` with frames in flight     | CI, laptop                      | CI, laptop (`run_sandbox_resize`)                 | laptop                        |
-  | `push_opacity` groups                         | n/a                             | n/a                                               | CI (lavapipe), laptop (Intel) |
-  | Pointer leave between own windows (Win32 fix) | CI test, laptop                 | CI test (Xvfb only)                               | n/a                           |
+  | Feature                                       | Wayland                                         | X11                                                         | Vulkan                               |
+  | --------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------- | ------------------------------------ |
+  | `request_frame` / `FrameReady`                | CI, laptop                                      | CI                                                          | n/a                                  |
+  | Presenter frame gating                        | CI, laptop (sandbox)                            | CI (no frame callback: answered at the next pump)           | laptop                               |
+  | `set_panel` in place                          | CI, laptop; lyr on Hyprland                     | CI test, laptop (Xvfb, openbox)                             | n/a                                  |
+  | `set_input_region`                            | CI, laptop                                      | CI                                                          | n/a                                  |
+  | Cursor shapes                                 | CI, laptop                                      | CI (libxcb-cursor)                                          | n/a                                  |
+  | Escape dismisses a `Grab` popup               | CI, laptop                                      | CI test, laptop (Xvfb, openbox)                             | n/a                                  |
+  | Popup reposition                              | refusal in CI; real path laptop                 | CI test, laptop (Xvfb, openbox)                             | n/a                                  |
+  | Panel at fractional scale (S21)               | laptop + CI test                                | n/a                                                         | n/a                                  |
+  | Fractional scale without the integer step     | unit test; pikr on Hyprland                     | n/a                                                         | n/a                                  |
+  | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)                       | CI, laptop (Xwayland, `grim`; Xvfb and picom, ignored test) | laptop                               |
+  | `display_adapter`                             | laptop (iGPU; MX550 under sway on `renderD129`) | laptop (Xwayland, DRI3)                                     | laptop                               |
+  | `Presenter::resize` with frames in flight     | CI, laptop                                      | CI, laptop (`run_sandbox_resize`)                           | laptop                               |
+  | `push_opacity` groups                         | n/a                                             | n/a                                                         | CI (lavapipe), laptop (Intel, MX550) |
+  | Pointer leave between own windows (Win32 fix) | CI test, laptop                                 | CI test (Xvfb only)                                         | n/a                                  |
 
   Still open from the table: nothing runnable here. X11's pointer-leave test
   (`crossing_into_another_of_our_windows_leaves_the_first` in `x11_e2e`, added
@@ -2720,12 +2720,17 @@ named under S-rows above. lyr's observations from its first Hyprland runs
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.
 
-**The Wayland e2e harness on the office laptop** (sway installed 2026-10-20)
-runs the shell suite (56 of 56 passed on 2026-10-20), then fails at its sandbox
-step because `VK_LAYER_KHRONOS_validation` is not installed
-(`vulkan-validation-layers` on Arch); the harness refuses a validation run that
-never loaded the layer, by design. Two more things about this machine: headless
-sway renders on the NVIDIA MX550 unless
+**The Wayland e2e harness on the office laptop** passes whole with
+`vulkan-validation-layers` installed (1.4.363; run on 2026-10-24 with
+`WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128`): the shell suite's 61 tests, both
+transparency read-backs, every sandbox and horde step with validation silent,
+and the validation self-test going red. Its sandbox ran on the MX550 while sway
+composited on the Intel GPU ("display on adapter 1"), so the run also presents
+across GPUs. Before the layer was there the harness stopped at its first sandbox
+step, by design: it refuses a validation run that never loaded the layer. The
+sprite suite (`run-sprite-e2e.sh`, `push_opacity` groups among it) passed 19 of
+19 on the MX550 with validation the same day. Two more things about this
+machine: headless sway renders on the NVIDIA MX550 unless
 `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128` puts it on the Intel GPU
 (2026-10-23; while the driver mismatched, earlier, it fell to software instead).
 **Run the harness with that variable here**: with sway on NVIDIA the Xwayland
