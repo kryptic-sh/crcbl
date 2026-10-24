@@ -707,6 +707,24 @@ impl Bvh {
         cost
     }
 
+    /// Internal-node surface-area cost relative to the root's surface area.
+    ///
+    /// The quotient is unchanged when the whole world scales uniformly, so a
+    /// quality policy does not mistake a larger but equally partitioned world
+    /// for a looser tree. A point-sized tree has no traversal surface and
+    /// therefore no degradation signal.
+    pub(crate) fn normalized_surface_area_cost(&self) -> f64 {
+        if self.root == NIL {
+            return 0.0;
+        }
+        let root_area = self.nodes[self.root as usize].aabb.half_surface_area();
+        if root_area == 0.0 {
+            0.0
+        } else {
+            self.surface_area_cost() / root_area
+        }
+    }
+
     // ── Internal helpers ───────────────────────────────────────────────
 
     /// The leaf node owning `element_index`, or `None` if that index names no
@@ -969,6 +987,29 @@ mod tests {
             unit_box_at(DVec3::new(2.0, 0.0, 0.0)),
         ]);
         assert_eq!(bvh.surface_area_cost(), 7.0);
+    }
+
+    #[test]
+    fn normalized_surface_area_cost_is_scale_invariant() {
+        let build = |scale: f64| {
+            Bvh::build([
+                (
+                    Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(0.5 * scale)),
+                    0,
+                ),
+                (
+                    Aabb::from_centre_half(
+                        DVec3::new(2.0 * scale, 0.0, 0.0),
+                        DVec3::splat(0.5 * scale),
+                    ),
+                    1,
+                ),
+            ])
+        };
+        assert_eq!(
+            build(1.0).normalized_surface_area_cost(),
+            build(10.0).normalized_surface_area_cost()
+        );
     }
 
     #[test]

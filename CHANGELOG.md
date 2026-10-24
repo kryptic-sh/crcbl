@@ -41,6 +41,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl_phys::PhysicsWorld` rebuilds a broadphase tree that refits have
+  loosened.** Every few full-tree passes of refits it compares the tree's
+  surface-area cost, normalised by its root's, with the value at the last build,
+  and rebuilds past a fixed ratio; a uniformly scaled or sparse world does not
+  trip it. In `crcbl bench --scenario phys` with 5,000 dense bodies, query p50
+  fell 11% after 300 ticks of drift and 18% after 600.
 - **Auto-exposure's histogram counts each tile locally first.** Every texel
   added one to the frame histogram with a global atomic, and a frame whose
   texels share a few bins serialised on them. Each 16×16 tile now counts in

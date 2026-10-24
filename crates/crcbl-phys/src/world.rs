@@ -90,6 +90,13 @@ const NO_ELEMENT: u32 = u32::MAX;
 /// they did not exist.
 pub const ALL_LAYERS: u32 = u32::MAX;
 
+/// Repartition a refit-aged tree once its normalized traversal cost grows this
+/// far past the last build or structural-change baseline.
+const BROADPHASE_REBUILD_COST_RATIO: f64 = 1.2;
+
+/// Full-tree equivalents of refits between quality scans.
+const BROADPHASE_QUALITY_CHECK_REFIT_PASSES: usize = 4;
+
 /// A collider stored in the [`PhysicsWorld`], with an optional trigger flag.
 #[derive(Debug, Clone)]
 struct ColliderSlot {
@@ -415,6 +422,11 @@ pub struct PhysicsWorld {
     live_count: usize,
     /// Lazily-rebuilt BVH. `None` when dirty.
     bvh: Option<Bvh>,
+    /// Scale-independent surface-area cost at the last build or structural
+    /// change. `None` asks the next query batch to establish a new baseline.
+    bvh_quality_baseline: Option<f64>,
+    /// Successful leaf refits since the last quality scan.
+    refits_since_quality_check: usize,
     /// Refit and rebuild totals, handed out by
     /// [`PhysicsWorld::broadphase_stats`]. Never reset.
     counters: BroadphaseCounters,
@@ -1467,6 +1479,8 @@ impl PhysicsWorld {
             free_slots: Vec::new(),
             live_count: 0,
             bvh: None,
+            bvh_quality_baseline: None,
+            refits_since_quality_check: 0,
             counters: BroadphaseCounters::default(),
             bvh_slot_to_elem: Vec::new(),
             scratch: QueryScratch::new(),
@@ -1694,6 +1708,8 @@ impl PhysicsWorld {
             match self.bvh_slot_to_elem.get(slot).copied() {
                 Some(elem) if elem != NO_ELEMENT && bvh.remove(elem as usize) => {
                     self.bvh_slot_to_elem[slot] = NO_ELEMENT;
+                    self.bvh_quality_baseline = None;
+                    self.refits_since_quality_check = 0;
                 }
                 // A live collider with no element in a built tree should not
                 // happen; if it ever does, the tree no longer describes the
@@ -1706,9 +1722,9 @@ impl PhysicsWorld {
 
     /// Rebuild the BVH from the current set of colliders.
     ///
-    /// Called automatically on the first query after a mutation. Explicitly
-    /// calling this is only needed when you want to control the timing of the
-    /// rebuild (e.g. once per frame rather than once per query batch).
+    /// Called automatically on the first query after an invalidation and when
+    /// refits make the existing partition sufficiently loose. Explicitly
+    /// calling this is only needed when you want to control the timing.
     pub fn rebuild(&mut self) {
         let elements: Vec<_> = self
             .colliders
@@ -1723,7 +1739,10 @@ impl PhysicsWorld {
         for (elem_idx, (_, slot)) in elements.iter().enumerate() {
             self.bvh_slot_to_elem[*slot as usize] = elem_idx as u32;
         }
-        self.bvh = Some(Bvh::build(elements));
+        let bvh = Bvh::build(elements);
+        self.bvh_quality_baseline = Some(bvh.normalized_surface_area_cost());
+        self.refits_since_quality_check = 0;
+        self.bvh = Some(bvh);
         self.counters.rebuilds += 1;
     }
 
@@ -2270,6 +2289,8 @@ impl PhysicsWorld {
                 self.bvh_slot_to_elem.resize(index as usize + 1, NO_ELEMENT);
             }
             self.bvh_slot_to_elem[index as usize] = elem as u32;
+            self.bvh_quality_baseline = None;
+            self.refits_since_quality_check = 0;
         }
         self.id_for_slot(index)
     }
@@ -2277,6 +2298,8 @@ impl PhysicsWorld {
     /// Drop the BVH so the next query rebuilds it from the collider set.
     fn invalidate_bvh(&mut self) {
         self.bvh = None;
+        self.bvh_quality_baseline = None;
+        self.refits_since_quality_check = 0;
         self.bvh_slot_to_elem.clear();
     }
 
@@ -2303,6 +2326,7 @@ impl PhysicsWorld {
         };
         if refit {
             self.counters.refits += 1;
+            self.refits_since_quality_check = self.refits_since_quality_check.saturating_add(1);
         } else {
             self.counters.updates_without_refit += 1;
             self.invalidate_bvh();
@@ -2312,6 +2336,30 @@ impl PhysicsWorld {
 
     fn ensure_bvh(&mut self) {
         if self.bvh.is_none() {
+            self.rebuild();
+            return;
+        }
+
+        let bvh = self.bvh.as_ref().expect("the absent tree returned above");
+        if self.bvh_quality_baseline.is_none() {
+            self.bvh_quality_baseline = Some(bvh.normalized_surface_area_cost());
+            self.refits_since_quality_check = 0;
+            return;
+        }
+        let refits_per_check = self
+            .live_count
+            .saturating_mul(BROADPHASE_QUALITY_CHECK_REFIT_PASSES)
+            .max(1);
+        if self.refits_since_quality_check < refits_per_check {
+            return;
+        }
+
+        let current_cost = bvh.normalized_surface_area_cost();
+        self.refits_since_quality_check = 0;
+        let baseline = self
+            .bvh_quality_baseline
+            .expect("the absent baseline returned above");
+        if current_cost > baseline * BROADPHASE_REBUILD_COST_RATIO {
             self.rebuild();
         }
     }
@@ -2477,6 +2525,57 @@ mod tests {
                 .overlap_sphere(DVec3::new(7.0, 0.0, 0.0), 0.1)
                 .is_empty(),
             "and no longer at the old one"
+        );
+    }
+
+    #[test]
+    fn a_spatially_loose_tree_rebuilds_when_the_quality_check_is_due() {
+        let (mut world, ids) = line_of_spheres(16);
+        let before = world.broadphase_stats();
+
+        for _ in 0..BROADPHASE_QUALITY_CHECK_REFIT_PASSES {
+            for (x, &id) in (0_u32..).zip(&ids) {
+                let side = if x % 2 == 0 { -1.0 } else { 1.0 };
+                let centre = DVec3::new(side * (1_000.0 + f64::from(x)), 0.0, 0.0);
+                assert!(world.set_sphere(id, Sphere::new(centre, 0.4)));
+            }
+            world.overlap_queries();
+        }
+
+        let after = world.broadphase_stats();
+        assert_eq!(
+            after.rebuilds,
+            before.rebuilds + 1,
+            "the interleaved distant leaves should be repartitioned: {after:?}"
+        );
+    }
+
+    #[test]
+    fn uniform_world_scaling_does_not_look_like_tree_degradation() {
+        let mut world = PhysicsWorld::new();
+        let ids: Vec<_> = (0..16)
+            .map(|x| {
+                world.add_box(BoxCollider::new(
+                    DVec3::new(f64::from(x), 0.0, 0.0),
+                    DVec3::splat(0.4),
+                ))
+            })
+            .collect();
+        let before = world.broadphase_stats();
+
+        for _ in 0..BROADPHASE_QUALITY_CHECK_REFIT_PASSES {
+            for (x, &id) in (0_u32..).zip(&ids) {
+                let scaled =
+                    BoxCollider::new(DVec3::new(f64::from(x) * 10.0, 0.0, 0.0), DVec3::splat(4.0));
+                assert!(world.set_box(id, scaled));
+            }
+            world.overlap_queries();
+        }
+
+        let after = world.broadphase_stats();
+        assert_eq!(
+            after.rebuilds, before.rebuilds,
+            "scaling preserved the partition and should not rebuild it: {after:?}"
         );
     }
 
