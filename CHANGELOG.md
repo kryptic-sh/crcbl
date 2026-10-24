@@ -13,8 +13,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`crcbl_phys::BroadphaseStats` is no longer `Eq`**, only `PartialEq`, because
+  it now carries the floating-point `surface_area_cost`.
+
 ### Added
 
+- **`crcbl_phys::Bvh::surface_area_cost` and
+  `BroadphaseStats::surface_area_cost`**: the summed half-surface area of the
+  tree's live internal nodes. Refits keep the depth and node count unchanged
+  while the boxes loosen, and this is the number that grows;
+  `crcbl bench --scenario phys` reports it in both its outputs.
 - **Sandbox stress fixtures and real-clock timing.** `sandbox --stress <NAME>`
   draws a fixed renderer workload in the cube's place and holds it for the whole
   run: `instances` (a screen-filling static grid), `moving` (the grid with every

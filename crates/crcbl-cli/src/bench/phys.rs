@@ -680,7 +680,7 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
          {query_line}\n\
          answers: {} results over {queries} queries, {per_query:.2} per query — read the \
          query line against this, not against the body count\n\
-         broadphase: {} elements, {} nodes, depth {}\n\
+         broadphase: {} elements, {} nodes, depth {}, surface-area cost {:.3}\n\
          one iteration: {} refits — one per body per tick — {} updates left for a \
          rebuild, {} tree builds; the build phase is one of them, so a refit phase that \
          rebuilt shows a second\n\
@@ -700,6 +700,7 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
         run.broadphase.elements,
         run.broadphase.nodes,
         run.broadphase.depth,
+        run.broadphase.surface_area_cost,
         run.broadphase.refits,
         run.broadphase.updates_without_refit,
         run.broadphase.rebuilds,
@@ -747,6 +748,10 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
                     ("elements", Json::Number(run.broadphase.elements as i64)),
                     ("nodes", Json::Number(run.broadphase.nodes as i64)),
                     ("depth", Json::Number(run.broadphase.depth as i64)),
+                    (
+                        "surface_area_cost",
+                        Json::Double(run.broadphase.surface_area_cost),
+                    ),
                     ("refits", Json::Number(run.broadphase.refits as i64)),
                     (
                         "updates_without_refit",
@@ -1057,6 +1062,12 @@ mod tests {
             (aged.broadphase.depth, aged.broadphase.nodes),
             "a refit rewrote the tree's shape, which is not what a refit does"
         );
+        assert!(
+            aged.broadphase.surface_area_cost > one.broadphase.surface_area_cost,
+            "the aged tree should expose its spatial looseness: one={:?}, aged={:?}",
+            one.broadphase,
+            aged.broadphase
+        );
 
         // And the aged run is still exactly right: `measure` holds every pass,
         // warm-up included, to a serial scan over the *final* positions, so
@@ -1219,6 +1230,31 @@ mod tests {
             "one query per body"
         );
         assert_eq!(answers[1].1, Json::Number(run.answers.results as i64));
+
+        let Some((_, Json::Object(broadphase))) = outcome
+            .json
+            .iter()
+            .find(|(key, _)| *key == "broadphase")
+            .cloned()
+        else {
+            panic!("no broadphase block in {:?}", outcome.json);
+        };
+        assert_eq!(
+            broadphase.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            [
+                "elements",
+                "nodes",
+                "depth",
+                "surface_area_cost",
+                "refits",
+                "updates_without_refit",
+                "rebuilds"
+            ]
+        );
+        assert_eq!(
+            broadphase[3].1,
+            Json::Double(run.broadphase.surface_area_cost)
+        );
 
         for phase in ["build:", "refit:", "query:", "answers:", "broadphase:"] {
             assert!(outcome.human.contains(phase), "{}", outcome.human);
