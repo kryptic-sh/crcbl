@@ -1216,6 +1216,11 @@ jobs:
       # and `x11-xkb-utils`'s `setxkbmap` are for the `xorg_` pass: two heads,
       # which Xvfb's single CRTC cannot have, and a dead-key layout, which
       # Xvfb will not switch to.
+      #
+      # `picom`, `imagemagick` and `x11-utils` are for the compositor
+      # read-back in the pass with no window manager: picom composites the
+      # Xvfb, `xwininfo` sees it take the compositor selection, and
+      # ImageMagick's `import` reads the blended pixel off the root window.
       - name: Install Xvfb, openbox, the X client libraries and the ALSA headers
         timeout-minutes: 10
         uses: ./.github/actions/apt-packages
@@ -1225,7 +1230,8 @@ jobs:
             libxcb-xtest0 libxcb-xfixes0 libxcb-cursor0 libxcb-shape0
             libxkbcommon0 libxkbcommon-x11-0 libvulkan1 mesa-vulkan-drivers
             vulkan-validationlayers dbus at-spi2-core xserver-xorg-core
-            xserver-xorg-video-dummy x11-xserver-utils x11-xkb-utils
+            xserver-xorg-video-dummy x11-xserver-utils x11-xkb-utils picom
+            imagemagick x11-utils
       # Starts Xvfb on a private display number, polls for its socket with a
       # deadline and a liveness check on the child, runs the `#[ignore]`d suite
       # with `--features x11-e2e`, and dumps the server log tail on any

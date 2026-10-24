@@ -752,8 +752,9 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    `_NET_WM_CM_S0` path, a compositing manager on a plain X server, passes
    `a_window_under_an_x_compositing_manager_is_blended_premultiplied` on the
    office laptop (2026-10-24: Xvfb, picom's xrender backend, lavapipe pinned;
-   red without picom). Not in CI: it would need `picom` and ImageMagick in an
-   Xvfb job and the lavapipe pin.
+   red without picom), and in CI since 2026-10-25: `run-x11-e2e.sh`'s pass with
+   no window manager starts picom, waits for its window, pins lavapipe and runs
+   the test (red with picom stopped before it).
 4. **Implemented, untested:** S17 panel focus on Win32 and AppKit, and on
    Hyprland in CI (a job of its own, M to L; on the office laptop's nested
    Hyprland 0.56.2, 2026-10-21, an exclusive panel took the keyboard as on sway,
@@ -2703,22 +2704,22 @@ named under S-rows above. lyr's observations from its first Hyprland runs
   that are CPU-only (`font::breaks`, UAX #9/#14/#29, `TextLayout::caret`, nav)
   need no per-platform cell.
 
-  | Feature                                       | Wayland                                         | X11                                                         | Vulkan                               |
-  | --------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------- | ------------------------------------ |
-  | `request_frame` / `FrameReady`                | CI, laptop                                      | CI                                                          | n/a                                  |
-  | Presenter frame gating                        | CI, laptop (sandbox)                            | CI (no frame callback: answered at the next pump)           | laptop                               |
-  | `set_panel` in place                          | CI, laptop; lyr on Hyprland                     | CI test, laptop (Xvfb, openbox)                             | n/a                                  |
-  | `set_input_region`                            | CI, laptop                                      | CI                                                          | n/a                                  |
-  | Cursor shapes                                 | CI, laptop                                      | CI (libxcb-cursor)                                          | n/a                                  |
-  | Escape dismisses a `Grab` popup               | CI, laptop                                      | CI test, laptop (Xvfb, openbox)                             | n/a                                  |
-  | Popup reposition                              | refusal in CI; real path laptop                 | CI test, laptop (Xvfb, openbox)                             | n/a                                  |
-  | Panel at fractional scale (S21)               | laptop + CI test                                | n/a                                                         | n/a                                  |
-  | Fractional scale without the integer step     | unit test; pikr on Hyprland                     | n/a                                                         | n/a                                  |
-  | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)                       | CI, laptop (Xwayland, `grim`; Xvfb and picom, ignored test) | laptop                               |
-  | `display_adapter`                             | laptop (iGPU; MX550 under sway on `renderD129`) | laptop (Xwayland, DRI3)                                     | laptop                               |
-  | `Presenter::resize` with frames in flight     | CI, laptop                                      | CI, laptop (`run_sandbox_resize`)                           | laptop                               |
-  | `push_opacity` groups                         | n/a                                             | n/a                                                         | CI (lavapipe), laptop (Intel, MX550) |
-  | Pointer leave between own windows (Win32 fix) | CI test, laptop                                 | CI test (Xvfb only)                                         | n/a                                  |
+  | Feature                                       | Wayland                                         | X11                                                     | Vulkan                               |
+  | --------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------- | ------------------------------------ |
+  | `request_frame` / `FrameReady`                | CI, laptop                                      | CI                                                      | n/a                                  |
+  | Presenter frame gating                        | CI, laptop (sandbox)                            | CI (no frame callback: answered at the next pump)       | laptop                               |
+  | `set_panel` in place                          | CI, laptop; lyr on Hyprland                     | CI test, laptop (Xvfb, openbox)                         | n/a                                  |
+  | `set_input_region`                            | CI, laptop                                      | CI                                                      | n/a                                  |
+  | Cursor shapes                                 | CI, laptop                                      | CI (libxcb-cursor)                                      | n/a                                  |
+  | Escape dismisses a `Grab` popup               | CI, laptop                                      | CI test, laptop (Xvfb, openbox)                         | n/a                                  |
+  | Popup reposition                              | refusal in CI; real path laptop                 | CI test, laptop (Xvfb, openbox)                         | n/a                                  |
+  | Panel at fractional scale (S21)               | laptop + CI test                                | n/a                                                     | n/a                                  |
+  | Fractional scale without the integer step     | unit test; pikr on Hyprland                     | n/a                                                     | n/a                                  |
+  | Transparent window, premultiplied (S16)       | laptop (`grim` read-back)                       | CI, laptop (Xwayland, `grim`; Xvfb and picom, `import`) | laptop                               |
+  | `display_adapter`                             | laptop (iGPU; MX550 under sway on `renderD129`) | laptop (Xwayland, DRI3)                                 | laptop                               |
+  | `Presenter::resize` with frames in flight     | CI, laptop                                      | CI, laptop (`run_sandbox_resize`)                       | laptop                               |
+  | `push_opacity` groups                         | n/a                                             | n/a                                                     | CI (lavapipe), laptop (Intel, MX550) |
+  | Pointer leave between own windows (Win32 fix) | CI test, laptop                                 | CI test (Xvfb only)                                     | n/a                                  |
 
   Still open from the table: nothing runnable here. X11's pointer-leave test
   (`crossing_into_another_of_our_windows_leaves_the_first` in `x11_e2e`, added

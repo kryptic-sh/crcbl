@@ -126,7 +126,8 @@ TRANSPARENCY_LOG="${SWAY_RUNTIME_DIR}/transparency.log"
 set +e
 # The second test puts the window on sway's Xwayland, whose `DISPLAY` only sway
 # knows: a command it runs inherits it, so one writes it down. The third needs a
-# plain X server with a compositing manager, which this session is not.
+# plain X server with a compositing manager, which this session is not;
+# `run-x11-e2e.sh` runs it.
 DISPLAY_FILE="${SWAY_RUNTIME_DIR}/xwayland-display"
 swaymsg exec "printenv DISPLAY > ${DISPLAY_FILE}" >/dev/null
 for _ in $(seq 50); do

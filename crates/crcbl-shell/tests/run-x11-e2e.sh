@@ -71,6 +71,11 @@ source "${REPO_ROOT}/tools/x11-display.sh"
 # shellcheck source=tools/vk-validation-log.sh
 source "${REPO_ROOT}/tools/vk-validation-log.sh"
 
+# And which manifest names lavapipe is `crcbl-vk`'s, for the compositor
+# read-back below.
+# shellcheck source=crates/crcbl-vk/tests/vulkan-icd.sh
+source "${REPO_ROOT}/crates/crcbl-vk/tests/vulkan-icd.sh"
+
 cd "$REPO_ROOT"
 OUTPUT="${RUNTIME_DIR}/nextest.log"
 set +e
@@ -145,6 +150,73 @@ if [ "$STATUS" -ne 0 ] || ! crcbl_nextest_summary "$ACCESS_PLAIN" "crcbl e2e" \
     echo "crcbl e2e: the AT-SPI reader failed or did not run exactly one test" >&2
     log_tail
     exit 1
+fi
+
+# S16 under an X compositing manager: picom on this Xvfb, a transparent Vulkan
+# window over an opaque one, and the screen read back with ImageMagick's
+# `import`, which is the only check that a plain X server's compositor blends
+# what the swapchain asked for (premultiplied). `run-wayland-e2e.sh` reads the
+# Wayland and Xwayland halves; this one lives in `crcbl-app`, beside them.
+#
+# Only with no window manager: the test probes a pixel inside both windows at
+# the screen's origin, where a bare server opens them and openbox does not.
+# Pinned to lavapipe, because Mesa's X11 WSI offers premultiplied alpha only
+# where the visual has it, and an NVIDIA device on Xvfb offers opaque alone.
+# picom names a window `picom` when it takes `_NET_WM_CM_S0`; the window
+# appearing is the cue, since the test asserts the transparent cap at once.
+run_compositor_readback() {
+    local log="${RUNTIME_DIR}/compositor.log"
+    local picom_log="${RUNTIME_DIR}/picom.log"
+    echo "crcbl e2e: reading a transparent window back through picom with import"
+    picom --backend xrender --config /dev/null >"$picom_log" 2>&1 &
+    local picom_pid=$!
+    local ready=""
+    for _ in $(seq 50); do
+        if xwininfo -root -tree 2>/dev/null | grep -q '"picom"'; then
+            ready=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [ -z "$ready" ]; then
+        echo "crcbl e2e: picom did not take the compositor selection" >&2
+        tail -n 20 "$picom_log" >&2
+        kill "$picom_pid" 2>/dev/null || true
+        log_tail
+        exit 1
+    fi
+    set +e
+    (
+        CRCBL_VK_ICD=/usr/share/vulkan/icd.d/lvp_icd.json
+        crcbl_pin_vk_icd "crcbl e2e"
+        CRCBL_SHELL=x11 cargo test --locked -q -p crcbl-app --test wayland_transparency \
+            -- --ignored --nocapture --test-threads=1 --exact \
+            a_window_under_an_x_compositing_manager_is_blended_premultiplied
+    ) 2>&1 | tee "$log"
+    local status=${PIPESTATUS[0]}
+    set -e
+    kill "$picom_pid" 2>/dev/null || true
+    wait "$picom_pid" 2>/dev/null || true
+    local plain="${RUNTIME_DIR}/compositor.plain.log"
+    crcbl_nextest_plain "$log" "$plain"
+    if [ "$status" -ne 0 ] || ! grep -q "test result: ok. 1 passed" "$plain"; then
+        echo "crcbl e2e: the read-back under picom failed or ran no test" >&2
+        log_tail
+        exit 1
+    fi
+}
+
+if [ -z "${WM_PID:-}" ]; then
+    if command -v picom >/dev/null && command -v import >/dev/null \
+        && command -v xwininfo >/dev/null; then
+        run_compositor_readback
+    else
+        echo "crcbl e2e: no picom, import or xwininfo; skipping the compositor read-back" >&2
+        if [ -n "${CI:-}" ]; then
+            echo "crcbl e2e: ...and this is CI, where they are installed on purpose" >&2
+            exit 1
+        fi
+    fi
 fi
 
 # The X11 half of the foundations stage's sandbox exit criterion — see

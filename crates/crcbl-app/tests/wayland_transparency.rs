@@ -36,6 +36,8 @@
 //! backdrop opens on the NVIDIA MX550, whose surface for an Xvfb window offers
 //! only opaque alpha, and the Intel adapter cannot present to an X server
 //! without DRI3. It fails without picom, at the capability check.
+//! `crates/crcbl-shell/tests/run-x11-e2e.sh` runs it in its pass with no window
+//! manager, starting picom and pinning lavapipe itself.
 
 #![cfg(target_os = "linux")]
 
