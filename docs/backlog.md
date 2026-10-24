@@ -4190,11 +4190,10 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
 - **Not upstream, worth porting one commit at a time** (cherry-pick, re-run
   `crcbl-shaders`' generator rather than resolving generated files, re-measure
   on the current tree since the numbers in the branch's backlog predate a month
-  of renderer work): half-resolution SSR march (re-blesses `golden/ssr.png`),
-  degraded-broadphase BVH rebuild (`crcbl-phys`), parallel sandbox crowd
-  queries, and the `combined` stress scene with its simulation tick-timing
-  report (`020447e2`, `1286e3ca`, `e957219b`, `3d61e0e1`) and the many-bucket
-  fixture (`cc3371d6`).
+  of renderer work): degraded-broadphase BVH rebuild (`crcbl-phys`), parallel
+  sandbox crowd queries, and the `combined` stress scene with its simulation
+  tick-timing report (`020447e2`, `1286e3ca`, `e957219b`, `3d61e0e1`) and the
+  many-bucket fixture (`cc3371d6`).
 - **Ported: the render stress fixtures and `--wall-clock`** (2026-10-24), as
   `sandbox --stress <NAME>` in `apps/sandbox/src/stress.rs`, because `--scene`
   already opens a `.scn/` directory on main. The fixtures replace the cube; the
@@ -4243,6 +4242,25 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   2026-10-24. Slang's MSL output allocates the module-scope `tile_histogram`
   threadgroup array in `clearMain` and `reduceMain` too, not only in
   `histogramMain`; whether that costs occupancy on Apple GPUs is unknown.
+- **Decision needed: march screen-space reflections at half resolution?** The
+  campaign's `3ac980e8` marches SSR over one pixel per 2×2 block (the nearest
+  surface in it) and reconstructs at full resolution. Ported and parked
+  2026-10-24 on the local branch `port/ssr-half` (commit "wip: half-resolution
+  SSR march"), because it is an image-quality trade, not a free win:
+  - **Gain.** `ssr` + `ssr-blur` p50 on the RX 7900 XTX, after the empty-probe
+    skip: 0.061 → 0.032 ms (Vulkan) and 0.044 → 0.029 ms (D3D12) at 1080p, 0.400
+    → 0.260 and 0.184 → 0.121 ms at 4K. The MX550 measured 2.142 → 0.885 ms at
+    1080p and 8.914 → 3.513 ms at 4K, so the case is weak GPUs.
+  - **Cost.** `golden/ssr.png` moves inside the pyramid's reflection only (SSIM
+    0.9992; re-blessed on lavapipe on the branch). `golden/meadow.png` does not
+    pass: 15.5% of pixels over tolerance, SSIM 0.971, max channel delta 39, all
+    in the grass, because thin blades lose detail through the half-resolution
+    reconstruction. Pure-sky rows also change by one level in a few hundred
+    pixels, which is unexplained and would need understanding before shipping.
+  - **Options.** Ship it as the default and re-bless `meadow` (weak GPUs gain
+    most, grass reflections soften); decline it and keep full resolution; or
+    make the march resolution an `[engine.video]` quality setting so both exist,
+    which needs a setting, a second pipeline path and tests of both.
 - **Carried over from the branch about the fixtures:** at 1920x1080 `moving`'s
   whole-grid rotation changes pixel coverage, so its GPU rows are not upload
   evidence; only its CPU frame interval is. The MX550 showed the host upload
