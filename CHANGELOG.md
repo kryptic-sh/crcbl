@@ -92,7 +92,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   specular lobe, and the drivers measured paid for the discarded lobe in full.
   It now skips the lobe: on an RX 7900 XTX the forward pass is 26–29% cheaper
   under rectangular fill lights and 6% under point fill lights, against up to 4%
-  more under ordinary rectangular lights.
+  more under ordinary rectangular lights. On a GeForce MX550 nothing got dearer:
+  27.5% cheaper under rectangular fill lights, 9.5% under point fill lights and
+  about 1% under ordinary ones.
 
 ### Fixed
 

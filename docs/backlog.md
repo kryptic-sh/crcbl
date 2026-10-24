@@ -4230,7 +4230,11 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   `lights-fit`, but rose 0.6–0.9% (Vulkan) and 3–4% (D3D12) in `area-lights-fit`
   and 1.5% in Vulkan's `specular-lights-fit` (0.01–0.04 ms), the branch's own
   cost where no light skips anything. Kept, because fill lights are the ones
-  scenes hold many of. Not measured on the MX550 or any non-AMD adapter yet.
+  scenes hold many of. On the office laptop's MX550 (Vulkan, NVIDIA 615.78,
+  2026-10-24, three mirrored pairs at `2ac4b17e` against `09780bf0`) nothing
+  rose: `forward` p50 fell 27.5% in `area-fill-lights-fit` (9.161 to 6.643 ms),
+  9.5% in `lights-fit`, 1.2% in `specular-lights-fit` and 0.8% in
+  `area-lights-fit`. Not measured on Intel.
 - **The empty-probe early return is unmeasured on a populated volume.** Ported
   2026-10-24: `probe_irradiance` (mesh) and `probe_environment` (SSR, water)
   return zero when `probe_counts.w`, the host-written total, is zero. Every
@@ -4243,7 +4247,11 @@ to origin. A trial merge conflicts in 38 files: the regenerated shader outputs,
   by `SHADOW_SEARCH_TEXELS`, bit-identical to the old product. `forward` did not
   move on Vulkan or D3D12 in `instances` or `specular-lights-fit` (two mirrored
   pairs); the September campaign measured 1.0–1.1% on the MX550's `instances`.
-  Kept as exact work removed; an MX550 re-run on the current tree is owed.
+  Kept as exact work removed. Re-run on the MX550 (2026-10-24, three mirrored
+  pairs at `15a82dc1` against `dd3d36ff`): `forward` p50 fell 1.1% in
+  `lights-fit` (2.583 to 2.555 ms, the two commits' runs not overlapping) and
+  0.4% in `specular-lights-fit`, within a run's spread; `instances` was not
+  re-run.
 - **Declined: forcing the blocker search to unroll (2026-10-24).** The
   campaign's `[ForceUnroll]` on `sun_penumbra_texels`' loop (`5f511756`) grew
   mesh SPIR-V 212,564 → 231,112 bytes, grass 263,456 → 319,892 and water 150,800
@@ -19337,14 +19345,26 @@ own app id or under 480 as far as 480 allows.
   then failed with `NoSymbol("SteamAPI_SteamApps_v009")` (slice 1 stopped
   earlier, at `SteamAPI_SteamUtils_v011`) — the loader works on a real DLL; the
   1.65 surface is unexercised. Without any library, `NoLibrary` listed the path
-  and `LoadLibraryExW`'s error 126. Linux and macOS loaders were not run at all.
-  What the smoke test asks, under 480 on each OS: init succeeds; `steam_id()` is
-  non-zero and the same across two runs; 300 pumps leave `decode_mismatches` at
-  zero; drop and exit are clean. And by hand: with Steam stopped,
-  `NoSteamClient` says so; with the redistributable absent, `NoLibrary` lists
-  the paths; without `steam_appid.txt`, the message names the file and the
-  working directory. On macOS, record whether a browser-downloaded dylib's
-  quarantine attribute had to be cleared.
+  and `LoadLibraryExW`'s error 126. **The Linux loader ran on the office laptop
+  (2026-10-24, Arch, Steam installed but not running)**: with no library,
+  `NoLibrary` named the path beside the test binary and that `CRCBL_STEAM_SDK`
+  is unset; with `CRCBL_STEAM_SDK` pointing at a scratch
+  `redistributable_bin/linux64/` holding the Steam client's own
+  `steamrt64/libsteam_api.so`, `Steam::init` opened it with `dlopen`, resolved
+  every symbol bound so far (so that copy has `SteamAPI_SteamApps_v009`, where
+  the Windows game's older copy stopped), loaded `steamclient.so`, and answered
+  `NoSteamClient` with the client's "Cannot create IPC pipe" message, the
+  working directory and whether `steam_appid.txt` was present. Not run there:
+  anything with Steam running and logged in (it would sign in the owner's
+  account), so the missing-`steam_appid.txt` message, which needs a running
+  client to tell apart, is unseen. The macOS loader was not run at all. What the
+  smoke test asks, under 480 on each OS: init succeeds; `steam_id()` is non-zero
+  and the same across two runs; 300 pumps leave `decode_mismatches` at zero;
+  drop and exit are clean. And by hand: with Steam stopped, `NoSteamClient` says
+  so; with the redistributable absent, `NoLibrary` lists the paths; without
+  `steam_appid.txt`, the message names the file and the working directory. On
+  macOS, record whether a browser-downloaded dylib's quarantine attribute had to
+  be cleared.
 - **The `pack(4)` layout tables** (Linux and macOS) come from a C++ program
   compiled with MinGW GCC against the mirror's headers, `pack(4)` obtained by
   forcing the platform test in a copy of `steamclientpublic.h` — so the
@@ -28536,18 +28556,23 @@ without the capability.
 
 What is still owed:
 
-- **`vkWaitForPresentKHR` is verified on radv only, and CI does not run it at
-  all.** `VK_KHR_present_wait` is a driver-conditional extension: this
-  developer's radv exposes it, lavapipe does not (`vulkaninfo` lists it under
-  both RADV devices and under neither llvmpipe entry), and lavapipe is what CI
-  runs for both `vk e2e` and the wayland sandbox pass. So every CI leg exercises
-  the _absent-capability_ path and proves nothing about the wait. `run_sandbox`
-  in `crates/crcbl-shell/tests/run-wayland-e2e.sh` says so on stderr rather than
-  passing quietly, and asserts the two halves agree when the extensions are
-  there — the backend's own `vkWaitForPresentKHR on present` line has to appear,
-  which is the only thing that tells a real wait from the immediate `Ok(())`.
-  Closing this needs a CI leg with a driver that has the pair; nothing else will
-  do it.
+- **`vkWaitForPresentKHR` is verified on radv, NVIDIA and Intel's ANV only, and
+  CI does not run it at all.** `VK_KHR_present_wait` is a driver-conditional
+  extension: this developer's radv exposes it, lavapipe does not (`vulkaninfo`
+  lists it under both RADV devices and under neither llvmpipe entry), and
+  lavapipe is what CI runs for both `vk e2e` and the wayland sandbox pass. So
+  every CI leg exercises the _absent-capability_ path and proves nothing about
+  the wait. `run_sandbox` in `crates/crcbl-shell/tests/run-wayland-e2e.sh` says
+  so on stderr rather than passing quietly, and asserts the two halves agree
+  when the extensions are there — the backend's own
+  `vkWaitForPresentKHR on present` line has to appear, which is the only thing
+  that tells a real wait from the immediate `Ok(())`. On the office laptop
+  (2026-10-24, headless sway on the Intel GPU) it passed on both its adapters:
+  the MX550 (NVIDIA 615.78) and, with `VK_DRIVER_FILES` naming `intel_icd.json`,
+  the Intel RPL-U (Mesa 26.2.5). On each, the windowed and fullscreen sandbox
+  paced 120 frames on `vkWaitForPresentKHR`, its unpresented-id probe answered
+  at once, and horde paced on it too. Closing this needs a CI leg with a driver
+  that has the pair; nothing else will do it.
 
 - **The windowed half of the `wait_until_presented` id check now has a check.**
   `run-wayland-e2e.sh` runs the sandbox with `--wait-unpresented`: on its first
