@@ -22,11 +22,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   that, with the sun, exactly fill one froxel's list), `specular-lights-fit`
   (the same lights with specular on), `area-lights-fit` and
   `area-fill-lights-fit` (rectangular lights at the same occupancy, with and
-  without specular) and `lights` (an overlapping field that overflows the froxel
-  lists). `--wall-clock` drives a headless run from the real clock, so the CPU
-  frame line printed at exit measures the frame instead of the fixed step.
-  Together with `CRCBL_LOG=info` and the per-pass GPU report, they are the
-  sandbox's benchmark.
+  without specular), `lights` (an overlapping field that overflows the froxel
+  lists) and `exposure` (the grid with auto-exposure metering every frame).
+  `--wall-clock` drives a headless run from the real clock, so the CPU frame
+  line printed at exit measures the frame instead of the fixed step. Together
+  with `CRCBL_LOG=info` and the per-pass GPU report, they are the sandbox's
+  benchmark.
 
 ### Changed
 

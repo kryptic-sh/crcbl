@@ -13,7 +13,7 @@
 
 use crcbl::math::{Mat4, Quat, Vec3};
 use crcbl::render::{
-    ForwardRenderer, InstanceDesc, InstanceHandle, Light, PointLight, RectLight,
+    ForwardRenderer, InstanceDesc, InstanceHandle, Light, PointLight, RectLight, RenderEffects,
     scene::{DEMO_CUBE, DEMO_UNTINTED},
 };
 use crcbl::shaders::light::CLUSTER_LIGHT_CAPACITY;
@@ -46,11 +46,14 @@ pub enum Stress {
     AreaFillLightsFit,
     /// The instance grid under an overlapping field of local lights.
     Lights,
+    /// The instance grid with auto-exposure metering every frame, which the
+    /// sandbox's default camera layer leaves off.
+    Exposure,
 }
 
 impl Stress {
     /// Every fixture, in the order `--help` lists them.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Instances,
         Self::Moving,
         Self::LightsFit,
@@ -58,6 +61,7 @@ impl Stress {
         Self::AreaLightsFit,
         Self::AreaFillLightsFit,
         Self::Lights,
+        Self::Exposure,
     ];
 
     /// Parses the spelling accepted by `sandbox --stress`.
@@ -77,6 +81,7 @@ impl Stress {
             Self::AreaLightsFit => "area-lights-fit",
             Self::AreaFillLightsFit => "area-fill-lights-fit",
             Self::Lights => "lights",
+            Self::Exposure => "exposure",
         }
     }
 
@@ -94,7 +99,7 @@ impl Stress {
     #[must_use]
     pub const fn light_count(self) -> usize {
         match self {
-            Self::Instances | Self::Moving => 0,
+            Self::Instances | Self::Moving | Self::Exposure => 0,
             Self::LightsFit
             | Self::SpecularLightsFit
             | Self::AreaLightsFit
@@ -128,6 +133,13 @@ impl Fixture {
             })
             .collect();
         renderer.set_lights(&lights(stress));
+        if stress == Stress::Exposure {
+            // The camera layer, because auto-exposure is a lens effect a view
+            // asks for; the player's clamp and the rest stay as opened.
+            let mut request = renderer.effect_request();
+            request.camera = request.camera.union(RenderEffects::AUTO_EXPOSURE);
+            renderer.set_effect_request(request);
+        }
         Self { stress, instances }
     }
 

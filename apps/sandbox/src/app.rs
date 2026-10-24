@@ -1081,6 +1081,32 @@ mod tests {
         );
     }
 
+    /// **The `exposure` fixture turns metering on in the frame it draws**, and
+    /// the grid it shares does not: the camera layer is what it changes.
+    #[test]
+    fn the_exposure_fixture_resolves_auto_exposure_and_the_grid_does_not() {
+        let resolved = |stress| {
+            let mut engine = scripted(&Options {
+                stress: Some(stress),
+                ..headless(8)
+            });
+            run_frames(&mut engine, 2);
+            let effects = engine.gpu().effects();
+            engine
+                .finish(ExitReason::CloseRequested)
+                .expect("the loop tears down");
+            effects.contains(crcbl::render::RenderEffects::AUTO_EXPOSURE)
+        };
+        assert!(
+            !resolved(Stress::Instances),
+            "the control already meters, so the comparison below proves nothing"
+        );
+        assert!(
+            resolved(Stress::Exposure),
+            "the exposure fixture's frame resolved no auto-exposure"
+        );
+    }
+
     /// **The sandbox can turn the panel on too, and F3 is all it takes.**
     ///
     /// Rule 4 applies to the sandbox as much as to a game, and the sandbox had

@@ -35,9 +35,10 @@ OPTIONS:
         --stress <NAME>   Draw a fixed renderer workload in the cube's place:
                           `instances`, `moving`, `lights-fit`,
                           `specular-lights-fit`, `area-lights-fit`,
-                          `area-fill-lights-fit` or `lights`. Each holds its
-                          load for the complete run, so tail timings taken
-                          under --wall-clock are comparable between runs.
+                          `area-fill-lights-fit`, `lights` or `exposure`.
+                          Each holds its load for the complete run, so tail
+                          timings taken under --wall-clock are comparable
+                          between runs.
         --backend <NAME>  GPU backend: `vk`, `mtl`, `dx12`, `wgpu`, `webgpu` or
                           `null`.
                           Default: choose one, which means Metal on macOS and
