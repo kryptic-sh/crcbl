@@ -13,11 +13,11 @@
 //! this departs from the specification's first-match rule as GTK does.
 //! Otherwise the file in the directory nearest by the specification's
 //! `DirectorySizeDistance`, the nominal size again breaking a tie. Each
-//! directory is tried for PNG, then SVG, then XPM. A name that misses everywhere is tried
-//! again as each of the caller's generic fallback names, so an application
-//! with no icon still gets the generic one. An absolute path is returned as it
-//! is, if the file exists, since `Icon=` and a notification's `app_icon` may
-//! name one.
+//! directory is tried for PNG, then SVG, then XPM. A name that misses
+//! everywhere is tried again as each of the caller's generic fallback names, so
+//! an application with no icon still gets the generic one. An absolute path is
+//! returned as it is, if the file exists, since `Icon=` and a notification's
+//! `app_icon` may name one.
 //!
 //! # Where it looks
 //!
@@ -35,13 +35,15 @@
 //! A found icon is remembered for the life of the [`IconThemes`]. A miss is
 //! remembered for the caller's `miss_retry` and looked up afresh after it, so a
 //! theme installed while the program runs is found without a restart. Each
-//! theme directory's file names are read once and kept on the same clock,
-//! because the specification's algorithm would otherwise test hundreds of
-//! paths per icon. What a found file holds is the caller's to cache:
+//! theme's directories are read once into an index of the icons they hold,
+//! rebuilt on the same clock, because the specification's algorithm would
+//! otherwise test hundreds of paths per icon; a lookup then ranks only the
+//! directories that hold the name, as GTK's `icon-theme.cache` lets it do.
+//! What a found file holds is the caller's to cache:
 //! [`FileVersion`] is the key that says when it changed.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -216,6 +218,63 @@ struct Theme {
     inherits: Vec<String>,
 }
 
+/// Where a theme holds its icons: each icon's name, without its extension, to
+/// the copies of it, and when the directories were read.
+#[derive(Debug)]
+struct Index {
+    icons: HashMap<OsString, Vec<Spot>>,
+    at: Instant,
+}
+
+/// One copy of an icon: positions in [`Theme::dirs`], in that directory's
+/// copies and in [`EXTENSIONS`].
+#[derive(Clone, Copy, Debug)]
+struct Spot {
+    dir: usize,
+    root: usize,
+    extension: usize,
+}
+
+impl Index {
+    /// Reads every directory of `theme`; a directory that cannot be read
+    /// holds nothing.
+    fn read(theme: &Theme, now: Instant) -> Self {
+        let mut icons: HashMap<OsString, Vec<Spot>> = HashMap::new();
+        for (dir, (_, directories)) in theme.dirs.iter().enumerate() {
+            for (root, directory) in directories.iter().enumerate() {
+                let Ok(entries) = std::fs::read_dir(directory) else {
+                    continue;
+                };
+                for entry in entries.filter_map(Result::ok) {
+                    let name = entry.file_name();
+                    let file = Path::new(&name);
+                    let (Some(stem), Some(extension)) = (file.file_stem(), file.extension()) else {
+                        continue;
+                    };
+                    let Some(extension) = EXTENSIONS.iter().position(|known| *known == extension)
+                    else {
+                        continue;
+                    };
+                    let spot = Spot {
+                        dir,
+                        root,
+                        extension,
+                    };
+                    // Most names recur in every size's directory: own the key
+                    // only the first time.
+                    match icons.get_mut(stem) {
+                        Some(spots) => spots.push(spot),
+                        None => {
+                            icons.insert(stem.to_owned(), vec![spot]);
+                        }
+                    }
+                }
+            }
+        }
+        Self { icons, at: now }
+    }
+}
+
 /// Reads a theme's `index.theme`: the desktop-entry format, groups of
 /// `key=value` lines, `#` comments. Only the keys the lookup needs are read,
 /// and a localised key (`Name[de]`) is a different key and ignored.
@@ -314,6 +373,7 @@ pub struct IconThemes {
     generic_names: Vec<String>,
     miss_retry: Duration,
     themes: HashMap<String, Option<Arc<Theme>>>,
+    indexes: HashMap<String, Index>,
     listings: HashMap<PathBuf, Listing>,
     cache: HashMap<(String, u32, u32), Cached>,
 }
@@ -329,6 +389,7 @@ impl IconThemes {
             generic_names: Vec::new(),
             miss_retry,
             themes: HashMap::new(),
+            indexes: HashMap::new(),
             listings: HashMap::new(),
             cache: HashMap::new(),
         }
@@ -436,56 +497,13 @@ impl IconThemes {
             return None;
         }
         let parsed = self.theme(theme)?;
-        if let Some(path) = self.lookup_in(query, &parsed) {
+        if let Some(path) = lookup_in(query, &parsed, self.index(theme, &parsed, query.now)) {
             return Some(path);
         }
         parsed
             .inherits
             .iter()
             .find_map(|parent| self.find_in_theme(query, parent, depth + 1, visited))
-    }
-
-    /// The specification's `LookupIcon` in one theme, ranking matching
-    /// directories by nominal size as the [module docs](self) say.
-    fn lookup_in(&mut self, query: Query<'_>, theme: &Theme) -> Option<PathBuf> {
-        let Query {
-            name,
-            size,
-            scale,
-            now,
-        } = query;
-        let files: Vec<OsString> = EXTENSIONS
-            .iter()
-            .map(|extension| format!("{name}.{extension}").into())
-            .collect();
-        // Lower is better: a match before a miss, then the specification's
-        // distance (zero for a match), then the nominal size's gap. The first
-        // directory and extension keep a tie.
-        let mut best: Option<((bool, u64, u64), PathBuf)> = None;
-        for (dir, directories) in &theme.dirs {
-            let rank = (
-                !dir.matches(size, scale),
-                dir.distance(size, scale),
-                dir.nominal_gap(size, scale),
-            );
-            if best.as_ref().is_some_and(|(known, _)| *known <= rank) {
-                continue;
-            }
-            for directory in directories {
-                let listing = self.listing(directory, now);
-                if let Some(file) = files.iter().find(|file| listing.contains(*file)) {
-                    best = Some((rank, directory.join(file)));
-                    break;
-                }
-            }
-            if best
-                .as_ref()
-                .is_some_and(|(known, _)| *known == (false, 0, 0))
-            {
-                break;
-            }
-        }
-        best.map(|(_, path)| path)
     }
 
     /// `theme`'s description, read once; `None` for a theme with no
@@ -524,15 +542,24 @@ impl IconThemes {
         parsed
     }
 
-    /// Whether `directory` holds `file`, from its listing.
-    fn listed(&mut self, directory: &Path, file: &str, now: Instant) -> bool {
-        self.listing(directory, now)
-            .contains(std::ffi::OsStr::new(file))
+    /// `theme`'s index, read again once it is older than the miss retry.
+    fn index(&mut self, name: &str, theme: &Theme, now: Instant) -> &Index {
+        let stale = self
+            .indexes
+            .get(name)
+            .is_none_or(|index| now.duration_since(index.at) >= self.miss_retry);
+        if stale {
+            self.indexes
+                .insert(name.to_owned(), Index::read(theme, now));
+        }
+        self.indexes
+            .get(name)
+            .expect("indexed just above when missing or stale")
     }
 
-    /// `directory`'s file names, read again once they are older than the miss
-    /// retry.
-    fn listing(&mut self, directory: &Path, now: Instant) -> &HashSet<OsString> {
+    /// Whether `directory` holds `file`, from its file names, read again once
+    /// they are older than the miss retry.
+    fn listed(&mut self, directory: &Path, file: &str, now: Instant) -> bool {
         let stale = self
             .listings
             .get(directory)
@@ -549,12 +576,40 @@ impl IconThemes {
             self.listings
                 .insert(directory.to_owned(), Listing { names, at: now });
         }
-        &self
-            .listings
+        self.listings
             .get(directory)
             .expect("listed just above when missing or stale")
             .names
+            .contains(OsStr::new(file))
     }
+}
+
+/// The specification's `LookupIcon` in one theme, ranking the directories that
+/// hold the icon by nominal size as the [module docs](self) say.
+fn lookup_in(query: Query<'_>, theme: &Theme, index: &Index) -> Option<PathBuf> {
+    let Query {
+        name, size, scale, ..
+    } = query;
+    // Lower is better: a match before a miss, then the specification's
+    // distance (zero for a match), then the nominal size's gap. The first
+    // directory, copy and extension keep a tie.
+    let spot = index
+        .icons
+        .get(OsStr::new(name))?
+        .iter()
+        .min_by_key(|spot| {
+            let (dir, _) = &theme.dirs[spot.dir];
+            (
+                !dir.matches(size, scale),
+                dir.distance(size, scale),
+                dir.nominal_gap(size, scale),
+                spot.dir,
+                spot.root,
+                spot.extension,
+            )
+        })?;
+    let (_, directories) = &theme.dirs[spot.dir];
+    Some(directories[spot.root].join(format!("{name}.{}", EXTENSIONS[spot.extension])))
 }
 
 #[cfg(test)]
@@ -825,6 +880,24 @@ Type=Fixed
         scratch.write("icons/Adwaita/48x48/apps/mail.svg", "");
         let png = scratch.write("icons/Adwaita/48x48/apps/mail.png", "");
         assert_eq!(themes(&scratch).lookup("mail", 48, 1), Some(png));
+    }
+
+    #[test]
+    fn the_first_listed_of_two_equal_directories_wins() {
+        let scratch = Scratch::new();
+        scratch.write(
+            "icons/hicolor/index.theme",
+            "[Icon Theme]
+Directories=48x48/devices,48x48/apps
+             [48x48/devices]
+Size=48
+             [48x48/apps]
+Size=48
+",
+        );
+        scratch.write("icons/hicolor/48x48/apps/phone.png", "");
+        let devices = scratch.write("icons/hicolor/48x48/devices/phone.png", "");
+        assert_eq!(themes(&scratch).lookup("phone", 48, 1), Some(devices));
     }
 
     #[test]

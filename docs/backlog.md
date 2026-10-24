@@ -1964,20 +1964,20 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       fallback themes (before `hicolor`) and generic names, absolute paths,
       `SearchPath::from_environment` and `SearchPath::prepend` for a tray's
       `IconThemePath`, hits cached for good and misses for `miss_retry`, and
-      each directory's file names read once on the same clock (the
-      specification's algorithm tests hundreds of paths per icon otherwise). The
-      published `DirectorySizeDistance` reads `MinSize` and `MaxSize` in its
-      `Threshold` branch; this uses the threshold's own bounds, as GTK does.
-      Verified by its unit tests on Windows and on Linux (WSL), over themes
-      built in a temporary directory, and fourteen hand mutants, each failing
-      its own test. **Compared with GTK 3 on the office laptop's installed
-      themes** (2026-10-24; Adwaita, Breeze, Papirus and hicolor; 400 sampled
-      names, 11 size and scale pairs each, 17,952 lookups, against
-      `Gtk.IconTheme.lookup_icon_for_scale` through Python): with Adwaita given
-      as a fallback theme, which GTK always adds, crcbl found everything GTK
-      found. **Decided 2026-10-24: among matching directories the nearest
-      nominal size wins**, as GTK does, rather than the specification's first
-      match (hicolor lists `22x22/apps`, whose threshold takes 24, before
+      each theme's directories read once into an index of the icons they hold,
+      on the same clock (the specification's algorithm tests hundreds of paths
+      per icon otherwise). The published `DirectorySizeDistance` reads `MinSize`
+      and `MaxSize` in its `Threshold` branch; this uses the threshold's own
+      bounds, as GTK does. Verified by its unit tests on Windows and on Linux
+      (WSL), over themes built in a temporary directory, and fourteen hand
+      mutants, each failing its own test. **Compared with GTK 3 on the office
+      laptop's installed themes** (2026-10-24; Adwaita, Breeze, Papirus and
+      hicolor; 400 sampled names, 11 size and scale pairs each, 17,952 lookups,
+      against `Gtk.IconTheme.lookup_icon_for_scale` through Python): with
+      Adwaita given as a fallback theme, which GTK always adds, crcbl found
+      everything GTK found. **Decided 2026-10-24: among matching directories the
+      nearest nominal size wins**, as GTK does, rather than the specification's
+      first match (hicolor lists `22x22/apps`, whose threshold takes 24, before
       `24x24/apps`, so a 24-pixel `firefox` was the 22-pixel file). Rerun after
       that change, leaving out `compton`, whose icon was installed after GTK's
       answers were recorded: 1,600 answers name another file, 88 of them GTK's
@@ -1988,13 +1988,14 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       matching scale (breeze's `24@2x` over `16@3x` at 48 pixels). Lookup time
       over each theme's queries stayed within 8% of first match. Not tested in
       CI: its Linux runner has `hicolor` at most.
-    - **An uncached lookup still walks every directory of each theme it
-      reaches**: about 0.2 ms through hicolor's 649 directories in two roots on
-      the office laptop, mostly hashing each directory's path to find its
-      listing. A per-theme index of icon names to directories, built from the
-      listings once (GTK reads `icon-theme.cache` for the same reason), would
-      make it one lookup per theme; it has to be rebuilt on the miss-retry
-      clock. Found answers are cached, so this is first-draw cost.
+    - **A theme's index reads a symlinked directory once per name it is listed
+      under.** Papirus lists 111 directories, its `@2x` ones symlinks to the 1x
+      ones, so `Index::read` takes in 164,716 entries for 84,289 files: about 90
+      ms on the office laptop before the first answer in that theme (Adwaita and
+      hicolor about 5 ms, Breeze about 20). Reading each canonical directory
+      once and reusing its names for an alias would about halve Papirus's.
+      Measured with 20 and 150 lookups at 48 pixels, the walk it replaced read
+      the same and took the same time there, so this is not a regression.
     - **JPEG is in**, `jpeg::decode` behind the `jpeg` feature, written here:
       sequential and progressive Huffman frames with successive approximation,
       restart intervals, grey, YCbCr and RGB (by libjpeg's JFIF, Adobe and
