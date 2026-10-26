@@ -18,9 +18,9 @@
 //! # What it saves, per backend
 //!
 //! - **Vulkan**: with the driver's ICD manifest
-//!   ([`GpuChoice::locate_vulkan_driver`]), the instance is opened on that
-//!   driver alone (`crcbl_vk::VkInstance::open_driver`), so the loader loads no
-//!   other: on the office laptop (Intel RPL-U and NVIDIA MX550, Arch) an
+//!   (`GpuChoice::locate_vulkan_driver`, native only), the instance is opened
+//!   on that driver alone (`crcbl_vk::VkInstance::open_driver`), so the loader
+//!   loads no other: on the office laptop (Intel RPL-U and NVIDIA MX550, Arch) an
 //!   instance on Intel's driver opened in 8–9 ms with no NVIDIA library
 //!   loaded, against 60–77 ms and NVIDIA's device files held open for an
 //!   instance on every driver. Without a manifest it still names the adapter.

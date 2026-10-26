@@ -1743,7 +1743,7 @@ impl Presenter {
     /// save and give back as [`PresenterDesc::gpu_choice`] next time; see
     /// [`crate::gpu_choice`]. On Vulkan it carries the driver's manifest when
     /// the open used one; otherwise
-    /// [`GpuChoice::locate_vulkan_driver`] finds it, off the start-up path.
+    /// `GpuChoice::locate_vulkan_driver` finds it, off the start-up path.
     #[must_use]
     pub fn gpu_choice(&self) -> &GpuChoice {
         &self.gpu_choice
