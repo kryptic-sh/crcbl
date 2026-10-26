@@ -13,6 +13,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-26
+
 ### Breaking
 
 - **`crcbl::settings::presets::QualityPreset` has a new variant, `Potato`**, and
@@ -53,6 +55,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `anisotropic_filtering` is 8, 4, 2 and 1. `high` remains the engine's own
   defaults, so a settings file that selects nothing still reads as `high`.
   Selecting a tier now overwrites a hand-set `anisotropic_filtering`.
+
+### Fixed
+
+- **0.10.0 is incomplete on crates.io; use 0.11.0.** Its publish stopped after
+  `crcbl-rand`, `crcbl-console`, `crcbl-jobs`, `crcbl-vfx`, `crcbl-water` and
+  `crcbl-sprite`: `crcbl-font`'s dev-dependency on `crcbl-spawn` carried a
+  version, which crates.io resolves at upload, and `crcbl-spawn` comes later.
+  Internal dev-dependencies are path-only again, and
+  `tools/check-publish-order.sh` refuses a versioned one, so the release's dry
+  run would catch it before anything is uploaded.
 
 ## [0.10.0] - 2026-10-26
 
@@ -21462,7 +21474,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/kryptic-sh/crcbl/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/kryptic-sh/crcbl/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/kryptic-sh/crcbl/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/kryptic-sh/crcbl/compare/v0.8.0...v0.8.1
