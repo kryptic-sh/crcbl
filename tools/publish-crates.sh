@@ -16,9 +16,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 tools/check-publish-order.sh
 VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-# How long to wait after each upload: `cargo publish` already waits for the
-# index to show the crate, and this spaces the uploads under the rate limit.
+# How long to wait after each upload, to space the uploads under the rate
+# limit, once the index shows the crate.
 PACING_SECS=25
+# How long an uploaded version may take to reach the sparse index, polled
+# every INDEX_POLL_SECS. `cargo publish` waits only a minute and then moves on,
+# and on 2026-10-26 the index lagged the API by hours: v0.10.0 and v0.11.0
+# both stopped at the first crate whose dependency was uploaded but not yet
+# indexed, as `failed to select a version`. The next crate resolves its
+# dependencies from the index, so nothing is uploaded until it is there.
+INDEX_WAIT_SECS=7200
+INDEX_POLL_SECS=30
 # How many times a rate-limited upload is retried, each after the wait the
 # server names.
 RATE_LIMIT_RETRIES=6
@@ -33,6 +41,36 @@ SERVER_ERROR_RETRIES=3
 SERVER_ERROR_WAIT_SECS=60
 
 # Whether `crate` is on crates.io at this version.
+# The sparse index's path for a crate, by cargo's rule: one, two and three
+# characters long get their own directories, and longer names two levels of
+# two characters each.
+index_path() {
+  local name
+  name=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "${#name}" in
+    1) echo "1/${name}" ;;
+    2) echo "2/${name}" ;;
+    3) echo "3/${name:0:1}/${name}" ;;
+    *) echo "${name:0:2}/${name:2:2}/${name}" ;;
+  esac
+}
+
+# Waits until the sparse index lists `$1` at VERSION, or fails after
+# INDEX_WAIT_SECS.
+wait_for_index() {
+  local crate="$1" waited=0 url
+  url="https://index.crates.io/$(index_path "$crate")"
+  until curl -fsS -A "${crate}-release-ci" "$url" | grep -q "\"vers\":\"${VERSION}\""; do
+    if [ "$waited" -ge "$INDEX_WAIT_SECS" ]; then
+      echo "::error::${crate}@${VERSION} is on crates.io but not in its index after ${INDEX_WAIT_SECS}s"
+      return 1
+    fi
+    sleep "$INDEX_POLL_SECS"
+    waited=$((waited + INDEX_POLL_SECS))
+  done
+  echo "${crate}@${VERSION} is in the index"
+}
+
 published() {
   # crates.io answers a request with no User-Agent with a 403.
   curl -fsS -A "${1}-release-ci" -o /dev/null "https://crates.io/api/v1/crates/${1}/${VERSION}"
@@ -43,11 +81,13 @@ publish_if_missing() {
   local log="/tmp/publish_${crate}.log"
   if published "$crate"; then
     echo "::notice::${crate}@${VERSION} already on crates.io, skipping"
-    return 0
+    wait_for_index "$crate"
+    return
   fi
   local attempt=0 server_errors=0
   while [ "$attempt" -lt "$RATE_LIMIT_RETRIES" ]; do
     if cargo publish -p "$crate" --locked --no-verify 2>&1 | tee "$log"; then
+      wait_for_index "$crate" || return 1
       sleep "$PACING_SECS"
       return 0
     fi
@@ -56,6 +96,7 @@ publish_if_missing() {
       # then fail on a crate that already exists.
       if published "$crate"; then
         echo "::notice::${crate}@${VERSION} landed despite a server error"
+        wait_for_index "$crate" || return 1
         sleep "$PACING_SECS"
         return 0
       fi

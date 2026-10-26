@@ -3346,6 +3346,19 @@ chord into AltGr and drop both modifiers.
 
 ## The release pipeline: what 0.1.0 left open (2026-10-16)
 
+**v0.11.0's crates.io publish is incomplete (2026-10-26), waiting on the
+index.** The tag's run uploaded `crcbl-rand` through `crcbl-font` and stopped at
+`crcbl-image`: `failed to select a version for crcbl-font = "^0.11.0"`, because
+crates.io's sparse index (and its git mirror) still listed nothing after 0.9.0
+for crates the API reported at 0.10.0 and 0.11.0, hours after upload, while its
+status page read "All Systems Operational". A rerun of the failed jobs met the
+same. `tools/publish-crates.sh` now waits for each upload to reach the sparse
+index (`wait_for_index`, up to `INDEX_WAIT_SECS`) before the next crate, but a
+rerun of the v0.11.0 run uses the tag's own copy of the script, so that run can
+only finish by being rerun once the index lists `crcbl-font` 0.11.0
+(`curl -s https://index.crates.io/cr/cb/crcbl-font`). v0.10.0's publish stopped
+earlier, on a versioned dev-dependency, and is superseded by 0.11.0.
+
 The owner asked, relayed by the lyr session, for a release pipeline matching
 tmxr's. `ci.yml` now carries it: the `package`, `build`, `install-packages`,
 `publish-github-release`, `publish-crates`, `aur-bin`, `brew-tap`,
