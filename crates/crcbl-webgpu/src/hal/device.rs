@@ -1242,10 +1242,6 @@ impl Device for WebGpuDevice {
         &self,
         desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
-        // The one descriptor here carrying compiled output rather than program
-        // text, so its artifacts are measured against the stream's caps before
-        // anything is encoded — see `super::bounds`.
-        super::bounds::shader_module(desc)?;
         // WebGPU consumes WGSL and nothing else — `createShaderModule` has one
         // `code` member and it is WGSL text. A descriptor carrying only SPIR-V,
         // MSL or DXIL therefore compiles nothing here, and used to be encoded
@@ -1269,6 +1265,10 @@ impl Device for WebGpuDevice {
             msl: None,
             dxil: &[],
         };
+        // Measured against the stream's caps before anything is encoded — see
+        // `super::bounds` — and only what crosses: a SPIR-V module past the
+        // stream's array cap is no reason to refuse WGSL that fits.
+        super::bounds::shader_module(&wgsl_only)?;
         let handle: ShaderModuleHandle = self.pool.alloc();
         self.channel.with(|channel| {
             channel.encode(|stream| stream.create_shader_module(handle, &wgsl_only))

@@ -98,6 +98,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The WebGPU backend no longer refuses a shader module over SPIR-V it never
+  sends.** `create_shader_module` measured the caller's whole descriptor against
+  the stream's caps, then sent only the WGSL. Once the grass shader's SPIR-V
+  passed the stream's array cap, every browser scene that draws grass failed to
+  build. It now measures only what crosses.
 - **A character no longer stands on air past a box's edge.** A capsule's
   straight sweep against an unturned box met the box inflated by its radius,
   with square edges, so a character whose axis was nearly a radius past a top

@@ -1798,6 +1798,53 @@ fn a_shader_module_crosses_with_its_wgsl_alone() {
     );
 }
 
+/// **Only what crosses is measured against the stream's caps.** The grass
+/// shader's SPIR-V outgrew [`crate::tag::MAX_ELEMENT_COUNT`] words and every
+/// browser scene drawing grass failed to build, refused over an artifact this
+/// device never encodes. Its WGSL is what crosses, so a SPIR-V module past the
+/// cap is accepted and an oversized WGSL is still refused.
+#[test]
+fn a_shader_module_is_measured_by_what_crosses() {
+    let (channel, device) = device_on_fresh_channel();
+    let spirv = vec![0u32; crate::tag::MAX_ELEMENT_COUNT + 1];
+    let wgsl = "@compute @workgroup_size(1) fn main() {}";
+    device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("large spirv"),
+            spirv: &spirv,
+            wgsl: Some(wgsl),
+            msl: None,
+            dxil: &[],
+        })
+        .expect("a SPIR-V module past the array cap does not cross, so it is no refusal");
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    assert!(
+        matches!(
+            commands.as_slice(),
+            [crate::Command::CreateShaderModule { spirv, .. }] if spirv.is_empty()
+        ),
+        "the module crosses without its SPIR-V: {commands:?}"
+    );
+
+    let oversized = "/".repeat(crate::tag::MAX_FIELD_BYTES + 1);
+    let error = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("large wgsl"),
+            spirv: &[],
+            wgsl: Some(&oversized),
+            msl: None,
+            dxil: &[],
+        })
+        .expect_err("WGSL past the field cap crosses, so it is refused");
+    assert!(
+        matches!(error, HalError::InvalidDescriptor(_)),
+        "an oversized WGSL is a descriptor error: {error:?}"
+    );
+}
+
 // ── (e) readback ───────────────────────────────────────────────────────────
 
 #[test]
