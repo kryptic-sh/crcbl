@@ -1073,6 +1073,9 @@ impl CharacterController {
             // floor beneath, while a character that was not walking has only
             // the probe's slack to slide and falls.
             let Some((landed, below)) = self.slide_off_edge(world, probe, &found) else {
+                if was_grounded {
+                    self.position -= UP * self.departure_drop(&found);
+                }
                 return;
             };
             self.position = landed;
@@ -1154,6 +1157,23 @@ impl CharacterController {
         let end = start + down * travel;
         let below = self.probe_below(world, end, self.config.skin_width * GROUND_PROBE_SKINS)?;
         below.walkable.then_some((end, below))
+    }
+
+    /// How far a character that was standing drops, leaving `found`, an edge
+    /// too steep to stand on with nothing walkable below it: down to the
+    /// height at which the edge's rounding meets the slope limit, which is
+    /// where shorter moves along the same walk would have followed it down to
+    /// and left it. Without it, where a character starts to fall depends on
+    /// how its walk was cut into moves: a move ending just past that point
+    /// left it at the top's height, the rounding's drop above where shorter
+    /// ones did. Never further than the probe's own contact, so a steep plane
+    /// is met rather than passed through.
+    fn departure_drop(&self, found: &GroundProbe) -> f64 {
+        let skin = self.config.skin_width;
+        let leaves = found.contact.point.y
+            + (self.config.radius + skin) * self.config.min_ground_normal_y
+            + self.config.half_height;
+        (self.position.y - leaves).clamp(0.0, (found.distance - skin).max(0.0))
     }
 
     /// How far below itself a move's closing ground probe looks: the

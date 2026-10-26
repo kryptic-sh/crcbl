@@ -145,3 +145,62 @@ fn a_mesh_step_is_climbed() {
         "feet at {feet}"
     );
 }
+
+/// **Walking off a rounded edge ends at a height continuous in the walk's
+/// length** (EW, 2026-10-26). Short moves follow the edge's rounding down
+/// while it is walkable and leave it at the slope limit, a fraction of the
+/// radius lower than the top; one move ending just past that point used to
+/// be left at the top's height, so where a character fell from depended on
+/// how its walk was cut into moves. EW's world: a slab whose top is `y = 0`
+/// and whose edge is at `x = 0.5`, nothing below it.
+///
+/// **Only while the probe still reaches the rounding**, which ends a radius
+/// past the edge: a move ending beyond that finds nothing below and stays at
+/// the top's height. A game that cuts a move at the moment `grounded` turns
+/// false, as EW does, falls from the point this pins; `docs/backlog.md`
+/// carries the moves that end further out.
+#[test]
+fn walking_off_a_rounded_edge_ends_continuous_in_the_walk() {
+    let mut world = PhysicsWorld::new();
+    world.add_box(BoxCollider::new(
+        DVec3::new(0.0, -0.1, 0.0),
+        DVec3::new(0.5, 0.1, 3.0),
+    ));
+    let config = CharacterConfig {
+        radius: 0.3,
+        half_height: 0.6,
+        ..CharacterConfig::default()
+    };
+    let mut settled = CharacterController::new(config, DVec3::new(0.0, 0.9, 0.0));
+    settled.move_and_slide(&mut world, DVec3::new(0.0, -0.005, 0.0));
+    assert!(settled.is_grounded());
+
+    let end = |length: f64, world: &mut PhysicsWorld| {
+        let mut walker = settled.clone();
+        let grounded = walker.move_and_slide(world, DVec3::X * length).grounded;
+        (walker.position().y, grounded)
+    };
+    // Steps of half a millimetre: a character walking at 3 m/s covers one
+    // in a sixth of a millisecond, so no frame rate cuts finer.
+    let step = 0.0005;
+    let (mut previous, mut was_grounded) = end(0.6, &mut world);
+    let mut departures = 0;
+    let mut length = 0.6;
+    while length + step < 0.5 + config.radius {
+        length += step;
+        let (height, grounded) = end(length, &mut world);
+        assert!(
+            (height - previous).abs() < 0.01,
+            "a walk of {length:.4} ends at {height:.4}, one of {:.4} at {previous:.4}",
+            length - step
+        );
+        if was_grounded && !grounded {
+            departures += 1;
+        }
+        (previous, was_grounded) = (height, grounded);
+    }
+    assert_eq!(
+        departures, 1,
+        "the walk leaves the edge once, and the sweep saw it"
+    );
+}

@@ -2892,6 +2892,31 @@ reconfigure (`wait_for_frame_at` in `run-wayland-e2e.sh`) before sending the
 next one. Sway's IPC `geometry` stays at the size at first map after a resize,
 with or without the fix, so it cannot serve as that cue.
 
+## A move that ends past a rounded edge's reach falls from the top (2026-10-26)
+
+**Open, and not what EW's loop sees.** `CharacterController::departure_drop`
+(EW's 0.11.0 report, bisected to the round-edge commit) makes a grounded
+character's move that ends over an edge's rounding, past the slope limit, end at
+the height shorter moves left the rounding from. A move ending more than a
+radius past the edge reaches no rounding at all: the closing probe finds
+nothing, and the character stays at the top's height, where shorter moves of the
+same walk would already be `(radius + skin) * (1 - min_ground_normal_y)` lower.
+EW cuts its updates where `grounded` turns false and falls from there, so it
+only meets the case pinned by
+`edge_tests::walking_off_a_rounded_edge_ends_continuous_in_the_walk`; a game
+that applies one long move does not.
+
+Dropping on every lost support would close it and is declined: a standing
+character whose floor is removed would drop that amount at once, and EW tests
+that a removed support preserves the whole fall. What would close it properly is
+a sweep back along the move that finds the edge it left and drops to that edge's
+departure height. Not started; worth doing only if a caller hits it.
+
+EW's fourth 0.11.0 failure, an AI visibility test, did not reproduce in
+isolation here or for EW; EW reads it as timing in its own search (the AI no
+longer catches on square wall corners), not a crcbl defect. Not verified
+further.
+
 ## HIGH PRIORITY: EW engine requirements
 
 EW engine requirements take priority over UI/editor expansion. EW adopts engine

@@ -15,6 +15,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl_phys::CharacterController` leaves a rounded edge at the same height
+  however its walk is cut into moves.** Since 0.10.0 rounded box edges, a
+  grounded character walking off one followed the rounding down while it was
+  walkable and left it at the slope limit, a fraction of its radius below the
+  top; a single move ending just past that point stayed at the top's height, so
+  one long update and many short ones fell from heights apart by
+  `radius * (1 - min_ground_normal_y)` (8.8 cm for EW's 0.3 m capsule). Such a
+  move now ends at the height where the rounding meets the slope limit.
+
 - **A resized Wayland surface no longer shows its last frame squeezed into the
   new size.** `crcbl-shell` used to commit a configure's new viewport
   destination the moment it acked it, before any buffer at that size existed, so
