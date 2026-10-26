@@ -7792,9 +7792,22 @@ the gaps below.
   (`a_composition_shows_at_the_caret_underlined_and_is_not_the_value`,
   `a_composition_over_a_selection_shows_in_its_place`,
   `the_text_input_area_is_the_engaged_caret`, and the pump's two tests, each red
-  under a hand mutant). Unverified: a real input method end to end on any
-  backend. Not done: the input method's own segment styles (a converted clause
-  against the one being edited), which no backend reports.
+  under a hand mutant). **Run against a real input method on Wayland
+  (2026-10-26, office laptop):** fcitx5 5.1.23 with Mozc on a headless sway 1.12
+  (Intel GPU), on a private D-Bus session and config, the sandbox's console
+  typed into through `crcbl-e2e-wayland-key`. The sandbox enabled
+  `zwp_text_input_v3`, sent `set_cursor_rectangle` at the caret and again as the
+  composition moved it (x 66 to 86), received `TextPreedit "あ"` and on Enter
+  `TextCommit "あ"`; a screenshot showed the composition underlined in the field
+  with the caret after it, and Mozc's candidate window opened just below the
+  caret. Seen and not chased: the console's bitmap font has no kana, so `あ`
+  draws as a box (the console takes no fallback face); `k` typed straight after
+  the console opened was lost, so `ka` composed `あ` rather than `か`, probably
+  before fcitx5 took the keyboard; and the first frame sent two rectangles in
+  one flush, `(33, 298, 1, 16)` then `(66, 272, 4, 32)`, the second the right
+  one. Not run with Win32 or AppKit input methods. Not done: the input method's
+  own segment styles (a converted clause against the one being edited), which no
+  backend reports.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
   fallback so copy and paste work within one page.
