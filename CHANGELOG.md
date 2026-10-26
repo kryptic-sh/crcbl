@@ -13,6 +13,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-26
+
 ### Breaking
 
 - **`crcbl_phys::BroadphaseStats` is no longer `Eq`**, only `PartialEq`, because
@@ -21419,7 +21421,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/kryptic-sh/crcbl/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/kryptic-sh/crcbl/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/kryptic-sh/crcbl/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/kryptic-sh/crcbl/compare/v0.7.0...v0.8.0
