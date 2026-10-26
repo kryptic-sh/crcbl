@@ -2912,10 +2912,10 @@ that a removed support preserves the whole fall. What would close it properly is
 a sweep back along the move that finds the edge it left and drops to that edge's
 departure height. Not started; worth doing only if a caller hits it.
 
-EW's fourth 0.11.0 failure, an AI visibility test, did not reproduce in
-isolation here or for EW; EW reads it as timing in its own search (the AI no
-longer catches on square wall corners), not a crcbl defect. Not verified
-further.
+EW verified `b15153ef` against its whole suite, the three ledge tests included
+(2026-10-26). Its fourth 0.11.0 failure, an AI search test, was EW's own: it
+checked places from a second search round that the AI reaches sooner now that
+wall corners are round, and EW fixed it on its side.
 
 ## HIGH PRIORITY: EW engine requirements
 
