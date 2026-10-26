@@ -13,6 +13,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`crcbl_app::present::PresenterDesc` and `crcbl::engine::GpuContextDesc` have
+  a new field, `gpu_choice`**, and **`crcbl_vk::OpenError` has two new variants,
+  `Driver` and `NoDirectDriverLoading`**: a struct literal of either desc names
+  `gpu_choice: None` or ends in `..Default::default()`, and an exhaustive
+  `match` on the error needs arms for both.
+
+### Added
+
+- **A saved GPU choice: the adapter a program ran on, reopened next time — on
+  Vulkan through its driver alone.** `crcbl_app::gpu_choice` (also
+  `crcbl::gpu_choice`): after an open, `Presenter::gpu_choice` (or
+  `GpuContext::gpu_choice`) is a `GpuChoice` the program saves as text and gives
+  back as `PresenterDesc::gpu_choice`; `gpu_choice_outcome` says whether it was
+  `Used`, `Stale` (it no longer holds, and the open went on without it) or
+  `Ignored` (a pin, a pick or the loader's own driver variables chose instead,
+  or another backend opened). On Vulkan, `GpuChoice::locate_vulkan_driver` finds
+  the adapter's ICD manifest once, off the start-up path, and later opens load
+  that driver alone through `VK_LUNARG_direct_driver_loading`, without asking
+  the loader which extensions exist (which loads every driver): on a laptop with
+  an Intel iGPU and an NVIDIA dGPU, a Vulkan instance on Intel's driver opened
+  in 8–9 ms with no NVIDIA library loaded, against 60–77 ms with NVIDIA's device
+  files held open. The saved adapter also goes first whatever the power
+  preference. Metal ignores a choice; D3D12's is not built yet and is ignored
+  too. `crcbl_vk::drivers` finds and reads the loader's manifests, and
+  `crcbl_vk::VkInstance::open_driver` opens on one. `crcbl-vk` now depends on
+  `serde` and `serde_json` to read them.
+
 ## [0.11.0] - 2026-10-26
 
 ### Breaking

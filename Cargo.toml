@@ -140,6 +140,8 @@ unicode-segmentation = "1.13.3"
 # Storage and persistence: serde for settings/save schemas, toml for settings
 # files, dirs for platform-standard config/data paths.
 serde = { version = "1", features = ["derive"] }
+# Vulkan ICD manifests, which `crcbl-vk` reads to load a driver directly.
+serde_json = "1.0.151"
 toml = "1.1"
 dirs = "7.0"
 

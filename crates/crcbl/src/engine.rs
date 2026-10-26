@@ -562,6 +562,9 @@ pub struct GpuContextDesc<'a> {
     /// The adapter the game names itself, or `None` to rank them.
     /// [`ADAPTER_ENV_VAR`] wins over it.
     pub adapter_pick: Option<AdapterPick<'a>>,
+    /// The GPU an earlier run saved from [`GpuContext::gpu_choice`], to open on
+    /// again; see [`crate::gpu_choice`]. `None` by default.
+    pub gpu_choice: Option<&'a crate::gpu_choice::GpuChoice>,
 }
 
 impl Default for GpuContextDesc<'_> {
@@ -615,6 +618,7 @@ impl Default for GpuContextDesc<'_> {
             settings: SettingsSource::default(),
             power_preference: PowerPreference::HighPerformance,
             adapter_pick: None,
+            gpu_choice: None,
         }
     }
 }
@@ -1065,6 +1069,7 @@ impl GpuContextDesc<'_> {
             optional_features: self.optional_features,
             pacing: self.settings.pacing(self.label, self.pacing),
             frames_in_flight: FRAMES_IN_FLIGHT,
+            gpu_choice: self.gpu_choice,
         }
     }
 }
@@ -1205,6 +1210,21 @@ impl GpuContext {
     #[must_use]
     pub fn device(&self) -> &dyn Device {
         self.presenter.device()
+    }
+
+    /// The choice of the adapter this context opened on, to save and give
+    /// back as [`GpuContextDesc::gpu_choice`]; see
+    /// [`Presenter::gpu_choice`].
+    #[must_use]
+    pub fn gpu_choice(&self) -> &crate::gpu_choice::GpuChoice {
+        self.presenter.gpu_choice()
+    }
+
+    /// What became of [`GpuContextDesc::gpu_choice`]; see
+    /// [`Presenter::gpu_choice_outcome`].
+    #[must_use]
+    pub fn gpu_choice_outcome(&self) -> &crate::gpu_choice::ChoiceOutcome {
+        self.presenter.gpu_choice_outcome()
     }
 
     /// The swapchain everything renders into, for a caller that wants the

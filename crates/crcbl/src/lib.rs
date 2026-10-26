@@ -390,6 +390,9 @@ pub mod args;
 /// [`crcbl_app::backend`], at the path it has always had.
 pub use crcbl_app::backend;
 
+/// [`crcbl_app::gpu_choice`]: the GPU a game ran on, saved and given back.
+pub use crcbl_app::gpu_choice;
+
 pub mod console_config;
 
 pub mod debug_console;

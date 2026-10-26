@@ -3,7 +3,7 @@
 use core::ffi::{CStr, c_void};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ash::{ext, khr, vk};
+use ash::{ext, khr, lunarg, vk};
 
 use crcbl_core::{Pool, SurfaceTarget};
 use crcbl_hal::{
@@ -403,6 +403,16 @@ pub enum OpenError {
     #[error("the Vulkan loader found no physical device")]
     NoAdapters,
 
+    /// The driver [`VkInstance::open_driver`] was given could not be read or
+    /// loaded.
+    #[error("{0}")]
+    Driver(#[from] crate::drivers::DriverError),
+
+    /// The loader cannot open an instance on one driver alone: it lacks
+    /// `VK_LUNARG_direct_driver_loading`, which loaders before 1.3.2xx do.
+    #[error("the Vulkan loader does not offer VK_LUNARG_direct_driver_loading")]
+    NoDirectDriverLoading,
+
     /// A run asked for validation to be able to fail it, and the layer that
     /// would do the failing is not installed.
     ///
@@ -428,6 +438,24 @@ impl From<OpenError> for HalError {
     }
 }
 
+/// The instance extensions an open on one driver asks for without asking
+/// the loader which exist — see [`VkInstance::open_driver`]: the surfaces the
+/// desktop drivers offer, `VK_KHR_get_surface_capabilities2`, which present
+/// timing needs, `VK_EXT_debug_utils`, which the loader itself provides, and
+/// `VK_LUNARG_direct_driver_loading`, which is what makes it one driver.
+const DIRECT_EXTENSIONS: &[&CStr] = &[
+    khr::surface::NAME,
+    #[cfg(not(windows))]
+    khr::wayland_surface::NAME,
+    #[cfg(not(windows))]
+    khr::xcb_surface::NAME,
+    #[cfg(windows)]
+    khr::win32_surface::NAME,
+    khr::get_surface_capabilities2::NAME,
+    ext::debug_utils::NAME,
+    lunarg::direct_driver_loading::NAME,
+];
+
 impl VkInstance {
     /// Loads Vulkan, creates an instance and enumerates adapters.
     ///
@@ -437,6 +465,27 @@ impl VkInstance {
     /// backend registry falls through on — or the other variants when there is
     /// one and it refused.
     pub fn open() -> Result<Self, OpenError> {
+        Self::open_with(None)
+    }
+
+    /// Opens an instance on `driver` alone: the loader loads that driver and
+    /// none of the others, through `VK_LUNARG_direct_driver_loading` in its
+    /// exclusive mode — see [`crate::drivers`].
+    ///
+    /// # Errors
+    ///
+    /// [`OpenError::Driver`] when the driver will not load,
+    /// [`OpenError::NoDirectDriverLoading`] when the loader cannot open on
+    /// one driver, [`OpenError::NoAdapters`] when the driver serves no device
+    /// here, and otherwise what [`open`](Self::open) returns.
+    pub fn open_driver(driver: &crate::drivers::Driver) -> Result<Self, OpenError> {
+        let entry_point = driver.load()?;
+        Self::open_with(Some(entry_point))
+    }
+
+    /// [`open`](Self::open), on the one driver whose
+    /// `vk_icdGetInstanceProcAddr` is `direct` when there is one.
+    fn open_with(direct: Option<vk::PFN_vkGetInstanceProcAddrLUNARG>) -> Result<Self, OpenError> {
         // The loading decision, in one call. See the crate docs for why this is
         // `load()` and not `linked()`.
         //
@@ -463,10 +512,25 @@ impl VkInstance {
             });
         }
 
-        // SAFETY: `entry` is valid; the call only reads the loader's tables.
-        let available_extensions = unsafe { entry.enumerate_instance_extension_properties(None) }
-            .map_err(|error| OpenError::Instance(format!("{error:?}")))?;
+        // **Not asked on one driver.** The loader answers this query by loading
+        // every installed driver and every implicit layer, which is the cost
+        // opening on one driver exists to avoid: measured on the office laptop
+        // (Intel and NVIDIA), the query alone kept NVIDIA's libraries mapped
+        // and its device files open. On one driver the extensions are instead
+        // the ones every desktop driver and the loader offer
+        // (`DIRECT_EXTENSIONS`); a driver missing one fails `vkCreateInstance`,
+        // which the caller reads as a choice that no longer holds.
+        let available_extensions = if direct.is_some() {
+            Vec::new()
+        } else {
+            // SAFETY: `entry` is valid; the call only reads the loader's tables.
+            unsafe { entry.enumerate_instance_extension_properties(None) }
+                .map_err(|error| OpenError::Instance(format!("{error:?}")))?
+        };
         let has_extension = |name: &CStr| {
+            if direct.is_some() {
+                return DIRECT_EXTENSIONS.contains(&name);
+            }
             available_extensions.iter().any(|properties| {
                 properties
                     .extension_name_as_c_str()
@@ -633,10 +697,32 @@ impl VkInstance {
         let mut validation_features =
             vk::ValidationFeaturesEXT::default().enabled_validation_features(&sync_enables);
 
+        // One driver alone, when asked: the loader loads it from the entry
+        // point given and, in the exclusive mode, no other.
+        let direct_drivers: Vec<vk::DirectDriverLoadingInfoLUNARG<'_>> = direct
+            .into_iter()
+            .map(|entry_point| {
+                vk::DirectDriverLoadingInfoLUNARG::default().pfn_get_instance_proc_addr(entry_point)
+            })
+            .collect();
+        let mut direct_list = vk::DirectDriverLoadingListLUNARG::default()
+            .mode(vk::DirectDriverLoadingModeLUNARG::EXCLUSIVE)
+            .drivers(&direct_drivers);
+        if direct.is_some() {
+            if !has_extension(lunarg::direct_driver_loading::NAME) {
+                return Err(OpenError::NoDirectDriverLoading);
+            }
+            extensions.push(lunarg::direct_driver_loading::NAME.as_ptr());
+            enabled_names.push(lunarg::direct_driver_loading::NAME);
+        }
+
         let mut create_info = vk::InstanceCreateInfo::default()
             .application_info(&application)
             .enabled_layer_names(&layers)
             .enabled_extension_names(&extensions);
+        if direct.is_some() {
+            create_info = create_info.push_next(&mut direct_list);
+        }
         if validation_enabled && debug_utils {
             create_info = create_info.push_next(&mut messenger_info);
         }

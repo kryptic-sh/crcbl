@@ -61,6 +61,8 @@ pub mod adapter;
 
 pub mod backend;
 
+pub mod gpu_choice;
+
 pub mod present;
 
 pub mod text_input;

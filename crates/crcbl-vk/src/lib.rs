@@ -205,8 +205,10 @@
 // device, and the validation report that makes the P1 gate checkable. Every
 // module below it is `pub(crate)`, because nothing above the seam may learn a
 // Vulkan type and a `pub` module full of `vk::` signatures is how that leaks.
-// `debug` is the exception: its types *are* the public API.
+// `debug` is the exception: its types *are* the public API. So is
+// `drivers`, whose types name files and libraries, not Vulkan objects.
 pub mod debug;
+pub mod drivers;
 
 pub(crate) mod adapter;
 pub(crate) mod command;
@@ -299,8 +301,61 @@ mod tests {
                         assert!(text.contains(layer), "{text}");
                         assert!(text.contains(var), "{text}");
                     }
+                    OpenError::Driver(_) | OpenError::NoDirectDriverLoading => {
+                        panic!("open() loads no driver directly, yet: {text}");
+                    }
                 }
             }
+        }
+    }
+
+    /// **Each installed driver opens alone, and the drivers between them are
+    /// what a whole instance sees**: an instance opened on one manifest shows
+    /// only adapters the whole instance also shows and no other manifest's
+    /// instance shows, and every adapter of the whole instance belongs to one
+    /// manifest's. A driver serving no device
+    /// here (`NoAdapters`) is fine; any other refusal is not.
+    ///
+    /// Ignored: it needs a Vulkan loader with `VK_LUNARG_direct_driver_loading`
+    /// and real drivers, and it leaves every driver loaded.
+    #[test]
+    #[ignore = "needs a Vulkan loader and installed drivers"]
+    fn each_driver_opens_alone_and_together_they_are_the_whole_instance() {
+        let key =
+            |info: &crcbl_hal::AdapterInfo| (info.vendor_id, info.device_id, info.name.clone());
+        let whole: Vec<_> = VkInstance::open()
+            .expect("a Vulkan instance")
+            .adapters()
+            .iter()
+            .map(key)
+            .collect();
+        let mut covered = Vec::new();
+        let manifests = drivers::manifests();
+        assert!(!manifests.is_empty(), "no ICD manifest found");
+        for manifest in manifests {
+            let driver = drivers::Driver::read(&manifest).expect("a readable manifest");
+            match VkInstance::open_driver(&driver) {
+                Ok(alone) => {
+                    let seen: Vec<_> = alone.adapters().iter().map(key).collect();
+                    eprintln!("{}: {seen:?}", manifest.display());
+                    for adapter in &seen {
+                        assert!(whole.contains(adapter), "{adapter:?} is only seen alone");
+                        assert!(
+                            !covered.contains(adapter),
+                            "{adapter:?} is seen alone through two drivers"
+                        );
+                    }
+                    covered.extend(seen);
+                }
+                Err(OpenError::NoAdapters) => eprintln!("{}: no device", manifest.display()),
+                Err(error) => panic!("{} would not open alone: {error}", manifest.display()),
+            }
+        }
+        for adapter in &whole {
+            assert!(
+                covered.contains(adapter),
+                "{adapter:?} belongs to no driver alone"
+            );
         }
     }
 }

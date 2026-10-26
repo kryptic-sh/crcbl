@@ -195,6 +195,18 @@ impl GpuBackend {
         }
     }
 
+    /// The backend an instance of `kind` belongs to.
+    #[must_use]
+    pub const fn of_kind(kind: crcbl_hal::BackendKind) -> Self {
+        match kind {
+            crcbl_hal::BackendKind::Vulkan => Self::Vulkan,
+            crcbl_hal::BackendKind::Metal => Self::Metal,
+            crcbl_hal::BackendKind::Dx12 => Self::Dx12,
+            crcbl_hal::BackendKind::Null => Self::Null,
+            crcbl_hal::BackendKind::WebGpu => Self::WebGpu,
+        }
+    }
+
     /// Every backend, in the order a user is offered them.
     ///
     /// Held complete by `position` below, whose `match` is exhaustive: a new
@@ -644,6 +656,19 @@ pub fn request_open() -> Result<PendingInstance, GpuError> {
 /// [`GpuError::UnknownBackend`] if this build has no such backend.
 pub fn request_open_backend(backend: GpuBackend) -> Result<PendingInstance, GpuError> {
     request_open_named(REGISTRY, backend)
+}
+
+/// A pending object already holding `instance`, opened on `backend` some
+/// other way than through the table — on one Vulkan driver alone, for a saved
+/// GPU choice. Its failure is final, as a by-name open's is.
+pub(crate) fn opened(backend: GpuBackend, instance: Box<dyn Instance>) -> PendingInstance {
+    PendingInstance {
+        current: Some((backend, ready(Ok(instance)))),
+        remaining: &[],
+        fallback: false,
+        tried: vec![backend],
+        last: "nothing was tried".to_string(),
+    }
 }
 
 /// The by-name pending object over an arbitrary registry, so a test can hold

@@ -125,6 +125,7 @@ use crcbl_shell::{Shell, ShellError, ShellEvent, WindowId};
 
 use crate::adapter::{ADAPTER_ENV_VAR, AdapterPick, Choice, PinMiss, PowerPreference};
 use crate::backend::{GpuBackend, PendingInstance};
+use crate::gpu_choice::{ChoiceOutcome, GpuChoice, Ignored};
 
 use frame_gate::FrameGate;
 
@@ -761,6 +762,10 @@ pub struct PresenterDesc<'a> {
     /// is recorded once the frame this many back has finished executing, so a
     /// ring this deep is never written while the device is reading it.
     pub frames_in_flight: usize,
+    /// The GPU an earlier run saved from [`Presenter::gpu_choice`], to open on
+    /// again; see [`crate::gpu_choice`]. [`Presenter::gpu_choice_outcome`]
+    /// says what became of it. `None` by default.
+    pub gpu_choice: Option<&'a GpuChoice>,
 }
 
 impl Default for PresenterDesc<'_> {
@@ -787,6 +792,7 @@ impl Default for PresenterDesc<'_> {
             optional_features: Features::PRESENT_FEEDBACK | Features::PRESENT_TIMING,
             pacing: Pacing::default(),
             frames_in_flight: FRAMES_IN_FLIGHT,
+            gpu_choice: None,
         }
     }
 }
@@ -882,6 +888,12 @@ pub struct Presenter {
     answers_requests: bool,
     /// Where the window's frame request stands; see [`frame_gate`].
     frame: FrameGate,
+    /// The choice of the adapter this presenter opened on, for the program to
+    /// save; see [`Presenter::gpu_choice`].
+    gpu_choice: GpuChoice,
+    /// What became of the choice the program gave; see
+    /// [`Presenter::gpu_choice_outcome`].
+    gpu_choice_outcome: ChoiceOutcome,
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
@@ -942,6 +954,17 @@ pub struct PendingPresenter {
     power_preference: PowerPreference,
     /// [`PresenterDesc::transparency`].
     transparency: Transparency,
+    /// [`PresenterDesc::backend`], kept to open again without a saved choice
+    /// that turned out not to hold.
+    backend: Option<GpuBackend>,
+    /// The saved choice while it is still being tried: given, not ignored and
+    /// not yet found stale.
+    choice: Option<GpuChoice>,
+    /// Whether the instance being opened is on the choice's Vulkan driver
+    /// alone, so a refusal there means reopening on every driver.
+    scoped: bool,
+    /// What has become of the choice so far.
+    outcome: ChoiceOutcome,
 }
 
 /// An [`AdapterPick`] that owns its name, for a [`PendingPresenter`] that
@@ -996,7 +1019,23 @@ impl PendingPresenter {
             adapter_pick: desc.adapter_pick.map(OwnedPick::new),
             power_preference: desc.power_preference,
             transparency: desc.transparency,
+            backend: desc.backend,
+            choice: None,
+            scoped: false,
+            outcome: ChoiceOutcome::NotGiven,
         })
+    }
+
+    /// Drops the saved choice as no longer holding, for `why`, and opens again
+    /// on every driver when the instance was on its driver alone.
+    fn choice_stale(&mut self, why: String) -> Result<(), PresentError> {
+        log::info!("hal: the saved GPU choice no longer holds ({why}); opening without it");
+        self.outcome = ChoiceOutcome::Stale(why);
+        self.choice = None;
+        if core::mem::take(&mut self.scoped) {
+            self.stage = OpenStage::Instance(request_backend(self.backend)?);
+        }
+        Ok(())
     }
 
     /// Advances the open. `Ok(None)` means "not yet, poll again next frame".
@@ -1021,7 +1060,30 @@ impl PendingPresenter {
                     // makes a failed open stay failed rather than retrying a
                     // half-built presenter on the next frame.
                     let backend = instance.backend();
+                    // An instance on every driver, checked against the saved
+                    // choice: one on its driver alone was checked as it opened.
+                    let on = GpuBackend::of_kind(backend);
+                    let (other_backend, absent) =
+                        self.choice.as_ref().map_or((false, false), |choice| {
+                            let other = on != choice.backend();
+                            let named = instance
+                                .adapters()
+                                .iter()
+                                .any(|adapter| choice.names(adapter));
+                            (other, !other && !named)
+                        });
+                    if other_backend {
+                        self.outcome = ChoiceOutcome::Ignored(Ignored::OtherBackend(on));
+                        self.choice = None;
+                    } else if absent {
+                        self.choice_stale(format!("no {on} adapter here is the one it names"))?;
+                    }
+                    let scoped = self.scoped;
                     match Presenter::start_device(instance, self) {
+                        Err(refusal) if scoped => {
+                            let error: PresentError = refusal.into();
+                            self.choice_stale(error.to_string())?;
+                        }
                         Ok(stage) => self.stage = stage,
                         Err(StartRefusal::Surface(error)) if pending.fall_through(&error) => {
                             // Never silent: which backend a window ended up
@@ -1088,12 +1150,63 @@ impl PendingPresenter {
     }
 }
 
-/// The backend instance `desc` asks for, not yet open.
-fn request_instance(desc: &PresenterDesc<'_>) -> Result<PendingInstance, PresentError> {
-    Ok(match desc.backend {
+/// The backend instance `backend` names, or the table's choice, not yet open.
+fn request_backend(backend: Option<GpuBackend>) -> Result<PendingInstance, PresentError> {
+    Ok(match backend {
         Some(backend) => crate::backend::request_open_backend(backend)?,
         None => crate::backend::request_open()?,
     })
+}
+
+/// Where an open with `desc` starts: on the saved choice's Vulkan driver
+/// alone where it has one and that driver still shows its adapter, else as
+/// `desc` asks. Sets `open`'s choice, its outcome so far and whether the
+/// instance is on one driver; see [`crate::gpu_choice`].
+fn start_open(desc: &PresenterDesc<'_>, open: &mut PendingPresenter) -> Result<(), PresentError> {
+    let Some(choice) = desc.gpu_choice else {
+        open.stage = OpenStage::Instance(request_backend(desc.backend)?);
+        return Ok(());
+    };
+    let backend = choice.backend();
+    let pinned = desc.adapter_pin.is_some();
+    let picked = desc.adapter_pick.is_some();
+    open.outcome = if let Some(why) = crate::gpu_choice::overridden(pinned, picked, backend) {
+        ChoiceOutcome::Ignored(Ignored::Overridden(why))
+    } else if desc.backend.is_some_and(|wanted| wanted != backend) {
+        ChoiceOutcome::Ignored(Ignored::OtherBackend(backend))
+    } else if matches!(backend, GpuBackend::Vulkan) {
+        open.choice = Some(choice.clone());
+        ChoiceOutcome::Used
+    } else {
+        // D3D12 is to open by the adapter's LUID; until it does, a choice
+        // there is not tried rather than half-tried.
+        ChoiceOutcome::Ignored(Ignored::Unsupported(backend))
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(manifest) = open.choice.as_ref().and_then(GpuChoice::vulkan_driver) {
+        let opened = crcbl_vk::drivers::Driver::read(manifest)
+            .map_err(|error| error.to_string())
+            .and_then(|driver| {
+                crcbl_vk::VkInstance::open_driver(&driver).map_err(|error| error.to_string())
+            });
+        match opened {
+            Ok(instance) => {
+                log::info!(
+                    "hal: opening on the saved GPU choice's driver alone, {}",
+                    manifest.display()
+                );
+                open.scoped = true;
+                open.stage = OpenStage::Instance(crate::backend::opened(
+                    GpuBackend::Vulkan,
+                    Box::new(instance),
+                ));
+                return Ok(());
+            }
+            Err(why) => open.choice_stale(why)?,
+        }
+    }
+    open.stage = OpenStage::Instance(request_backend(desc.backend)?);
+    Ok(())
 }
 
 impl Presenter {
@@ -1188,11 +1301,10 @@ impl Presenter {
         // A value from a registry rather than a type, which is the whole
         // difference between "the caller knows about Vulkan" and "the caller
         // knows there are backends".
-        let instance = request_instance(desc)?;
         let target = Self::target(shell, window)?;
-        let mut pending =
-            PendingPresenter::new(OpenStage::Instance(instance), target, extent, desc)?;
+        let mut pending = PendingPresenter::new(OpenStage::Done, target, extent, desc)?;
         pending.window = Some(window);
+        start_open(desc, &mut pending)?;
         Ok(pending)
     }
 
@@ -1207,13 +1319,14 @@ impl Presenter {
         extent: (u32, u32),
         desc: &PresenterDesc<'_>,
     ) -> Result<PendingPresenter, PresentError> {
-        let instance = request_instance(desc)?;
-        PendingPresenter::new(
-            OpenStage::Instance(instance),
+        let mut pending = PendingPresenter::new(
+            OpenStage::Done,
             crcbl_hal::SurfaceTarget::Offscreen,
             extent,
             desc,
-        )
+        )?;
+        start_open(desc, &mut pending)?;
+        Ok(pending)
     }
 
     /// [`request_open`](Self::request_open) on an instance the caller already
@@ -1322,6 +1435,14 @@ impl Presenter {
         };
         if let Choice::Ranked(ranked) = &mut choice {
             *ranked = crate::adapter::rank(&adapters, open.power_preference, display);
+            // The saved choice ahead of the ranking: it is what this program
+            // ran on, and the walk still goes on past it if it cannot present.
+            if let Some(saved) = &open.choice
+                && let Some(at) = ranked.iter().position(|adapter| saved.names(adapter))
+            {
+                let adapter = ranked.remove(at);
+                ranked.insert(0, adapter);
+            }
         }
         let candidates = choice.candidates();
 
@@ -1559,6 +1680,26 @@ impl Presenter {
             log::debug!("hal: no present feedback; the frame limiter is the only pacing");
         }
 
+        let opened_on = instance
+            .adapters()
+            .into_iter()
+            .find(|info| info.id == adapter)
+            .ok_or(PresentError::Unusable(
+                "the opened adapter is not the instance's",
+            ))?;
+        let mut gpu_choice = GpuChoice::of(GpuBackend::of_kind(instance.backend()), &opened_on);
+        let mut gpu_choice_outcome = open.outcome.clone();
+        if let Some(saved) = &open.choice {
+            if saved.names(&opened_on) {
+                if let Some(driver) = saved.vulkan_driver().filter(|_| open.scoped) {
+                    gpu_choice = gpu_choice.with_vulkan_driver(driver.to_owned());
+                }
+            } else {
+                gpu_choice_outcome =
+                    ChoiceOutcome::Stale("its adapter cannot present this window".to_owned());
+            }
+        }
+
         Ok(Self {
             instance,
             device,
@@ -1584,6 +1725,8 @@ impl Presenter {
             window: open.window,
             answers_requests,
             frame: FrameGate::Open,
+            gpu_choice,
+            gpu_choice_outcome,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
             batch: Vec::with_capacity(1),
@@ -1594,6 +1737,23 @@ impl Presenter {
     #[must_use]
     pub fn device(&self) -> &dyn Device {
         self.device.as_ref()
+    }
+
+    /// The choice of the adapter this presenter opened on, for the program to
+    /// save and give back as [`PresenterDesc::gpu_choice`] next time; see
+    /// [`crate::gpu_choice`]. On Vulkan it carries the driver's manifest when
+    /// the open used one; otherwise
+    /// [`GpuChoice::locate_vulkan_driver`] finds it, off the start-up path.
+    #[must_use]
+    pub fn gpu_choice(&self) -> &GpuChoice {
+        &self.gpu_choice
+    }
+
+    /// What became of [`PresenterDesc::gpu_choice`]: used, stale — save
+    /// [`gpu_choice`](Self::gpu_choice) in its place — ignored, or not given.
+    #[must_use]
+    pub fn gpu_choice_outcome(&self) -> &ChoiceOutcome {
+        &self.gpu_choice_outcome
     }
 
     /// The swapchain everything renders into, for a caller that wants the

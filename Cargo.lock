@@ -1117,6 +1117,8 @@ dependencies = [
  "crcbl-shaders",
  "crcbl-spawn",
  "glam",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

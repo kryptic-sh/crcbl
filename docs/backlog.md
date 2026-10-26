@@ -320,14 +320,38 @@ not premultiplied: of 15,071 partly transparent pixels across 139 icons, 7,105
 have a colour channel above alpha. Nothing in crcbl converts shell icons today;
 if something does, it must not treat them as premultiplied on the way in.
 
-**Vulkan enumeration loads the dGPU's driver for a `LowPower` program:
-documented, not fixed (decided by the owner 2026-10-21).** pikr measured about
-100 ms of start-up on the office laptop with the NVIDIA ICD loaded and unused.
-`crcbl_app::adapter`'s module docs now tell launchers to set
-`VK_LOADER_DRIVERS_SELECT`. Declined for now: restricting the loader from inside
-crcbl, by writing that variable (a racy environment write) or through
-`VK_LUNARG_direct_driver_loading` (a heuristic map from the display's kernel
-driver to an ICD manifest, L-sized).
+**A saved GPU choice opens on its Vulkan driver alone (built 2026-10-26,
+reopening the 2026-10-21 decision at the owner's request, through pikr).**
+`crcbl_app::gpu_choice` and `PresenterDesc::gpu_choice`: the program saves an
+opaque `GpuChoice` and gives it back, and crcbl matches, validates and falls
+back (`ChoiceOutcome`). Vulkan: `VK_LUNARG_direct_driver_loading`, exclusive,
+from the manifest `GpuChoice::locate_vulkan_driver` found, and no
+`vkEnumerateInstanceExtensionProperties` on that path, since the loader answers
+it by loading every driver and implicit layer (`DIRECT_EXTENSIONS` instead).
+Measured on the office laptop (Arch, Mesa 26.2.5, NVIDIA 615.78), fresh
+processes, best of seven: an instance on Intel's driver alone 8.2–8.9 ms with
+only `libvulkan_intel` loaded and no NVIDIA device file open, against 60.7–77.5
+ms and 14 NVIDIA files for an instance on every driver; on NVIDIA's alone 48.8
+ms. Verified by `crcbl-vk`'s
+`each_driver_opens_alone_and_together_they_are_the_whole_instance` (red with the
+inclusive mode) and `crcbl-app`'s `tests/gpu_choice.rs` (four ignored tests, run
+here: reopen through the driver, win over the power preference located or not,
+stale on a missing manifest or adapter, overridden by a pin; red under three of
+four hand mutants — see the gap below). **Owed:**
+
+- **D3D12, by the Windows session** (the owner's call: it must work there): open
+  by the adapter's LUID, matched on vendor, device and name because a LUID lasts
+  until restart; replace `start_open`'s `Ignored::Unsupported` arm for
+  `GpuBackend::Dx12`, with tests and RX 7900 XTX / Raphael / WARP timings. Metal
+  stays `Ignored::Unsupported` by design.
+- **Not covered by a test:** `Presenter::finish`'s `Stale` when the saved
+  adapter is present but cannot present the window and the walk moves on (an
+  offscreen open always presents; a transparent X11 window on NVIDIA under Xvfb
+  would reach it). Neither is the reopen after a refused device on the
+  one-driver instance (`choice_stale` with `scoped`).
+- **Not done:** pikr and lyr adopting it (after the release that carries it);
+  `SharedGpu` presenters inherit the first presenter's device, so they take no
+  choice of their own.
 
 **Adapter choice, left over from the 2026-10-19 slice** (lazy describe,
 `PowerPreference`, `AdapterPick`, `Instance::display_adapter`; the policy is

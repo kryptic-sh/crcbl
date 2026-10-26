@@ -14,6 +14,10 @@ rust-version.workspace = true
 ash = { workspace = true }
 crcbl-core = { workspace = true }
 crcbl-hal = { workspace = true }
+# A driver's ICD manifest is JSON: `drivers` reads its `library_path` to load
+# that driver alone.
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 # Test-only. `crcbl-shaders` supplies the SPIR-V and the geometry the triangle
