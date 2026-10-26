@@ -16,7 +16,9 @@ publish = false
 # `.scn/` directory of the sandbox's own two systems and reloads a chunk file
 # when it changes (`src/scene/disk.rs`). No glTF is read, so none is linked.
 [dependencies]
-crcbl = { workspace = true, features = ["scn"] }
+# `system-fonts`: the console falls back to the system's faces for text the
+# bitmap font has no glyph for, such as Japanese typed through an input method.
+crcbl = { workspace = true, features = ["scn", "system-fonts"] }
 
 # The helpers this sample's own unit tests read a frame back with — `ui_text`,
 # `row_value` and `headless_common`, each a fact about an engine surface that
