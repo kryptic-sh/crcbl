@@ -1227,6 +1227,13 @@ impl GpuContext {
         self.presenter.gpu_choice_outcome()
     }
 
+    /// What chose this context's adapter over any saved choice, whether or not
+    /// one was given; see [`Presenter::gpu_choice_overridden`].
+    #[must_use]
+    pub fn gpu_choice_overridden(&self) -> Option<&'static str> {
+        self.presenter.gpu_choice_overridden()
+    }
+
     /// The swapchain everything renders into, for a caller that wants the
     /// seam's present-feedback calls directly — `Device::wait_until_presented`
     /// is how a frame is held for the display.

@@ -13,6 +13,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`Presenter::gpu_choice_overridden` and `GpuContext::gpu_choice_overridden`**
+  name what chose an open's adapter over any saved choice — the adapter pin, the
+  program's pick or a Vulkan loader driver variable — whether or not a choice
+  was given. A program with nothing saved yet otherwise had to repeat that rule
+  itself to avoid saving a one-off pin as its choice.
+
 ### Fixed
 
 - **Finding a saved GPU choice's Vulkan driver no longer logs errors for drivers

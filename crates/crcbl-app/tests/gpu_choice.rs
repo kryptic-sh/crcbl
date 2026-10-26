@@ -133,13 +133,35 @@ fn a_stale_choice_is_reported_and_the_open_goes_on() {
     assert_eq!(adapter(&opened).name, ranked.name);
 }
 
-/// **A pin overrides a choice**, which is then not tried at all.
+/// **A pin overrides a choice**, which is then not tried at all — and a
+/// pinned open says so with no choice given, so a program does not save the
+/// pin as its choice (pikr, 2026-10-26).
 #[test]
 #[ignore = "needs Vulkan drivers"]
 fn a_pin_overrides_a_saved_choice() {
     let first = open(None, PowerPreference::LowPower);
+    assert_eq!(
+        first.gpu_choice_overridden(),
+        None,
+        "nothing overrode a plain open"
+    );
     let choice = first.gpu_choice().clone();
     drop(first);
+    let pinned_alone = Presenter::open_offscreen(
+        EXTENT,
+        &PresenterDesc {
+            backend: Some(GpuBackend::Vulkan),
+            adapter_pin: Some("cpu"),
+            ..PresenterDesc::default()
+        },
+    )
+    .expect("a pinned presenter");
+    assert_eq!(pinned_alone.gpu_choice_outcome(), &ChoiceOutcome::NotGiven);
+    assert!(
+        pinned_alone.gpu_choice_overridden().is_some(),
+        "a pinned open with no choice still names the pin"
+    );
+    drop(pinned_alone);
     let pinned = Presenter::open_offscreen(
         EXTENT,
         &PresenterDesc {

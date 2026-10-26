@@ -894,6 +894,9 @@ pub struct Presenter {
     /// What became of the choice the program gave; see
     /// [`Presenter::gpu_choice_outcome`].
     gpu_choice_outcome: ChoiceOutcome,
+    /// What chose this open's adapter over any saved choice; see
+    /// [`Presenter::gpu_choice_overridden`].
+    gpu_choice_overridden: Option<&'static str>,
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
@@ -1707,7 +1710,13 @@ impl Presenter {
             .ok_or(PresentError::Unusable(
                 "the opened adapter is not the instance's",
             ))?;
-        let mut gpu_choice = GpuChoice::of(GpuBackend::of_kind(instance.backend()), &opened_on);
+        let opened_backend = GpuBackend::of_kind(instance.backend());
+        let mut gpu_choice = GpuChoice::of(opened_backend, &opened_on);
+        let gpu_choice_overridden = crate::gpu_choice::overridden(
+            open.adapter_pin.is_some(),
+            open.adapter_pick.is_some(),
+            opened_backend,
+        );
         let mut gpu_choice_outcome = open.outcome.clone();
         if let Some(saved) = &open.choice {
             if saved.names(&opened_on) {
@@ -1747,6 +1756,7 @@ impl Presenter {
             frame: FrameGate::Open,
             gpu_choice,
             gpu_choice_outcome,
+            gpu_choice_overridden,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
             batch: Vec::with_capacity(1),
@@ -1774,6 +1784,21 @@ impl Presenter {
     #[must_use]
     pub fn gpu_choice_outcome(&self) -> &ChoiceOutcome {
         &self.gpu_choice_outcome
+    }
+
+    /// What chose this open's adapter instead of any saved choice — the
+    /// adapter pin, the program's pick or a Vulkan loader driver variable —
+    /// **whether or not a choice was given**, or `None` if nothing did.
+    ///
+    /// The answer to "may I save [`gpu_choice`](Self::gpu_choice)?": an open
+    /// something overrode is that override's adapter, and saving it would make
+    /// a one-off pin the program's choice from then on. With no choice given,
+    /// [`gpu_choice_outcome`](Self::gpu_choice_outcome) is `NotGiven` and does
+    /// not say this; with one given, it is `Ignored(Overridden(_))` naming
+    /// the same thing.
+    #[must_use]
+    pub fn gpu_choice_overridden(&self) -> Option<&'static str> {
+        self.gpu_choice_overridden
     }
 
     /// The swapchain everything renders into, for a caller that wants the
