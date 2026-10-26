@@ -17795,17 +17795,18 @@ system's whole entities (above).
 (above — the old bytes are kept instead); a frame-count retirement (above); an
 in-place write into the image in force, which is the half-uploaded frame.
 
-**Coverage gaps:** run on Windows only. The watch's `stat` and rename cases were
-not run on Linux or macOS in this slice, and no test drives a writer that pauses
-between chunks for longer than `SETTLE`, which would be offered half written and
-then refused as a parse error until it finishes. The editor's watch is driven
-through the headless loop and the null backend, never a window; a change held by
-the unsaved bar asking something else, and one held by a gizmo drag, have no
-test of their own (play mode's hold does). The serve's watch runs in process
-against the rig, never the `crcbl` binary. `Document::revert`'s roll-back of
-steps already performed when a later one is refused is not reached by a test:
-the scene is read whole and checked first, so a refusal part way needs a row a
-component's rule refuses, which no test vocabulary here has.
+**Coverage gaps:** run on Windows, and on Linux (the office laptop, 2026-10-26:
+`crcbl-assets`' watch tests, the rename onto the path and the missing file among
+them, pass on ext4 and tmpfs); not run on macOS. No test drives a writer that
+pauses between chunks for longer than `SETTLE`, which would be offered half
+written and then refused as a parse error until it finishes. The editor's watch
+is driven through the headless loop and the null backend, never a window; a
+change held by the unsaved bar asking something else, and one held by a gizmo
+drag, have no test of their own (play mode's hold does). The serve's watch runs
+in process against the rig, never the `crcbl` binary. `Document::revert`'s
+roll-back of steps already performed when a later one is refused is not reached
+by a test: the scene is read whole and checked first, so a refusal part way
+needs a row a component's rule refuses, which no test vocabulary here has.
 `crates/crcbl-assets/src/registry.rs`'s module docs still keep `Unloaded` out,
 correctly: nothing reimports an asset the registry holds.
 
