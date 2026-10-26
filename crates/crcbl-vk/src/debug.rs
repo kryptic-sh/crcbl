@@ -293,6 +293,10 @@ struct SinkInner {
     errors: AtomicU64,
     warnings: AtomicU64,
     kept: Mutex<Kept>,
+    /// Whether the instance was opened on one driver alone, where the
+    /// loader finding no GPU is an answer and not a fault; see
+    /// [`ValidationSink::for_one_driver`].
+    one_driver: bool,
 }
 
 /// The messages themselves, and how far [`ValidationSink::take_error`] has read.
@@ -342,6 +346,28 @@ impl ValidationSink {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty sink for an instance opened on one driver alone
+    /// ([`VkInstance::open_driver`](crate::VkInstance::open_driver)).
+    ///
+    /// **The loader's "failed to detect any valid GPUs" is not an error on
+    /// it**: probing every installed driver for a saved GPU choice opens each
+    /// one alone, and a driver with no device behind it — on a machine with
+    /// an Intel and an NVIDIA GPU, `intel_hasvk` and `nouveau` — answers
+    /// exactly that, which the open already returns as
+    /// [`OpenError::NoAdapters`](crate::OpenError::NoAdapters). The messenger
+    /// logs it at debug and this sink does not keep it. On an instance over
+    /// every driver the same message means no GPU is usable at all, and stays
+    /// an error.
+    #[must_use]
+    pub fn for_one_driver() -> Self {
+        Self {
+            inner: Arc::new(SinkInner {
+                one_driver: true,
+                ..SinkInner::default()
+            }),
+        }
     }
 
     /// Records one message.
@@ -568,6 +594,23 @@ unsafe fn messenger_body(
         )
     };
 
+    // SAFETY: `user_data` is null or the pointer produced by `Arc::into_raw`
+    // in `messenger_user_data`. The instance keeps that allocation alive until
+    // strictly after `vkDestroyDebugUtilsMessengerEXT`, so it is live for the
+    // whole time the driver can call this. A shared reference is enough —
+    // never an owned `Arc`, which would double-free — because `SinkInner` is
+    // `Sync` and every field is interior-mutable.
+    let sink = unsafe { user_data.cast::<SinkInner>().as_ref() };
+
+    let general = !kinds.intersects(
+        vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+            | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+    );
+    if sink.is_some_and(|sink| sink.one_driver) && general && is_no_gpu_found(&id, &text) {
+        crcbl_core::log::debug!("vk general: {id}: {text} (a driver probed alone)");
+        return;
+    }
+
     let severity = Severity::from_flags(severity);
     let kind = if kinds.contains(vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION) {
         "validation"
@@ -583,16 +626,16 @@ unsafe fn messenger_body(
         Severity::Verbose => crcbl_core::log::debug!("vk {kind}: {id}: {text}"),
     }
 
-    if !user_data.is_null() {
-        // SAFETY: `user_data` is the pointer produced by `Arc::into_raw` in
-        // `messenger_user_data`. The instance keeps that allocation alive until
-        // strictly after `vkDestroyDebugUtilsMessengerEXT`, so it is live for
-        // the whole time the driver can call this. A shared reference is enough
-        // — never an owned `Arc`, which would double-free — because `SinkInner`
-        // is `Sync` and every field is interior-mutable.
-        let sink = unsafe { &*user_data.cast::<SinkInner>() };
+    if let Some(sink) = sink {
         sink.record(ValidationMessage { severity, id, text });
     }
+}
+
+/// Whether a message is the Vulkan loader saying it found no GPU behind the
+/// drivers it loaded; see [`ValidationSink::for_one_driver`]. Matched on the
+/// loader's own id and wording, since it carries no VUID.
+fn is_no_gpu_found(id: &str, text: &str) -> bool {
+    id == "Loader Message" && text.contains("Failed to detect any valid GPUs")
 }
 
 /// Copies a possibly-null C string into an owned `String`.
@@ -744,6 +787,24 @@ mod tests {
             id: id.to_string(),
             text: "something happened".to_string(),
         }
+    }
+
+    /// The loader's wording on the office laptop's Mesa drivers (2026-10-26),
+    /// double space included, and two messages it must not swallow.
+    #[test]
+    fn only_the_loaders_no_gpu_message_is_a_probe_answer() {
+        assert!(is_no_gpu_found(
+            "Loader Message",
+            "setup_loader_term_phys_devs:  Failed to detect any valid GPUs in the current config"
+        ));
+        assert!(!is_no_gpu_found(
+            "Loader Message",
+            "loader_scanned_icd_add: Could not get layer"
+        ));
+        assert!(!is_no_gpu_found(
+            "VUID-vkCmdDraw-None-02700",
+            "Failed to detect any valid GPUs"
+        ));
     }
 
     #[test]

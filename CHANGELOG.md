@@ -15,6 +15,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Finding a saved GPU choice's Vulkan driver no longer logs errors for drivers
+  with no GPU behind them.** `GpuChoice::locate_vulkan_driver` opens every
+  installed driver alone, and the loader answers one with nothing behind it
+  (`intel_hasvk` and `nouveau` beside an Intel and an NVIDIA GPU) with "Failed
+  to detect any valid GPUs", which crcbl-vk's messenger logged at ERROR and
+  counted as a validation error. On an instance opened on one driver it is now
+  logged at debug and not kept; the open still returns `OpenError::NoAdapters`.
+
 - **`crcbl_phys::CharacterController` leaves a rounded edge at the same height
   however its walk is cut into moves.** Since 0.10.0 rounded box edges, a
   grounded character walking off one followed the rounding down while it was

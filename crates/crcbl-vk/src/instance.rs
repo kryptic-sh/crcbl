@@ -674,7 +674,11 @@ impl VkInstance {
             Vec::new()
         };
 
-        let sink = ValidationSink::new();
+        let sink = if direct.is_some() {
+            ValidationSink::for_one_driver()
+        } else {
+            ValidationSink::new()
+        };
         let user_data = if validation_enabled && debug_utils {
             debug::messenger_user_data(&sink)
         } else {

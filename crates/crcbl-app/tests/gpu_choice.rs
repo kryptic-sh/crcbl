@@ -160,3 +160,77 @@ fn a_pin_overrides_a_saved_choice() {
     );
     assert_eq!(adapter(&pinned).device_type, DeviceType::Cpu);
 }
+
+/// Every log record at debug or above, from the moment [`Captured::install`]
+/// is first called; the probe test reads what the messenger said through it.
+struct Captured(std::sync::Mutex<Vec<(log::Level, String)>>);
+
+impl Captured {
+    fn install() -> &'static Self {
+        static CAPTURED: std::sync::OnceLock<&'static Captured> = std::sync::OnceLock::new();
+        CAPTURED.get_or_init(|| {
+            let captured: &'static Self =
+                Box::leak(Box::new(Self(std::sync::Mutex::new(Vec::new()))));
+            log::set_logger(captured).expect("no other logger in this test binary");
+            log::set_max_level(log::LevelFilter::Debug);
+            captured
+        })
+    }
+
+    fn records(&self) -> Vec<(log::Level, String)> {
+        self.0.lock().expect("unpoisoned").clone()
+    }
+}
+
+impl log::Log for Captured {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Debug
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        self.0
+            .lock()
+            .expect("unpoisoned")
+            .push((record.level(), record.args().to_string()));
+    }
+
+    fn flush(&self) {}
+}
+
+/// **Probing a driver with no GPU behind it logs no error** (lyr,
+/// 2026-10-26): finding a choice's driver opens every installed driver alone,
+/// and the Vulkan loader says each one with nothing behind it — `intel_hasvk`
+/// and `nouveau` on the office laptop — failed to detect a GPU. That is the
+/// probe's answer, and the open already reports it as an error value, so the
+/// messenger must not log it as an error too. It still logs it, at debug:
+/// that is what shows the probe saw the message rather than missed it.
+#[test]
+#[ignore = "needs Vulkan drivers, at least one with no GPU behind it"]
+fn probing_a_driver_with_no_gpu_logs_no_error() {
+    let captured = Captured::install();
+    let mut empty = 0;
+    for path in crcbl_vk::drivers::manifests() {
+        let Ok(driver) = crcbl_vk::drivers::Driver::read(&path) else {
+            continue;
+        };
+        if let Err(crcbl_vk::OpenError::NoAdapters) = crcbl_vk::VkInstance::open_driver(&driver) {
+            empty += 1;
+        }
+    }
+    assert!(
+        empty > 0,
+        "no installed driver lacks a GPU, so nothing was probed"
+    );
+    let records = captured.records();
+    let errors: Vec<_> = records
+        .iter()
+        .filter(|(level, _)| *level == log::Level::Error)
+        .collect();
+    assert!(errors.is_empty(), "probing logged errors: {errors:#?}");
+    assert!(
+        records
+            .iter()
+            .any(|(_, text)| text.contains("Failed to detect any valid GPUs")),
+        "the loader's message never reached the log, so nothing was checked: {records:#?}"
+    );
+}
