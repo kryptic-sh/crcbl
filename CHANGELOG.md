@@ -23,14 +23,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
-- **The forward pass is 5–13% faster on Intel's Mesa driver**, with the same
-  picture. `mesh.slang`'s `fragmentMain` wrote each shadow filter once per light
-  kind and cascade, and every call is inlined, so its light loop held about six
-  copies of the PCF taps; ANV, which builds the stage at SIMD8 only, spilled
-  under them. Each lookup is now written once: 10,221 instructions and 90:260
-  spills:fills on ANV become 7,042 and 78:153. `grass.slang` and `water.slang`
-  copy the sun's lookups, and grass the punctual ones too, and take the same
-  change.
+- **The forward pass is 6–19% faster on Intel's Mesa driver**, with the same
+  picture and the NVIDIA MX550 within 2%. `mesh.slang`'s `fragmentMain` wrote
+  the sun's shadow filter once per filter mode and twice more for the cascade
+  blend, and every call is inlined, so its light loop held about six copies of
+  the PCF taps; ANV, which builds the stage at SIMD8 only, spilled under them.
+  Each cascade now takes one `tile_pcf`, and the blend's two cascades are one
+  loop body: 10,221 instructions and 90:260 spills:fills on ANV become 7,333 and
+  64:104. `grass.slang` and `water.slang` copy the sun's lookups and take the
+  same change.
 
 ### Fixed
 

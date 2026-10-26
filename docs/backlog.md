@@ -4355,32 +4355,37 @@ and every trial it rejected is folded into "Declined" below.
   adds no register pressure, cut the forward shader's pressure on ANV, or gate
   either on the adapter. The owner chose the long-term fix (2026-10-26): cut the
   forward shader's pressure on ANV, below.
-- **The forward shader's shadow filters, written once each (2026-10-26).**
+- **The forward shader's shadow filters, written fewer times (2026-10-26).**
   Stubbing parts of `fragmentMain` out on ANV put the pressure in the light
   loop's body, not in values held across it: folding the emission early and
   carrying the cascade view's index instead of its tint changed nothing (10,221
   instructions and 90:260 spills:fills either way), while stubbing the shadow
   lookups alone took it to 4,602 and 50:83. Every call is inlined, and the loop
-  held about six copies of `tile_pcf`'s taps — the sun's cascade and its blend
-  partner, each with a disc and a measured-penumbra path, and the spot and point
-  arms. Writing each lookup once — one `tile_pcf` per cascade, the blend's two
-  cascades as one `[loop]` body, one `punctual_visibility` for spots and points
-  — keeps the arithmetic and takes ANV to 7,042 instructions and 78:153
-  spills:fills; `grass.slang` and `water.slang`, which copy the sun's lookups
-  and, for grass, the punctual ones, take the same shape. Timed as above
-  (`b15153ef` against the change, three mirrored pairs, means of six `forward`
-  p50s): `lights-fit` 9.729 → 8.438 ms (−13.3%), `area-lights-fit` 20.501 →
-  18.892 ms (−7.8%), `area-fill-lights-fit` 13.184 → 12.472 ms (−5.4%) with no
-  overlap, and `specular-lights-fit` 12.956 → 12.143 ms (−6.3%) overlapping in
-  one run that an earlier run of the same comparison separated (12.305 → 11.432
-  ms). Those timings are of the variant before the guards took volumetric's
-  spelling (7,029 instructions, the same spills). On the Intel GPU and lavapipe
-  the forward and render e2e suites and the lantern, horde and tide goldens pass
-  before and after, and every golden's difference line — pixel count, maximum
-  delta and the rest — is identical between the two. **Left:** ANV still builds
-  the stage at SIMD8 only and still spills; the next share is the area light's
-  LTC branch and the probe grid. Not yet measured: the MX550, lavapipe's timing,
-  and the RX 7900 XTX on D3D12 and Vulkan, which the Windows session runs.
+  held about six copies of `tile_pcf`'s taps: per cascade a disc and a
+  measured-penumbra path, the blend's second cascade, and the spot and point
+  arms. What shipped: one `tile_pcf` per cascade with only the radius chosen,
+  and the blend's two cascades as one `[loop]` body; the spot and point arms
+  keep a `punctual_visibility` call each, fed by `spot_map_world` and
+  `point_map_world`. ANV: 7,333 instructions, 64:104 spills:fills. Timed as
+  above (`b15153ef` against it, three mirrored pairs per fixture, means of six
+  `forward` p50s), Intel iGPU: `lights-fit` 9.717 → 7.923 ms (−18.5%),
+  `specular-lights-fit` 12.289 → 10.925 ms (−11.1%), `area-lights-fit` 20.362 →
+  18.452 ms (−9.4%), `area-fill-lights-fit` 13.171 → 12.373 ms (−6.1%), none
+  overlapping. NVIDIA MX550 (`CRCBL_ADAPTER=discrete`): three fixtures within
+  the baseline's spread, `lights-fit` 2.534 → 2.574 ms (+1.6%, clear of it).
+  **The variants, so they are not re-tried:** one `punctual_visibility` for both
+  kinds (pushed as `74610ec7`) made the MX550 3–6% slower on every fixture and
+  spilled more on ANV (78:153); without the cascade loop, ANV kept 8,553
+  instructions and lost most of its gain while the MX550 still regressed; with
+  the disc and penumbra `tile_pcf` calls split again, ANV's area fixtures ran
+  10–23% slower than the baseline. ANV's code generation for this stage swings
+  that far on small source changes, so a change here is timed, not inferred from
+  its instruction count. On the Intel GPU and lavapipe the forward and render
+  e2e suites and the lantern, horde and tide goldens pass, with every golden's
+  difference line identical to `b15153ef`'s. **Left:** ANV still builds the
+  stage at SIMD8 only and still spills; the next share is the area light's LTC
+  branch and the probe grid. Not measured: lavapipe's timing, and the RX 7900
+  XTX on D3D12 and Vulkan, which the Windows session runs.
 - **Unmeasured paths.** A populated probe volume pays the empty-probe early
   return's uniform branch, which no fixture has probes to time; water's own pass
   was not timed either. Slang's MSL output allocates the tile-local exposure

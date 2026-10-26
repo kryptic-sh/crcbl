@@ -880,7 +880,6 @@ mod tests {
         ("uint SHADOW_CASCADES", ";"),
         ("uint SHADOW_LIGHT_TILES", ";"),
         ("uint SHADOW_POINT_FACES", ";"),
-        ("uint NO_SHADOW_TILE", ";"),
         ("uint SHADOW_ATLAS_TILES", ";"),
         ("uint PROBE_LEVELS", ";"),
         ("uint KIND_DIRECTIONAL", ";"),

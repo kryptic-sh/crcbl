@@ -139,8 +139,6 @@ static const uint SHADOW_LIGHT_TILES = 14;
 
 static const uint SHADOW_POINT_FACES = 6;
 
-static const uint NO_SHADOW_TILE = 0xffffffffu;
-
 static const uint SHADOW_ATLAS_TILES = 16;
 
 static const uint KIND_DIRECTIONAL = 0;
@@ -1627,31 +1625,28 @@ float3 grass_light(float3 world_position, float3 normal, float2 pixel)
             reach = sun_visibility(world_position, to_light, n_dot_l, geometric_normal, pixel,
                                    sun_cascade, sun_fade);
         }
-        else
+        // A call per kind, on mesh.slang's `fragmentMain`'s terms and for its
+        // measured reason.
+        else if (light.kind == KIND_POINT)
         {
-            // One `punctual_visibility` for both kinds, on mesh.slang's
-            // `fragmentMain`'s terms: every call is inlined, and two would put
-            // two copies of the filter's taps in this loop.
-            uint tile = NO_SHADOW_TILE;
-            float map_world = 0.0;
-            if (light.kind == KIND_POINT)
+            if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
             {
-                if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
+                if (n_dot_l > 0.0)
                 {
                     uint face;
-                    map_world = point_map_world(light, world_position, face);
-                    tile = light.shadow_tile + face;
+                    float map_world = point_map_world(light, world_position, face);
+                    reach *= punctual_visibility(light.shadow_tile + face, world_position, to_light,
+                                                 n_dot_l, map_world, geometric_normal, pixel);
                 }
             }
-            else if (light.shadow_tile < SHADOW_LIGHT_TILES)
+        }
+        else if (light.shadow_tile < SHADOW_LIGHT_TILES)
+        {
+            if (n_dot_l > 0.0)
             {
-                tile = light.shadow_tile;
-                map_world = spot_map_world(light, world_position);
-            }
-            if (tile != NO_SHADOW_TILE && n_dot_l > 0.0)
-            {
-                reach *= punctual_visibility(tile, world_position, to_light, n_dot_l, map_world,
-                                             geometric_normal, pixel);
+                reach *= punctual_visibility(light.shadow_tile, world_position, to_light, n_dot_l,
+                                             spot_map_world(light, world_position), geometric_normal,
+                                             pixel);
             }
         }
 

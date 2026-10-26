@@ -6031,48 +6031,46 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
             // beside it — `sun_visibility`'s out-parameters say why.
             sun_cascade_tint = cascade_tint(sun_cascade, sun_fade);
         }
-        else
+        // **A spot and a point light call `punctual_visibility` separately**,
+        // though the two calls differ only in the tile and map width they pass.
+        // One call site would hold one copy of its filter instead of two, and
+        // was measured (2026-10-26): on NVIDIA's MX550 that variant ran the
+        // forward pass 3–6% slower, while on Intel's ANV the two calls spilled
+        // less than the one. `docs/backlog.md` has the four variants' numbers.
+        else if (light.kind == KIND_POINT)
         {
-            // **One `punctual_visibility` for a spot and a point light**, and
-            // that is about the compiler rather than the maths: every call is
-            // inlined, and a filter written once per kind was two copies of its
-            // taps in this loop — on Mesa's ANV, which builds this stage at
-            // SIMD8 only and spills, code it could not afford. The kinds differ
-            // only in which tile they read and how wide its map is here.
-            uint tile = NO_SHADOW_TILE;
-            float map_world = 0.0;
-            if (light.kind == KIND_POINT)
+            // **The whole run has to be inside the region, not just its first
+            // tile**: a point light's faces are `shadow_tile .. + 6`, so a row
+            // whose base sat in the last five tiles would read a matrix past the
+            // end of the array. `Selection` never emits one; this is what makes
+            // that a fact about the shader rather than a promise about the host.
+            //
+            // Written as a subtraction on the two constants rather than as
+            // `shadow_tile + SHADOW_POINT_FACES <= SHADOW_LIGHT_TILES`, because
+            // `NO_SHADOW_TILE` is `0xffffffff` and that sum wraps — an
+            // unshadowed point light would pass the test and sample tile 5.
+            if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
             {
-                // **The whole run has to be inside the region, not just its
-                // first tile**: a point light's faces are `shadow_tile .. + 6`,
-                // so a row whose base sat in the last five tiles would read a
-                // matrix past the end of the array. `Selection` never emits
-                // one; this is what makes that a fact about the shader rather
-                // than a promise about the host.
-                //
-                // Written as a subtraction on the two constants rather than as
-                // `shadow_tile + SHADOW_POINT_FACES <= SHADOW_LIGHT_TILES`,
-                // because `NO_SHADOW_TILE` is `0xffffffff` and that sum wraps —
-                // an unshadowed point light would pass the test and sample
-                // tile 5.
-                if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
+                // Facing away: black from the diffuse term already, and the
+                // place self-shadowing acne is worst. `sun_visibility`'s reason
+                // exactly, and the spot's below.
+                if (n_dot_l > 0.0)
                 {
                     uint face;
-                    map_world = point_map_world(light, input.world_position, face);
-                    tile = light.shadow_tile + face;
+                    float map_world = point_map_world(light, input.world_position, face);
+                    reach *= punctual_visibility(light.shadow_tile + face, input.world_position,
+                                                 to_light, n_dot_l, map_world, geometric_normal,
+                                                 input.position.xy);
                 }
             }
-            // A spot, or a rectangle, which `Selection` refuses a tile.
-            else if (light.shadow_tile < SHADOW_LIGHT_TILES)
+        }
+        // A spot, or a rectangle, which `Selection` refuses a tile.
+        else if (light.shadow_tile < SHADOW_LIGHT_TILES)
+        {
+            if (n_dot_l > 0.0)
             {
-                tile = light.shadow_tile;
-                map_world = spot_map_world(light, input.world_position);
-            }
-            // Facing away: black from the diffuse term already, and the place
-            // self-shadowing acne is worst. `sun_visibility`'s reason exactly.
-            if (tile != NO_SHADOW_TILE && n_dot_l > 0.0)
-            {
-                reach *= punctual_visibility(tile, input.world_position, to_light, n_dot_l, map_world,
+                reach *= punctual_visibility(light.shadow_tile, input.world_position, to_light,
+                                             n_dot_l, spot_map_world(light, input.world_position),
                                              geometric_normal, input.position.xy);
             }
         }

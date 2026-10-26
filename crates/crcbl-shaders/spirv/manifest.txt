@@ -232,22 +232,22 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [grass]
 source = shaders/grass.slang
-source-sha256 = a7fd4ef3bd869fa5e40eeb3d1d83155bbefff26efe18fcb2bc9eda703a2d199a
+source-sha256 = 30fbb2cb75c2dddc9eed6659cca23d48073cb29232a20409d4a5bbbc41b465d7
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/grass.spv
-spirv-sha256 = 86aabffd2f0b567b6c629b4bfa08b477c70b007531a76be36679e62ba44b1cf6
+spirv-sha256 = 63e96b7f99d24c18014e40bba0b86119f8934658b7b8e28934e5fa97f5daf1b2
 wgsl = wgsl/grass.wgsl
-wgsl-sha256 = 63086dbc2b61b93d6473d07d4b8cfe35aad2dd7931e2de24855a0ee1148ff9c1
+wgsl-sha256 = fceb569d3c69ae36aef57d39fb57c1c22c836add66634f50ab5e3b2d3df13424
 msl = msl/grass.metal
-msl-sha256 = 1145ca63124b8493678c1b85e46397f0bddf5057a774e79e8dbd3a446f4b7ddf
+msl-sha256 = 762dd9d9d99ac8d833c128de89e5cb3ab41361ee5782eee9ce6702474131789b
 dxil = vertexMain:dxil/grass.vertex.dxil:6184f0d6ad37125570f1d54db49e49440f9cf2d6396e058b117675319bbb49a2
 dxil = bladeNearVertexMain:dxil/grass.blade_near_vertex.dxil:3db14da3faf25fb44d6db3cb52f148f3d2518e38198b485fe8bdd399b26fc85e
 dxil = bladeFarVertexMain:dxil/grass.blade_far_vertex.dxil:2d12f7137a1eb27c856ce85fff90247d20bc440422a582f84af1880f81f2d0a4
-dxil = bladeFragmentMain:dxil/grass.blade_fragment.dxil:b31b74fda9d22b693fdc96d866f7fb95411d588a157c82e05531993ff9fc94c0
-dxil = fragmentMain:dxil/grass.fragment.dxil:481a1c16c51cb919206e8e76d76859ee1425888c0625b06466cd58fa5e1ac46f
+dxil = bladeFragmentMain:dxil/grass.blade_fragment.dxil:a6216ab883645b88104a366cf66b04f6561857c50e64d52fb4936b7f5038ed56
+dxil = fragmentMain:dxil/grass.fragment.dxil:f741de5c300ee9fc954480118de010b7cf7286235e8b4674c466eed03ba05665
 dxil = shellVertexMain:dxil/grass.shell_vertex.dxil:e77291ee1693d91e9b466cfb2065c8d688801d781fef7b8cb679e1992d058af6
 dxil = finVertexMain:dxil/grass.fin_vertex.dxil:0c02ced4d74c4c941ac7fa14d8e1ecc41d346037d0e34fbd20199769506b1776
-dxil = shellFragmentMain:dxil/grass.shell_fragment.dxil:2c5320bab409a80bb073c258bfa83d170e618cb1d569643748a71c7a63b86f91
+dxil = shellFragmentMain:dxil/grass.shell_fragment.dxil:10a0e09d0934b4bf2e752223338910f0b25cee6972bdbba10e2a3129e3a60929
 entry-points = vertexMain:vertex, bladeNearVertexMain:vertex, bladeFarVertexMain:vertex, bladeFragmentMain:fragment, fragmentMain:fragment, shellVertexMain:vertex, finVertexMain:vertex, shellFragmentMain:fragment
 
 [grass_gen]
@@ -318,18 +318,18 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 71ca1844de1bf3d93c01f77da089862b9f22624939e685b09d5d1349c9701ae2
+source-sha256 = bc405160c20f35413b924b179e596d8684dedeb5242765ad3123cc9f8446c5f0
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = 2bc70f28111ace75533192af1ce40ae76ce7c729c2a566884e0e66542388a005
+spirv-sha256 = 10fda05317f9b442bd59813edf4f7ced541ae62799a5c408f0c513a0f3eca5cc
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 8518ec83c4740309cd7c4bbae404db638cab0c013e7f829275a6fdb6bae82770
+wgsl-sha256 = 0cdf3ed817c9b99ddbfa2f0c59eb001f6904556ca025fcf0c0d6344f8cd07cf6
 msl = msl/mesh.metal
-msl-sha256 = 2467962748545d601765196c7df898fec17acbc11de5395d0e02865f03215d0f
+msl-sha256 = 737edc7c3e5af6aefb5839af49afd18785d6f5d79a5a5dedce622945884c6d50
 dxil = vertexMain:dxil/mesh.vertex.dxil:e416e9385394b85a2cce3da00a8a1363ea5e157b87b112badb52c736683301b6
 dxil = depthVertexMain:dxil/mesh.depth_vertex.dxil:feefc00badf71db6a0f78fb37aba1b292ce85e0de7cf2573a844dac9355cf773
 dxil = depthClearVertexMain:dxil/mesh.depth_clear_vertex.dxil:e2007f43be9438f2c6d5022cb8fb44f825ab39426569a45117fd8c1494ab53a4
-dxil = fragmentMain:dxil/mesh.fragment.dxil:b3322e0862d8d149f45b8d52e41a658145c556d80d024bb4473a6729b0c255a0
+dxil = fragmentMain:dxil/mesh.fragment.dxil:997d93fe1240b5ee0dd2fb258397b6b3bcb7c990144ab82471a72e5bbc0def52
 dxil = depthMaskedFragmentMain:dxil/mesh.depth_masked_fragment.dxil:730b927a61eb69d89f64b52190d60125f3d99077c892bdbfa98be3ae260a39ad
 dxil = rsmFragmentMain:dxil/mesh.rsm_fragment.dxil:7ffe5596141b8537bec0d26490530be5af5b34385068cec93b680ff7a974dbcc
 entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:vertex, fragmentMain:fragment, depthMaskedFragmentMain:fragment, rsmFragmentMain:fragment

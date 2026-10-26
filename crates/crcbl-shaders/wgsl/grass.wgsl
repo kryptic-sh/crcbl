@@ -929,18 +929,12 @@ fn point_map_world_0( light_0 : ptr<function, GpuLight_std430_0>,  world_positio
     return 2.0f * _S65;
 }
 
-fn spot_map_world_0( light_1 : ptr<function, GpuLight_std430_0>,  world_position_4 : vec3<f32>) -> f32
-{
-    var cos_outer_1 : f32 = (*light_1).direction_0.w;
-    return 2.0f * (sqrt(saturate(1.0f - cos_outer_1 * cos_outer_1)) / max(cos_outer_1, 0.00009999999747379f)) * max(dot(world_position_4 - (*light_1).position_0.xyz, normalize((*light_1).direction_0.xyz)), 0.0f);
-}
-
 fn light_tile_0( tile_5 : u32) -> u32
 {
     return u32(2) + tile_5;
 }
 
-fn punctual_visibility_0( tile_6 : u32,  world_position_5 : vec3<f32>,  to_light_4 : vec3<f32>,  n_dot_l_1 : f32,  map_world_0 : f32,  geometric_normal_3 : vec3<f32>,  pixel_6 : vec2<f32>) -> f32
+fn punctual_visibility_0( tile_6 : u32,  world_position_4 : vec3<f32>,  to_light_4 : vec3<f32>,  n_dot_l_1 : f32,  map_world_0 : f32,  geometric_normal_3 : vec3<f32>,  pixel_6 : vec2<f32>) -> f32
 {
     var atlas_0 : u32 = light_tile_0(tile_6);
     var rect_9 : vec4<f32> = atlas_rect_0(atlas_0);
@@ -949,7 +943,7 @@ fn punctual_visibility_0( tile_6 : u32,  world_position_5 : vec3<f32>,  to_light
         return 1.0f;
     }
     var texel_world_1 : f32 = map_world_0 / tile_texels_0(rect_9);
-    var clip_1 : vec4<f32> = (((vec4<f32>(world_position_5 + geometric_normal_3 * vec3<f32>((texel_world_1 * 4.0f * shadow_normal_offset_0(geometric_normal_3, to_light_4))) + to_light_4 * vec3<f32>((texel_world_1 * 2.0f)), 1.0f)) * (mat4x4<f32>(frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(0)][i32(0)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(1)][i32(0)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(2)][i32(0)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(3)][i32(0)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(0)][i32(1)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(1)][i32(1)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(2)][i32(1)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(3)][i32(1)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(0)][i32(2)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(1)][i32(2)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(2)][i32(2)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(3)][i32(2)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(0)][i32(3)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(1)][i32(3)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(2)][i32(3)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(3)][i32(3)]))));
+    var clip_1 : vec4<f32> = (((vec4<f32>(world_position_4 + geometric_normal_3 * vec3<f32>((texel_world_1 * 4.0f * shadow_normal_offset_0(geometric_normal_3, to_light_4))) + to_light_4 * vec3<f32>((texel_world_1 * 2.0f)), 1.0f)) * (mat4x4<f32>(frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(0)][i32(0)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(1)][i32(0)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(2)][i32(0)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(3)][i32(0)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(0)][i32(1)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(1)][i32(1)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(2)][i32(1)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(3)][i32(1)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(0)][i32(2)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(1)][i32(2)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(2)][i32(2)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(3)][i32(2)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(0)][i32(3)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(1)][i32(3)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(2)][i32(3)], frame_0.light_view_proj_0.data_2[tile_6].data_0[i32(3)][i32(3)]))));
     var _S66 : f32 = clip_1.w;
     if(_S66 <= 0.0f)
     {
@@ -983,6 +977,12 @@ fn punctual_visibility_0( tile_6 : u32,  world_position_5 : vec3<f32>,  to_light
         return tile_box_pcf_0(atlas_0, tile_uv_6, ndc_1.z);
     }
     return tile_pcf_0(atlas_0, tile_uv_6, ndc_1.z, pixel_6, 2.0f);
+}
+
+fn spot_map_world_0( light_1 : ptr<function, GpuLight_std430_0>,  world_position_5 : vec3<f32>) -> f32
+{
+    var cos_outer_1 : f32 = (*light_1).direction_0.w;
+    return 2.0f * (sqrt(saturate(1.0f - cos_outer_1 * cos_outer_1)) / max(cos_outer_1, 0.00009999999747379f)) * max(dot(world_position_5 - (*light_1).position_0.xyz, normalize((*light_1).direction_0.xyz)), 0.0f);
 }
 
 fn grass_light_0( world_position_6 : vec3<f32>,  normal_3 : vec3<f32>,  pixel_7 : vec2<f32>) -> vec3<f32>
@@ -1043,22 +1043,25 @@ fn grass_light_0( world_position_6 : vec3<f32>,  normal_3 : vec3<f32>,  pixel_7 
         }
         else
         {
-            var tile_7 : u32;
-            var map_world_1 : f32;
             if(_S72 == u32(1))
             {
                 var _S74 : u32 = _S71.shadow_tile_0;
                 if((_S71.shadow_tile_0) <= u32(8))
                 {
-                    var face_1 : u32;
-                    var _S75 : f32 = point_map_world_0(&(_S71), world_position_6, &(face_1));
-                    tile_7 = _S74 + face_1;
-                    map_world_1 = _S75;
+                    if(n_dot_l_2 > 0.0f)
+                    {
+                        var face_1 : u32;
+                        var _S75 : f32 = point_map_world_0(&(_S71), world_position_6, &(face_1));
+                        reach_3 = reach_1 * punctual_visibility_0(_S74 + face_1, world_position_6, to_light_5, n_dot_l_2, _S75, normal_3, pixel_7);
+                    }
+                    else
+                    {
+                        reach_3 = reach_1;
+                    }
                 }
                 else
                 {
-                    tile_7 = u32(4294967295);
-                    map_world_1 = 0.0f;
+                    reach_3 = reach_1;
                 }
             }
             else
@@ -1066,32 +1069,20 @@ fn grass_light_0( world_position_6 : vec3<f32>,  normal_3 : vec3<f32>,  pixel_7 
                 var _S76 : u32 = _S71.shadow_tile_0;
                 if((_S71.shadow_tile_0) < u32(14))
                 {
-                    var _S77 : f32 = spot_map_world_0(&(_S71), world_position_6);
-                    tile_7 = _S76;
-                    map_world_1 = _S77;
+                    if(n_dot_l_2 > 0.0f)
+                    {
+                        var _S77 : f32 = spot_map_world_0(&(_S71), world_position_6);
+                        reach_3 = reach_1 * punctual_visibility_0(_S76, world_position_6, to_light_5, n_dot_l_2, _S77, normal_3, pixel_7);
+                    }
+                    else
+                    {
+                        reach_3 = reach_1;
+                    }
                 }
                 else
                 {
-                    tile_7 = u32(4294967295);
-                    map_world_1 = 0.0f;
+                    reach_3 = reach_1;
                 }
-            }
-            var _S78 : bool;
-            if(tile_7 != u32(4294967295))
-            {
-                _S78 = n_dot_l_2 > 0.0f;
-            }
-            else
-            {
-                _S78 = false;
-            }
-            if(_S78)
-            {
-                reach_3 = reach_1 * punctual_visibility_0(tile_7, world_position_6, to_light_5, n_dot_l_2, map_world_1, normal_3, pixel_7);
-            }
-            else
-            {
-                reach_3 = reach_1;
             }
         }
         direct_0 = direct_0 + _S71.color_0.xyz * vec3<f32>((max(n_dot_l_2, 0.0f) * reach_3));
@@ -1116,30 +1107,30 @@ struct pixelInput_0
     @interpolate(flat) @location(6) patch_3 : f32,
 };
 
-fn grass_style_1( _S79 : vec3<f32>,  _S80 : u32,  _S81 : f32,  _S82 : f32) -> vec3<f32>
+fn grass_style_1( _S78 : vec3<f32>,  _S79 : u32,  _S80 : f32,  _S81 : f32) -> vec3<f32>
 {
-    var _S83 : vec4<f32> = blades_0[_S80].occlusion_0;
-    var reach_4 : f32 = blades_0[_S80].occlusion_0.w;
+    var _S82 : vec4<f32> = blades_0[_S79].occlusion_0;
+    var reach_4 : f32 = blades_0[_S79].occlusion_0.w;
     var occluded_1 : f32;
     if(reach_4 > 0.0f)
     {
-        occluded_1 = saturate(1.0f - _S81 / reach_4);
+        occluded_1 = saturate(1.0f - _S80 / reach_4);
     }
     else
     {
         occluded_1 = 0.0f;
     }
-    var start_1 : f32 = blades_0[_S80].glow_0.w;
-    return mix(mix(_S79, _S83.xyz, vec3<f32>(occluded_1)), blades_0[_S80].patch_0.xyz, vec3<f32>((blades_0[_S80].patch_0.w * _S82))) + blades_0[_S80].glow_0.xyz * vec3<f32>(saturate((_S81 - start_1) / max(1.0f - start_1, 0.00009999999747379f)));
+    var start_1 : f32 = blades_0[_S79].glow_0.w;
+    return mix(mix(_S78, _S82.xyz, vec3<f32>(occluded_1)), blades_0[_S79].patch_0.xyz, vec3<f32>((blades_0[_S79].patch_0.w * _S81))) + blades_0[_S79].glow_0.xyz * vec3<f32>(saturate((_S80 - start_1) / max(1.0f - start_1, 0.00009999999747379f)));
 }
 
 @fragment
-fn bladeFragmentMain( _S84 : pixelInput_0, @builtin(position) position_3 : vec4<f32>) -> pixelOutput_0
+fn bladeFragmentMain( _S83 : pixelInput_0, @builtin(position) position_3 : vec4<f32>) -> pixelOutput_0
 {
-    var _S85 : vec3<f32> = grass_style_1(_S84.color_3, _S84.row_6, _S84.uv_1.y, _S84.patch_3);
-    var _S86 : vec3<f32> = grass_light_0(_S84.world_position_7, normalize(_S84.normal_4), position_3.xy);
-    var _S87 : pixelOutput_0 = pixelOutput_0( vec4<f32>(_S85 * _S86, 1.0f) );
-    return _S87;
+    var _S84 : vec3<f32> = grass_style_1(_S83.color_3, _S83.row_6, _S83.uv_1.y, _S83.patch_3);
+    var _S85 : vec3<f32> = grass_light_0(_S83.world_position_7, normalize(_S83.normal_4), position_3.xy);
+    var _S86 : pixelOutput_0 = pixelOutput_0( vec4<f32>(_S84 * _S85, 1.0f) );
+    return _S86;
 }
 
 struct pixelOutput_1
@@ -1159,18 +1150,18 @@ struct pixelInput_1
 };
 
 @fragment
-fn fragmentMain( _S88 : pixelInput_1, @builtin(position) position_4 : vec4<f32>) -> pixelOutput_1
+fn fragmentMain( _S87 : pixelInput_1, @builtin(position) position_4 : vec4<f32>) -> pixelOutput_1
 {
-    var _S89 : f32 = _S88.uv_2.y;
-    var _S90 : vec3<f32> = vec3<f32>(_S88.uv_2.x, 1.0f - _S89, 0.0f);
-    if(((textureSampleLevel((grassCard_0), (grassCardSampler_0), ((_S90)).xy, i32(((_S90)).z), (_S88.level_3))).x) < 0.5f)
+    var _S88 : f32 = _S87.uv_2.y;
+    var _S89 : vec3<f32> = vec3<f32>(_S87.uv_2.x, 1.0f - _S88, 0.0f);
+    if(((textureSampleLevel((grassCard_0), (grassCardSampler_0), ((_S89)).xy, i32(((_S89)).z), (_S87.level_3))).x) < 0.5f)
     {
         discard;
     }
-    var _S91 : vec3<f32> = grass_style_1(_S88.color_4, _S88.row_7, _S89, _S88.patch_4);
-    var _S92 : vec3<f32> = grass_light_0(_S88.world_position_8, normalize(_S88.normal_5), position_4.xy);
-    var _S93 : pixelOutput_1 = pixelOutput_1( vec4<f32>(_S91 * _S92, 1.0f) );
-    return _S93;
+    var _S90 : vec3<f32> = grass_style_1(_S87.color_4, _S87.row_7, _S88, _S87.patch_4);
+    var _S91 : vec3<f32> = grass_light_0(_S87.world_position_8, normalize(_S87.normal_5), position_4.xy);
+    var _S92 : pixelOutput_1 = pixelOutput_1( vec4<f32>(_S90 * _S91, 1.0f) );
+    return _S92;
 }
 
 fn grass_shell_count_0() -> u32
@@ -1180,8 +1171,8 @@ fn grass_shell_count_0() -> u32
 
 fn grass_ground_texel_0( texel_0 : vec2<i32>) -> f32
 {
-    var _S94 : vec3<i32> = vec3<i32>(clamp(texel_0, vec2<i32>(i32(0), i32(0)), vec2<i32>(i32(field_0.maps_0.x) - i32(1), i32(field_0.maps_0.y) - i32(1))), i32(0));
-    return (textureLoad((grassGround_0), ((_S94)).xy, ((_S94)).z).x);
+    var _S93 : vec3<i32> = vec3<i32>(clamp(texel_0, vec2<i32>(i32(0), i32(0)), vec2<i32>(i32(field_0.maps_0.x) - i32(1), i32(field_0.maps_0.y) - i32(1))), i32(0));
+    return (textureLoad((grassGround_0), ((_S93)).xy, ((_S93)).z).x);
 }
 
 struct GrassGround_0
@@ -1195,18 +1186,18 @@ fn grass_ground_under_0( world_1 : vec2<f32>) -> GrassGround_0
     var at_0 : vec2<f32> = (world_1 - field_0.ground_1.xy) * vec2<f32>(field_0.ground_1.w);
     var base_2 : vec2<f32> = floor(at_0);
     var blend_1 : vec2<f32> = at_0 - base_2;
-    var _S95 : vec2<i32> = vec2<i32>(base_2);
-    var h00_0 : f32 = grass_ground_texel_0(_S95);
-    var h10_0 : f32 = grass_ground_texel_0(_S95 + vec2<i32>(i32(1), i32(0)));
-    var h01_0 : f32 = grass_ground_texel_0(_S95 + vec2<i32>(i32(0), i32(1)));
-    var h11_0 : f32 = grass_ground_texel_0(_S95 + vec2<i32>(i32(1), i32(1)));
-    var _S96 : f32 = blend_1.x;
-    var _S97 : f32 = h10_0 - h00_0;
-    var lower_2 : f32 = h00_0 + _S96 * _S97;
-    var _S98 : f32 = h11_0 - h01_0;
+    var _S94 : vec2<i32> = vec2<i32>(base_2);
+    var h00_0 : f32 = grass_ground_texel_0(_S94);
+    var h10_0 : f32 = grass_ground_texel_0(_S94 + vec2<i32>(i32(1), i32(0)));
+    var h01_0 : f32 = grass_ground_texel_0(_S94 + vec2<i32>(i32(0), i32(1)));
+    var h11_0 : f32 = grass_ground_texel_0(_S94 + vec2<i32>(i32(1), i32(1)));
+    var _S95 : f32 = blend_1.x;
+    var _S96 : f32 = h10_0 - h00_0;
+    var lower_2 : f32 = h00_0 + _S95 * _S96;
+    var _S97 : f32 = h11_0 - h01_0;
     var under_0 : GrassGround_0;
-    under_0.height_1 = lower_2 + blend_1.y * (h01_0 + _S96 * _S98 - lower_2);
-    under_0.normal_6 = normalize(vec3<f32>(- (0.5f * (_S97 + _S98)), field_0.ground_1.z, - (0.5f * (h01_0 - h00_0 + (h11_0 - h10_0)))));
+    under_0.height_1 = lower_2 + blend_1.y * (h01_0 + _S95 * _S97 - lower_2);
+    under_0.normal_6 = normalize(vec3<f32>(- (0.5f * (_S96 + _S97)), field_0.ground_1.z, - (0.5f * (h01_0 - h00_0 + (h11_0 - h10_0)))));
     return under_0;
 }
 
@@ -1218,15 +1209,15 @@ fn windSmoothTriangle_0( u_1 : f32) -> f32
 
 fn windSample_0( posRel_0 : vec3<f32>) -> vec3<f32>
 {
-    var _S99 : vec2<f32> = posRel_0.xz;
-    var deflection_0 : vec2<f32> = (textureSampleLevel((windDirectionLayer_0), (windSampler_0), (wind_0.directionUv_0 + _S99 * wind_0.directionUvPerMetre_0), (0.0f))).xy * vec2<f32>(2.0f) - vec2<f32>(1.0f);
-    var intensity_0 : f32 = (textureSampleLevel((windIntensityLayer_0), (windSampler_0), (wind_0.intensityUv_0 + _S99 * wind_0.intensityUvPerMetre_0), (0.0f))).x;
+    var _S98 : vec2<f32> = posRel_0.xz;
+    var deflection_0 : vec2<f32> = (textureSampleLevel((windDirectionLayer_0), (windSampler_0), (wind_0.directionUv_0 + _S98 * wind_0.directionUvPerMetre_0), (0.0f))).xy * vec2<f32>(2.0f) - vec2<f32>(1.0f);
+    var intensity_0 : f32 = (textureSampleLevel((windIntensityLayer_0), (windSampler_0), (wind_0.intensityUv_0 + _S98 * wind_0.intensityUvPerMetre_0), (0.0f))).x;
     var base_3 : vec2<f32> = wind_0.baseDirection_0;
-    var _S100 : f32 = wind_0.baseDirection_0.x;
-    var _S101 : f32 = deflection_0.x;
-    var _S102 : f32 = wind_0.baseDirection_0.y;
-    var _S103 : f32 = deflection_0.y;
-    var turned_0 : vec2<f32> = vec2<f32>(_S100 * _S101 - _S102 * _S103, _S100 * _S103 + _S102 * _S101);
+    var _S99 : f32 = wind_0.baseDirection_0.x;
+    var _S100 : f32 = deflection_0.x;
+    var _S101 : f32 = wind_0.baseDirection_0.y;
+    var _S102 : f32 = deflection_0.y;
+    var turned_0 : vec2<f32> = vec2<f32>(_S99 * _S100 - _S101 * _S102, _S99 * _S102 + _S101 * _S100);
     var lengthSquared_0 : f32 = dot(turned_0, turned_0);
     var direction_2 : vec2<f32>;
     if(lengthSquared_0 > 9.999999960041972e-13f)
@@ -1237,7 +1228,7 @@ fn windSample_0( posRel_0 : vec3<f32>) -> vec3<f32>
     {
         direction_2 = base_3;
     }
-    var speed_0 : f32 = intensity_0 * wind_0.baseSpeed_0 * (1.0f + wind_0.gustAmplitude_0 * (2.0f * windSmoothTriangle_0(dot(_S99, base_3) * wind_0.invGustWavelength_0 + wind_0.gustPhase_0) - 1.0f));
+    var speed_0 : f32 = intensity_0 * wind_0.baseSpeed_0 * (1.0f + wind_0.gustAmplitude_0 * (2.0f * windSmoothTriangle_0(dot(_S98, base_3) * wind_0.invGustWavelength_0 + wind_0.gustPhase_0) - 1.0f));
     return vec3<f32>(direction_2.x * speed_0, 0.0f, direction_2.y * speed_0);
 }
 
@@ -1246,8 +1237,8 @@ fn grass_lean_0( velocity_0 : vec3<f32>,  height_2 : f32) -> vec3<f32>
     var speed_1 : f32 = length(velocity_0);
     var bend_0 : f32 = height_2 * 0.60000002384185791f * (speed_1 / (speed_1 + 6.0f));
     var along_2 : vec2<f32> = velocity_0.xz * vec2<f32>((bend_0 / max(speed_1, 9.99999997475242708e-07f)));
-    var _S104 : f32 = bend_0 * bend_0;
-    return vec3<f32>(along_2.x, - (_S104 / (height_2 + sqrt(max(height_2 * height_2 - _S104, 0.0f)))), along_2.y);
+    var _S103 : f32 = bend_0 * bend_0;
+    return vec3<f32>(along_2.x, - (_S103 / (height_2 + sqrt(max(height_2 * height_2 - _S103, 0.0f)))), along_2.y);
 }
 
 struct GrassShellVertex_0
@@ -1265,17 +1256,17 @@ fn grass_sheet_vertex_0( rest_1 : vec2<f32>,  share_0 : f32,  fin_1 : vec4<f32>,
 {
     var under_1 : GrassGround_0 = grass_ground_under_0(rest_1);
     var lift_0 : f32 = share_0 * field_0.stack_0.x;
-    var _S105 : f32 = rest_1.x;
-    var _S106 : f32 = rest_1.y;
-    var ground_2 : vec3<f32> = vec3<f32>(_S105, under_1.height_1, _S106);
+    var _S104 : f32 = rest_1.x;
+    var _S105 : f32 = rest_1.y;
+    var ground_2 : vec3<f32> = vec3<f32>(_S104, under_1.height_1, _S105);
     var world_2 : vec3<f32> = ground_2 + vec3<f32>(0.0f, lift_0, 0.0f) + grass_lean_0(windSample_0(ground_2 - frame_0.camera_position_0.xyz), field_0.stack_0.x) * vec3<f32>((share_0 * share_0));
     var output_4 : GrassShellVertex_0;
-    var _S107 : vec4<f32> = (((vec4<f32>(world_2, 1.0f)) * (mat4x4<f32>(frame_0.view_proj_0.data_0[i32(0)][i32(0)], frame_0.view_proj_0.data_0[i32(1)][i32(0)], frame_0.view_proj_0.data_0[i32(2)][i32(0)], frame_0.view_proj_0.data_0[i32(3)][i32(0)], frame_0.view_proj_0.data_0[i32(0)][i32(1)], frame_0.view_proj_0.data_0[i32(1)][i32(1)], frame_0.view_proj_0.data_0[i32(2)][i32(1)], frame_0.view_proj_0.data_0[i32(3)][i32(1)], frame_0.view_proj_0.data_0[i32(0)][i32(2)], frame_0.view_proj_0.data_0[i32(1)][i32(2)], frame_0.view_proj_0.data_0[i32(2)][i32(2)], frame_0.view_proj_0.data_0[i32(3)][i32(2)], frame_0.view_proj_0.data_0[i32(0)][i32(3)], frame_0.view_proj_0.data_0[i32(1)][i32(3)], frame_0.view_proj_0.data_0[i32(2)][i32(3)], frame_0.view_proj_0.data_0[i32(3)][i32(3)]))));
-    output_4.position_5 = _S107;
+    var _S106 : vec4<f32> = (((vec4<f32>(world_2, 1.0f)) * (mat4x4<f32>(frame_0.view_proj_0.data_0[i32(0)][i32(0)], frame_0.view_proj_0.data_0[i32(1)][i32(0)], frame_0.view_proj_0.data_0[i32(2)][i32(0)], frame_0.view_proj_0.data_0[i32(3)][i32(0)], frame_0.view_proj_0.data_0[i32(0)][i32(1)], frame_0.view_proj_0.data_0[i32(1)][i32(1)], frame_0.view_proj_0.data_0[i32(2)][i32(1)], frame_0.view_proj_0.data_0[i32(3)][i32(1)], frame_0.view_proj_0.data_0[i32(0)][i32(2)], frame_0.view_proj_0.data_0[i32(1)][i32(2)], frame_0.view_proj_0.data_0[i32(2)][i32(2)], frame_0.view_proj_0.data_0[i32(3)][i32(2)], frame_0.view_proj_0.data_0[i32(0)][i32(3)], frame_0.view_proj_0.data_0[i32(1)][i32(3)], frame_0.view_proj_0.data_0[i32(2)][i32(3)], frame_0.view_proj_0.data_0[i32(3)][i32(3)]))));
+    output_4.position_5 = _S106;
     output_4.world_position_9 = world_2;
-    output_4.rest_0 = vec3<f32>(_S105, lift_0, _S106);
+    output_4.rest_0 = vec3<f32>(_S104, lift_0, _S105);
     output_4.normal_7 = under_1.normal_6;
-    output_4.footprint_0 = max(abs(_S107.w), 0.00009999999747379f) / max(grass_0.screen_0.x, 0.00009999999747379f);
+    output_4.footprint_0 = max(abs(_S106.w), 0.00009999999747379f) / max(grass_0.screen_0.x, 0.00009999999747379f);
     output_4.occlusion_1 = occlusion_2;
     output_4.fin_0 = fin_1;
     return output_4;
@@ -1284,19 +1275,19 @@ fn grass_sheet_vertex_0( rest_1 : vec2<f32>,  share_0 : f32,  fin_1 : vec4<f32>,
 @vertex
 fn shellVertexMain(@builtin(vertex_index) index_8 : u32, @builtin(instance_index) instance_id_3 : u32) -> GrassShellVertex_0
 {
-    var _S108 : u32 = grass_shell_count_0() - u32(1);
+    var _S107 : u32 = grass_shell_count_0() - u32(1);
     var quad_0 : u32 = index_8 / u32(6);
-    return grass_sheet_vertex_0(tile_1.tile_0.xy + (vec2<f32>(f32(quad_0 % u32(16)), f32(quad_0 / u32(16))) + GRASS_CARD_CORNERS_0[index_8 % u32(6)]) * vec2<f32>((tile_1.tile_0.z / 16.0f)), field_0.layers_0[_S108 - min(instance_id_3, _S108)].x, vec4<f32>(0.0f, 1.0f, 0.0f, 0.0f), field_0.layers_0[_S108 - min(instance_id_3, _S108)].y);
+    return grass_sheet_vertex_0(tile_1.tile_0.xy + (vec2<f32>(f32(quad_0 % u32(16)), f32(quad_0 / u32(16))) + GRASS_CARD_CORNERS_0[index_8 % u32(6)]) * vec2<f32>((tile_1.tile_0.z / 16.0f)), field_0.layers_0[_S107 - min(instance_id_3, _S107)].x, vec4<f32>(0.0f, 1.0f, 0.0f, 0.0f), field_0.layers_0[_S107 - min(instance_id_3, _S107)].y);
 }
 
 fn grass_occlusion_at_0( share_1 : f32) -> f32
 {
-    var _S109 : u32 = grass_shell_count_0();
+    var _S108 : u32 = grass_shell_count_0();
     var occlusion_3 : f32 = field_0.layers_0[i32(0)].y;
     var shell_0 : u32 = u32(0);
     for(;;)
     {
-        if(shell_0 < _S109)
+        if(shell_0 < _S108)
         {
         }
         else
@@ -1316,20 +1307,20 @@ fn grass_occlusion_at_0( share_1 : f32) -> f32
 fn finVertexMain(@builtin(vertex_index) index_9 : u32) -> GrassShellVertex_0
 {
     var quad_1 : u32 = index_9 / u32(6);
-    var _S110 : u32 = index_9 % u32(6);
-    var _S111 : u32 = max(field_0.tiles_0.z / u32(4), u32(1));
-    var _S112 : u32 = quad_1 / (_S111 * u32(64));
-    var _S113 : u32 = min(_S112, u32(1));
-    var fin_line_0 : u32 = quad_1 / u32(64) % _S111;
+    var _S109 : u32 = index_9 % u32(6);
+    var _S110 : u32 = max(field_0.tiles_0.z / u32(4), u32(1));
+    var _S111 : u32 = quad_1 / (_S110 * u32(64));
+    var _S112 : u32 = min(_S111, u32(1));
+    var fin_line_0 : u32 = quad_1 / u32(64) % _S110;
     var band_2 : f32 = 4.0f * field_0.origin_0.w;
     var across_1 : f32 = (f32(fin_line_0) + 0.5f) * band_2;
     var stride_0 : f32 = tile_1.tile_0.z / 16.0f;
-    var _S114 : f32 = f32(quad_1 / u32(4) % u32(16));
-    var along_3 : f32 = (_S114 + GRASS_CARD_CORNERS_0[_S110].x) * stride_0;
-    var middle_along_0 : f32 = (_S114 + 0.5f) * stride_0;
-    var share_2 : f32 = (f32(quad_1 % u32(4)) + GRASS_CARD_CORNERS_0[_S110].y) / 4.0f;
-    var along_z_0 : bool = _S113 == u32(0);
-    var _S115 : vec2<f32> = tile_1.tile_0.xy;
+    var _S113 : f32 = f32(quad_1 / u32(4) % u32(16));
+    var along_3 : f32 = (_S113 + GRASS_CARD_CORNERS_0[_S109].x) * stride_0;
+    var middle_along_0 : f32 = (_S113 + 0.5f) * stride_0;
+    var share_2 : f32 = (f32(quad_1 % u32(4)) + GRASS_CARD_CORNERS_0[_S109].y) / 4.0f;
+    var along_z_0 : bool = _S112 == u32(0);
+    var _S114 : vec2<f32> = tile_1.tile_0.xy;
     var side_1 : vec2<f32>;
     if(along_z_0)
     {
@@ -1339,8 +1330,8 @@ fn finVertexMain(@builtin(vertex_index) index_9 : u32) -> GrassShellVertex_0
     {
         side_1 = vec2<f32>(along_3, across_1);
     }
-    var rest_2 : vec2<f32> = _S115 + side_1;
-    var _S116 : vec2<f32> = tile_1.tile_0.xy;
+    var rest_2 : vec2<f32> = _S114 + side_1;
+    var _S115 : vec2<f32> = tile_1.tile_0.xy;
     if(along_z_0)
     {
         side_1 = vec2<f32>(across_1, middle_along_0);
@@ -1349,7 +1340,7 @@ fn finVertexMain(@builtin(vertex_index) index_9 : u32) -> GrassShellVertex_0
     {
         side_1 = vec2<f32>(middle_along_0, across_1);
     }
-    var middle_0 : vec2<f32> = _S116 + side_1;
+    var middle_0 : vec2<f32> = _S115 + side_1;
     if(along_z_0)
     {
         side_1 = vec2<f32>(0.5f * band_2, 0.0f);
@@ -1380,17 +1371,17 @@ fn finVertexMain(@builtin(vertex_index) index_9 : u32) -> GrassShellVertex_0
     {
         graze_0 = tile_1.tile_0.y;
     }
-    var output_5 : GrassShellVertex_0 = grass_sheet_vertex_0(rest_2, share_2, vec4<f32>(f32(_S113) + 1.0f, fade_1, graze_0 + across_1, 0.0f), grass_occlusion_at_0(share_2));
-    var _S117 : bool;
+    var output_5 : GrassShellVertex_0 = grass_sheet_vertex_0(rest_2, share_2, vec4<f32>(f32(_S112) + 1.0f, fade_1, graze_0 + across_1, 0.0f), grass_occlusion_at_0(share_2));
+    var _S116 : bool;
     if(fade_1 <= 0.0f)
     {
-        _S117 = true;
+        _S116 = true;
     }
     else
     {
-        _S117 = (field_0.stack_0.z) <= 0.0f;
+        _S116 = (field_0.stack_0.z) <= 0.0f;
     }
-    if(_S117)
+    if(_S116)
     {
         output_5.position_5 = vec4<f32>(0.0f, 0.0f, -1.0f, 1.0f);
     }
@@ -1410,11 +1401,11 @@ struct GrassInstance_0
 fn grass_no_blade_0() -> GrassInstance_0
 {
     var none_0 : GrassInstance_0;
-    const _S118 : vec4<f32> = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
-    none_0.root_0 = _S118;
-    none_0.facing_0 = _S118;
-    none_0.lean_0 = _S118;
-    none_0.ground_0 = _S118;
+    const _S117 : vec4<f32> = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
+    none_0.root_0 = _S117;
+    none_0.facing_0 = _S117;
+    none_0.lean_0 = _S117;
+    none_0.ground_0 = _S117;
     none_0.lanes_0 = vec4<u32>(u32(0), u32(0), u32(0), u32(0));
     return none_0;
 }
@@ -1423,70 +1414,70 @@ fn grass_cell_0( global_0 : vec2<i32>) -> GrassInstance_0
 {
     var side_2 : i32 = i32(max(field_0.tiles_0.z, u32(1)));
     var extent_0 : vec2<i32> = vec2<i32>(i32(field_0.tiles_0.x), i32(field_0.tiles_0.y)) * vec2<i32>(side_2);
-    var _S119 : i32 = global_0.x;
-    var _S120 : bool;
-    if(_S119 < i32(0))
+    var _S118 : i32 = global_0.x;
+    var _S119 : bool;
+    if(_S118 < i32(0))
     {
-        _S120 = true;
+        _S119 = true;
     }
     else
     {
-        _S120 = (global_0.y) < i32(0);
+        _S119 = (global_0.y) < i32(0);
     }
-    if(_S120)
+    if(_S119)
     {
-        _S120 = true;
+        _S119 = true;
     }
     else
     {
-        _S120 = _S119 >= (extent_0.x);
+        _S119 = _S118 >= (extent_0.x);
     }
-    if(_S120)
+    if(_S119)
     {
-        _S120 = true;
+        _S119 = true;
     }
     else
     {
-        _S120 = (global_0.y) >= (extent_0.y);
+        _S119 = (global_0.y) >= (extent_0.y);
     }
-    if(_S120)
+    if(_S119)
     {
         return grass_no_blade_0();
     }
-    var _S121 : vec2<u32> = vec2<u32>(global_0);
+    var _S120 : vec2<u32> = vec2<u32>(global_0);
     var cells_0 : u32 = u32(side_2);
-    var _S122 : u32 = _S121.y;
-    var _S123 : u32 = _S122 / cells_0;
-    var _S124 : u32 = _S123 * field_0.tiles_0.x;
-    var _S125 : u32 = _S121.x;
-    var _S126 : u32 = _S125 / cells_0;
-    var slot_2 : u32 = _S124 + _S126;
-    var _S127 : u32 = _S122 % cells_0;
-    var _S128 : u32 = _S127 * cells_0;
-    var _S129 : u32 = _S125 % cells_0;
-    var _S130 : GrassInstance_std430_0 = grassCells_0[slot_2 * field_0.tiles_0.w + (_S128 + _S129)];
-    var _S131 : GrassInstance_0 = GrassInstance_0( _S130.root_0, _S130.facing_0, _S130.lean_0, _S130.ground_0, _S130.clump_0, _S130.lanes_0 );
-    return _S131;
+    var _S121 : u32 = _S120.y;
+    var _S122 : u32 = _S121 / cells_0;
+    var _S123 : u32 = _S122 * field_0.tiles_0.x;
+    var _S124 : u32 = _S120.x;
+    var _S125 : u32 = _S124 / cells_0;
+    var slot_2 : u32 = _S123 + _S125;
+    var _S126 : u32 = _S121 % cells_0;
+    var _S127 : u32 = _S126 * cells_0;
+    var _S128 : u32 = _S124 % cells_0;
+    var _S129 : GrassInstance_std430_0 = grassCells_0[slot_2 * field_0.tiles_0.w + (_S127 + _S128)];
+    var _S130 : GrassInstance_0 = GrassInstance_0( _S129.root_0, _S129.facing_0, _S129.lean_0, _S129.ground_0, _S129.clump_0, _S129.lanes_0 );
+    return _S130;
 }
 
 fn grass_strand_reach_0( blade_4 : GrassInstance_0,  lift_1 : f32,  floor_reach_0 : f32,  fade_2 : f32) -> f32
 {
-    var _S132 : f32 = blade_4.root_0.w;
-    var _S133 : bool;
-    if(!(lift_1 < _S132))
+    var _S131 : f32 = blade_4.root_0.w;
+    var _S132 : bool;
+    if(!(lift_1 < _S131))
     {
-        _S133 = true;
+        _S132 = true;
     }
     else
     {
-        _S133 = (grass_row_0(blade_4.lanes_0.y).flags_0.x) != u32(1);
+        _S132 = (grass_row_0(blade_4.lanes_0.y).flags_0.x) != u32(1);
     }
-    if(_S133)
+    if(_S132)
     {
         return -1.0f;
     }
     var bound_0 : f32 = 0.5f * field_0.origin_0.w;
-    return min(max(min(blade_4.facing_0.z, bound_0) * (1.0f - lift_1 / _S132), floor_reach_0), bound_0) * fade_2;
+    return min(max(min(blade_4.facing_0.z, bound_0) * (1.0f - lift_1 / _S131), floor_reach_0), bound_0) * fade_2;
 }
 
 struct pixelOutput_2
@@ -1505,22 +1496,22 @@ struct pixelInput_2
 };
 
 @fragment
-fn shellFragmentMain( _S134 : pixelInput_2, @builtin(position) position_6 : vec4<f32>) -> pixelOutput_2
+fn shellFragmentMain( _S133 : pixelInput_2, @builtin(position) position_6 : vec4<f32>) -> pixelOutput_2
 {
     var cell_1 : f32 = field_0.origin_0.w;
-    var _S135 : vec2<f32> = _S134.rest_3.xz;
-    var from_corner_0 : vec2<f32> = (_S135 - field_0.origin_0.xy) / vec2<f32>(cell_1);
-    var _S136 : vec2<f32> = floor(from_corner_0);
-    var _S137 : vec2<i32> = vec2<i32>(_S136);
-    var inside_0 : vec2<f32> = from_corner_0 - _S136;
-    var _S138 : i32;
+    var _S134 : vec2<f32> = _S133.rest_3.xz;
+    var from_corner_0 : vec2<f32> = (_S134 - field_0.origin_0.xy) / vec2<f32>(cell_1);
+    var _S135 : vec2<f32> = floor(from_corner_0);
+    var _S136 : vec2<i32> = vec2<i32>(_S135);
+    var inside_0 : vec2<f32> = from_corner_0 - _S135;
+    var _S137 : i32;
     if((inside_0.x) < 0.5f)
     {
-        _S138 = i32(-1);
+        _S137 = i32(-1);
     }
     else
     {
-        _S138 = i32(1);
+        _S137 = i32(1);
     }
     var band_3 : i32;
     if((inside_0.y) < 0.5f)
@@ -1531,22 +1522,22 @@ fn shellFragmentMain( _S134 : pixelInput_2, @builtin(position) position_6 : vec4
     {
         band_3 = i32(1);
     }
-    var lift_2 : f32 = _S134.rest_3.y;
-    var _S139 : f32 = 0.5f * _S134.footprint_1;
-    var _S140 : f32 = _S134.fin_2.y;
-    var _S141 : GrassInstance_0 = grass_no_blade_0();
-    var _S142 : f32 = _S134.fin_2.x;
+    var lift_2 : f32 = _S133.rest_3.y;
+    var _S138 : f32 = 0.5f * _S133.footprint_1;
+    var _S139 : f32 = _S133.fin_2.y;
+    var _S140 : GrassInstance_0 = grass_no_blade_0();
+    var _S141 : f32 = _S133.fin_2.x;
     var dz_0 : i32;
     var dx_0 : i32;
     var nearest_0 : f32;
     var nearest_1 : f32;
     var found_2 : GrassInstance_0;
     var found_3 : GrassInstance_0;
-    var _S143 : bool;
-    if(_S142 < 0.5f)
+    var _S142 : bool;
+    if(_S141 < 0.5f)
     {
         nearest_1 = 2.0f;
-        found_3 = _S141;
+        found_3 = _S140;
         dz_0 = i32(0);
         for(;;)
         {
@@ -1569,19 +1560,19 @@ fn shellFragmentMain( _S134 : pixelInput_2, @builtin(position) position_6 : vec4
                 {
                     break;
                 }
-                var blade_5 : GrassInstance_0 = grass_cell_0(_S137 + vec2<i32>(dx_0 * _S138, dz_0 * band_3));
-                var reach_5 : f32 = grass_strand_reach_0(blade_5, lift_2, _S139, _S140);
-                var offset_1 : vec2<f32> = _S135 - blade_5.root_0.xz;
+                var blade_5 : GrassInstance_0 = grass_cell_0(_S136 + vec2<i32>(dx_0 * _S137, dz_0 * band_3));
+                var reach_5 : f32 = grass_strand_reach_0(blade_5, lift_2, _S138, _S139);
+                var offset_1 : vec2<f32> = _S134 - blade_5.root_0.xz;
                 var apart_0 : f32 = sqrt(dot(offset_1, offset_1)) / max(reach_5, 9.99999997475242708e-07f);
                 if(reach_5 > 0.0f)
                 {
-                    _S143 = apart_0 < nearest_0;
+                    _S142 = apart_0 < nearest_0;
                 }
                 else
                 {
-                    _S143 = false;
+                    _S142 = false;
                 }
-                if(_S143)
+                if(_S142)
                 {
                     nearest_0 = apart_0;
                     found_2 = blade_5;
@@ -1598,8 +1589,8 @@ fn shellFragmentMain( _S134 : pixelInput_2, @builtin(position) position_6 : vec4
     }
     else
     {
-        var along_z_1 : bool = _S142 < 1.5f;
-        var _S144 : f32 = _S134.fin_2.z;
+        var along_z_1 : bool = _S141 < 1.5f;
+        var _S143 : f32 = _S133.fin_2.z;
         if(along_z_1)
         {
             nearest_0 = field_0.origin_0.x;
@@ -1608,21 +1599,21 @@ fn shellFragmentMain( _S134 : pixelInput_2, @builtin(position) position_6 : vec4
         {
             nearest_0 = field_0.origin_0.y;
         }
-        var _S145 : i32 = i32(floor((_S144 - nearest_0) / cell_1 + 0.5f)) - i32(2);
+        var _S144 : i32 = i32(floor((_S143 - nearest_0) / cell_1 + 0.5f)) - i32(2);
         if(along_z_1)
         {
-            dz_0 = _S137.y;
+            dz_0 = _S136.y;
         }
         else
         {
-            dz_0 = _S137.x;
+            dz_0 = _S136.x;
         }
         if(along_z_1)
         {
-            _S138 = band_3;
+            _S137 = band_3;
         }
         nearest_0 = 2.0f;
-        found_2 = _S141;
+        found_2 = _S140;
         band_3 = i32(0);
         for(;;)
         {
@@ -1645,37 +1636,37 @@ fn shellFragmentMain( _S134 : pixelInput_2, @builtin(position) position_6 : vec4
                 {
                     break;
                 }
-                var along_4 : i32 = dz_0 + dx_0 * _S138;
-                var _S146 : vec2<i32>;
+                var along_4 : i32 = dz_0 + dx_0 * _S137;
+                var _S145 : vec2<i32>;
                 if(along_z_1)
                 {
-                    _S146 = vec2<i32>(_S145 + band_3, along_4);
+                    _S145 = vec2<i32>(_S144 + band_3, along_4);
                 }
                 else
                 {
-                    _S146 = vec2<i32>(along_4, _S145 + band_3);
+                    _S145 = vec2<i32>(along_4, _S144 + band_3);
                 }
-                var blade_6 : GrassInstance_0 = grass_cell_0(_S146);
-                var reach_6 : f32 = grass_strand_reach_0(blade_6, lift_2, _S139, _S140);
+                var blade_6 : GrassInstance_0 = grass_cell_0(_S145);
+                var reach_6 : f32 = grass_strand_reach_0(blade_6, lift_2, _S138, _S139);
                 var offset_2 : f32;
                 if(along_z_1)
                 {
-                    offset_2 = _S134.rest_3.z - blade_6.root_0.z;
+                    offset_2 = _S133.rest_3.z - blade_6.root_0.z;
                 }
                 else
                 {
-                    offset_2 = _S134.rest_3.x - blade_6.root_0.x;
+                    offset_2 = _S133.rest_3.x - blade_6.root_0.x;
                 }
                 var apart_1 : f32 = abs(offset_2) / max(reach_6, 9.99999997475242708e-07f);
                 if(reach_6 > 0.0f)
                 {
-                    _S143 = apart_1 < nearest_1;
+                    _S142 = apart_1 < nearest_1;
                 }
                 else
                 {
-                    _S143 = false;
+                    _S142 = false;
                 }
-                if(_S143)
+                if(_S142)
                 {
                     nearest_1 = apart_1;
                     found_3 = blade_6;
@@ -1694,7 +1685,7 @@ fn shellFragmentMain( _S134 : pixelInput_2, @builtin(position) position_6 : vec4
     }
     var row_8 : GrassBlade_0 = grass_row_0(found_2.lanes_0.y);
     var along_blade_0 : f32 = saturate(lift_2 / found_2.root_0.w);
-    var color_5 : vec3<f32> = grass_style_0(mix(row_8.root_color_0.xyz, row_8.tip_color_0.xyz, vec3<f32>(along_blade_0)) * vec3<f32>((1.0f - 0.18000000715255737f * found_2.facing_0.w)), row_8, along_blade_0, grass_patch_0(found_2.lanes_0.z)) * vec3<f32>(_S134.occlusion_4);
+    var color_5 : vec3<f32> = grass_style_0(mix(row_8.root_color_0.xyz, row_8.tip_color_0.xyz, vec3<f32>(along_blade_0)) * vec3<f32>((1.0f - 0.18000000715255737f * found_2.facing_0.w)), row_8, along_blade_0, grass_patch_0(found_2.lanes_0.z)) * vec3<f32>(_S133.occlusion_4);
     var normal_9 : vec3<f32>;
     if((row_8.flags_0.y) == u32(1))
     {
@@ -1702,10 +1693,10 @@ fn shellFragmentMain( _S134 : pixelInput_2, @builtin(position) position_6 : vec4
     }
     else
     {
-        normal_9 = normalize(_S134.normal_8);
+        normal_9 = normalize(_S133.normal_8);
     }
-    var _S147 : vec3<f32> = grass_light_0(_S134.world_position_10, normal_9, position_6.xy);
-    var _S148 : pixelOutput_2 = pixelOutput_2( vec4<f32>(color_5 * _S147, 1.0f) );
-    return _S148;
+    var _S146 : vec3<f32> = grass_light_0(_S133.world_position_10, normal_9, position_6.xy);
+    var _S147 : pixelOutput_2 = pixelOutput_2( vec4<f32>(color_5 * _S146, 1.0f) );
+    return _S147;
 }
 
