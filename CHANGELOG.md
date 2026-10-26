@@ -48,6 +48,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and `crcbl_vk::VkInstance::open_driver` opens on one. `crcbl-vk` now depends
   on `serde` and `serde_json` to read them.
 
+### Fixed
+
+- **`crcbl::text_input::TextPump::place` tells the shell no area while no field
+  is engaged.** A tree can keep a field engaged while its panel is shut, as the
+  engine's console does, and the area `place` passed on then was stored by the
+  shell and sent with the next `enable`, so an input method briefly placed its
+  candidate window at a stale caret before the right one arrived.
+
 ## [0.11.0] - 2026-10-26
 
 ### Breaking

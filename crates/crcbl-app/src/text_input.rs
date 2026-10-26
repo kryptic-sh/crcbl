@@ -256,7 +256,10 @@ impl TextPump {
     /// in the tree's pixels, which `scale` turns into the window's device
     /// pixels — `1.0` for a tree laid out in them. Call it after
     /// [`engage`](Self::engage), which a Wayland input method needs first.
-    /// The shell is asked only when the area changes.
+    /// The shell is asked only when the area changes, and is told `None`
+    /// while [`engage`](Self::engage) last named no field: a tree can keep a
+    /// field engaged while its panel is shut, and an area kept from then
+    /// would be sent with the next `enable`, before this frame's.
     pub fn place<S: Shell + ?Sized>(
         &mut self,
         area: Option<(Vec2, Vec2)>,
@@ -264,7 +267,9 @@ impl TextPump {
         shell: &mut S,
         window: WindowId,
     ) {
-        let area = area.map(|(min, max)| device_rect(min * scale, max * scale));
+        let area = area
+            .filter(|_| matches!(self.engaged, Some(Some(_))))
+            .map(|(min, max)| device_rect(min * scale, max * scale));
         if self.area == Some(area) {
             return;
         }
@@ -476,5 +481,30 @@ mod tests {
 
         pump.place(None, 2.0, &mut shell, window);
         assert_eq!(area(&shell), None);
+    }
+
+    /// **No field, no area**: a caret handed over while nothing is engaged
+    /// is not told, so the shell has no stale area to send with the next
+    /// `enable`.
+    #[test]
+    fn no_area_is_told_while_no_field_is_engaged() {
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("a headless window");
+        let mut pump = TextPump::new();
+        let caret = Some((Vec2::new(10.0, 20.0), Vec2::new(11.0, 36.0)));
+        let area = |shell: &HeadlessShell| shell.text_input_area(window).expect("live");
+
+        pump.engage(None, &mut shell, window);
+        pump.place(caret, 1.0, &mut shell, window);
+        assert_eq!(area(&shell), None, "an area was told with no field engaged");
+
+        pump.engage(Some(TextPurpose::Normal), &mut shell, window);
+        pump.place(caret, 1.0, &mut shell, window);
+        assert!(
+            area(&shell).is_some(),
+            "the engaged field's area was not told"
+        );
     }
 }

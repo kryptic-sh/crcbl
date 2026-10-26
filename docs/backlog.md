@@ -7861,11 +7861,14 @@ the gaps below.
   with the caret after it, and Mozc's candidate window opened just below the
   caret. Seen and not chased: `k` typed straight after the console opened was
   lost, so `ka` composed `あ` rather than `か`, probably before fcitx5 took the
-  keyboard; and the first frame sent two rectangles in one flush,
-  `(33, 298, 1, 16)` then `(66, 272, 4, 32)`, the second the right one. Not run
-  with Win32 or AppKit input methods. Not done: the input method's own segment
-  styles (a converted clause against the one being edited), which no backend
-  reports.
+  keyboard. The first frame used to send two rectangles in one flush, a stale
+  `(33, 298, 1, 16)` then the right `(66, 272, 4, 32)`: the console's tree kept
+  its field engaged while the panel was shut, `TextPump::place` handed the shell
+  that area while no field was engaged, and `enable` re-sent it; fixed
+  2026-10-26 (`place` tells no area while `engage` names no field), and the run
+  repeated with one rectangle after `enable`. Not run with Win32 or AppKit input
+  methods. Not done: the input method's own segment styles (a converted clause
+  against the one being edited), which no backend reports.
 - **The console's fallback faces (2026-10-26).** A bitmap span draws a char it
   has no glyph for from `Ui::set_fallback_fonts`'s faces inside that char's one
   cell (`Ui::bitmap_text`), and under `system-fonts` the console takes the
