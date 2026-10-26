@@ -4298,11 +4298,21 @@ and every trial it rejected is folded into "Declined" below.
   (`15a82dc1` → `dd3d36ff`), bit-identical in what they compute, measured
   `lights-fit` 9.499 → 10.062 ms (+5.9%) and `specular-lights-fit` 12.427 →
   12.396 ms (−0.2%, within the spread), so the regression is ANV's code
-  generation for the changed shader, not the arithmetic. Options: keep both
-  (fill lights are what scenes hold many of, and the iGPU is the weakest
-  target), restructure the skip so the branch costs ANV less (unexplored:
-  compare the two commits' ANV ISA with `INTEL_DEBUG=fs`), or gate either on the
-  adapter. Not investigated further.
+  generation for the changed shader, not the arithmetic. **Why, from ANV's own
+  shader statistics** (`INTEL_DEBUG=fs`, `MESA_SHADER_CACHE_DISABLE=1`, the same
+  release builds): of every fragment shader the sandbox compiles, the skip
+  changes one, the forward shader, which ANV builds at SIMD8 only and which
+  **already spills registers** — 10,323 instructions and 84:290 spills:fills
+  before the skip, 10,487 and 89:316 after; the added spill traffic is the
+  likely cost. The blocker offsets spill nothing and shave about 6 instructions
+  per variant, but ANV's static cycle estimate for one variant rose 386,161 →
+  451,559 while two others fell: scheduling, as far as estimates show (two
+  variants of the earlier build are missing from the later build's five-frame
+  capture). Reducing the forward shader's register pressure on ANV would help
+  both, and every Intel frame. Options: keep both (fill lights are what scenes
+  hold many of, and the iGPU is the weakest target), restructure the skip so it
+  adds no register pressure, cut the forward shader's pressure on ANV, or gate
+  either on the adapter. Further Intel runs wait on the owner's choice.
 - **Unmeasured paths.** A populated probe volume pays the empty-probe early
   return's uniform branch, which no fixture has probes to time; water's own pass
   was not timed either. Slang's MSL output allocates the tile-local exposure
