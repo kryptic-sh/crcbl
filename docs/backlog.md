@@ -7874,9 +7874,9 @@ the gaps below.
   Mozc drew in a CJK face in its cell. Follow-ups, not done: a wide char (CJK,
   by East Asian Width) taking two cells as a terminal gives it, which changes
   every bitmap measurement (`FontAtlas::text_width` and its callers, the caret
-  stops); reading only the faces a missing char needs rather than all of them;
-  and the sandbox does not turn `system-fonts` on, so its console shows
-  `.notdef` unless built with `--features crcbl/system-fonts`.
+  stops); reading only the faces a missing char needs rather than all of them.
+  The sandbox turns `system-fonts` on (2026-10-26, `f79de7c5`), so its console
+  draws Japanese out of the box.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
   fallback so copy and paste work within one page.
