@@ -9,10 +9,10 @@ use glam::Vec2;
 use super::style::{Display, ImageName, NodeStyle, TextDecoration, WhiteSpace};
 use super::{Content, Ui, padding_box};
 use crate::draw_list::{Border, CornerRadii, DrawList};
-use crate::font::Font;
-use crate::font::layout::TextLayout;
+use crate::font::layout::{PositionedGlyph, TextLayout};
+use crate::font::{Font, GlyphId};
 use crate::image::{AtlasImage, NineSliceImage};
-use crate::text::{ASCENDER, GLYPH_ADVANCE, LINE_HEIGHT};
+use crate::text::{ASCENDER, GLYPH_ADVANCE, GLYPH_HEIGHT, LINE_HEIGHT, NOTDEF_INDEX, glyph_index};
 use crate::widget::{NATURAL_FONT_SIZE, SkinInsets};
 
 /// How far below the baseline an underline's top is, in ems, for a font whose
@@ -80,6 +80,73 @@ fn visible(color: [f32; 4]) -> bool {
 }
 
 impl Ui {
+    /// Draws `text` in the bitmap font at `pos`, `size` pixels high: its own
+    /// glyphs, and in the cell of each char it has only `.notdef` for, the
+    /// first of [`Ui::set_fallback_fonts`]'s faces that has one — that face's
+    /// glyph as wide as the cell allows and no taller than the bitmap's,
+    /// centred on the cell and standing on the bitmap's baseline. The grid is
+    /// the bitmap's either way: every char is one cell, so measuring is
+    /// unchanged. A char no face has stays `.notdef`.
+    pub(super) fn bitmap_text(
+        &self,
+        list: &mut DrawList,
+        pos: Vec2,
+        text: &str,
+        color: [f32; 4],
+        size: f32,
+    ) {
+        let missing = |c: char| c != '\n' && glyph_index(c) == NOTDEF_INDEX;
+        if self.fallback.is_empty() || !text.chars().any(missing) {
+            list.text(pos, text, color, size);
+            return;
+        }
+        let scale = size / NATURAL_FONT_SIZE;
+        let cell = GLYPH_ADVANCE * scale;
+        let tallest = GLYPH_HEIGHT as f32 * scale;
+        let mut shown = String::with_capacity(text.len());
+        let mut borrowed = Vec::new();
+        let (mut column, mut line) = (0_u16, 0_u16);
+        for c in text.chars() {
+            if c == '\n' {
+                shown.push(c);
+                (column, line) = (0, line + 1);
+                continue;
+            }
+            let found = missing(c)
+                .then(|| {
+                    self.fallback.iter().find_map(|font| {
+                        let glyph = font.glyph_id(c);
+                        (glyph != GlyphId::NOTDEF).then_some((font, glyph))
+                    })
+                })
+                .flatten();
+            match found {
+                Some((font, glyph)) => {
+                    // A space keeps the cell and draws nothing over the glyph.
+                    shown.push(' ');
+                    let wide = font.advance(glyph) / f32::from(font.metrics().units_per_em);
+                    let em = if wide > 0.0 {
+                        (cell / wide).min(tallest)
+                    } else {
+                        tallest
+                    };
+                    let offset = Vec2::new(
+                        f32::from(column) * cell + (cell - wide * em) * 0.5,
+                        f32::from(line) * LINE_HEIGHT * scale + ASCENDER as f32 * scale,
+                    );
+                    borrowed.push((font, em, PositionedGlyph { glyph, offset }, c));
+                }
+                None => shown.push(c),
+            }
+            column = column.saturating_add(1);
+        }
+        list.text(pos, shown, color, size);
+        let mut buffer = [0; 4];
+        for (font, em, glyph, c) in borrowed {
+            list.text_glyphs(pos, font, em, color, [glyph], c.encode_utf8(&mut buffer));
+        }
+    }
+
     /// Draws the tree [`Ui::layout`] last laid out into `list`: every root in
     /// build order, each parent before its children, then every node's
     /// outline; then each open pop-up the same way, lowest first, and the
@@ -198,7 +265,7 @@ impl Ui {
                         (0.0, top + ASCENDER as f32 * scale, width)
                     });
                     underline_lines(list, style, None, content_min, lines);
-                    list.text(content_min, text, style.color, style.font_size);
+                    self.bitmap_text(list, content_min, text, style.color, style.font_size);
                 }
                 Some(font) => {
                     // Broken at the width the layout measured it under —

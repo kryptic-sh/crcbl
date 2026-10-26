@@ -198,3 +198,109 @@ fn an_emoji_in_a_span_resolves_to_a_colour_quad() {
     assert_eq!(quad_min.y, baseline.round() - (WIDE * 0.75).round());
     assert_eq!(quad_max - quad_min, Vec2::splat(WIDE));
 }
+
+/// The bitmap font at twice its natural size: cells of twenty pixels by
+/// thirty-two, glyphs twenty-six high, the baseline twenty down.
+const BITMAP_CSS: &str = ".b { font-family: bitmap; font-size: 26px; }";
+
+/// A bitmap run as drawn: where it starts and what it says.
+type BitmapRun = (Vec2, String);
+
+/// A glyph run as drawn: its face, size, text and first glyph's pen.
+type GlyphRun = (Font, f32, String, Vec2);
+
+/// The text and each pen `list`'s bitmap runs and glyph runs draw, in order.
+fn bitmap_and_glyphs(list: &DrawList) -> (Vec<BitmapRun>, Vec<GlyphRun>) {
+    let mut texts = Vec::new();
+    let mut glyphs = Vec::new();
+    for command in list.commands() {
+        match command {
+            DrawCommand::Text { pos, text, .. } => texts.push((*pos, text.clone())),
+            DrawCommand::Glyphs {
+                origin,
+                font,
+                size,
+                glyphs: placed,
+                text,
+                ..
+            } => glyphs.push((
+                font.clone(),
+                *size,
+                text.as_deref().unwrap_or_default().to_owned(),
+                *origin + placed[0].offset,
+            )),
+            _ => {}
+        }
+    }
+    (texts, glyphs)
+}
+
+/// **A bitmap span draws a char it lacks from a fallback face, in its own
+/// cell**: the span is as wide as ever, the bitmap run draws a space where the
+/// char was, and the face's glyph, as large as the cell's width and the
+/// bitmap's height allow, is centred on that cell on the bitmap's baseline. A
+/// char no face has stays the bitmap's `.notdef`, and a tree with no fallback
+/// faces draws the span as it always did.
+#[test]
+fn a_bitmap_span_draws_a_missing_char_from_a_fallback_face_in_its_cell() {
+    let text = "a\u{e9}b\u{6f22}";
+    let build = |fallback: bool| {
+        let mut ui = Ui::new();
+        if fallback {
+            ui.set_fallback_fonts([primary()]);
+        }
+        ui.add_stylesheet("bitmap.css", BITMAP_CSS);
+        let mut key = None;
+        frame(&mut ui, idle(), |ui| {
+            key = Some(ui.span(".b", text, &[]).key)
+        });
+        let (min, max) = ui.rect(key.expect("built")).expect("laid out");
+        let mut list = DrawList::new();
+        ui.emit(&mut list);
+        (max.x - min.x, bitmap_and_glyphs(&list))
+    };
+
+    let (width, (texts, glyphs)) = build(true);
+    assert_eq!(width, 4.0 * 20.0, "the fallback changed the span's width");
+    let [(pos, shown)] = texts.as_slice() else {
+        panic!("one bitmap run: {texts:?}");
+    };
+    assert_eq!(shown, "a b\u{6f22}");
+    // Half an em wide, so the bitmap's height bounds it: 26 pixels an em,
+    // 13 wide, centred in the second 20-pixel cell.
+    assert_eq!(
+        glyphs,
+        [(
+            primary().clone(),
+            26.0,
+            "\u{e9}".to_owned(),
+            *pos + Vec2::new(20.0 + 3.5, 20.0)
+        )]
+    );
+
+    let (width, (texts, glyphs)) = build(false);
+    assert_eq!(width, 4.0 * 20.0);
+    assert_eq!(texts.len(), 1);
+    assert_eq!(texts[0].1, text, "no fallback faces, yet the text changed");
+    assert!(glyphs.is_empty());
+}
+
+/// **A paragraph's bitmap run falls back the same way.**
+#[test]
+fn a_bitmap_run_draws_a_missing_char_from_a_fallback_face() {
+    let mut ui = Ui::new();
+    ui.set_fallback_fonts([primary()]);
+    ui.add_stylesheet("bitmap.css", BITMAP_CSS);
+    frame(&mut ui, idle(), |ui| {
+        ui.paragraph(".b", &[], |p| {
+            p.run("", "x\u{e9}", &[]);
+        });
+    });
+    let mut list = DrawList::new();
+    ui.emit(&mut list);
+    let (texts, glyphs) = bitmap_and_glyphs(&list);
+    assert_eq!(texts.len(), 1);
+    assert_eq!(texts[0].1, "x ");
+    assert_eq!(glyphs.len(), 1);
+    assert_eq!(glyphs[0].3, texts[0].0 + Vec2::new(20.0 + 3.5, 20.0));
+}

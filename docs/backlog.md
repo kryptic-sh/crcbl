@@ -7800,14 +7800,24 @@ the gaps below.
   composition moved it (x 66 to 86), received `TextPreedit "あ"` and on Enter
   `TextCommit "あ"`; a screenshot showed the composition underlined in the field
   with the caret after it, and Mozc's candidate window opened just below the
-  caret. Seen and not chased: the console's bitmap font has no kana, so `あ`
-  draws as a box (the console takes no fallback face); `k` typed straight after
-  the console opened was lost, so `ka` composed `あ` rather than `か`, probably
-  before fcitx5 took the keyboard; and the first frame sent two rectangles in
-  one flush, `(33, 298, 1, 16)` then `(66, 272, 4, 32)`, the second the right
-  one. Not run with Win32 or AppKit input methods. Not done: the input method's
-  own segment styles (a converted clause against the one being edited), which no
-  backend reports.
+  caret. Seen and not chased: `k` typed straight after the console opened was
+  lost, so `ka` composed `あ` rather than `か`, probably before fcitx5 took the
+  keyboard; and the first frame sent two rectangles in one flush,
+  `(33, 298, 1, 16)` then `(66, 272, 4, 32)`, the second the right one. Not run
+  with Win32 or AppKit input methods. Not done: the input method's own segment
+  styles (a converted clause against the one being edited), which no backend
+  reports.
+- **The console's fallback faces (2026-10-26).** A bitmap span draws a char it
+  has no glyph for from `Ui::set_fallback_fonts`'s faces inside that char's one
+  cell (`Ui::bitmap_text`), and under `system-fonts` the console takes the
+  system's `monospace` fallbacks on its first open: on the office laptop 21
+  faces in 89 ms, so that frame is late by as much, and `あ` composed through
+  Mozc drew in a CJK face in its cell. Follow-ups, not done: a wide char (CJK,
+  by East Asian Width) taking two cells as a terminal gives it, which changes
+  every bitmap measurement (`FontAtlas::text_width` and its callers, the caret
+  stops); reading only the faces a missing char needs rather than all of them;
+  and the sandbox does not turn `system-fonts` on, so its console shows
+  `.notdef` unless built with `--features crcbl/system-fonts`.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
   fallback so copy and paste work within one page.

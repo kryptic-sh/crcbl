@@ -13,6 +13,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **A span in the bitmap font falls back for a char it has no glyph for.** Where
+  it drew `.notdef`, it now draws the glyph of the first of
+  `Ui::set_fallback_fonts`'s faces that has one, inside that char's one cell: as
+  wide as the cell allows, no taller than the bitmap's glyphs, on its baseline.
+  Measuring is unchanged, so no layout moves. With the `crcbl` crate's
+  `system-fonts` feature, the engine's console hands its panel the system's
+  fallback faces for `monospace` the first time it opens
+  (`ConsolePanel::set_fallback_fonts`), so Japanese typed through an input
+  method draws in it.
+
 ## [0.10.0] - 2026-10-26
 
 ### Breaking

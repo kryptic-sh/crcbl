@@ -34,6 +34,7 @@ use glam::Vec2;
 
 use crate::draw_list::DrawList;
 use crate::edit::{Edit, Motion};
+use crate::font::Font;
 use crate::menu::MenuStyle;
 use crate::style::{Declaration, SheetId, Sides};
 use crate::text::FontAtlas;
@@ -377,6 +378,13 @@ impl ConsolePanel {
             return None;
         }
         Some(line)
+    }
+
+    /// Sets the faces the panel's text falls back to for a char the bitmap
+    /// font has no glyph for — [`Ui::set_fallback_fonts`]. Each is drawn
+    /// inside that char's one cell.
+    pub fn set_fallback_fonts(&mut self, fonts: impl IntoIterator<Item = impl Into<Font>>) {
+        self.ui.set_fallback_fonts(fonts);
     }
 
     /// The clipboard requests this frame's field made, for the caller to carry

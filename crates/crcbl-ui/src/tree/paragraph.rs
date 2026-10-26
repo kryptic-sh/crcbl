@@ -285,7 +285,8 @@ impl Ui {
                 None => {
                     let scale = style.font_size / NATURAL_FONT_SIZE;
                     let top = line.baseline - ASCENDER as f32 * scale;
-                    list.text(
+                    self.bitmap_text(
+                        list,
                         origin + Vec2::new(fragment.x, top),
                         text,
                         style.color,

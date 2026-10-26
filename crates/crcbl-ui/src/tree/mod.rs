@@ -1527,8 +1527,10 @@ impl Ui {
     /// `font-family` selected**, so a stylesheet never has to name the emoji
     /// font beside every family; `emoji`, CSS's generic family, stays a
     /// reserved name rather than a second way to say the same thing. A span
-    /// in the bitmap font does not fall back. The faces draw as registered:
-    /// a bold span's fallback glyphs are not synthesised bold.
+    /// in the bitmap font falls back only for a char it has no glyph for,
+    /// and keeps its grid: the face's glyph is drawn inside that char's one
+    /// cell, which measuring never changes. The faces draw as registered: a
+    /// bold span's fallback glyphs are not synthesised bold.
     ///
     /// Read when a span is built, like [`Ui::register_font`]'s registry, and
     /// every span is measured again under a new list. An empty list, the

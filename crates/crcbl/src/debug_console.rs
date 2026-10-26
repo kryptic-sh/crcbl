@@ -506,6 +506,30 @@ pub struct Console {
     /// The prefix every candidate shares, which is the head the panel
     /// highlights.
     cycle_prefix: String,
+    /// Whether the system's fallback faces were handed to the panel, which
+    /// the first [`open`](Self::open) does.
+    #[cfg(feature = "system-fonts")]
+    fonts_asked: bool,
+}
+
+/// The system's fallback faces for `monospace`, parsed, in the order the
+/// system gives them; a face that will not read or parse is left out.
+#[cfg(feature = "system-fonts")]
+fn system_fallbacks() -> Vec<crcbl_ui::font::Font> {
+    use crcbl_ui::font::Font;
+    use crcbl_ui::font::system::crcbl_font::{FontQuery, SystemFonts};
+    let started = std::time::Instant::now();
+    let faces: Vec<Font> = SystemFonts::new()
+        .fallbacks(&FontQuery::new("monospace"))
+        .iter()
+        .filter_map(|face| Font::from_system(face).ok())
+        .collect();
+    crcbl_core::info!(
+        "console: {} fallback faces read in {:?}",
+        faces.len(),
+        started.elapsed()
+    );
+    faces
 }
 
 impl Console {
@@ -543,6 +567,8 @@ impl Console {
             cycle_at: None,
             cycle_stem: String::new(),
             cycle_prefix: String::new(),
+            #[cfg(feature = "system-fonts")]
+            fonts_asked: false,
         }
     }
 
@@ -604,9 +630,21 @@ impl Console {
     }
 
     /// Shows the panel, and puts its view at the newest line.
+    ///
+    /// With the `system-fonts` feature, the first time it opens it hands the
+    /// panel the system's fallback faces for `monospace`, so text the bitmap
+    /// font has no glyph for — Japanese typed through an input method, say —
+    /// draws in them rather than as `.notdef`. Then and not at boot: a run
+    /// that never opens the console reads no font, and a golden run's console
+    /// does not depend on the machine's.
     pub fn open(&mut self) {
         self.open = true;
         self.panel.log_mut().scroll_to_bottom();
+        #[cfg(feature = "system-fonts")]
+        if !self.fonts_asked {
+            self.fonts_asked = true;
+            self.panel.set_fallback_fonts(system_fallbacks());
+        }
     }
 
     /// Hides the panel and drops any completion it was offering, and what this
