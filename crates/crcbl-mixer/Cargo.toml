@@ -46,4 +46,5 @@ windows-core = "0.62.2"
 
 # The live test runs `pactl` as its witness, through the workspace's spawner.
 [dev-dependencies]
-crcbl-spawn = { workspace = true }
+# By path only, so publishing this crate does not wait on it.
+crcbl-spawn = { path = "../crcbl-spawn" }

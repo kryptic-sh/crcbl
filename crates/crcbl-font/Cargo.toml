@@ -26,4 +26,6 @@ skrifa.workspace = true
 workspace = true
 
 [dev-dependencies]
-crcbl-spawn.workspace = true
+# `tests/system.rs` asks `fc-match` for the answer it holds the lookup to. By
+# path only, so publishing this crate does not wait on it.
+crcbl-spawn = { path = "../crcbl-spawn" }

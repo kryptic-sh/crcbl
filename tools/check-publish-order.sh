@@ -5,14 +5,18 @@
 # crates.io resolves a crate's dependencies when it is uploaded, so each crate
 # must follow every workspace crate it needs as a normal or build dependency.
 # (Internal dev-dependencies are path-only and stripped on publish; the
-# workspace `Cargo.toml` says why.) The list is spelled out rather than derived
+# workspace `Cargo.toml` says why. A versioned one is not stripped, and
+# crates.io resolves it at upload like any other, so this refuses one: v0.10.0
+# stopped halfway on `crcbl-font`'s versioned dev-dependency on `crcbl-spawn`,
+# which comes later.) The list is spelled out rather than derived
 # so a release publishes exactly what was reviewed, and this check fails, on
 # every push, when the list and the workspace disagree:
 #
 # * a publishable member missing from ORDER, or a listed crate that is no
 #   longer a publishable member — a new library would otherwise fail the
 #   release halfway, with the crates ahead of it already uploaded;
-# * a crate listed before one of its own dependencies.
+# * a crate listed before one of its own dependencies;
+# * an internal dev-dependency with a version requirement.
 #
 # `--print` prints ORDER, one crate per line, for the jobs that walk it.
 set -euo pipefail
@@ -103,6 +107,16 @@ for crate in "${ORDER[@]}"; do
         failed=1
         ;;
     esac
+  done
+  # shellcheck disable=SC2016 # `$crate`, `$members` and `$n` are jq's own.
+  versioned=$(names --arg crate "$crate" '
+    [.packages[].name] as $members
+    | .packages[] | select(.name == $crate) | .dependencies[]
+    | select(.kind == "dev" and .req != "*") | .name
+    | select(. as $n | $members | index($n))' <<<"$metadata" | sort -u)
+  for dep in $versioned; do
+    echo "::error::$crate has a versioned dev-dependency on $dep; make it path-only"
+    failed=1
   done
   seen="$seen$crate "
 done
