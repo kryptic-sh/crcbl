@@ -4202,31 +4202,12 @@ migrates every caller and deletes its own copy in the same change.
 
 The 56-commit campaign of 2026-09-22/23 (the MX550 laptop, never pushed) was
 ported to `main` on 2026-10-24, one slice at a time and re-measured on the RX
-7900 XTX. The original stays on **`archive/perf-campaign-2026-09`** (forked from
-`e5b5a5b4`) until the half-resolution SSR decision below is made; delete it
-then. Its own `docs/backlog.md` holds the September measurements, and every
-trial it rejected is folded into "Declined" below.
+7900 XTX. The original is on **`archive/perf-campaign-2026-09`** (forked from
+`e5b5a5b4`); its last unported commit, the half-resolution SSR march, shipped on
+2026-10-26 as the `ssr_resolution` setting, so the branch can be deleted once
+the user confirms. Its own `docs/backlog.md` holds the September measurements,
+and every trial it rejected is folded into "Declined" below.
 
-- **Decision needed: march screen-space reflections at half resolution?** The
-  campaign's `3ac980e8` marches SSR over one pixel per 2×2 block (the nearest
-  surface in it) and reconstructs at full resolution. Ported and parked on the
-  Windows box's local branch `port/ssr-half` ("wip: half-resolution SSR march");
-  `3ac980e8` on the archive branch is the original. It is an image-quality
-  trade, not a free win:
-  - **Gain.** `ssr` + `ssr-blur` p50 on the RX 7900 XTX, after the empty-probe
-    skip: 0.061 → 0.032 ms (Vulkan) and 0.044 → 0.029 ms (D3D12) at 1080p, 0.400
-    → 0.260 and 0.184 → 0.121 ms at 4K. The MX550 measured 2.142 → 0.885 ms at
-    1080p and 8.914 → 3.513 ms at 4K, so the case is weak GPUs.
-  - **Cost.** `golden/ssr.png` moves inside the pyramid's reflection only (SSIM
-    0.9992; re-blessed on lavapipe on the branch). `golden/meadow.png` does not
-    pass: 15.5% of pixels over tolerance, SSIM 0.971, max channel delta 39, all
-    in the grass, because thin blades lose detail through the half-resolution
-    reconstruction. Pure-sky rows also change by one level in a few hundred
-    pixels, which is unexplained and would need understanding before shipping.
-  - **Options.** Ship it as the default and re-bless `meadow` (weak GPUs gain
-    most, grass reflections soften); decline it and keep full resolution; or
-    make the march resolution an `[engine.video]` quality setting so both exist,
-    which needs a setting, a second pipeline path and tests of both.
 - **How the sandbox measures.**
   `CRCBL_LOG=info sandbox --headless --wall-clock --backend vk --stress NAME --pacing off --fps 0 --frames 900 --size 1920x1080 --debug-overlay`
   logs per-pass GPU p50/p95 over the last 120 frames and the real-clock CPU
@@ -4386,8 +4367,9 @@ also move every AO golden, so it is deferred rather than built. Reopen the
 performance work on a slower GPU's frame budget, a browser profile, or a new
 workload whose price exceeds 0.1 ms. Next in the plans is
 `docs/plan/ ROADMAP.md`'s P12, the editor, unparked 2026-09-15 to follow the UI
-rungs. SSR's half-resolution march was decided against for now (see P27). One
-surprise still matters to anyone reading older `record` figures:
+rungs. SSR's reduced-resolution march shipped as a quality setting on 2026-10-26
+rather than as the default (_What the SSR resolution setting did not verify_).
+One surprise still matters to anyone reading older `record` figures:
 `bucket_price`'s `record` includes `PassTimers::begin_frame`'s `query_results`
 wait (0.56–0.60 ms on the ranged rows, because nothing throttles the offscreen
 ring), and before P17 shipped it also included the fresh pool's driver cost, so
@@ -9281,17 +9263,6 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
     gather does. Reopen with a Vulkan-only timing prototype showing the gather
     saves more than 0.1 ms a frame on shard, and then decide the D3D12 ulp
     question with that number in hand.
-  - **Decided 2026-09-30: no half-resolution march for now.**
-    `docs/notes/rendering.md` refused it by measurement at lantern 960x720
-    (`ssr` 6.3% of the frame); at 1920x1080 shard's `ssr` is 29.8% of the pass
-    sum after the change above. Expected price: the march's 0.25 ms to about a
-    quarter, plus an upsample like `ssao-upsample`'s 0.036 ms, so about 0.15 ms
-    saved on shard and almost nothing on lantern. It moves every SSR golden and
-    reverses a recorded decision, while the probe-visibility trial ahead of it
-    saves more (about 0.24 ms on shard), keeps the picture, and helps `forward`
-    too. Revisit it as a quality-tier knob (the Low tier's, beside the AO
-    bundle) once a frame budget on a slower GPU shows `ssr` on its critical
-    path, with the SSR goldens re-blessed under a visual review.
   - **Candidate, structural: one mipped Hi-Z image.** A single `Load` at a level
     would drop the select and the clamps. `crcbl_render::hiz`'s header says why
     the chain is separate images (the graph cannot attach a mip; WebGPU
@@ -12394,36 +12365,45 @@ starts from a row rather than a question. Every number is a **starting budget to
 sweep on that tier's hardware**, not a constant: the constant is spelled where
 the code reads it and the sweep fixes it there.
 
-| Item                    | Low (browser, lavapipe, integrated)          | Medium                             | High (desktop, RT where present)           |
-| ----------------------- | -------------------------------------------- | ---------------------------------- | ------------------------------------------ |
-| Antialiasing            | FXAA                                         | CMAA2                              | CMAA2; MSAA opt-in                         |
-| Render scale            | 0.75                                         | 1.0                                | 1.0                                        |
-| Shadow atlas            | 2048², 4 shadowed local lights               | 4096², 8                           | 8192², 16                                  |
-| Sun shadows             | 2 cascades, box                              | 3 cascades, disc                   | 3 cascades, PCSS                           |
-| Contact shadows         | off                                          | on                                 | on                                         |
-| Ambient occlusion       | 2 slices, 1 blur, bent normals off           | 4 slices, 2 blurs, bent normals on | 4 slices, 2 blurs, bent normals on         |
-| Area lights (LTC)       | on                                           | on                                 | on                                         |
-| Probe volume            | 2 levels, 16³ probes each, capture amortised | 3 levels, 24³                      | 4 levels, 32³; traced updater on RT        |
-| Atmosphere              | on (one LUT fetch)                           | on                                 | on                                         |
-| Reflections             | SSR half-res, sky + probe fallback           | SSR full-res, Hi-Z                 | SSR + cone trace; RT reflections on RT     |
-| Volumetric fog          | off                                          | on, half-res froxels               | on                                         |
-| Bloom, auto-exposure    | on                                           | on                                 | on                                         |
-| Ray-traced shadows / GI | —                                            | —                                  | on where the device reports the capability |
+| Item                    | Potato                   | Low (browser, lavapipe, integrated)          | Medium                             | High (desktop, RT where present)           |
+| ----------------------- | ------------------------ | -------------------------------------------- | ---------------------------------- | ------------------------------------------ |
+| Antialiasing            | FXAA                     | FXAA                                         | CMAA2                              | CMAA2; MSAA opt-in                         |
+| Render scale            | 0.5                      | 0.75                                         | 1.0                                | 1.0                                        |
+| Anisotropic filtering   | off (1)                  | 2                                            | 4                                  | 8, the engine default                      |
+| Shadow atlas            | as low                   | 2048², 4 shadowed local lights               | 4096², 8                           | 8192², 16                                  |
+| Sun shadows             | 2 cascades, box          | 2 cascades, box                              | 3 cascades, disc                   | 3 cascades, PCSS                           |
+| Contact shadows         | off                      | off                                          | on                                 | on                                         |
+| Ambient occlusion       | as low                   | 2 slices, 1 blur, bent normals off           | 4 slices, 2 blurs, bent normals on | 4 slices, 2 blurs, bent normals on         |
+| Area lights (LTC)       | on                       | on                                           | on                                 | on                                         |
+| Probe volume            | as low                   | 2 levels, 16³ probes each, capture amortised | 3 levels, 24³                      | 4 levels, 32³; traced updater on RT        |
+| Atmosphere              | on                       | on (one LUT fetch)                           | on                                 | on                                         |
+| Reflections             | SSR at 0.25 of each axis | SSR at 0.5, sky + probe fallback             | SSR at 0.75, Hi-Z                  | SSR full-res + cone trace; RT on RT        |
+| Volumetric fog          | off                      | off                                          | on, half-res froxels               | on                                         |
+| Bloom, auto-exposure    | on                       | on                                           | on                                 | on                                         |
+| Ray-traced shadows / GI | —                        | —                                            | —                                  | on where the device reports the capability |
 
 Each Low cell is what a frame must fit on the browser tier at 60 Hz; Medium is
 what the settings screen shows on a device reporting no ray tracing; High is
-what an RT-capable desktop opens on. The shadow cadence row decided on
-2026-09-06 (on for low, off for medium and high, half the tiles per frame) is
-the entry _The shadow cadence default still has no tier to live in_ below.
+what an RT-capable desktop opens on. Potato (added 2026-10-26 on the user's ask)
+is every covered key at or near its cheapest rung, for a device that cannot hold
+Low; FXAA stays on it because its cost is small beside what it buys back at half
+the extent. The Reflections and Anisotropic filtering cells were set the same
+day, the first by the user (full, three quarters, half and a quarter), the
+second unmeasured. The shadow cadence row decided on 2026-09-06 (on for low, off
+for medium and high, half the tiles per frame) is the entry _The shadow cadence
+default still has no tier to live in_ below.
 
-**What `crcbl::settings::presets` covers today is seven keys** — `render_scale`,
-`antialiasing`, `shadow_filter`, `volumetric_fog`, `ssao_slices`,
-`ssao_blur_passes` and `ssao_bent_normals` (verified in `QualityValues`,
-2026-09-24). Every other row has no `[engine.video]` key and mostly no renderer
-half; _Quality presets still owe their remaining rows_ is that list. The
-profiling baseline is meant to measure each preset, which is what turns "priced
-on three tiers" into numbers a rung is held to (_Profiling: five of the eight
-gaps are still open_).
+**What `crcbl::settings::presets` covers today**: `render_scale`,
+`antialiasing`, `shadow_filter`, `volumetric_fog`, `contact_shadows`,
+`ssao_slices`, `ssao_blur_passes`, `ssao_bent_normals`, `ssr_resolution` and
+`anisotropic_filtering` (verified in `QualityValues`, 2026-10-26). The other
+effect switches (`shadows`, `ambient_occlusion`, `reflections`, `bloom`,
+`auto_exposure`) are deliberately left to the player, because they change what a
+frame looks like rather than what the same look costs. Every other row has no
+`[engine.video]` key and mostly no renderer half; _Quality presets still owe
+their remaining rows_ is that list. The profiling baseline is meant to measure
+each preset, which is what turns "priced on three tiers" into numbers a rung is
+held to (_Profiling: five of the eight gaps are still open_).
 
 ### The graphics catalogue's quality keys, and the widening they need
 
@@ -12507,7 +12487,7 @@ The rules these protect are in `docs/notes/backends.md` under _What the deleted
 - **A stored `quality` key**: its label drifts the moment a covered key is
   hand-edited, and `quality = "custom"` would write nothing. Replaced by the
   derived label on 2026-08-31.
-- **An `ultra` tier**: the table has three columns, and a fourth name has no
+- **An `ultra` tier**: the table has four columns, and a fifth name has no
   values behind it.
 - **Hand-written MSL for Metal ray tracing**: nothing off macOS can validate
   MSL, so a hand-kept twin would drift undetectably. Do not revisit without an
@@ -12520,9 +12500,9 @@ hardware measurements that would make these preset values rather than guesses:
 
 - `crcbl_render::shadow::cadence::r_shadow_cadence` and `r_shadow_faces` need
   the visible lag measured per tier; the entry below owns that work.
-- `anisotropic_filtering` was named as a preset knob when the presets were
-  planned, but the tier table above assigns it no values. So do the shadow atlas
-  budget and the froxel sample count.
+- The shadow atlas budget and the froxel sample count have no values in the tier
+  table. `anisotropic_filtering` got its row on 2026-10-26 (8, 4, 2, 1) without
+  a measurement; sweep it with the rest.
 
 Until those measurements exist, presets must leave these knobs alone.
 
@@ -12530,11 +12510,11 @@ Until those measurements exist, presets must leave these knobs alone.
 
 The shadow atlas's size and light budget (2048²/4096²/8192² with 4/8/16 shadowed
 local lights), the probe volume's levels and density (2/3/4 levels at
-16³/24³/32³), SSR's resolution and Hi-Z and cone-trace rungs, contact shadows
-and the ray-traced rungs still have no `[engine.video]` key and mostly no
-renderer half. Each reaches a tier in two steps, in this order: a catalogue key
-in `crcbl::settings::catalogue` with a reader that drives the renderer's setter
-or console variable (the road `render_scale` takes to
+16³/24³/32³), SSR's Hi-Z and cone-trace rungs, contact shadows and the
+ray-traced rungs still have no `[engine.video]` key and mostly no renderer half.
+Each reaches a tier in two steps, in this order: a catalogue key in
+`crcbl::settings::catalogue` with a reader that drives the renderer's setter or
+console variable (the road `render_scale` takes to
 `ForwardRenderer::set_render_scale`), then the column values from the tier table
 above. Contact shadows are the odd row: the shadows plan made
 `RenderEffects::CONTACT_SHADOWS` a tier item rather than a settings row, so it
@@ -12584,16 +12564,53 @@ walks past the new row to the MUSIC fader. What was not done:
 - **Nothing looked at the row.** No windowed run and no GPU; every check is over
   `Screen::menu_kind` and the menu set it reconciles. Whether the caption fits
   the panel's column is unverified.
-- **The row cannot reach `low` in one press from `custom`.** A stack on no tier
-  parks the cycler on the bottom rung, so `ArrowLeft` there does nothing and the
-  first press forward lands on `medium`; `low` is one wrap away. That is exactly
-  what an off-ladder anisotropy does on its own row, and it is deliberate — but
-  it is the one place the arrows do something other than what a player reaching
-  for the cheapest tier would guess.
+- **The row cannot reach `potato` in one press from `custom`.** A stack on no
+  tier parks the cycler on the bottom rung, so `ArrowLeft` there does nothing
+  and the first press forward lands on `low`; `potato` is one wrap away. That is
+  exactly what an off-ladder anisotropy does on its own row, and it is
+  deliberate — but it is the one place the arrows do something other than what a
+  player reaching for the cheapest tier would guess.
 - **`RESET` leaves the row reading `custom`.** It writes the whole extent, the
   game's own antialiasing rung and every effect on, which is no column of the
   table. Correct, since no tier is a default — see the entry above — and written
   down because from the screen it looks like a row that stopped working.
+
+## What the SSR resolution setting did not verify (2026-10-26)
+
+`[engine.video] ssr_resolution` drives `crcbl_render::r_ssr_resolution`; below 1
+the march (`ssr.slang`'s `representative_pixel`) covers a block of scene pixels
+per invocation and the composite (`ssr_blur.slang`) rebuilds at full resolution.
+What was checked, all on the RX 7900 XTX under Vulkan: at the default share of 1
+the `meadow` and `ssr` goldens compare exactly as they do on `main`;
+`every_reduced_march_still_reflects_the_pyramid_and_only_under_it` passes at
+0.75, 0.5 and 0.25; and the frame graph's render areas match
+`crate::ssr::march_extent` at every share on the null backend. Each of those was
+shown to go red by breaking what it guards. Not done:
+
+- **No other backend or adapter has drawn a reduced march.** D3D12, Metal,
+  WebGPU and lavapipe are unverified, and CI's legs are the first run of the new
+  test there.
+- **No timing of the shipped form.** The parked fixed half-resolution march
+  measured `ssr` + `ssr-blur` p50 0.061 → 0.032 ms (Vulkan) and 0.044 → 0.029 ms
+  (D3D12) at 1080p on the RX 7900 XTX, and 2.142 → 0.885 ms at 1080p and 8.914 →
+  3.513 ms at 4K on the MX550. The general block walk and the shares 0.75 and
+  0.25 are unmeasured on every device.
+- **No golden at a reduced share.** At half resolution the parked port moved
+  `golden/meadow.png` by 15.5% of pixels (thin blades lose detail, and a rough
+  surface's probe fallback is taken once per block), and changed a few hundred
+  pure-sky pixels by one level, which was never explained. Neither was
+  re-measured here.
+- **`apps/options`' `QUALITY` cycler has four rungs now**; nothing looked at it.
+- **First-launch selection still never picks `potato`**: the decided policy is
+  `low` for a CPU adapter and `medium` otherwise, and it is unbuilt (_Automatic
+  first-launch quality selection needs lifecycle design_).
+
+**Surprise worth keeping: a GPU's float division is not exact.** The first
+version of the march mapped blocks through `size / working`, a float ratio of
+exactly one at full resolution, and drew a different frame there (`meadow` SSIM
+0.961 against 0.998). A ratio a rounding step under one floors every pixel after
+the first onto its neighbour. Both shaders now map blocks with integer division,
+which is exact.
 
 ## What the preset slice did not verify (2026-08-31)
 

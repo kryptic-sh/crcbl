@@ -139,8 +139,9 @@ struct SsrParams
     /// pass's own block. `probe_wrap` is where it is applied.
     uint4 probe_level_offset[PROBE_LEVELS];
     /// `x` is how many levels of the Hi-Z pyramid this frame built, which is the
-    /// deepest level the march may climb to; the other three lanes are the
-    /// sixteen-byte row's padding.
+    /// deepest level the march may climb to; `yz` is the extent of the image
+    /// the march writes, the scene's own or smaller (`crcbl_render::ssr`'s
+    /// `march_extent`); `w` is the sixteen-byte row's padding.
     ///
     /// **Zero is a valid frame**: an extent too small to halve once gets no
     /// pyramid at all, the march never leaves level 0, and what it walks is the
@@ -394,6 +395,12 @@ static const float DEPTH_FAR = 0.0;
 /// lets a sample's own tests say which of its materials this pass can see.
 static const float ROUGHNESS_CUTOFF = 0.5;
 
+/// The widest block of scene pixels, on either axis, that one march
+/// invocation stands for: the reciprocal of the smallest scale the march runs
+/// at. `crcbl_shaders::ssr::MAX_BLOCK` is the Rust mirror, and it is what
+/// `crcbl_render::ssr` holds its scale floor to.
+static const int MAX_BLOCK = 4;
+
 /// The sharpness ramp at `roughness`: full strength at a mirror, nothing at
 /// [`ROUGHNESS_CUTOFF`], linear between.
 ///
@@ -550,6 +557,44 @@ float depth_at(int2 pixel, int2 extent)
 {
     int2 clamped = clamp(pixel, int2(0, 0), extent - int2(1, 1));
     return scene_depth.Load(int3(clamped, 0));
+}
+
+/// The nearest visible scene pixel in the block one march invocation covers.
+///
+/// The block runs from `block * extent / working` up to but not including
+/// `(block + 1) * extent / working` on each axis, so the blocks tile the scene
+/// with no gap and no overlap, and at full resolution it is the one pixel the
+/// invocation sits on. **Integer division, not a float ratio**: a GPU may
+/// divide floats approximately, and a ratio of one that arrives a rounding
+/// step under one floors every pixel past the first onto its neighbour.
+/// Reversed-Z makes the largest stored depth the nearest surface, and choosing
+/// it keeps thin foreground geometry represented instead of letting a fixed
+/// sub-pixel phase miss it. The clamps hold the walk to [`MAX_BLOCK`] and to the
+/// image if an extent ever arrives outside what the host writes.
+int2 representative_pixel(int2 block, int2 extent, int2 working)
+{
+    int2 first = clamp(block * extent / working, int2(0, 0), extent - int2(1, 1));
+    int2 last = (block + int2(1, 1)) * extent / working;
+    last = clamp(last, first + int2(1, 1), min(first + int2(MAX_BLOCK, MAX_BLOCK), extent));
+    int2 best = first;
+    float best_depth = depth_at(best, extent);
+    for (int y = 0; y < MAX_BLOCK; ++y)
+    {
+        for (int x = 0; x < MAX_BLOCK; ++x)
+        {
+            int2 candidate = first + int2(x, y);
+            if (candidate.x < last.x && candidate.y < last.y)
+            {
+                float candidate_depth = depth_at(candidate, extent);
+                if (candidate_depth > best_depth)
+                {
+                    best = candidate;
+                    best_depth = candidate_depth;
+                }
+            }
+        }
+    }
+    return best;
 }
 
 /// The two rows of the inverse projection that `depth` alone reaches: the
@@ -1343,13 +1388,17 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
 {
     uint width;
     uint height;
-    // Read off the image rather than passed in the block: the pass renders at the
-    // depth buffer's own size by construction, and a second copy of that number
-    // in a uniform is a second thing that can be stale.
+    // Read the scene extent off the depth image rather than pass a second copy
+    // that can become stale. The colour target is the march's working extent,
+    // which the block carries because nothing here can query a render target;
+    // `representative_pixel` maps this invocation back into the scene's
+    // dimensions. A zero extent is a block nobody filled, read as one pixel so
+    // the division stays defined.
     scene_depth.GetDimensions(width, height);
     int2 extent = int2(int(width), int(height));
     float2 size = float2(float(width), float(height));
-    int2 pixel = int2(input.position.xy);
+    int2 working = int2(max(camera.hiz.yz, uint2(1u, 1u)));
+    int2 pixel = representative_pixel(int2(input.position.xy), extent, working);
 
     // **What a pixel with no reflection writes**, and every pixel of the target
     // has to be written. The alpha is the ramp `ssr_blur.slang` weighs taps by,

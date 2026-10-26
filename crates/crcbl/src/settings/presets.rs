@@ -25,14 +25,20 @@
 //! # What a tier covers, and what it is silent about
 //!
 //! What a tier writes is [`QualityValues`]: the render scale, the antialiasing
-//! tier, the shadow filter, the volumetric fog and contact-shadow switches and
-//! the three SSAO keys (slices, blur passes, bent normals). Those are the table's
-//! rows this tree has an `[engine.video]` key for; every other row names an
-//! amount of something with no key and often no renderer half — the shadow
-//! atlas's size and light budget, the probe volume's levels, SSR's resolution
-//! and ray tracing. Contact shadows are covered through their
-//! [`TIER_VIDEO_KEYS`] switch, off on the low tier. A preset writes what it can
-//! and is silent about the rest; `docs/backlog.md` carries the list.
+//! tier, the shadow filter, the volumetric fog and contact-shadow switches, the
+//! three SSAO keys (slices, blur passes, bent normals), the reflection march's
+//! resolution and the anisotropic filtering. Those are the table's rows this
+//! tree has an `[engine.video]` key for; every other row names an amount of
+//! something with no key and often no renderer half — the shadow atlas's size
+//! and light budget, the probe volume's levels and ray tracing. Contact shadows
+//! are covered through their [`TIER_VIDEO_KEYS`] switch, off on the two
+//! cheapest tiers. A preset writes what it can and is silent about the rest;
+//! `docs/backlog.md` carries the list.
+//!
+//! **The effect switches a player turns off are not tier items**, fog and
+//! contact shadows excepted: shadows, ambient occlusion, reflections, bloom and
+//! auto-exposure change what a frame looks like rather than what it costs to
+//! draw the same look, so every tier leaves them as the player set them.
 //!
 //! **A knob that is a console variable and not a settings key is not something
 //! a tier can reach**, and that is the shape of the road rather than a gap in
@@ -82,10 +88,11 @@ use crcbl_render::{Antialiasing, RenderEffects, shadow::Filter};
 use crcbl_store::settings::SettingsStack;
 
 use super::{
-    ANTIALIASING_KEY, Applied, ConsoleHost, RENDER_SCALE_KEY, SHADOW_FILTER_KEY,
-    SSAO_BENT_NORMALS_KEY, SSAO_BLUR_PASSES_KEY, SSAO_SLICES_KEY, Stage, TIER_VIDEO_KEYS,
-    VIDEO_KEYS, VIDEO_NAMESPACE, antialiasing_or_default, apply, render_scale, shadow_filter,
-    ssao_bent_normals, ssao_blur_passes, ssao_slices, video_effects,
+    ANISOTROPIC_FILTERING_KEY, ANTIALIASING_KEY, Applied, ConsoleHost, RENDER_SCALE_KEY,
+    SHADOW_FILTER_KEY, SSAO_BENT_NORMALS_KEY, SSAO_BLUR_PASSES_KEY, SSAO_SLICES_KEY,
+    SSR_RESOLUTION_KEY, Stage, TIER_VIDEO_KEYS, VIDEO_KEYS, VIDEO_NAMESPACE, anisotropic_filtering,
+    antialiasing_or_default, apply, render_scale, shadow_filter, ssao_bent_normals,
+    ssao_blur_passes, ssao_slices, ssr_resolution, video_effects,
 };
 
 /// The word [`selected`] has no tier for.
@@ -124,10 +131,13 @@ const _: () = assert!(
 /// One column of topic 39's tier table.
 ///
 /// `ultra` is deliberately absent: the plan's catalogue row names five words,
-/// and the table has three columns. A fourth tier with no column would be a
-/// name with no values behind it.
+/// and the table has four columns. A tier with no column would be a name with
+/// no values behind it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QualityPreset {
+    /// The column below the browser tier: every covered key at or near its
+    /// cheapest rung, for a device that cannot hold `low` at its frame rate.
+    Potato,
     /// The browser, lavapipe and integrated column.
     Low,
     /// The column a device reporting no ray tracing opens on.
@@ -138,12 +148,13 @@ pub enum QualityPreset {
 
 impl QualityPreset {
     /// The tiers, cheapest first — the table's own column order.
-    pub const ALL: [Self; 3] = [Self::Low, Self::Medium, Self::High];
+    pub const ALL: [Self; 4] = [Self::Potato, Self::Low, Self::Medium, Self::High];
 
     /// The word a person types and [`selected`] prints.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Potato => "potato",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -165,6 +176,22 @@ impl QualityPreset {
     #[must_use]
     pub const fn values(self) -> QualityValues {
         match self {
+            // Every covered key at its cheapest rung but the resolve: FXAA is
+            // the one pass whose cost is small beside what it buys back at
+            // half the extent, on the table's "best-looking for the
+            // performance" rule.
+            Self::Potato => QualityValues {
+                render_scale: 0.5,
+                antialiasing: Antialiasing::Fxaa,
+                shadow_filter: Filter::Box,
+                volumetric_fog: false,
+                ssao_slices: 2,
+                ssao_blur_passes: 1,
+                ssao_bent_normals: false,
+                contact_shadows: false,
+                ssr_resolution: 0.25,
+                anisotropic_filtering: 1.0,
+            },
             // "Render scale 0.75 | Volumetric fog off | Antialiasing FXAA".
             Self::Low => QualityValues {
                 render_scale: 0.75,
@@ -176,6 +203,8 @@ impl QualityPreset {
                 ssao_bent_normals: false,
                 // "Contact shadows off", topic 45's low-tier clear.
                 contact_shadows: false,
+                ssr_resolution: 0.5,
+                anisotropic_filtering: 2.0,
             },
             // "Render scale 1.0 | Volumetric fog on, half-res froxels" — the
             // half-res froxel grid is its own unbuilt rung, so the switch is all
@@ -192,7 +221,11 @@ impl QualityPreset {
                 ssao_blur_passes: 2,
                 ssao_bent_normals: true,
                 contact_shadows: true,
+                ssr_resolution: 0.75,
+                anisotropic_filtering: 4.0,
             },
+            // The engine's own defaults, key for key — see
+            // `a_run_that_selects_nothing_writes_nothing_and_asks_for_nothing`.
             Self::High => QualityValues {
                 render_scale: 1.0,
                 antialiasing: Antialiasing::Cmaa2,
@@ -202,6 +235,8 @@ impl QualityPreset {
                 ssao_blur_passes: 2,
                 ssao_bent_normals: true,
                 contact_shadows: true,
+                ssr_resolution: 1.0,
+                anisotropic_filtering: crcbl_render::DEFAULT_ANISOTROPY,
             },
         }
     }
@@ -211,8 +246,8 @@ impl QualityPreset {
 ///
 /// **`PartialEq` and not `Eq`**, since it holds a float — the same reason
 /// [`CatalogueKey`](super::CatalogueKey) gives. The comparison is exact and that
-/// is deliberate: both scales in the table are exact binary fractions, and the
-/// reader clamps to the same range the writer wrote through, so a value that
+/// is deliberate: every scale and anisotropy in the table is an exact binary
+/// fraction or a small whole number, and the reader clamps to the same range the writer wrote through, so a value that
 /// came out of a tier and back through the file is the value that went in.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QualityValues {
@@ -232,6 +267,11 @@ pub struct QualityValues {
     pub ssao_bent_normals: bool,
     /// The [`super::TIER_VIDEO_KEYS`] contact-shadow switch.
     pub contact_shadows: bool,
+    /// [`super::SSR_RESOLUTION_KEY`]: the share of each scene axis the
+    /// reflection march runs at.
+    pub ssr_resolution: f32,
+    /// [`super::ANISOTROPIC_FILTERING_KEY`].
+    pub anisotropic_filtering: f32,
 }
 
 /// What the engine's own readers answer for the keys a tier covers.
@@ -251,6 +291,8 @@ pub fn current_values(stack: &SettingsStack) -> QualityValues {
         ssao_blur_passes: ssao_blur_passes(stack),
         ssao_bent_normals: ssao_bent_normals(stack),
         contact_shadows: video_effects(stack).contains(RenderEffects::CONTACT_SHADOWS),
+        ssr_resolution: ssr_resolution(stack),
+        anisotropic_filtering: anisotropic_filtering(stack),
     }
 }
 
@@ -320,6 +362,11 @@ pub fn select(
         (SSAO_BLUR_PASSES_KEY, Value::Int(values.ssao_blur_passes)),
         (SSAO_BENT_NORMALS_KEY, Value::Bool(values.ssao_bent_normals)),
         (CONTACT_SHADOWS_KEY, Value::Bool(values.contact_shadows)),
+        (SSR_RESOLUTION_KEY, Value::Float(values.ssr_resolution)),
+        (
+            ANISOTROPIC_FILTERING_KEY,
+            Value::Float(values.anisotropic_filtering),
+        ),
     ] {
         let key = format!("{VIDEO_NAMESPACE}.{name}");
         if apply(stack, &key, &value, stage)? == Applied::NextStart {
@@ -332,7 +379,7 @@ pub fn select(
 /// One line describing what the covered keys hold.
 fn values_line(values: QualityValues) -> String {
     format!(
-        "{RENDER_SCALE_KEY} = {}, {ANTIALIASING_KEY} = {}, {SHADOW_FILTER_KEY} = {}, {FOG_KEY} = {}, {SSAO_SLICES_KEY} = {}, {SSAO_BLUR_PASSES_KEY} = {}, {SSAO_BENT_NORMALS_KEY} = {}, {CONTACT_SHADOWS_KEY} = {}",
+        "{RENDER_SCALE_KEY} = {}, {ANTIALIASING_KEY} = {}, {SHADOW_FILTER_KEY} = {}, {FOG_KEY} = {}, {SSAO_SLICES_KEY} = {}, {SSAO_BLUR_PASSES_KEY} = {}, {SSAO_BENT_NORMALS_KEY} = {}, {CONTACT_SHADOWS_KEY} = {}, {SSR_RESOLUTION_KEY} = {}, {ANISOTROPIC_FILTERING_KEY} = {}",
         values.render_scale,
         values.antialiasing.name(),
         values.shadow_filter.label(),
@@ -341,6 +388,8 @@ fn values_line(values: QualityValues) -> String {
         values.ssao_blur_passes,
         values.ssao_bent_normals,
         values.contact_shadows,
+        values.ssr_resolution,
+        values.anisotropic_filtering,
     )
 }
 
@@ -457,9 +506,18 @@ mod tests {
     /// **Every tier has the exact shadow-filter and SSAO bundle the table assigns it.**
     #[test]
     fn every_tier_has_its_exact_shadow_filter_and_ssao_bundle() {
+        assert_eq!(QualityPreset::Potato.values().shadow_filter, Filter::Box);
         assert_eq!(QualityPreset::Low.values().shadow_filter, Filter::Box);
         assert_eq!(QualityPreset::Medium.values().shadow_filter, Filter::Disc);
         assert_eq!(QualityPreset::High.values().shadow_filter, Filter::Pcss);
+        assert_eq!(
+            (
+                QualityPreset::Potato.values().ssao_slices,
+                QualityPreset::Potato.values().ssao_blur_passes,
+                QualityPreset::Potato.values().ssao_bent_normals
+            ),
+            (2, 1, false),
+        );
         assert_eq!(
             (
                 QualityPreset::Low.values().ssao_slices,
@@ -484,6 +542,67 @@ mod tests {
             ),
             (4, 2, true),
         );
+    }
+
+    /// **Each tier marches reflections at its own share of the frame**: full
+    /// resolution on `high`, then three quarters, half and a quarter.
+    #[test]
+    fn every_tier_marches_reflections_at_its_own_share() {
+        let shares = QualityPreset::ALL.map(|tier| tier.values().ssr_resolution);
+        assert_eq!(shares, [0.25, 0.5, 0.75, 1.0]);
+    }
+
+    /// **No covered key costs more on a cheaper tier.**
+    ///
+    /// Each tier beside the next one up, key by key: a number no larger, a rung
+    /// no higher on its own lowest-first ladder, and a switch that is not on
+    /// where the dearer tier has it off. A column edited so that `low` asked
+    /// for more than `medium` would be a ladder a player climbs down and pays
+    /// more on.
+    #[test]
+    fn no_covered_key_costs_more_on_a_cheaper_tier() {
+        fn rung<T: PartialEq>(ladder: &[T], value: &T) -> usize {
+            ladder
+                .iter()
+                .position(|candidate| candidate == value)
+                .expect("every value a tier holds is on its ladder")
+        }
+        for pair in QualityPreset::ALL.windows(2) {
+            let (cheap, dear) = (pair[0].values(), pair[1].values());
+            let name = format!("{:?} against {:?}", pair[0], pair[1]);
+            assert!(cheap.render_scale <= dear.render_scale, "{name}");
+            assert!(cheap.ssr_resolution <= dear.ssr_resolution, "{name}");
+            assert!(
+                cheap.anisotropic_filtering <= dear.anisotropic_filtering,
+                "{name}"
+            );
+            assert!(cheap.ssao_slices <= dear.ssao_slices, "{name}");
+            assert!(cheap.ssao_blur_passes <= dear.ssao_blur_passes, "{name}");
+            assert!(
+                rung(&Antialiasing::ALL, &cheap.antialiasing)
+                    <= rung(&Antialiasing::ALL, &dear.antialiasing),
+                "{name}"
+            );
+            assert!(
+                rung(&Filter::ALL, &cheap.shadow_filter) <= rung(&Filter::ALL, &dear.shadow_filter),
+                "{name}"
+            );
+            for (switch, cheap_on, dear_on) in [
+                ("fog", cheap.volumetric_fog, dear.volumetric_fog),
+                (
+                    "bent normals",
+                    cheap.ssao_bent_normals,
+                    dear.ssao_bent_normals,
+                ),
+                (
+                    "contact shadows",
+                    cheap.contact_shadows,
+                    dear.contact_shadows,
+                ),
+            ] {
+                assert!(!cheap_on || dear_on, "{name}: {switch}");
+            }
+        }
     }
 
     /// **Selecting a tier moves what the engine's own readers answer**, for
@@ -526,6 +645,21 @@ mod tests {
                 wanted.volumetric_fog,
                 "{tier:?}",
             );
+            assert_eq!(
+                video_effects(&stack).contains(RenderEffects::CONTACT_SHADOWS),
+                wanted.contact_shadows,
+                "{tier:?}",
+            );
+            assert!(
+                (ssr_resolution(&stack) - wanted.ssr_resolution).abs() < f32::EPSILON,
+                "{tier:?} left the reflection march at {}",
+                ssr_resolution(&stack),
+            );
+            assert!(
+                (anisotropic_filtering(&stack) - wanted.anisotropic_filtering).abs() < f32::EPSILON,
+                "{tier:?} left the anisotropy at {}",
+                anisotropic_filtering(&stack),
+            );
         }
     }
 
@@ -552,6 +686,9 @@ mod tests {
             SSAO_SLICES_KEY,
             SSAO_BLUR_PASSES_KEY,
             SSAO_BENT_NORMALS_KEY,
+            CONTACT_SHADOWS_KEY,
+            SSR_RESOLUTION_KEY,
+            ANISOTROPIC_FILTERING_KEY,
         ] {
             assert!(
                 !stack.contains(&format!("{VIDEO_NAMESPACE}.{name}")),
@@ -575,7 +712,7 @@ mod tests {
     /// label has and this one does not.
     #[test]
     fn moving_any_covered_key_takes_the_label_off_its_tier() {
-        let moves: [(&str, Value); 7] = [
+        let moves: [(&str, Value); 10] = [
             (RENDER_SCALE_KEY, Value::Float(0.5)),
             (ANTIALIASING_KEY, Value::Enum(Antialiasing::None.name())),
             (SHADOW_FILTER_KEY, Value::Enum(Filter::Box.label())),
@@ -583,6 +720,9 @@ mod tests {
             (SSAO_SLICES_KEY, Value::Int(2)),
             (SSAO_BLUR_PASSES_KEY, Value::Int(1)),
             (SSAO_BENT_NORMALS_KEY, Value::Bool(false)),
+            (CONTACT_SHADOWS_KEY, Value::Bool(false)),
+            (SSR_RESOLUTION_KEY, Value::Float(0.5)),
+            (ANISOTROPIC_FILTERING_KEY, Value::Float(1.0)),
         ];
         for (name, value) in moves {
             let (mut stack, mut stage) = empty();

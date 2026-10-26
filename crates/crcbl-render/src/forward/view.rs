@@ -692,6 +692,13 @@ pub(super) struct View {
     /// reason: the block that switch writes and the composite
     /// [`View::add_passes`] adds for it have to agree.
     pub(super) frame_aerial: bool,
+    /// The extent of the image the reflection march writes this frame —
+    /// [`crate::ssr::march_extent`] of the frame's extent at
+    /// `crate::ssr::r_ssr_resolution` — frozen by [`View::begin_frame`] beside
+    /// [`View::frame_effects`] and for its reason: the block that tells
+    /// `ssr.slang` this extent and the image [`View::add_passes`] creates at it
+    /// have to agree, and the console can move the variable between the two.
+    pub(super) frame_ssr_extent: (u32, u32),
     /// The frame serial [`View::begin_frame`] last ran for — see
     /// [`ForwardRenderer::frame_serial`]. A secondary view records passes only
     /// in the frame it was begun for.
@@ -1370,6 +1377,8 @@ impl View {
                 frame_effects: inputs.effects,
                 // Replaced by every `begin_frame`, on `frame_effects`' terms.
                 frame_aerial: false,
+                // Replaced by every `begin_frame`, on `frame_effects`' terms.
+                frame_ssr_extent: (1, 1),
                 // No frame has begun it.
                 begun: 0,
                 draws: rollback.draws.take().unwrap_or_else(|| {
@@ -1617,6 +1626,7 @@ impl View {
             },
         )?;
         self.frame_aerial = reflected_air.is_some();
+        self.frame_ssr_extent = crate::ssr::march_extent(extent, crate::ssr::resolution_scale());
 
         let gradient = frame.gradient;
         let uniforms = mesh::FrameUniforms {
@@ -1836,6 +1846,9 @@ impl View {
                 // frame too small to halve gets zero, and the march walks the
                 // prepass at full resolution.
                 hiz_levels: crate::hiz::levels_for(extent),
+                // The image the march writes, which `add_passes` creates at
+                // this same frozen extent.
+                march_extent: [self.frame_ssr_extent.0, self.frame_ssr_extent.1],
                 // The gradient itself rather than the projection the frame
                 // block carries: this pass wants the radiance along one
                 // direction and `Sky::gradient` is what has it exactly. A
@@ -2214,16 +2227,22 @@ impl View {
         // first pass that will, and until then `DebugView::Motion`
         // is what observes the subtraction.
         let motion = graph.create_image("motion", crate::targets::motion(extent));
-        // The march's output and the blur's, and both are the scene target's
-        // description exactly. The blur writes the scene colour plus a term, so
-        // a narrower image there would tonemap a truncated frame; the march
-        // writes a reflection *out of* that same colour, so an eight-bit image
-        // here would clip the frame's bright end before the tonemap saw it.
-        // Three live requests for one description are three physical images —
-        // see `TransientPool::image`.
+        // The march's output and the blur's, both in the scene target's format:
+        // the blur writes the scene colour plus a term, so a narrower image
+        // there would tonemap a truncated frame, and the march writes a
+        // reflection *out of* that same colour, so an eight-bit image here would
+        // clip the frame's bright end before the tonemap saw it. The march runs
+        // at the extent `begin_frame` froze (`crate::ssr::march_extent`), which
+        // is the scene's own at full resolution — and then three live requests
+        // for one description are three physical images, see
+        // `TransientPool::image`. The composite stays at the scene extent
+        // because it replaces the scene colour from here on.
         let reflected = effects.contains(RenderEffects::REFLECTIONS).then(|| {
             (
-                graph.create_image("reflection", crate::targets::scene_color(extent)),
+                graph.create_image(
+                    "reflection",
+                    crate::targets::scene_color(self.frame_ssr_extent),
+                ),
                 graph.create_image("scene-reflected", crate::targets::scene_color(extent)),
             )
         });

@@ -4,8 +4,8 @@
 
 use crcbl_console::{Kind, Value};
 use crcbl_render::{
-    Antialiasing, DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEffects, r_ssao_bent_normals,
-    r_ssao_blur_passes, r_ssao_slices,
+    Antialiasing, DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, MIN_SSR_RESOLUTION, RenderEffects,
+    r_ssao_bent_normals, r_ssao_blur_passes, r_ssao_slices,
     shadow::{Filter, shipped_filter},
 };
 
@@ -107,6 +107,12 @@ pub fn video_effects(stack: &SettingsStack) -> RenderEffects {
 /// clears no bit. A settings screen writing the row and a start-up reading it
 /// back still go through one spelling.
 pub const RENDER_SCALE_KEY: &str = "render_scale";
+
+/// The `[engine.video]` key that sizes the reflection march's working image.
+///
+/// Spelled here for [`RENDER_SCALE_KEY`]'s reason, and read by
+/// [`ssr_resolution`].
+pub const SSR_RESOLUTION_KEY: &str = "ssr_resolution";
 
 /// The `[engine.video]` key that multiplies the UI's scale.
 ///
@@ -223,6 +229,9 @@ pub struct VideoSettings {
     /// What fraction of the caller's extent the renderer draws at; see
     /// [`render_scale`].
     pub render_scale: f32,
+    /// What share of each scene axis the reflection march runs at; see
+    /// [`ssr_resolution`].
+    pub ssr_resolution: f32,
     /// The anisotropy the base-colour page is sampled with; see
     /// [`anisotropic_filtering`].
     pub anisotropic_filtering: f32,
@@ -258,6 +267,7 @@ impl VideoSettings {
             antialiasing: None,
             shadow_filter: shipped_filter(),
             render_scale: 1.0,
+            ssr_resolution: 1.0,
             anisotropic_filtering: DEFAULT_ANISOTROPY,
             frame_limit: FrameLimit::unlimited(),
             ssao_slices: ssao_slices_default(),
@@ -275,6 +285,7 @@ pub fn video(stack: &SettingsStack) -> VideoSettings {
         antialiasing: antialiasing(stack),
         shadow_filter: shadow_filter(stack),
         render_scale: render_scale(stack),
+        ssr_resolution: ssr_resolution(stack),
         anisotropic_filtering: anisotropic_filtering(stack),
         frame_limit: frame_limit(stack),
         ssao_slices: ssao_slices(stack),
@@ -480,6 +491,42 @@ pub fn render_scale(stack: &SettingsStack) -> f32 {
     }
 }
 
+/// What share of each scene axis the player wants the reflection march run at,
+/// for `crcbl_render::r_ssr_resolution`.
+///
+/// `1.0` for a stack that says nothing, and otherwise the file's value clamped
+/// to `MIN_SSR_RESOLUTION..=1.0` — the variable's own range, so no file asks
+/// for a march the renderer would refuse to size.
+///
+/// # A line that does nothing says so
+///
+/// On [`render_scale`]'s terms exactly: a value this cannot use — a string,
+/// `nan`, `inf` — leaves the march at full resolution and **warns**, naming the
+/// key, and a finite value outside the range is clamped without a word.
+#[must_use]
+pub fn ssr_resolution(stack: &SettingsStack) -> f32 {
+    let dotted = format!("{VIDEO_NAMESPACE}.{SSR_RESOLUTION_KEY}");
+    let unreadable = || {
+        crcbl_core::log::warn!(
+            "settings: `{dotted}` is not a usable number, so it does nothing; \
+             reflections are marched at full resolution"
+        );
+        1.0
+    };
+    match stack.get::<f64>(&dotted) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped to [MIN_SSR_RESOLUTION, 1.0], where every f64 has an f32 within an ulp"
+        )]
+        // The finite check first, for `render_scale`'s reason: `clamp` answers
+        // NaN for NaN.
+        Some(scale) if scale.is_finite() => (scale as f32).clamp(MIN_SSR_RESOLUTION, 1.0),
+        Some(_) => unreadable(),
+        None if stack.contains(&dotted) => unreadable(),
+        None => 1.0,
+    }
+}
+
 /// The multiplier the player puts over the UI's base scale, for
 /// [`DrawList::set_scale`](crcbl_ui::draw_list::DrawList::set_scale).
 ///
@@ -617,8 +664,8 @@ pub(super) fn antialiasing_or_default(stack: &SettingsStack) -> Antialiasing {
 /// Write the whole `[engine.video]` section into the stack's user layer.
 ///
 /// The mirror of [`video`], key for key: every entry of [`VIDEO_KEYS`],
-/// [`ANTIALIASING_KEY`], [`RENDER_SCALE_KEY`], [`ANISOTROPIC_FILTERING_KEY`] and
-/// [`FRAME_LIMIT_KEY`]. Nothing is persisted until the
+/// [`ANTIALIASING_KEY`], [`RENDER_SCALE_KEY`], [`SSR_RESOLUTION_KEY`],
+/// [`ANISOTROPIC_FILTERING_KEY`] and [`FRAME_LIMIT_KEY`]. Nothing is persisted until the
 /// caller saves the stack
 /// — see [`SettingsStack::save_platform`].
 ///
@@ -651,6 +698,7 @@ pub fn set_video(stack: &mut SettingsStack, video: VideoSettings) -> Result<(), 
     }
     set_shadow_filter(stack, video.shadow_filter)?;
     set_render_scale(stack, video.render_scale)?;
+    set_ssr_resolution(stack, video.ssr_resolution)?;
     set_anisotropic_filtering(stack, video.anisotropic_filtering)?;
     set_frame_limit(stack, video.frame_limit)?;
     set_ssao_slices(stack, video.ssao_slices)?;
@@ -728,6 +776,26 @@ pub fn set_render_scale(stack: &mut SettingsStack, scale: f32) -> Result<(), Sto
         )));
     }
     stack.set(&dotted, &f64::from(scale.clamp(MIN_RENDER_SCALE, 1.0)))
+}
+
+/// Write `[engine.video] ssr_resolution`, clamped to what [`ssr_resolution`]
+/// reads.
+///
+/// Clamped on the way in on [`set_render_scale`]'s terms, so the file holds the
+/// share the next start-up will actually march at.
+///
+/// # Errors
+///
+/// [`set_video`]'s, and a value that is not finite, for [`set_render_scale`]'s
+/// reason.
+pub fn set_ssr_resolution(stack: &mut SettingsStack, scale: f32) -> Result<(), StorageError> {
+    let dotted = format!("{VIDEO_NAMESPACE}.{SSR_RESOLUTION_KEY}");
+    if !scale.is_finite() {
+        return Err(StorageError::Other(format!(
+            "settings: `{dotted}` cannot be written as {scale}"
+        )));
+    }
+    stack.set(&dotted, &f64::from(scale.clamp(MIN_SSR_RESOLUTION, 1.0)))
 }
 
 /// Write `[engine.video] ui_scale`, clamped to what [`ui_scale`] reads.
@@ -857,6 +925,7 @@ mod tests {
             antialiasing: Some(Antialiasing::Cmaa2),
             shadow_filter: Filter::Disc,
             render_scale: 0.5,
+            ssr_resolution: 0.75,
             anisotropic_filtering: 4.0,
             frame_limit: FrameLimit::fps(60),
             ssao_slices: 2,
@@ -1005,6 +1074,36 @@ mod tests {
             !written.contains("0.05"),
             "the file kept the unclamped ask:\n{written}"
         );
+    }
+
+    /// **The reflection march's share is clamped both ways to the renderer
+    /// variable's range**, and an empty file reads as that variable's default.
+    #[test]
+    fn an_ssr_resolution_is_held_to_the_renderer_variables_range() {
+        assert_eq!(
+            Value::Float(ssr_resolution(&stack_from(""))),
+            *crcbl_render::r_ssr_resolution.default(),
+            "an empty file marches at a resolution the renderer does not ship",
+        );
+        assert_eq!(
+            crcbl_render::r_ssr_resolution.kind(),
+            Kind::Float {
+                min: MIN_SSR_RESOLUTION,
+                max: 1.0
+            },
+        );
+        let (reloaded, written) = round_trip(|stack| {
+            set_ssr_resolution(stack, 0.05).expect("a fresh user layer accepts every key");
+        });
+        assert!((ssr_resolution(&reloaded) - MIN_SSR_RESOLUTION).abs() < f32::EPSILON);
+        assert!(
+            !written.contains("0.05"),
+            "the file kept the unclamped ask:\n{written}"
+        );
+        let stack = stack_from(&format!(
+            "[{VIDEO_NAMESPACE}]\n{SSR_RESOLUTION_KEY} = 2.0\n"
+        ));
+        assert!((ssr_resolution(&stack) - 1.0).abs() < f32::EPSILON);
     }
 
     /// **Every effect is reachable from a settings file**, through the boolean

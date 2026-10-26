@@ -529,30 +529,30 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr]
 source = shaders/ssr.slang
-source-sha256 = e4b85e2bfaa45b94c3ff0096c58deff2ddbee0ed3b470ec2d18963b3072097a1
+source-sha256 = 823ebe57279bc20af5379dccce0bde0cb1ed063c06a197dd5123858c3a69a3c5
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssr.spv
-spirv-sha256 = 5a9b4ec3095517d2aecd2785cc02b06341e095ae127da0cadb2a61b16b467e45
+spirv-sha256 = 6c4ceb255cc149cb6df3eaecd624160c1fa4ba3da11a8f21011a517d367b884c
 wgsl = wgsl/ssr.wgsl
-wgsl-sha256 = 27f76a2aeeac3eb31d4103792caa9d669fb65ab18a2da5e4565ef3636ae9342e
+wgsl-sha256 = 3989e255263c39e8f18fd68661a35b6f7e7d7b54f4007414c969689f86fb7412
 msl = msl/ssr.metal
-msl-sha256 = f4102fe7a5cddb9762b4e7471eea1efab9ca8b92b834c6d3f43e6003f37896f3
+msl-sha256 = f209e0c1ef4690474cb9f6ad42a97cc7078c26885320d3ad999fe8adfd7c59db
 dxil = vertexMain:dxil/ssr.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/ssr.fragment.dxil:43685853333f852fc4bd47594ad38dae158be00948d8ac7f49a42c79c046b838
+dxil = fragmentMain:dxil/ssr.fragment.dxil:e6696a2c4efa2d94956239e68abb06f7a3823b3b514b2bfbe2695f8467452279
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr_blur]
 source = shaders/ssr_blur.slang
-source-sha256 = e096d5778710a5f37c8ed86653eb4583db5081844b055fe0d167354a37d37915
+source-sha256 = cd61b3f56ed589a9e4858e29c4308842560b3f7481dd6bf04566fbc78b166267
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssr_blur.spv
-spirv-sha256 = e1ab24e20672d9f1d12c2cb243ed2b4ce14bca3d3a99ad9bf7c247389e919fab
+spirv-sha256 = 800651c02e806b2407f7fae5a9d01af85f31022f104c3b1c8bef32463bb68617
 wgsl = wgsl/ssr_blur.wgsl
-wgsl-sha256 = 9d75110416241b398baa5fd3cf06f9d4379cc31e015e6758e32ee46db199b8d6
+wgsl-sha256 = a05604dc1b9b31dea9106bb2595d65efc1dd08409349318c3c1ba5e3842466b6
 msl = msl/ssr_blur.metal
-msl-sha256 = 5586b7083a95cd2b85128dbf3f4e444734d3267b5a0b3e3bd161daaf6afb6966
+msl-sha256 = 7d6043c7da7b1a717e8eedb96d82fbfe68cb75bab9ec41f30ec3ab5f2c16b688
 dxil = vertexMain:dxil/ssr_blur.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/ssr_blur.fragment.dxil:db771e839272fbf63e1004c785f2dde27c7c4a4f261fffb388471dd7a6dcff37
+dxil = fragmentMain:dxil/ssr_blur.fragment.dxil:95818326d3e6b9eaa7a068a4c401db721bd820a29113b299ea8046572015b576
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [task_write_probe]

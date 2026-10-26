@@ -157,11 +157,12 @@ pub use engine_video::{
     ANISOTROPIC_FILTERING_KEY, ANTIALIASING_KEY, ANTIALIASING_NAMES, FRAME_LIMIT_CEILING,
     FRAME_LIMIT_KEY, MAX_ANISOTROPIC_FILTERING, MAX_UI_SCALE, MIN_UI_SCALE, RENDER_SCALE_KEY,
     SHADOW_FILTER_KEY, SHADOW_FILTER_NAMES, SSAO_BENT_NORMALS_KEY, SSAO_BLUR_PASSES_KEY,
-    SSAO_SLICES_KEY, TIER_VIDEO_KEYS, UI_SCALE_KEY, VIDEO_KEYS, VIDEO_NAMESPACE, VideoSettings,
-    anisotropic_filtering, antialiasing, frame_limit, render_scale, set_anisotropic_filtering,
-    set_antialiasing, set_frame_limit, set_render_scale, set_shadow_filter, set_ssao_bent_normals,
-    set_ssao_blur_passes, set_ssao_slices, set_ui_scale, set_video, set_video_effects,
-    shadow_filter, ssao_bent_normals, ssao_blur_passes, ssao_slices, ui_scale, video,
+    SSAO_SLICES_KEY, SSR_RESOLUTION_KEY, TIER_VIDEO_KEYS, UI_SCALE_KEY, VIDEO_KEYS,
+    VIDEO_NAMESPACE, VideoSettings, anisotropic_filtering, antialiasing, frame_limit, render_scale,
+    set_anisotropic_filtering, set_antialiasing, set_frame_limit, set_render_scale,
+    set_shadow_filter, set_ssao_bent_normals, set_ssao_blur_passes, set_ssao_slices,
+    set_ssr_resolution, set_ui_scale, set_video, set_video_effects, shadow_filter,
+    ssao_bent_normals, ssao_blur_passes, ssao_slices, ssr_resolution, ui_scale, video,
     video_effects,
 };
 pub use key_catalogue::{CatalogueKey, KeyStatus, catalogue, catalogued};

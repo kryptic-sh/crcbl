@@ -2653,7 +2653,7 @@ mod tests {
     fn the_tier_row_is_placed_from_the_file_without_writing_a_thing() {
         let held = QualityPreset::Medium;
         let (mut screen, mut menus) = screen(
-            "[engine.video]\nrender_scale = 1.0\nantialiasing = \"cmaa2\"\nshadow_filter = \"disc\"\nvolumetric_fog = true\nssao_slices = 4\nssao_blur_passes = 2\nssao_bent_normals = true\n",
+            "[engine.video]\nrender_scale = 1.0\nantialiasing = \"cmaa2\"\nshadow_filter = \"disc\"\nvolumetric_fog = true\nssao_slices = 4\nssao_blur_passes = 2\nssao_bent_normals = true\nssr_resolution = 0.75\nanisotropic_filtering = 4.0\n",
         );
         assert_eq!(
             crcbl::settings::presets::selected(&screen.stack()),
@@ -2754,33 +2754,33 @@ mod tests {
             "the fixture has to open on no tier for the walk below to be a walk",
         );
 
-        // `low` is the bottom rung and the row is parked there while the file
-        // is on no tier, so `ENTER` reaches it by walking the table round once.
-        let low = QualityPreset::Low;
+        // The row is parked on the bottom rung while the file is on no tier, so
+        // `ENTER` reaches that rung by walking the table round once.
+        let bottom = QualityPreset::ALL[0];
         for _ in 0..QualityPreset::ALL.len() {
             press(&mut menus, crate::menu::QUALITY_ID);
             reconcile(&mut screen, &mut menus);
         }
         assert_eq!(
             crcbl::settings::presets::current_values(&screen.stack()),
-            low.values(),
-            "the walk did not land on {low:?}",
+            bottom.values(),
+            "the walk did not land on {bottom:?}",
         );
 
         // Every one of these is read on the same frame the tier landed on.
         assert_eq!(
             screen.render_scale(),
-            low.values().render_scale,
+            bottom.values().render_scale,
             "the screen is still holding the scale it had before the tier landed",
         );
         assert_eq!(
             screen.antialiasing(),
-            low.values().antialiasing,
+            bottom.values().antialiasing,
             "the screen is still holding the tier it had before the tier landed",
         );
         assert_eq!(
             screen.effects().contains(RenderEffects::VOLUMETRIC_FOG),
-            low.values().volumetric_fog,
+            bottom.values().volumetric_fog,
             "the screen is still holding the effects it had before the tier landed",
         );
         let groove = menus
@@ -2790,23 +2790,23 @@ mod tests {
             .expect("the scale groove");
         assert_eq!(
             groove,
-            crate::menu::scale_handle_at(low.values().render_scale),
+            crate::menu::scale_handle_at(bottom.values().render_scale),
             "the scale groove is still where it was before the tier landed",
         );
         assert!(
             hint(&mut menus, crate::menu::RENDER_SCALE_ID)
-                .starts_with(&crate::menu::percent(low.values().render_scale)),
+                .starts_with(&crate::menu::percent(bottom.values().render_scale)),
             "the scale row reads {:?}",
             hint(&mut menus, crate::menu::RENDER_SCALE_ID),
         );
         assert_eq!(
             rung(&mut menus, crate::menu::ANTIALIASING_ID),
-            crate::menu::antialiasing_rung(low.values().antialiasing),
+            crate::menu::antialiasing_rung(bottom.values().antialiasing),
             "the antialiasing row is still on the rung the file opened with",
         );
         assert_eq!(
             rung(&mut menus, crate::menu::effect_id(fog_switch())),
-            crate::menu::switch_rung(low.values().volumetric_fog),
+            crate::menu::switch_rung(bottom.values().volumetric_fog),
             "the fog switch is still showing what it held before the tier landed",
         );
 
@@ -2821,7 +2821,7 @@ mod tests {
         reconcile(&mut screen, &mut menus);
         assert_eq!(
             screen.effects().contains(RenderEffects::VOLUMETRIC_FOG),
-            low.values().volumetric_fog,
+            bottom.values().volumetric_fog,
             "flipping another switch put the tier's fog key back",
         );
     }

@@ -48,6 +48,15 @@ pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE + 
 /// `docs/backlog.md` carries it as the slice that owns the decision.
 pub const ROUGHNESS_CUTOFF: f32 = 0.5;
 
+/// The widest block of scene pixels, on either axis, one invocation of the
+/// reflection march stands for, matching `static const int MAX_BLOCK` in
+/// `ssr.slang`.
+///
+/// The march walks at most this many pixels on each axis to find a block's
+/// nearest surface, so the scale it runs at may not fall below its reciprocal;
+/// `crcbl_render::ssr` holds its floor to it.
+pub const MAX_BLOCK: u32 = 4;
+
 /// `UNTINTED` is the row an instance written by omission shades through, and it
 /// must skip the screen-space march exactly.
 ///
@@ -117,6 +126,14 @@ pub struct SsrParams {
     /// `MAX_LEVELS` is the Rust mirror of that number, and this field is what
     /// the frame actually has.
     pub hiz_levels: u32,
+    /// The extent of the image the march writes: the scene's own at full
+    /// resolution, smaller on a reduced march.
+    ///
+    /// In the pyramid row's `yz`, because the march renders into that image
+    /// and has no way to query a render target's size; it divides the depth
+    /// image's extent by this to find the block of scene pixels each of its
+    /// invocations covers.
+    pub march_extent: [u32; 2],
     /// The gradient sky a ray that hit nothing sees, one row per band —
     /// zenith, horizon, ground, each a linear RGB radiance in `xyz` with `w`
     /// unread padding.
@@ -177,10 +194,15 @@ impl SsrParams {
         bytes[at..at + crate::probe::PROBE_VOLUME_SIZE]
             .copy_from_slice(&self.probe_volume.to_bytes());
         at += crate::probe::PROBE_VOLUME_SIZE;
-        // The pyramid row: the level count, and three lanes of the padding a
-        // sixteen-byte row leaves. They stay zero, which is what the array was
-        // initialised to.
-        bytes[at..at + 4].copy_from_slice(&self.hiz_levels.to_le_bytes());
+        // The pyramid row: the level count, the march's extent, and one lane of
+        // the padding a sixteen-byte row leaves. It stays zero, which is what
+        // the array was initialised to.
+        for (lane, value) in [self.hiz_levels, self.march_extent[0], self.march_extent[1]]
+            .into_iter()
+            .enumerate()
+        {
+            bytes[at + lane * 4..at + lane * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
         at += 16;
         for row in self.sky.into_iter().chain([self.atmosphere]) {
             for value in row {
@@ -358,6 +380,15 @@ mod tests {
         assert!(
             !include_str!("../shaders/mesh.slang").contains("ROUGHNESS_CUTOFF"),
             "mesh.slang names ROUGHNESS_CUTOFF again; the ramp belongs to ssr.slang"
+        );
+    }
+
+    #[test]
+    fn the_largest_block_matches_the_march() {
+        let declaration = format!("static const int MAX_BLOCK = {MAX_BLOCK};");
+        assert!(
+            include_str!("../shaders/ssr.slang").contains(&declaration),
+            "ssr.slang does not declare `{declaration}`"
         );
     }
 
@@ -617,6 +648,7 @@ mod tests {
             inv_view,
             probe_volume,
             hiz_levels: 3,
+            march_extent: [640, 360],
             // A different number in every lane of every row: the three bands
             // are the same width and would permute silently, and a sky whose
             // ground colour reached the zenith is a picture rather than an
@@ -641,11 +673,13 @@ mod tests {
         assert_eq!(&bytes[probes..probes + 4], &10u32.to_le_bytes());
         assert_eq!(&bytes[probes + 12..probes + 16], &1320u32.to_le_bytes());
         assert_eq!(&bytes[probes + 32..probes + 36], &4.0f32.to_le_bytes());
-        // The pyramid row past the header: the level count in `x` and nothing
-        // in the three lanes `std140` padded it out to.
+        // The pyramid row past the header: the level count in `x`, the march's
+        // extent in `yz`, and nothing in the lane `std140` padded it out to.
         let hiz = probes + crate::probe::PROBE_VOLUME_SIZE;
         assert_eq!(&bytes[hiz..hiz + 4], &3u32.to_le_bytes());
-        assert_eq!(&bytes[hiz + 4..hiz + 16], &[0u8; 12]);
+        assert_eq!(&bytes[hiz + 4..hiz + 8], &640u32.to_le_bytes());
+        assert_eq!(&bytes[hiz + 8..hiz + 12], &360u32.to_le_bytes());
+        assert_eq!(&bytes[hiz + 12..hiz + 16], &[0u8; 4]);
         // And the sky's three rows past it, then the sun row that closes the
         // block.
         let sky = hiz + 16;

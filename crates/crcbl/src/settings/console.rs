@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crcbl_audio::mixer::Bus;
 use crcbl_console::{Binding, Fault, Flags, Kind, Value};
-use crcbl_render::MIN_RENDER_SCALE;
+use crcbl_render::{MIN_RENDER_SCALE, MIN_SSR_RESOLUTION};
 use crcbl_store::settings::SettingsStack;
 
 use super::engine_audio::{AUDIO_NAMESPACE, audio_gains};
@@ -20,15 +20,16 @@ use super::engine_video::{
     FRAME_LIMIT_KEY, MAX_ANISOTROPIC_FILTERING, MAX_UI_SCALE, MIN_UI_SCALE, RENDER_SCALE_KEY,
     SHADOW_FILTER_KEY, SHADOW_FILTER_NAMES, SSAO_BENT_NORMALS_KEY, SSAO_BENT_NORMALS_KIND,
     SSAO_BLUR_PASSES_KEY, SSAO_BLUR_PASSES_KIND, SSAO_SLICES_KEY, SSAO_SLICES_KIND,
-    TIER_VIDEO_KEYS, UI_SCALE_KEY, VIDEO_KEYS, VIDEO_NAMESPACE, anisotropic_filtering,
-    antialiasing_or_default, effect_keys, frame_limit, render_scale, shadow_filter,
-    ssao_bent_normals, ssao_blur_passes, ssao_slices, ui_scale, video_effects,
+    SSR_RESOLUTION_KEY, TIER_VIDEO_KEYS, UI_SCALE_KEY, VIDEO_KEYS, VIDEO_NAMESPACE,
+    anisotropic_filtering, antialiasing_or_default, effect_keys, frame_limit, render_scale,
+    shadow_filter, ssao_bent_normals, ssao_blur_passes, ssao_slices, ssr_resolution, ui_scale,
+    video_effects,
 };
 use super::key_catalogue::{
     ANISOTROPIC_FILTERING_HELP, ANTIALIASING_HELP, DISPLAY_MODE_HELP, EFFECT_HELP,
     FRAME_LIMIT_HELP, GAIN_HELP, GAIN_KIND, NAMED_FLAGS, NAMED_HELP, NAMED_VIDEO_KEYS,
     PRESENT_MODE_HELP, RENDER_SCALE_HELP, SHADOW_FILTER_HELP, SSAO_BENT_NORMALS_HELP,
-    SSAO_BLUR_PASSES_HELP, SSAO_SLICES_HELP, UI_SCALE_HELP,
+    SSAO_BLUR_PASSES_HELP, SSAO_SLICES_HELP, SSR_RESOLUTION_HELP, UI_SCALE_HELP,
 };
 use super::stage::{Deferred, apply};
 
@@ -318,6 +319,7 @@ fn read_stack(stack: &SettingsStack, namespace: &str, name: &str, kind: Kind) ->
         SSAO_BLUR_PASSES_KEY => Value::Int(ssao_blur_passes(stack)),
         SSAO_BENT_NORMALS_KEY => Value::Bool(ssao_bent_normals(stack)),
         RENDER_SCALE_KEY => Value::Float(render_scale(stack)),
+        SSR_RESOLUTION_KEY => Value::Float(ssr_resolution(stack)),
         ANISOTROPIC_FILTERING_KEY => Value::Float(anisotropic_filtering(stack)),
         UI_SCALE_KEY => Value::Float(ui_scale(stack)),
         // An absent key reads back as the word for what a run opens on when
@@ -436,6 +438,8 @@ settings_bindings! {
         Flags::ARCHIVE, SSAO_BENT_NORMALS_HELP;
     RENDER_SCALE: VIDEO_NAMESPACE, RENDER_SCALE_KEY,
         Kind::Float { min: MIN_RENDER_SCALE, max: 1.0 }, Flags::ARCHIVE, RENDER_SCALE_HELP;
+    SSR_RESOLUTION: VIDEO_NAMESPACE, SSR_RESOLUTION_KEY,
+        Kind::Float { min: MIN_SSR_RESOLUTION, max: 1.0 }, Flags::ARCHIVE, SSR_RESOLUTION_HELP;
     ANISOTROPIC_FILTERING: VIDEO_NAMESPACE, ANISOTROPIC_FILTERING_KEY,
         Kind::Float { min: 1.0, max: MAX_ANISOTROPIC_FILTERING }, Flags::ARCHIVE,
         ANISOTROPIC_FILTERING_HELP;
@@ -592,9 +596,9 @@ mod tests {
                 checked += 1;
             }
         }
-        // Seven switches, eleven video rows and six gains: two ends of each
-        // numeric or boolean row, and every word of each enum row.
-        assert_eq!(checked, 52, "the sweep did not cover the read catalogue");
+        // Two ends of each numeric or boolean row, and every word of each enum
+        // row, over the switches, the other video rows and the gains.
+        assert_eq!(checked, 54, "the sweep did not cover the read catalogue");
     }
 
     /// **A key nothing reads refuses a set, and says why.**

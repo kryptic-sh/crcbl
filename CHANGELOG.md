@@ -13,8 +13,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`crcbl::settings::presets::QualityPreset` has a new variant, `Potato`**, and
+  `QualityPreset::ALL` grows to match. `QualityValues` and
+  `crcbl::settings::VideoSettings` gain `ssr_resolution` (and `QualityValues`
+  gains `anisotropic_filtering`), so a struct literal of either needs the new
+  fields; `crcbl_shaders::ssr::SsrParams` gains `march_extent`.
+
 ### Added
 
+- **Screen-space reflections have a resolution setting.**
+  `[engine.video] ssr_resolution` (and the `r_ssr_resolution` console variable
+  it drives) is the share of each scene axis the reflection march runs at, from
+  `crcbl_render::MIN_SSR_RESOLUTION` (a quarter) up to 1. Below full resolution
+  each march pixel stands for a block of scene pixels and marches from the
+  block's nearest surface, and the composite rebuilds the frame at full
+  resolution from the smaller image. The default stays 1, which draws the frame
+  it always did.
+- **A `potato` quality tier**, below `low`: render scale 0.5, FXAA, the box
+  shadow filter, no volumetric fog or contact shadows, the cheapest SSAO bundle,
+  reflections marched at a quarter resolution and anisotropic filtering off.
+  `quality potato` and `crcbl settings preset potato` select it.
 - **A span in the bitmap font falls back for a char it has no glyph for.** Where
   it drew `.notdef`, it now draws the glyph of the first of
   `Ui::set_fallback_fonts`'s faces that has one, inside that char's one cell: as
@@ -24,6 +44,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   fallback faces for `monospace` the first time it opens
   (`ConsolePanel::set_fallback_fonts`), so Japanese typed through an input
   method draws in it.
+
+### Changed
+
+- **Quality tiers now set the reflection march's resolution and the anisotropic
+  filtering**, alongside the keys they already wrote: `ssr_resolution` is 1,
+  0.75, 0.5 and 0.25 on `high`, `medium`, `low` and `potato`, and
+  `anisotropic_filtering` is 8, 4, 2 and 1. `high` remains the engine's own
+  defaults, so a settings file that selects nothing still reads as `high`.
+  Selecting a tier now overwrites a hand-set `anisotropic_filtering`.
 
 ## [0.10.0] - 2026-10-26
 

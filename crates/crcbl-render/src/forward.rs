@@ -19307,6 +19307,85 @@ mod tests {
         recorder.assert_valid();
     }
 
+    /// [`ssr_resolution_switch`]'s lock.
+    static SSR_RESOLUTION_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Takes `r_ssr_resolution` for this thread and puts full resolution back
+    /// when the guard drops, on [`ssao_blur_switch`]'s terms.
+    fn ssr_resolution_switch() -> std::sync::MutexGuard<'static, ()> {
+        SSR_RESOLUTION_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// **The reflection march runs at its share of the frame and the composite
+    /// at all of it**, at every share a quality tier writes.
+    ///
+    /// On the occlusion chain's terms just above: the pass list is the same at
+    /// every share, so the **render area** is where the scale is observable. A
+    /// march image left at the frame's extent would be a march that saved
+    /// nothing, and a composite at the march's extent would tonemap a truncated
+    /// frame.
+    #[test]
+    fn the_reflection_march_runs_at_its_share_and_composites_at_the_frame() {
+        let _switch = ssr_resolution_switch();
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+        for share in [1.0, 0.75, 0.5, 0.25] {
+            crate::ssr::r_ssr_resolution
+                .set(&crcbl_console::Value::Float(share))
+                .expect("every tier's share is in the variable's range");
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    TEST_EXTENT,
+                )
+                .expect("write");
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, &pool, target, TEST_EXTENT);
+            let compiled = graph.compile(&pool).expect("a legal frame");
+            let area_of = |label: &str| {
+                let pass = compiled
+                    .passes()
+                    .iter()
+                    .find(|pass| pass.label() == label)
+                    .unwrap_or_else(|| panic!("the frame records no `{label}` pass at all"));
+                let area = pass.render_area();
+                (area.width, area.height)
+            };
+            let marched = crate::ssr::march_extent(TEST_EXTENT, share);
+            assert_eq!(
+                area_of("ssr"),
+                marched,
+                "at {share} the march has to run over its own share of the frame"
+            );
+            assert_eq!(
+                area_of("ssr-blur"),
+                TEST_EXTENT,
+                "at {share} the composite replaces the scene colour, so it runs at the frame's \
+                 own extent"
+            );
+            drop(compiled);
+        }
+        crate::ssr::r_ssr_resolution
+            .set(&crcbl_console::Value::Float(1.0))
+            .expect("full resolution is in range");
+
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
     /// **The comparison seam records a second march, scissored to the columns
     /// the first one was kept off.**
     ///

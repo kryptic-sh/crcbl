@@ -277,6 +277,7 @@ pub use sprite_pass::{
     SpriteInstance, SpriteRenderer, sheet_lane,
 };
 pub use ssao::{r_ssao_bent_normals, r_ssao_blur_passes, r_ssao_slices};
+pub use ssr::{MIN_SSR_RESOLUTION, r_ssr_resolution};
 pub use stack::{
     AmbientOcclusionPass, AntialiasingPass, AutoExposurePass, BloomPass, CameraStack,
     ContactShadowsPass, ReflectionsPass, ShadowsPass, StackError, VolumetricFogPass,
@@ -316,8 +317,9 @@ pub use volumetric::FroxelBuffers;
 /// topic 45's seventh decision gives: one moves the compared
 /// depth towards the light and the other moves the receiver sideways along its
 /// own normal, so acne and peter-panning are pulled by different numbers and a
-/// single knob could not show the pair moving against each other.
-/// `tests/console_table.rs` is
+/// single knob could not show the pair moving against each other — and
+/// `ssr::r_ssr_resolution`, the share of the scene the reflection march runs
+/// at. `tests/console_table.rs` is
 /// what keeps this list in step with what the source actually declares.
 #[must_use]
 pub fn console_table() -> crcbl_console::Table {
@@ -339,6 +341,7 @@ pub fn console_table() -> crcbl_console::Table {
         shadow::r_shadow_filter,
         shadow::r_shadow_split,
         shadow::r_shadow_bias,
-        shadow::r_shadow_normal_offset
+        shadow::r_shadow_normal_offset,
+        ssr::r_ssr_resolution
     ]
 }

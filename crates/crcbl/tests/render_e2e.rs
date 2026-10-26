@@ -3126,6 +3126,54 @@ fn the_ssr_scene_reflects_its_pyramid_and_matches_its_golden() {
     );
 }
 
+/// **Every reduced march still reflects the pyramid, and only under it** —
+/// at each share a quality tier writes below full resolution.
+///
+/// The golden above holds the full-resolution frame. Below it a working pixel
+/// stands for a block of the floor, and the composite rebuilds the frame from
+/// the smaller image; what has to survive that is the scene's one claim, read
+/// by the same check. Each frame must also differ from the full-resolution
+/// one, or the share never reached the march and the check proved nothing
+/// about it.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn every_reduced_march_still_reflects_the_pyramid_and_only_under_it() {
+    crcbl_core::log::init_logging();
+    let frame = |share: f32| {
+        crcbl::render::r_ssr_resolution
+            .set(&crcbl::console::Value::Float(share))
+            .expect("every tier's share is in the variable's range");
+        let setup = OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, |device, queue, format| {
+            crcbl::screenshot::ssr_forward(
+                device,
+                queue,
+                format,
+                crcbl::render::Sky::NONE,
+                RenderEffects::DEFAULT_STACK,
+            )
+        })
+        .unwrap_or_else(|why| panic!("a GPU backend opens for the ssr scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format))
+            .expect("the readback is exactly one image")
+    };
+
+    let full = frame(1.0);
+    for share in [0.75, 0.5, 0.25] {
+        let reduced = frame(share);
+        eprintln!("crcbl render e2e: ssr at a march share of {share}");
+        the_floor_reflects_the_pyramid_and_only_under_it(&reduced);
+        assert_ne!(
+            reduced.pixels(),
+            full.pixels(),
+            "a march at {share} drew the full-resolution frame, so the share never reached it"
+        );
+    }
+}
+
 /// How bright the pole this test lights its sky with is.
 ///
 /// Large, and in red alone. The reflection reaches the floor through a Fresnel

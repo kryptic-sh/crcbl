@@ -3,7 +3,7 @@
 
 use crcbl_audio::mixer::Bus;
 use crcbl_console::{Flags, Kind};
-use crcbl_render::MIN_RENDER_SCALE;
+use crcbl_render::{MIN_RENDER_SCALE, MIN_SSR_RESOLUTION};
 
 use super::engine_audio::AUDIO_NAMESPACE;
 use super::engine_display::{
@@ -13,7 +13,7 @@ use super::engine_video::{
     ANISOTROPIC_FILTERING_KEY, ANTIALIASING_KEY, ANTIALIASING_NAMES, FRAME_LIMIT_CEILING,
     FRAME_LIMIT_KEY, MAX_ANISOTROPIC_FILTERING, MAX_UI_SCALE, MIN_UI_SCALE, RENDER_SCALE_KEY,
     SHADOW_FILTER_KEY, SHADOW_FILTER_NAMES, SSAO_BENT_NORMALS_KEY, SSAO_BLUR_PASSES_KEY,
-    SSAO_SLICES_KEY, UI_SCALE_KEY, VIDEO_NAMESPACE, effect_keys,
+    SSAO_SLICES_KEY, SSR_RESOLUTION_KEY, UI_SCALE_KEY, VIDEO_NAMESPACE, effect_keys,
 };
 
 #[cfg(doc)]
@@ -108,6 +108,10 @@ pub(super) const SSAO_BENT_NORMALS_HELP: &str =
 
 /// [`RENDER_SCALE_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
 pub(super) const RENDER_SCALE_HELP: &str = "fraction of the surface extent the frame is drawn at";
+
+/// [`SSR_RESOLUTION_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
+pub(super) const SSR_RESOLUTION_HELP: &str =
+    "share of each scene axis the reflection march runs at; absent marches at full resolution";
 
 /// [`DISPLAY_MODE_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
 pub(super) const DISPLAY_MODE_HELP: &str =
@@ -277,6 +281,15 @@ pub fn catalogue() -> Vec<CatalogueKey> {
     ));
     keys.push(read(
         VIDEO_NAMESPACE,
+        SSR_RESOLUTION_KEY,
+        Kind::Float {
+            min: MIN_SSR_RESOLUTION,
+            max: 1.0,
+        },
+        SSR_RESOLUTION_HELP,
+    ));
+    keys.push(read(
+        VIDEO_NAMESPACE,
         ANISOTROPIC_FILTERING_KEY,
         Kind::Float {
             min: 1.0,
@@ -380,6 +393,7 @@ mod tests {
         wanted.push(format!("{VIDEO_NAMESPACE}.{SSAO_BLUR_PASSES_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{SSAO_BENT_NORMALS_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"));
+        wanted.push(format!("{VIDEO_NAMESPACE}.{SSR_RESOLUTION_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{UI_SCALE_KEY}"));

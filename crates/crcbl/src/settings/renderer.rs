@@ -4,7 +4,8 @@
 
 use crcbl_console::{Kind, Value};
 use crcbl_render::{
-    r_ssao_bent_normals, r_ssao_blur_passes, r_ssao_slices, shadow::r_shadow_filter,
+    MIN_SSR_RESOLUTION, r_ssao_bent_normals, r_ssao_blur_passes, r_ssao_slices, r_ssr_resolution,
+    shadow::r_shadow_filter,
 };
 
 use super::engine_video::{
@@ -23,7 +24,7 @@ static PROCESS_VIDEO_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(())
 /// Serialises tests that move process-global video convars and restores them.
 #[cfg(test)]
 pub(crate) struct ProcessVideoTestGuard {
-    prior: [Value; 4],
+    prior: [Value; 5],
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -38,6 +39,7 @@ pub(crate) fn process_video_test_guard() -> ProcessVideoTestGuard {
             r_ssao_slices.get(),
             r_ssao_blur_passes.get(),
             r_ssao_bent_normals.get(),
+            r_ssr_resolution.get(),
         ],
         _lock: lock,
     }
@@ -51,6 +53,7 @@ impl Drop for ProcessVideoTestGuard {
             (&r_ssao_slices, &self.prior[1]),
             (&r_ssao_blur_passes, &self.prior[2]),
             (&r_ssao_bent_normals, &self.prior[3]),
+            (&r_ssr_resolution, &self.prior[4]),
         ] {
             convar
                 .set(value)
@@ -102,6 +105,18 @@ pub(crate) fn apply_process_video(video: &VideoSettings) {
     r_ssao_bent_normals
         .set(&Value::Bool(video.ssao_bent_normals))
         .expect("a bool is in `r_ssao_bent_normals`' domain");
+    // Clamped here as well as by the reader, for `applicable_ssao_integer`'s
+    // reason: a hand-built `VideoSettings` never went through the reader, and a
+    // NaN is answered with full resolution, which is what a file holding one
+    // reads as.
+    let ssr_resolution = if video.ssr_resolution.is_finite() {
+        video.ssr_resolution.clamp(MIN_SSR_RESOLUTION, 1.0)
+    } else {
+        1.0
+    };
+    r_ssr_resolution
+        .set(&Value::Float(ssr_resolution))
+        .expect("the clamped share is in `r_ssr_resolution`'s domain");
 }
 
 /// Put `video` into force on `renderer`, through the `device` that built it.
@@ -230,6 +245,7 @@ mod tests {
         let video = VideoSettings {
             ssao_slices: i64::MAX,
             ssao_blur_passes: i64::MIN,
+            ssr_resolution: f32::NAN,
             ..VideoSettings::unrestricted()
         };
 
@@ -237,6 +253,13 @@ mod tests {
 
         assert_eq!(r_ssao_slices.get_i64(), ssao_slices_default());
         assert_eq!(r_ssao_blur_passes.get_i64(), ssao_blur_passes_default());
+        assert!((r_ssr_resolution.get_f32() - 1.0).abs() < f32::EPSILON);
+
+        apply_process_video(&VideoSettings {
+            ssr_resolution: 0.0,
+            ..VideoSettings::unrestricted()
+        });
+        assert!((r_ssr_resolution.get_f32() - MIN_SSR_RESOLUTION).abs() < f32::EPSILON);
     }
 
     /// **Every debug view turns on exactly the switch
@@ -286,7 +309,8 @@ mod tests {
         }
     }
 
-    /// A live renderer application moves the process-global SSAO bundle.
+    /// A live renderer application moves the process-global SSAO bundle and
+    /// the reflection march's share.
     #[test]
     fn applying_video_to_a_renderer_updates_ssao_convars() {
         use crate::hal::null::NullInstance;
@@ -307,6 +331,7 @@ mod tests {
             ssao_slices: 2,
             ssao_blur_passes: 1,
             ssao_bent_normals: false,
+            ssr_resolution: 0.5,
             ..VideoSettings::unrestricted()
         };
 
@@ -321,6 +346,7 @@ mod tests {
             ),
             (2, 1, false),
         );
+        assert!((r_ssr_resolution.get_f32() - 0.5).abs() < f32::EPSILON);
         renderer.destroy(device.as_ref());
     }
 

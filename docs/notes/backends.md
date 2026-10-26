@@ -324,11 +324,11 @@ The rules, each with its _why_:
   resolution order, and the file and its spelling with persistence, whose own
   rule is that a key is named, with its domain, before anything reads it.
 - **A preset is a command that writes keys**, not a key and not a fifth layer.
-  `quality low|medium|high` writes every key it covers into the user file, and
-  the resolution order never sees the preset. The label is derived by
+  `quality potato|low|medium|high` writes every key it covers into the user
+  file, and the resolution order never sees the preset. The label is derived by
   `presets::selected` from what the readers answer, so `custom` means exactly
-  "the covered keys are not one column's set". There are three tiers because the
-  table has three columns.
+  "the covered keys are not one column's set". There are four tiers because the
+  table has four columns.
 - **Audio bus gains take no capability clamp**, and that chain is genuinely
   shorter rather than unimplemented: no audio device removes the ability to
   multiply a sample by a scalar, and the DSP core runs identically on native and

@@ -1,5 +1,6 @@
-//! Topic 47's screen-space reflections (`docs/notes/rendering.md`): the two
-//! full-screen passes between the forward pass and the tonemap.
+//! Topic 47's screen-space reflections (`docs/notes/rendering.md`): a march at
+//! [`r_ssr_resolution`]'s share of the scene extent and a full-resolution
+//! composite between the forward pass and the tonemap.
 //!
 //! ```text
 //! forward ──▶ scene-color ─────┐                  ┌─────────────┐
@@ -13,16 +14,26 @@
 //! except through [`Ssr::add_passes`].
 //!
 //! **The blur is the composite, and the march is not.** `ssr.slang` writes the
-//! reflection by itself into an `Rgba16Float` transient; `ssr_blur.slang`
-//! filters that image and writes the sum of it and the scene colour into a
-//! second one, which [`ForwardRenderer::add_passes`] returns in place of the
-//! scene colour. Had the march composited there would be no way to filter the
-//! reflection without filtering the whole frame with it. Two passes, no blend
-//! state, and no image that is both read and written.
+//! reflection by itself into an `Rgba16Float` transient at the march's extent;
+//! `ssr_blur.slang` reconstructs and filters that image at scene resolution and
+//! writes its sum with the scene colour into a second one, which
+//! [`ForwardRenderer::add_passes`] returns in place of the scene colour. Had the
+//! march composited there would be no way to filter the reflection without
+//! filtering the whole frame with it. Two passes, no blend state, and no image
+//! that is both read and written.
 //!
 //! That is also the off-switch: a frame that does not add these passes hands the
 //! scene colour on and is bit-identical, needing no placeholder because nothing
 //! upstream reads the result.
+//!
+//! **The march's resolution is a quality knob, and full resolution is what
+//! ships.** [`r_ssr_resolution`] is the share of each scene axis the march runs
+//! at; below one, each of its invocations stands for a block of scene pixels
+//! and marches from the block's nearest surface, and the composite reconstructs
+//! at scene resolution from the smaller image. At one both mappings are the
+//! identity and the frame is the one every golden was blessed at.
+//! `crcbl::settings`' `ssr_resolution` key is the player's road to it, and a
+//! quality tier writes that key.
 //!
 //! There is no device fact to gate on. Every backend has a full-screen draw, a
 //! sampled `D32Float` and a sampled `Rgba8Unorm`, and the reflectivity
@@ -89,6 +100,35 @@ const SKY_VIEW_BINDING: u32 = PROBE_VISIBILITY_BINDING + 1;
 /// Vertices in the over-sized full-screen triangle `ssr.slang` and
 /// `ssr_blur.slang` generate from `SV_VertexID`. No geometry is bound anywhere.
 const FULLSCREEN_VERTICES: u32 = 3;
+
+/// The smallest share of the scene extent the march runs at: the reciprocal of
+/// [`ssr::MAX_BLOCK`], the widest block `ssr.slang` walks for a nearest surface.
+pub const MIN_SSR_RESOLUTION: f32 = 1.0 / ssr::MAX_BLOCK as f32;
+
+crcbl_console::convar! {
+    /// Share of each scene axis the reflection march runs at: 1 ships, 0.25 floors.
+    pub static r_ssr_resolution: f32 in 0.25 ..= 1.0 = 1.0;
+}
+
+/// [`r_ssr_resolution`] as [`march_extent`] wants it.
+///
+/// Clamped on the way through rather than trusted, on `crate::ssao`'s
+/// `slice_count` terms: the variable's range is the console's guard, and this
+/// is the one that holds the march to the block `ssr.slang` can walk.
+pub(crate) fn resolution_scale() -> f32 {
+    r_ssr_resolution.get_f32().clamp(MIN_SSR_RESOLUTION, 1.0)
+}
+
+/// The working extent of the reflection march at `scale` of `extent`.
+///
+/// Rounded up so odd and single-pixel scene axes remain covered, and never
+/// past the scene's own extent, so every invocation stands for at least one
+/// scene pixel. At a scale of one it is `extent` exactly.
+pub(crate) fn march_extent(extent: (u32, u32), scale: f32) -> (u32, u32) {
+    let scale = f64::from(scale);
+    let axis = |length: u32| ((f64::from(length) * scale).ceil() as u32).clamp(1, length.max(1));
+    (axis(extent.0), axis(extent.1))
+}
 
 /// The graph transients [`Ssr::add_passes`] reads and writes.
 ///
@@ -841,5 +881,60 @@ impl Ssr {
         }
         self.sky_prefilter.destroy(device);
         self.dfg.destroy(device);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MIN_SSR_RESOLUTION, march_extent, r_ssr_resolution};
+
+    #[test]
+    fn the_march_extent_covers_even_odd_and_single_pixel_frames() {
+        assert_eq!(march_extent((1920, 1080), 1.0), (1920, 1080));
+        assert_eq!(march_extent((1920, 1080), 0.75), (1440, 810));
+        assert_eq!(march_extent((1920, 1080), 0.5), (960, 540));
+        assert_eq!(march_extent((1920, 1080), 0.25), (480, 270));
+        assert_eq!(march_extent((1921, 1081), 0.5), (961, 541));
+        assert_eq!(march_extent((1921, 1081), 0.75), (1441, 811));
+        assert_eq!(march_extent((1, 1), 0.25), (1, 1));
+    }
+
+    /// **No working pixel stands for a block wider than the march walks.**
+    ///
+    /// `ssr.slang` searches at most `MAX_BLOCK` scene pixels on each axis for a
+    /// block's nearest surface; a block wider than that would march from a
+    /// surface that only part of it holds. Over every axis length a frame is
+    /// likely to have, at the floor, where blocks are widest.
+    #[test]
+    fn no_block_at_the_floor_is_wider_than_the_march_walks() {
+        for length in 1..=4096u32 {
+            let (working, _) = march_extent((length, 1), MIN_SSR_RESOLUTION);
+            let widest = length.div_ceil(working);
+            assert!(
+                widest <= crcbl_shaders::ssr::MAX_BLOCK,
+                "a {length}-pixel axis at the floor gives {widest}-pixel blocks"
+            );
+        }
+    }
+
+    /// The console's range is the range [`super::resolution_scale`] honours,
+    /// and its default is full resolution.
+    ///
+    /// `convar!` takes its bounds as literals — a macro cannot read a constant
+    /// — so the declaration's floor is a copy of [`MIN_SSR_RESOLUTION`], and
+    /// this is what holds them together.
+    #[test]
+    fn the_console_range_is_the_range_the_march_honours() {
+        assert_eq!(
+            r_ssr_resolution.kind(),
+            crcbl_console::Kind::Float {
+                min: MIN_SSR_RESOLUTION,
+                max: 1.0,
+            },
+        );
+        assert_eq!(
+            r_ssr_resolution.default(),
+            &crcbl_console::Value::Float(1.0)
+        );
     }
 }

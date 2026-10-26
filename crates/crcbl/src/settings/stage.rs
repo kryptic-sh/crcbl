@@ -13,10 +13,11 @@ use super::engine_display::{
 };
 use super::engine_video::{
     ANISOTROPIC_FILTERING_KEY, ANTIALIASING_KEY, FRAME_LIMIT_KEY, RENDER_SCALE_KEY,
-    SHADOW_FILTER_KEY, SSAO_BENT_NORMALS_KEY, SSAO_BLUR_PASSES_KEY, SSAO_SLICES_KEY, UI_SCALE_KEY,
-    VideoSettings, effect_keys, set_anisotropic_filtering, set_antialiasing, set_frame_limit,
-    set_render_scale, set_shadow_filter, set_ssao_bent_normals, set_ssao_blur_passes,
-    set_ssao_slices, set_ui_scale, set_video_effects, ui_scale, video, video_effects,
+    SHADOW_FILTER_KEY, SSAO_BENT_NORMALS_KEY, SSAO_BLUR_PASSES_KEY, SSAO_SLICES_KEY,
+    SSR_RESOLUTION_KEY, UI_SCALE_KEY, VideoSettings, effect_keys, set_anisotropic_filtering,
+    set_antialiasing, set_frame_limit, set_render_scale, set_shadow_filter, set_ssao_bent_normals,
+    set_ssao_blur_passes, set_ssao_slices, set_ssr_resolution, set_ui_scale, set_video_effects,
+    ui_scale, video, video_effects,
 };
 use super::key_catalogue::{KeyStatus, catalogued};
 use crate::engine::{FrameLimit, Pacing};
@@ -415,6 +416,13 @@ pub fn apply(
             set_render_scale(stack, scale).map_err(storage)?;
             Ok(reached(stage.apply_video(&video(stack))))
         }
+        SSR_RESOLUTION_KEY => {
+            let Value::Float(scale) = *value else {
+                unreachable!("the share is a float kind, which `check` has held it to")
+            };
+            set_ssr_resolution(stack, scale).map_err(storage)?;
+            Ok(reached(stage.apply_video(&video(stack))))
+        }
         ANISOTROPIC_FILTERING_KEY => {
             let Value::Float(anisotropy) = *value else {
                 unreachable!("the anisotropy is a float kind, which `check` has held it to")
@@ -614,6 +622,13 @@ mod tests {
             (video.render_scale - 0.5).abs() < f32::EPSILON,
             "the scale did not survive the anisotropy write"
         );
+        let key = format!("{VIDEO_NAMESPACE}.{SSR_RESOLUTION_KEY}");
+        assert_eq!(
+            apply(&mut stack, &key, &Value::Float(0.25), &mut stage),
+            Ok(Applied::Live)
+        );
+        let video = *stage.video.last().expect("the renderer was told");
+        assert!((video.ssr_resolution - 0.25).abs() < f32::EPSILON);
 
         for (name, value) in [
             (SSAO_SLICES_KEY, Value::Int(2)),
