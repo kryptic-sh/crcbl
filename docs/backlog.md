@@ -494,7 +494,10 @@ four hand mutants — see the gap below). **Owed:**
     `a_leave_dispatched_by_the_waits_own_drain_ends_the_wait`: the wait returned
     `Wake::Message` after 136 µs instead of `Wake::Recorded`, and the rerun of
     the job passed. A guess, unverified: another message reached the queue
-    before the posted leave was drained. Not investigated.
+    before the posted leave was drained. Not investigated. **Again** on main's
+    run 40296623283 (`47a1f1b6`, 2026-10-26, a D3D12-only change):
+    `Wake::Message` after 48.9 µs; the job was rerun. Twice in two days makes it
+    a flake to fix, not a one-off.
 - **AppKit input method: mutants not run.** The `appkit_session` additions went
   red on CI for removing the pre-edit gate in `record_preedit` and the
   end-of-pre-edit block in `insert_text`. Cancelled unrun: the
@@ -4279,8 +4282,27 @@ and every trial it rejected is folded into "Declined" below.
   (`15a82dc1` → `dd3d36ff`), neutral on the RX 7900 XTX, measured `lights-fit`
   2.583 → 2.555 ms (−1.1%, ranges apart, as in September) and
   `specular-lights-fit` 3.989 → 3.972 ms (−0.4%, within a run's spread).
-  `instances` was not re-run. Not measured: any Intel adapter, and D3D12 on any
-  adapter but the RX 7900 XTX.
+  `instances` was not re-run. Not measured: D3D12 on any adapter but the RX 7900
+  XTX.
+- **Re-timed on the office laptop's Intel GPU (2026-10-26): both ports cost
+  ordinary lights there — a decision for the owner.** Intel RPL-U (Xe), Mesa
+  26.2.5 ANV, Vulkan on Arch, `CRCBL_ADAPTER=integrated`, AC power and the
+  performance profile; three mirrored pairs per fixture, mean of the per-run
+  `forward` p50s, the two commits' runs not overlapping in any row called a
+  change. The fill-light specular skip (`2ac4b17e` → `09780bf0`) saves under
+  fill lights as elsewhere — `area-fill-lights-fit` 24.556 → 17.925 ms (−27.0%),
+  `lights-fit` 14.256 → 13.164 ms (−7.7%) — but makes ordinary lights dearer by
+  far more than on any other adapter: `area-lights-fit` 24.588 → 27.046 ms
+  (+10.0%) and `specular-lights-fit` 16.656 → 18.915 ms (+13.6%), against 0.6–4%
+  on the RX 7900 XTX and nothing on the MX550. The pre-scaled blocker offsets
+  (`15a82dc1` → `dd3d36ff`), bit-identical in what they compute, measured
+  `lights-fit` 9.499 → 10.062 ms (+5.9%) and `specular-lights-fit` 12.427 →
+  12.396 ms (−0.2%, within the spread), so the regression is ANV's code
+  generation for the changed shader, not the arithmetic. Options: keep both
+  (fill lights are what scenes hold many of, and the iGPU is the weakest
+  target), restructure the skip so the branch costs ANV less (unexplored:
+  compare the two commits' ANV ISA with `INTEL_DEBUG=fs`), or gate either on the
+  adapter. Not investigated further.
 - **Unmeasured paths.** A populated probe volume pays the empty-probe early
   return's uniform branch, which no fixture has probes to time; water's own pass
   was not timed either. Slang's MSL output allocates the tile-local exposure
