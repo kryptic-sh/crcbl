@@ -416,48 +416,65 @@ impl Dx12Instance {
     /// backend reports for it.
     #[must_use]
     pub fn open() -> Option<Self> {
-        // **Before anything else opens a device.** The D3D12 debug layer is
-        // chosen per device at creation, and every probe and device this
-        // instance makes comes after this line — so a layer turned on later
-        // would validate nothing this instance opened. See [`crate::debug`],
-        // which also says why its messages are pulled out of the info queue
-        // rather than left for a debugger nobody has attached.
-        debug::enable_debug_layer();
+        let factory = start_dxgi()?;
+        let listed = candidates(&factory);
+        if listed.is_empty() {
+            crcbl_core::log::warn!("crcbl-dx12: DXGI lists no adapter, not even WARP");
+            return None;
+        }
+        Some(Self::holding(factory, listed))
+    }
 
-        // **Before anything else opens a device, for the same reason and with
-        // one worse failure mode.** DRED is chosen per device at creation too,
-        // and a device created before this line keeps no breadcrumbs *and
-        // reports no error* — so a removal on it would produce exactly the log
-        // a run with no DRED at all produces. Unlike the debug layer this is
-        // unconditional: see [`crate::dred`] for why `CRCBL_DX12_VALIDATION`
-        // does not reach it.
-        dred::enable();
+    /// An instance holding one adapter alone, for a program that saved which
+    /// adapter it ran on: the one `luid` names when `is_it` accepts it, else
+    /// the first adapter [`open`](Self::open) would list that `is_it` accepts.
+    /// It reports that adapter as the only one, with the first id.
+    ///
+    /// The LUID is only the fast path, because it lasts only until the machine
+    /// restarts: after a restart it names another adapter or none, and `is_it`
+    /// is what tells. WARP is never looked up by it — DXGI also lists software
+    /// adapters [`open`](Self::open) leaves out, which share WARP's vendor,
+    /// device and name — so a saved WARP is found by name, as `open` finds it.
+    ///
+    /// # Errors
+    ///
+    /// Why no adapter was opened: DXGI would not start, or no adapter here is
+    /// one `is_it` accepts — the GPU was removed or swapped, or a driver update
+    /// changed the name or device id it reports.
+    pub fn open_adapter(
+        luid: Option<u64>,
+        is_it: impl Fn(&AdapterInfo) -> bool,
+    ) -> Result<Self, String> {
+        let factory = start_dxgi().ok_or_else(|| "DXGI would not start".to_owned())?;
+        let accepts = |(raw_adapter, desc): &(IDXGIAdapter1, DXGI_ADAPTER_DESC1)| {
+            is_it(&adapter::identify(AdapterId(0), raw_adapter, desc))
+        };
+        let by_luid = luid.and_then(|luid| {
+            // SAFETY: `factory` is a live COM interface this crate owns a
+            // reference to; `EnumAdapterByLuid` writes only the interface it
+            // returns, and `IDXGIAdapter1` is the IID it is asked for.
+            let raw_adapter: IDXGIAdapter1 =
+                unsafe { factory.EnumAdapterByLuid(adapter::luid_from(luid)) }.ok()?;
+            let desc = desc_of(&raw_adapter)?;
+            let found = (raw_adapter, desc);
+            (!adapter::is_software(&desc) && accepts(&found)).then_some(found)
+        });
+        let found = match by_luid {
+            Some(found) => found,
+            None => candidates(&factory)
+                .into_iter()
+                .find(|candidate| accepts(candidate))
+                .ok_or_else(|| "no D3D12 adapter here is the one it names".to_owned())?,
+        };
+        Ok(Self::holding(factory, vec![found]))
+    }
 
-        // `CreateDXGIFactory2` rather than `CreateDXGIFactory1`: they differ
-        // only in the flags word. Zero here even with the D3D12 debug layer on,
-        // and that is a decision rather than an omission:
-        // `DXGI_CREATE_FACTORY_DEBUG` turns on a *second*, separate layer whose
-        // output is object-lifetime reporting rather than the API validation
-        // this backend needs — and it fails factory creation outright with
-        // `DXGI_ERROR_SDK_COMPONENT_MISSING` on a machine without the Graphics
-        // Tools feature, which would cost enumeration itself for a diagnostic.
-        //
-        // SAFETY: the call takes no pointer of ours and writes only the
-        // interface it returns; `IDXGIFactory4` is the IID it is asked for, so
-        // the QI either succeeds or the call fails.
-        let factory: IDXGIFactory4 =
-            match unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS::default()) } {
-                Ok(factory) => factory,
-                Err(error) => {
-                    crcbl_core::log::warn!("crcbl-dx12: DXGI would not start: {error}");
-                    return None;
-                }
-            };
-
+    /// An instance over `listed`, in that order, from `factory`.
+    fn holding(factory: IDXGIFactory4, listed: Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1)>) -> Self {
         // **No device is created here.** Each adapter is identified from what
         // DXGI says of it, and probed only when something asks for its caps —
         // see `crate::adapter`.
-        let adapters: Vec<AdapterRecord> = candidates(&factory)
+        let adapters: Vec<AdapterRecord> = listed
             .into_iter()
             .zip(0u32..)
             .map(|((raw_adapter, desc), index)| {
@@ -474,13 +491,9 @@ impl Dx12Instance {
             })
             .collect();
 
-        if adapters.is_empty() {
-            crcbl_core::log::warn!("crcbl-dx12: DXGI lists no adapter, not even WARP");
-            return None;
-        }
         let allow_tearing = probe_tearing(&factory);
         crcbl_core::log::info!("crcbl-dx12: DXGI_FEATURE_PRESENT_ALLOW_TEARING={allow_tearing}");
-        Some(Self {
+        Self {
             inner: Arc::new(InstanceInner {
                 factory,
                 adapters,
@@ -489,7 +502,7 @@ impl Dx12Instance {
                 opened: AtomicBool::new(false),
                 surfaces: Mutex::new(Pool::new()),
             }),
-        })
+        }
     }
 
     /// The enumerated records, raw D3D12 answers included once probed.
@@ -550,6 +563,47 @@ impl Dx12Instance {
     /// [`AdapterRecord::describe`], holding the probe until the first open.
     fn describe<'a>(&self, record: &'a AdapterRecord) -> Result<&'a Described, HalError> {
         record.describe(!self.inner.opened.load(Ordering::Acquire))
+    }
+}
+
+/// The debug layer and DRED switched on, then a DXGI factory; `None` when
+/// DXGI will not start. What every instance opens with.
+fn start_dxgi() -> Option<IDXGIFactory4> {
+    // **Before anything else opens a device.** The D3D12 debug layer is
+    // chosen per device at creation, and every probe and device this
+    // instance makes comes after this line — so a layer turned on later
+    // would validate nothing this instance opened. See [`crate::debug`],
+    // which also says why its messages are pulled out of the info queue
+    // rather than left for a debugger nobody has attached.
+    debug::enable_debug_layer();
+
+    // **Before anything else opens a device, for the same reason and with
+    // one worse failure mode.** DRED is chosen per device at creation too,
+    // and a device created before this line keeps no breadcrumbs *and
+    // reports no error* — so a removal on it would produce exactly the log
+    // a run with no DRED at all produces. Unlike the debug layer this is
+    // unconditional: see [`crate::dred`] for why `CRCBL_DX12_VALIDATION`
+    // does not reach it.
+    dred::enable();
+
+    // `CreateDXGIFactory2` rather than `CreateDXGIFactory1`: they differ
+    // only in the flags word. Zero here even with the D3D12 debug layer on,
+    // and that is a decision rather than an omission:
+    // `DXGI_CREATE_FACTORY_DEBUG` turns on a *second*, separate layer whose
+    // output is object-lifetime reporting rather than the API validation
+    // this backend needs — and it fails factory creation outright with
+    // `DXGI_ERROR_SDK_COMPONENT_MISSING` on a machine without the Graphics
+    // Tools feature, which would cost enumeration itself for a diagnostic.
+    //
+    // SAFETY: the call takes no pointer of ours and writes only the
+    // interface it returns; `IDXGIFactory4` is the IID it is asked for, so
+    // the QI either succeeds or the call fails.
+    match unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS::default()) } {
+        Ok(factory) => Some(factory),
+        Err(error) => {
+            crcbl_core::log::warn!("crcbl-dx12: DXGI would not start: {error}");
+            None
+        }
     }
 }
 

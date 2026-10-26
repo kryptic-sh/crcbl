@@ -43,6 +43,7 @@
 use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Format, Limits,
 };
+use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 use windows::Win32::Graphics::Direct3D12::{
     D3D_SHADER_MODEL, D3D_SHADER_MODEL_5_1, D3D_SHADER_MODEL_6_0, D3D_SHADER_MODEL_6_1,
@@ -878,6 +879,14 @@ pub(crate) fn identify(
 pub(crate) fn luid_of(desc: &DXGI_ADAPTER_DESC1) -> u64 {
     (u64::from(desc.AdapterLuid.HighPart.cast_unsigned()) << 32)
         | u64::from(desc.AdapterLuid.LowPart)
+}
+
+/// The `LUID` that [`luid_of`] packed as `packed`, to hand back to DXGI.
+pub(crate) fn luid_from(packed: u64) -> LUID {
+    LUID {
+        LowPart: packed as u32,
+        HighPart: ((packed >> 32) as u32).cast_signed(),
+    }
 }
 
 /// Everything one D3D12 adapter can do, and the device it was asked through,

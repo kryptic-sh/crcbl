@@ -960,8 +960,9 @@ pub struct PendingPresenter {
     /// The saved choice while it is still being tried: given, not ignored and
     /// not yet found stale.
     choice: Option<GpuChoice>,
-    /// Whether the instance being opened is on the choice's Vulkan driver
-    /// alone, so a refusal there means reopening on every driver.
+    /// Whether the instance being opened holds the choice alone — its Vulkan
+    /// driver, or its D3D12 adapter — so a refusal there means reopening
+    /// without it.
     scoped: bool,
     /// What has become of the choice so far.
     outcome: ChoiceOutcome,
@@ -1159,9 +1160,10 @@ fn request_backend(backend: Option<GpuBackend>) -> Result<PendingInstance, Prese
 }
 
 /// Where an open with `desc` starts: on the saved choice's Vulkan driver
-/// alone where it has one and that driver still shows its adapter, else as
-/// `desc` asks. Sets `open`'s choice, its outcome so far and whether the
-/// instance is on one driver; see [`crate::gpu_choice`].
+/// alone where it has one and that driver still shows its adapter, on its
+/// D3D12 adapter alone where that is still here, else as `desc` asks. Sets
+/// `open`'s choice, its outcome so far and whether the instance holds the
+/// choice alone; see [`crate::gpu_choice`].
 fn start_open(desc: &PresenterDesc<'_>, open: &mut PendingPresenter) -> Result<(), PresentError> {
     let Some(choice) = desc.gpu_choice else {
         open.stage = OpenStage::Instance(request_backend(desc.backend)?);
@@ -1174,14 +1176,32 @@ fn start_open(desc: &PresenterDesc<'_>, open: &mut PendingPresenter) -> Result<(
         ChoiceOutcome::Ignored(Ignored::Overridden(why))
     } else if desc.backend.is_some_and(|wanted| wanted != backend) {
         ChoiceOutcome::Ignored(Ignored::OtherBackend(backend))
-    } else if matches!(backend, GpuBackend::Vulkan) {
+    } else if matches!(backend, GpuBackend::Vulkan | GpuBackend::Dx12) {
         open.choice = Some(choice.clone());
         ChoiceOutcome::Used
     } else {
-        // D3D12 is to open by the adapter's LUID; until it does, a choice
-        // there is not tried rather than half-tried.
         ChoiceOutcome::Ignored(Ignored::Unsupported(backend))
     };
+    #[cfg(target_os = "windows")]
+    if let Some(choice) = open
+        .choice
+        .as_ref()
+        .filter(|choice| choice.backend() == GpuBackend::Dx12)
+    {
+        match crcbl_dx12::Dx12Instance::open_adapter(choice.luid(), |adapter| choice.names(adapter))
+        {
+            Ok(instance) => {
+                log::info!("hal: opening on the saved GPU choice's D3D12 adapter alone");
+                open.scoped = true;
+                open.stage = OpenStage::Instance(crate::backend::opened(
+                    GpuBackend::Dx12,
+                    Box::new(instance),
+                ));
+                return Ok(());
+            }
+            Err(why) => open.choice_stale(why)?,
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(manifest) = open.choice.as_ref().and_then(GpuChoice::vulkan_driver) {
         let opened = crcbl_vk::drivers::Driver::read(manifest)

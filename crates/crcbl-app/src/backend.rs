@@ -659,9 +659,10 @@ pub fn request_open_backend(backend: GpuBackend) -> Result<PendingInstance, GpuE
 }
 
 /// A pending object already holding `instance`, opened on `backend` some
-/// other way than through the table — on one Vulkan driver alone, for a saved
-/// GPU choice. Its failure is final, as a by-name open's is. Native only, as
-/// every way of opening an instance outside the table is.
+/// other way than through the table — on one Vulkan driver or one D3D12
+/// adapter alone, for a saved GPU choice. Its failure is final, as a by-name
+/// open's is. Native only, as every way of opening an instance outside the
+/// table is.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn opened(backend: GpuBackend, instance: Box<dyn Instance>) -> PendingInstance {
     PendingInstance {

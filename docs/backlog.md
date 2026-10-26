@@ -339,16 +339,37 @@ here: reopen through the driver, win over the power preference located or not,
 stale on a missing manifest or adapter, overridden by a pin; red under three of
 four hand mutants — see the gap below). **Owed:**
 
-- **D3D12, by the Windows session** (the owner's call: it must work there): open
-  by the adapter's LUID, matched on vendor, device and name because a LUID lasts
-  until restart; replace `start_open`'s `Ignored::Unsupported` arm for
-  `GpuBackend::Dx12`, with tests and RX 7900 XTX / Raphael / WARP timings. Metal
-  stays `Ignored::Unsupported` by design.
+- **D3D12 (built 2026-10-26, Windows desktop: RX 7900 XTX, Raphael iGPU,
+  WARP).** `crcbl_dx12::Dx12Instance::open_adapter` holds the saved adapter
+  alone: `EnumAdapterByLuid` when the LUID still names an adapter the choice's
+  vendor, device and name accept, else `open`'s own listing filtered by them.
+  WARP never takes the LUID path, since DXGI also lists software adapters `open`
+  skips that share WARP's vendor, device and name. Stale looks like: the GPU was
+  removed or swapped, a driver update changed its name or device id, or (after a
+  restart) nothing here carries the three; a LUID that now names another adapter
+  is passed over, not trusted. `start_open` opens it with `scoped`, as Vulkan
+  does. **Measured** by the ignored `what_a_saved_choice_saves` in `crcbl-app`'s
+  `tests/gpu_choice_dx12.rs` (release, median of 15, offscreen; with a choice
+  against an open pinned to the same adapter without one): instance 0.93 → 0.37
+  ms on the 7900 XTX, 0.92 → 0.36 ms on Raphael, 0.89 → 1.03 ms on WARP (it
+  lists every adapter, then identifies the match again); first present 221.5 →
+  227.1 ms, 226.8 → 227.6 ms and 6.9 → 6.8 ms, i.e. unchanged. **It saves almost
+  nothing on D3D12**, because the instance already opens no device until one is
+  asked for and the ranked walk puts the saved adapter first either way; what it
+  adds is the check that the adapter is still the same one. Tests: the same
+  file's four WARP cases run by default on Windows (reopen alone, a LUID from
+  before a restart, stale on a missing adapter, overridden by a pin), plus an
+  ignored one needing a discrete GPU beside an integrated one (wins over the
+  power preference, also with the integrated adapter's LUID saved), all run
+  here. Each went red under a hand mutant: Dx12 left `Unsupported`, the LUID
+  trusted without the check, every adapter kept, the stale open failing, the pin
+  skipped on D3D12, the listing fallback removed. **Gap:** dropping the LUID
+  fast path altogether turns nothing red; it changes only speed.
 - **Not covered by a test:** `Presenter::finish`'s `Stale` when the saved
   adapter is present but cannot present the window and the walk moves on (an
   offscreen open always presents; a transparent X11 window on NVIDIA under Xvfb
   would reach it). Neither is the reopen after a refused device on the
-  one-driver instance (`choice_stale` with `scoped`).
+  one-driver or one-adapter instance (`choice_stale` with `scoped`).
 - **Not done:** pikr and lyr adopting it (after the release that carries it);
   `SharedGpu` presenters inherit the first presenter's device, so they take no
   choice of their own.

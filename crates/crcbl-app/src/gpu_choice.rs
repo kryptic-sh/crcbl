@@ -24,9 +24,10 @@
 //!   instance on Intel's driver opened in 8–9 ms with no NVIDIA library
 //!   loaded, against 60–77 ms and NVIDIA's device files held open for an
 //!   instance on every driver. Without a manifest it still names the adapter.
-//! - **D3D12**: the adapter by its LUID, with vendor, device and name to
-//!   check it, since a LUID lasts only until the machine restarts. Not built
-//!   yet; until it is, a D3D12 choice is [`Ignored::Unsupported`].
+//! - **D3D12**: the instance holds that adapter alone
+//!   (`crcbl_dx12::Dx12Instance::open_adapter`), found by its LUID and checked
+//!   by vendor, device and name, since a LUID lasts only until the machine
+//!   restarts; after one, the adapter is found by those three instead.
 //! - **Metal**: [`Ignored::Unsupported`]. Metal has one driver per machine
 //!   and nothing to skip.
 //!
@@ -100,6 +101,13 @@ impl GpuChoice {
         adapter.vendor_id == self.vendor_id
             && adapter.device_id == self.device_id
             && adapter.name == self.name
+    }
+
+    /// The adapter's LUID where its backend has one (D3D12), which names it
+    /// only until the machine restarts.
+    #[must_use]
+    pub const fn luid(&self) -> Option<u64> {
+        self.luid
     }
 
     /// The Vulkan driver's ICD manifest, once located.

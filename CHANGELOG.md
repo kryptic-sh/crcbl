@@ -37,10 +37,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   an Intel iGPU and an NVIDIA dGPU, a Vulkan instance on Intel's driver opened
   in 8–9 ms with no NVIDIA library loaded, against 60–77 ms with NVIDIA's device
   files held open. The saved adapter also goes first whatever the power
-  preference. Metal ignores a choice; D3D12's is not built yet and is ignored
-  too. `crcbl_vk::drivers` finds and reads the loader's manifests, and
-  `crcbl_vk::VkInstance::open_driver` opens on one. `crcbl-vk` now depends on
-  `serde` and `serde_json` to read them.
+  preference. On D3D12 the instance holds the saved adapter alone
+  (`crcbl_dx12::Dx12Instance::open_adapter`), found by its LUID and checked by
+  vendor, device and name, since a LUID lasts only until a restart; after one it
+  is found by those three (`GpuChoice::luid` reads the saved LUID). That saves
+  little, because a D3D12 instance already creates no device until one is asked
+  for: on an RX 7900 XTX desktop an instance opened in 0.37 ms against 0.93 ms,
+  and the first present took the same time (about 225 ms) either way. Metal
+  ignores a choice. `crcbl_vk::drivers` finds and reads the loader's manifests,
+  and `crcbl_vk::VkInstance::open_driver` opens on one. `crcbl-vk` now depends
+  on `serde` and `serde_json` to read them.
 
 ## [0.11.0] - 2026-10-26
 
