@@ -106,6 +106,10 @@ struct Session {
     /// reads a pipe another application writes. Recording it here means every
     /// test that pastes is also a test that the frame loop kept running.
     slowest_pump: Duration,
+    /// The windows [`map`](Self::map) gave a buffer, which every resize maps
+    /// again at the new size — what a client that draws does, and what the
+    /// backend leaves the commit of a resized surface on screen to.
+    mapped: Vec<WindowId>,
 }
 
 impl Session {
@@ -135,14 +139,44 @@ impl Session {
             shell,
             events: Vec::new(),
             slowest_pump: Duration::ZERO,
+            mapped: Vec::new(),
         }
     }
 
     fn pump(&mut self) {
         let started = Instant::now();
         let events = &mut self.events;
+        let first = events.len();
         self.shell.pump(&mut |event| events.push(event));
         self.slowest_pump = self.slowest_pump.max(started.elapsed());
+        // A resized window draws again at its new size, as a client does:
+        // the backend leaves the commit of a resized surface on screen to
+        // the next frame, so a window nothing redraws would never take it.
+        let resized: Vec<WindowId> = self.events[first..]
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::Resized { window, .. }
+                | ShellEvent::ScaleFactorChanged { window, .. } => Some(*window),
+                _ => None,
+            })
+            .filter(|window| self.mapped.contains(window))
+            .collect();
+        for window in resized {
+            match crcbl_shell::wayland_test_support::map_window(&*self.shell, window) {
+                // A window destroyed since its resize has nothing to draw.
+                Ok(()) | Err(ShellError::InvalidWindow { .. }) => {}
+                Err(error) => panic!("drawing a resized window again: {error}"),
+            }
+        }
+    }
+
+    /// Gives `window` a buffer, and again at each new size; see
+    /// [`mapped`](Self::mapped).
+    fn map(&mut self, window: WindowId) {
+        crcbl_shell::wayland_test_support::map_window(&*self.shell, window).expect("map");
+        if !self.mapped.contains(&window) {
+            self.mapped.push(window);
+        }
     }
 
     /// Pumps until `ready`, or fails naming what never happened.
@@ -213,7 +247,7 @@ impl Session {
         self.pump_until("the first configure", |session| {
             session.size(window).is_some()
         });
-        crcbl_shell::wayland_test_support::map_window(&*self.shell, window).expect("map");
+        self.map(window);
         // The compositor answers a newly mapped surface with a configure of its
         // own; wait for the exchange to settle so later assertions are not
         // racing it.
@@ -562,7 +596,7 @@ fn an_unmapped_window_is_configured_but_not_yet_managed() {
 
     // Attaching a buffer is the whole difference. Afterwards the request that
     // was ignored is honoured, and the window is addressable.
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, window).expect("map");
+    session.map(window);
     session.pump_until(
         "the fullscreen configure a mapped surface gets",
         |session| {
@@ -751,7 +785,7 @@ fn a_window_created_borderless_is_never_mapped_at_its_windowed_size() {
     // Everything after this is a configure about a surface with a buffer on it,
     // which is to say one somebody could see.
     session.take_names();
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, window).expect("map");
+    session.map(window);
     session.pump_until("the fullscreen configure", |session| {
         session
             .shell
@@ -3797,7 +3831,7 @@ fn a_reserving_panel_takes_its_edge_from_tiled_windows_and_gives_it_back() {
     let state = session.shell.window_state(bar).expect("live panel");
     assert_eq!(state.effective_mode(), Some(DisplayMode::Windowed));
 
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    session.map(bar);
     let below = PhysicalSize::new(OUTPUT_SIZE.width, OUTPUT_SIZE.height - HEIGHT);
     session.pump_until("tiled windows to give up the bar's height", |session| {
         session.size(window) == Some(below)
@@ -3841,7 +3875,7 @@ fn a_panel_on_a_fractional_output_is_configured_at_its_scale() {
     session.pump_until("the bar's first configure", |session| {
         session.size(bar).is_some()
     });
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    session.map(bar);
     session.pump_until("the bar's preferred scale", |session| {
         session
             .shell
@@ -3894,7 +3928,7 @@ fn a_reconfigured_panel_is_configured_at_its_new_height_and_reserves_it() {
     session.pump_until("the panel's first configure", |session| {
         session.size(bar) == Some(PhysicalSize::new(OUTPUT_SIZE.width, HEIGHT))
     });
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    session.map(bar);
     session.pump_until("tiled windows to give up the bar's height", |session| {
         session.size(window)
             == Some(PhysicalSize::new(
@@ -4001,7 +4035,7 @@ fn an_exclusive_panel_takes_the_keyboard_when_it_maps() {
         "an unanchored panel is the size it asked for"
     );
 
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, launcher).expect("map");
+    session.map(launcher);
     let input = VirtualInput::attach(&*session.shell, launcher).expect("virtual devices");
     session.pump_until("the panel to take the keyboard", |session| {
         session
@@ -4063,7 +4097,7 @@ fn an_on_demand_panel_takes_the_keyboard_on_a_click_and_gives_it_back() {
     session.pump_until("the panel's first configure", |session| {
         session.size(panel_window).is_some()
     });
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, panel_window).expect("map");
+    session.map(panel_window);
     let input = VirtualInput::attach(&*session.shell, panel_window).expect("virtual devices");
     let focused = |session: &Session, which: WindowId| {
         session
@@ -4144,7 +4178,7 @@ fn unplugging_a_monitor_names_it_and_asks_its_panels_to_close() {
         Some(SECOND_OUTPUT_SIZE.width),
         "the panel is on the output it asked for"
     );
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    session.map(bar);
     session.settle(Duration::from_millis(200));
     session.take_names();
 
@@ -4340,7 +4374,7 @@ fn a_panel_opens_a_popup() {
     session.pump_until("the bar's first configure", |session| {
         session.size(bar).is_some()
     });
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    session.map(bar);
     let calendar = session.create(&popup(
         "crcbl e2e calendar",
         LogicalSize::new(300.0, 250.0),
@@ -4400,7 +4434,7 @@ fn a_grabbing_popup_is_dismissed_by_a_click_outside_it() {
     session.pump_until("the menu's first configure", |session| {
         session.size(menu).is_some()
     });
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, menu).expect("map");
+    session.map(menu);
     session.settle(Duration::from_millis(200));
     session.take_names();
 
@@ -4465,7 +4499,7 @@ fn escape_on_a_grabbing_popup_is_delivered_then_asks_it_to_close() {
     session.pump_until("the menu's first configure", |session| {
         session.size(menu).is_some()
     });
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, menu).expect("map");
+    session.map(menu);
     session.settle(Duration::from_millis(200));
     session.take_names();
 
@@ -4540,7 +4574,7 @@ fn a_grabbing_popup_takes_the_keyboard_from_its_exclusive_panel() {
     session.pump_until("the panel's first configure", |session| {
         session.size(bar).is_some()
     });
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    session.map(bar);
     let input = VirtualInput::attach(&*session.shell, bar).expect("virtual devices");
     session.pump_until("the panel to take the keyboard", |session| {
         session
@@ -4580,7 +4614,7 @@ fn a_grabbing_popup_takes_the_keyboard_from_its_exclusive_panel() {
     session.pump_until("the dropdown's first configure", |session| {
         session.size(dropdown).is_some()
     });
-    crcbl_shell::wayland_test_support::map_window(&*session.shell, dropdown).expect("map");
+    session.map(dropdown);
     session.settle(Duration::from_millis(200));
     session.take_names();
 

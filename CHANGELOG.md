@@ -13,6 +13,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **A resized Wayland surface no longer shows its last frame squeezed into the
+  new size.** `crcbl-shell` used to commit a configure's new viewport
+  destination the moment it acked it, before any buffer at that size existed, so
+  a shrinking panel briefly drew its old buffer scaled down. A surface that is
+  already on screen now leaves that commit to its next frame, which carries the
+  new size and the new destination together; one not yet mapped still commits at
+  once. A client that stops drawing after a resize keeps its old size on screen
+  until it draws again.
+
 ## [0.12.0] - 2026-10-26
 
 ### Breaking

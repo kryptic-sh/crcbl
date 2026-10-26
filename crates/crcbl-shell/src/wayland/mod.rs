@@ -3222,12 +3222,17 @@ impl WaylandShell {
             mode: config.mode,
         });
         let (surface, viewport) = (window.surface, window.viewport);
+        // On screen already, the commit is left to the next present, for
+        // `apply_configure`'s reason: the buffer shown is the old scale's.
+        let defer_commit = !window.outputs.is_empty();
         // SAFETY: both proxies are live; a scale change is only in effect after
         // a commit, and the viewport destination is what tells the compositor
         // how large the (physical) buffer should appear.
         unsafe {
             set_viewport(viewport, logical);
-            wl_surface::commit(surface);
+            if !defer_commit {
+                wl_surface::commit(surface);
+            }
         }
         self.queue.push_back(ShellEvent::ScaleFactorChanged {
             window: id,
@@ -3294,6 +3299,20 @@ impl WaylandShell {
         let scale_changed = window
             .configuration
             .is_some_and(|previous| previous.scale_factor != scale_factor);
+        // **A surface already on screen is not committed at a new size here.**
+        // Its buffer is the old size, and a commit now would apply the new
+        // viewport destination to it, so the compositor would show the last
+        // frame squeezed or stretched into the new rectangle until a frame of
+        // that size arrived — lyr's shrinking menu, for up to 1.6 s on a nested
+        // Hyprland. The destination and the acknowledgement are left pending
+        // instead, and the next present commits them with the buffer drawn at
+        // that size, which the protocol allows. A surface on no output has no
+        // buffer to distort, and a configure that keeps the size changes no
+        // destination, so both are committed at once as before.
+        let resized = window
+            .configuration
+            .is_some_and(|previous| previous.size != size || previous.scale_factor != scale_factor);
+        let defer_commit = resized && !window.outputs.is_empty();
         window.configuration = Some(config);
         // `xdg_toplevel.state.activated` is a focus signal a compositor sets
         // even before a `wl_seat` has a keyboard. Compare against the previous
@@ -3312,8 +3331,10 @@ impl WaylandShell {
         // SAFETY: every proxy is live, and the configure came from whichever
         // of the two role objects is not null. `ack_configure` must precede
         // the commit, and the commit is what makes the acknowledged state
-        // current. The viewport destination is the logical size the compositor
-        // just asked for, which is exactly what `wp_viewport` wants.
+        // current — this one, or for a resized surface on screen the next
+        // present's (see `defer_commit`). The viewport destination is the
+        // logical size the compositor just asked for, which is exactly what
+        // `wp_viewport` wants.
         unsafe {
             set_viewport(viewport, logical);
             if layer.is_null() {
@@ -3321,7 +3342,9 @@ impl WaylandShell {
             } else {
                 zwlr_layer_surface_v1::ack_configure(layer, serial);
             }
-            wl_surface::commit(surface);
+            if !defer_commit {
+                wl_surface::commit(surface);
+            }
         }
         self.conn.flush();
 

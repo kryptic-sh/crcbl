@@ -2876,6 +2876,22 @@ driver and openbox installed). Last run 2026-10-24 at `de958005`:
 both, fullscreen and F11 refused without a window manager and granted under it;
 `run-x11-xorg-e2e.sh`'s five `xorg_` tests pass both ways.
 
+**Sway loses a `resize set` sent while it waits for the commit of the one before
+(2026-10-26; surprising, not a crcbl bug).** Since a resized surface leaves its
+commit to its next frame, a floating window's resize transaction stays open
+until that frame (20–37 ms on the Intel iGPU, against about 1 ms when the ack
+was committed empty at once). A second `swaymsg resize set` that lands inside
+that window comes back as a configure at the first size, never the second. Seen
+in sway 1.12's `-d` log and the client's `WAYLAND_DEBUG`, in the harness's soak
+step with back-to-back resizes. Why sway answers with the old size is a guess
+from its floating-window code (a commit that changes the surface size resizes
+the container to match), not confirmed in its source. Any client that commits
+its new size with a buffer, which is every ordinary one, gets the same. The
+harness now waits after each resize for a second `FrameReady` past the
+reconfigure (`wait_for_frame_at` in `run-wayland-e2e.sh`) before sending the
+next one. Sway's IPC `geometry` stays at the size at first map after a resize,
+with or without the fix, so it cannot serve as that cue.
+
 ## HIGH PRIORITY: EW engine requirements
 
 EW engine requirements take priority over UI/editor expansion. EW adopts engine

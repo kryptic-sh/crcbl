@@ -378,3 +378,90 @@ fn a_window_under_an_x_compositing_manager_is_blended_premultiplied() {
     };
     assert_blended(x11.as_mut(), None, &backdrop, screen);
 }
+
+/// **A shrinking panel keeps showing its last frame at the size it was drawn**,
+/// until the frame at the new size arrives — never that frame squeezed into the
+/// new rectangle. A blue panel over the red backdrop is shrunk with
+/// `set_panel` and not presented again; a pixel the old panel covered and the
+/// new one does not must still be blue. Presenting again must then show the
+/// new size, which the deferred acknowledgement rides in on. Committing the new viewport
+/// destination with the configure's acknowledgement applied it to the buffer
+/// already shown, which the compositor then scaled into the new size: lyr's
+/// menu panel showed squeezed for up to 1.6 s on a nested Hyprland.
+#[test]
+#[ignore = "needs headless sway, grim and a Vulkan driver; see the module docs"]
+fn a_shrinking_panel_is_not_squeezed_before_its_next_frame() {
+    let mut shell = crcbl_shell::open_backend(ShellBackend::Wayland).expect("a Wayland session");
+    let shell = shell.as_mut();
+    let mut backdrop = Solid::open(shell, &sway_backdrop(), [1.0, 0.0, 0.0, 1.0], None);
+    let panel = PanelDesc {
+        namespace: "crcbl-shrink",
+        layer: PanelLayer::Top,
+        anchor: PanelAnchor::TOP | PanelAnchor::LEFT,
+        ..PanelDesc::default()
+    };
+    let desc = WindowDesc {
+        title: "crcbl shrink",
+        app_id: APP_ID,
+        size: LogicalSize::new(800.0, 600.0),
+        role: WindowRole::Panel(panel),
+        ..WindowDesc::default()
+    };
+    let mut shrinking = Solid::open(shell, &desc, [0.0, 0.0, 1.0, 1.0], Some(&backdrop));
+    // Inside the 800x600 panel and outside the 400x300 one it shrinks to.
+    let given_up = (600, 450);
+    let blue = |pixel: [u8; 3]| pixel[2] > 200 && pixel[0] < 50;
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !blue(grim_pixel(given_up)) {
+        assert!(Instant::now() < deadline, "the panel never showed");
+        shell.pump(&mut |event| {
+            backdrop.presenter.observe(&event);
+            shrinking.presenter.observe(&event);
+        });
+        backdrop.present();
+        shrinking.present();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    shell
+        .set_panel(shrinking.window, LogicalSize::new(400.0, 300.0), &panel)
+        .expect("set_panel");
+    // The configure arrives and is answered; nothing is presented.
+    let until = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < until {
+        shell.pump(&mut |_| {});
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pixel = grim_pixel(given_up);
+    assert!(
+        blue(pixel),
+        "the panel's last frame was squeezed into its new size before a frame of that \
+         size arrived: {pixel:?} where it was blue"
+    );
+
+    // The next frames carry the new size: the pixel given up shows the
+    // backdrop, and the panel's own corner is still the panel.
+    let red = |pixel: [u8; 3]| pixel[0] > 200 && pixel[2] < 50;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !red(grim_pixel(given_up)) {
+        assert!(
+            Instant::now() < deadline,
+            "the panel never took its new size once it presented again"
+        );
+        shell.pump(&mut |event| {
+            backdrop.presenter.observe(&event);
+            shrinking.presenter.observe(&event);
+        });
+        backdrop.present();
+        shrinking.present();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        blue(grim_pixel((200, 150))),
+        "the shrunk panel is not where it was"
+    );
+
+    shrinking.close(shell);
+    backdrop.close(shell);
+}

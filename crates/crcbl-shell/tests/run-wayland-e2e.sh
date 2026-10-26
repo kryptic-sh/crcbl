@@ -119,8 +119,10 @@ fi
 # read back off the screen with `grim`, which is the only check that the
 # compositor blends what the swapchain asked for (premultiplied) rather than
 # what the cap says, once for a Wayland window and once for an X11 window on
-# Xwayland. Lives in `crcbl-app`, which has the presenter. The run must report
-# exactly two tests, or a renamed test would pass this step by matching nothing.
+# Xwayland — and a shrinking panel read back between its configure and its next
+# frame, which must not be its last frame squeezed. Lives in `crcbl-app`, which
+# has the presenter. The run must report exactly three tests, or a renamed test
+# would pass this step by matching nothing.
 echo "crcbl e2e: reading a transparent window back through sway with grim"
 TRANSPARENCY_LOG="${SWAY_RUNTIME_DIR}/transparency.log"
 set +e
@@ -148,7 +150,7 @@ STATUS=${PIPESTATUS[0]}
 set -e
 TRANSPARENCY_PLAIN="${SWAY_RUNTIME_DIR}/transparency.plain.log"
 crcbl_nextest_plain "$TRANSPARENCY_LOG" "$TRANSPARENCY_PLAIN"
-if [ "$STATUS" -ne 0 ] || ! grep -q "test result: ok. 2 passed" "$TRANSPARENCY_PLAIN"; then
+if [ "$STATUS" -ne 0 ] || ! grep -q "test result: ok. 3 passed" "$TRANSPARENCY_PLAIN"; then
     echo "crcbl e2e: the transparency read-back failed or ran no test" >&2
     sway_log_tail
     exit 1
@@ -651,6 +653,32 @@ wait_for_sandbox_window() {
     done
 }
 
+# `wait_for_frame_at <log> <WxH> <nth>`
+#
+# Waits for a frame presented after the sandbox's `nth` swapchain reconfigure
+# to that size. The first `FrameReady` after the reconfigure may still answer
+# the frame before it; the second can only follow a frame presented after it,
+# so the compositor has the window at that size. A resize sent before then
+# can be lost: the backend commits a resized surface with its next frame, and
+# a `resize set` that reaches sway while it still waits for that commit came
+# back as the size before it.
+wait_for_frame_at() {
+    local log="$1" size="$2" nth="$3"
+    local reconfigured deadline
+    reconfigured="$(grep -n "hal: reconfiguring the swapchain to $size" "$log" | sed -n "${nth}p" | cut -d: -f1)"
+    deadline=$(( $(date +%s) + SWAY_SESSION_TIMEOUT_S ))
+    while [ -z "$reconfigured" ] \
+        || [ "$(tail -n "+${reconfigured}" "$log" | grep -c "shell event: FrameReady" || true)" -lt 2 ]; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "crcbl e2e: no frame was presented at $size after reconfigure $nth" >&2
+            tail -n 40 "$log" >&2 || true
+            sway_log_tail
+            exit 1
+        fi
+        sleep "$SWAY_SESSION_POLL_S"
+    done
+}
+
 # `run_sandbox_toggle <backend>`
 run_sandbox_toggle() {
     local backend="$1"
@@ -772,23 +800,10 @@ run_sandbox_resize() {
     for size in 900x500 640x360; do
         swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" resize set "${size%x*}" "${size#*x}" >/dev/null
         wait_for_line "a reconfigure at $size" "$log" "hal: reconfiguring the swapchain to $size"
-    done
-    # A frame at the last size before closing: the summary reports the extent
-    # last presented, and a close answered in the same pump as the reconfigure
-    # (on lavapipe, at a few frames a second) left it at the size before. The
-    # first `FrameReady` after the reconfigure may still answer the frame
-    # before it; the second can only follow a frame presented after it.
-    local reconfigured deadline
-    reconfigured="$(grep -n "hal: reconfiguring the swapchain to 640x360" "$log" | head -1 | cut -d: -f1)"
-    deadline=$(( $(date +%s) + SWAY_SESSION_TIMEOUT_S ))
-    while [ "$(tail -n "+${reconfigured}" "$log" | grep -c "shell event: FrameReady" || true)" -lt 2 ]; do
-        if [ "$(date +%s)" -ge "$deadline" ]; then
-            echo "crcbl e2e: no frame was presented at 640x360 after the reconfigure" >&2
-            kill "$sandbox_pid" 2>/dev/null || true
-            sway_log_tail
-            exit 1
-        fi
-        sleep "$SWAY_SESSION_POLL_S"
+        # Also before closing: the summary reports the extent last presented,
+        # and a close answered in the same pump as the reconfigure (on
+        # lavapipe, at a few frames a second) left it at the size before.
+        wait_for_frame_at "$log" "$size" 1
     done
 
     swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" kill >/dev/null
@@ -881,6 +896,7 @@ run_sandbox_soak() {
         if [ $((resize % 2)) -eq 1 ]; then size=900x500; else size=640x360; fi
         swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" resize set "${size%x*}" "${size#*x}" >/dev/null
         wait_for_count "resize $resize to $size" "$log" "$reconfigure $size" $(((resize + 1) / 2))
+        wait_for_frame_at "$log" "$size" $(((resize + 1) / 2))
     done
 
     # The window is 640x360 logical now; at scale 2 its buffer is twice that.
