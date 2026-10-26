@@ -880,6 +880,7 @@ mod tests {
         ("uint SHADOW_CASCADES", ";"),
         ("uint SHADOW_LIGHT_TILES", ";"),
         ("uint SHADOW_POINT_FACES", ";"),
+        ("uint NO_SHADOW_TILE", ";"),
         ("uint SHADOW_ATLAS_TILES", ";"),
         ("uint PROBE_LEVELS", ";"),
         ("uint KIND_DIRECTIONAL", ";"),
@@ -935,10 +936,9 @@ mod tests {
         "float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,",
         "float punctual_visibility(uint tile, float3 world_position, float3 to_light, \
          float n_dot_l,",
-        "float spot_visibility(GpuLight light, uint tile, float3 world_position, float3 to_light,",
+        "float spot_map_world(GpuLight light, float3 world_position)",
         "uint point_face(float3 from_light)",
-        "float point_visibility(GpuLight light, uint base, float3 world_position, \
-         float3 to_light,",
+        "float point_map_world(GpuLight light, float3 world_position, out uint face)",
         "float range_window(float distance, float radius)",
         "float punctual_falloff(float distance, float radius)",
         "float spot_cone(float3 to_light, float3 axis, float cos_outer, float cos_inner)",

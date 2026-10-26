@@ -4353,7 +4353,34 @@ and every trial it rejected is folded into "Declined" below.
   both, and every Intel frame. Options: keep both (fill lights are what scenes
   hold many of, and the iGPU is the weakest target), restructure the skip so it
   adds no register pressure, cut the forward shader's pressure on ANV, or gate
-  either on the adapter. Further Intel runs wait on the owner's choice.
+  either on the adapter. The owner chose the long-term fix (2026-10-26): cut the
+  forward shader's pressure on ANV, below.
+- **The forward shader's shadow filters, written once each (2026-10-26).**
+  Stubbing parts of `fragmentMain` out on ANV put the pressure in the light
+  loop's body, not in values held across it: folding the emission early and
+  carrying the cascade view's index instead of its tint changed nothing (10,221
+  instructions and 90:260 spills:fills either way), while stubbing the shadow
+  lookups alone took it to 4,602 and 50:83. Every call is inlined, and the loop
+  held about six copies of `tile_pcf`'s taps — the sun's cascade and its blend
+  partner, each with a disc and a measured-penumbra path, and the spot and point
+  arms. Writing each lookup once — one `tile_pcf` per cascade, the blend's two
+  cascades as one `[loop]` body, one `punctual_visibility` for spots and points
+  — keeps the arithmetic and takes ANV to 7,042 instructions and 78:153
+  spills:fills; `grass.slang` and `water.slang`, which copy the sun's lookups
+  and, for grass, the punctual ones, take the same shape. Timed as above
+  (`b15153ef` against the change, three mirrored pairs, means of six `forward`
+  p50s): `lights-fit` 9.729 → 8.438 ms (−13.3%), `area-lights-fit` 20.501 →
+  18.892 ms (−7.8%), `area-fill-lights-fit` 13.184 → 12.472 ms (−5.4%) with no
+  overlap, and `specular-lights-fit` 12.956 → 12.143 ms (−6.3%) overlapping in
+  one run that an earlier run of the same comparison separated (12.305 → 11.432
+  ms). Those timings are of the variant before the guards took volumetric's
+  spelling (7,029 instructions, the same spills). On the Intel GPU and lavapipe
+  the forward and render e2e suites and the lantern, horde and tide goldens pass
+  before and after, and every golden's difference line — pixel count, maximum
+  delta and the rest — is identical between the two. **Left:** ANV still builds
+  the stage at SIMD8 only and still spills; the next share is the area light's
+  LTC branch and the probe grid. Not yet measured: the MX550, lavapipe's timing,
+  and the RX 7900 XTX on D3D12 and Vulkan, which the Windows session runs.
 - **Unmeasured paths.** A populated probe volume pays the empty-probe early
   return's uniform branch, which no fixture has probes to time; water's own pass
   was not timed either. Slang's MSL output allocates the tile-local exposure
@@ -33505,9 +33532,10 @@ The atlas is a quadtree over `shadow::ATLAS_COLUMNS` × `shadow::ATLAS_ROWS` roo
 cells of `shadow::TILE` texels — `shadow::AtlasAllocator` decides where a map
 lands and `Assignment::level` how large it is — `shadow::Selection` decides who
 gets tiles, `shadow::spot_matrix` and `shadow::point_matrix` build reversed-Z
-perspective projections, and `mesh.slang`'s `spot_visibility` and
-`point_visibility` sample them through the same `tile_pcf` disc the cascades
-use. Decisions taken, so they are not re-argued:
+perspective projections, and `mesh.slang`'s `punctual_visibility` samples them,
+at the tile and map width `spot_map_world` and `point_map_world` give it,
+through the same `tile_pcf` disc the cascades use. Decisions taken, so they are
+not re-argued:
 
 - **Two budgets, because they buy different things.** `LIGHT_TILES` is atlas
   space — two point cubes and two spots' worth — and `LIGHT_SLOTS` is cull

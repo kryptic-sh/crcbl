@@ -21,6 +21,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was given. A program with nothing saved yet otherwise had to repeat that rule
   itself to avoid saving a one-off pin as its choice.
 
+### Changed
+
+- **The forward pass is 5–13% faster on Intel's Mesa driver**, with the same
+  picture. `mesh.slang`'s `fragmentMain` wrote each shadow filter once per light
+  kind and cascade, and every call is inlined, so its light loop held about six
+  copies of the PCF taps; ANV, which builds the stage at SIMD8 only, spilled
+  under them. Each lookup is now written once: 10,221 instructions and 90:260
+  spills:fills on ANV become 7,042 and 78:153. `grass.slang` and `water.slang`
+  copy the sun's lookups, and grass the punctual ones too, and take the same
+  change.
+
 ### Fixed
 
 - **Finding a saved GPU choice's Vulkan driver no longer logs errors for drivers

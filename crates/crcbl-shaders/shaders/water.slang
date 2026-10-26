@@ -699,14 +699,17 @@ float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
     {
         return tile_box_pcf(cascade, tile_uv, ndc.z);
     }
-    if (mode == SHADOW_FILTER_DISC)
+    // The disc at its fixed reach is the ninth decision without the tenth, so
+    // the penumbra is the same width wherever its caster stands. **One
+    // `tile_pcf` for both modes**, with only the radius chosen: every call is
+    // inlined, and two would put two copies of its taps in this stage —
+    // mesh.slang's `fragmentMain` says what that cost on ANV.
+    float radius = SHADOW_FILTER_TEXELS;
+    if (mode != SHADOW_FILTER_DISC)
     {
-        // The disc at its fixed reach: the ninth decision without the tenth, so
-        // the penumbra is the same width wherever its caster stands.
-        return tile_pcf(cascade, tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
+        float2 rotation = shadow_rotation(pixel);
+        radius = sun_penumbra_texels(cascade, tile_uv, ndc.z, rotation);
     }
-    float2 rotation = shadow_rotation(pixel);
-    float radius = sun_penumbra_texels(cascade, tile_uv, ndc.z, rotation);
     return tile_pcf(cascade, tile_uv, ndc.z, pixel, radius);
 }
 
@@ -755,41 +758,52 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
         selected = cascade;
     }
 
-    float visibility =
-        cascade_visibility(cascade, world_position, to_light, geometric_normal, pixel);
-    if (cascade + 1 >= SHADOW_CASCADES)
-    {
-        // The last cascade has nothing to fade into. Everything past its reach
-        // selects it too — the loop's fallback — and gets its answer unmixed,
-        // which the box test inside turns into "lit" soon enough.
-        return visibility;
-    }
-
     // The band, at the outer edge of this cascade's reach. `reach` is strictly
     // positive here: the loop only leaves a cascade selected whose far distance
     // *exceeds* this fragment's, and the one case where it does not — nothing
-    // matched — returned above.
-    float reach = frame.cascade_far[cascade];
-    float band = reach * CASCADE_FADE_FRACTION;
-    float blend = saturate((eye_distance - (reach - band)) / band);
-    // Before the early return, not after it: `saturate` has already made a
-    // fragment short of the band an exact zero, and reporting it there as well
-    // is what keeps this parameter written on every path.
-    fade = blend;
-    if (blend <= 0.0)
+    // matched — selects the last cascade, which has nothing to fade into.
+    // Everything past its reach gets its answer unmixed, which the box test
+    // inside turns into "lit" soon enough.
+    float blend = 0.0;
+    if (cascade + 1 < SHADOW_CASCADES)
     {
-        return visibility;
+        float reach = frame.cascade_far[cascade];
+        float band = reach * CASCADE_FADE_FRACTION;
+        blend = saturate((eye_distance - (reach - band)) / band);
     }
+    // Written on every path, the last cascade's included: `saturate` has
+    // already made a fragment short of the band an exact zero.
+    fade = blend;
 
-    // The next cascade is guaranteed to contain this fragment, which is what
-    // makes the mix well defined rather than a blend with the `1.0` an outside
-    // fragment gets: the cascades are spheres about the same eye with strictly
-    // growing radii — `crcbl_render::shadow::cascade_matrix` fits every one of
-    // them to `eye` — so anything inside cascade `i` is inside cascade `i + 1`
-    // by construction, not by a margin someone has to maintain.
-    float next =
-        cascade_visibility(cascade + 1, world_position, to_light, geometric_normal, pixel);
-    return lerp(visibility, next, blend);
+    // A fragment in the band also reads the next cascade, which is guaranteed
+    // to contain it — and that is what makes the mix well defined rather than a
+    // blend with the `1.0` an outside fragment gets: the cascades are spheres
+    // about the same eye with strictly growing radii —
+    // `crcbl_render::shadow::cascade_matrix` fits every one of them to `eye` —
+    // so anything inside cascade `i` is inside cascade `i + 1` by construction.
+    //
+    // **One `cascade_visibility` in a loop that is not unrolled**, rather than
+    // two calls: every call is inlined, and each copy is a whole filter and
+    // penumbra search, which on ANV — this stage at SIMD8 only, and spilling —
+    // was the largest share of its code. The arithmetic is the two calls'
+    // exactly, mixed by the same `lerp`.
+    uint lookups = blend > 0.0 ? 2u : 1u;
+    float visibility = 1.0;
+    float next = 1.0;
+    [loop]
+    for (uint step = 0u; step < lookups; ++step)
+    {
+        float taken = cascade_visibility(cascade + step, world_position, to_light, geometric_normal, pixel);
+        if (step == 0u)
+        {
+            visibility = taken;
+        }
+        else
+        {
+            next = taken;
+        }
+    }
+    return lookups == 1u ? visibility : lerp(visibility, next, blend);
 }
 
 float2 decode_fixed_pair(float4 texel)

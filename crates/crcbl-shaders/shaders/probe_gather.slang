@@ -412,7 +412,7 @@ float spot_cone(float3 to_light, float3 axis, float cos_outer, float cos_inner)
 float producer_tangent(PunctualProducer light)
 {
     // A cube face is a right angle, whose half-angle's tangent is one — the same
-    // fact `mesh.slang`'s `point_visibility` reads a face's axial depth off.
+    // fact `mesh.slang`'s `point_map_world` reads a face's axial depth off.
     if (light.tile.w != PROBE_LIGHT_KIND_SPOT)
     {
         return 1.0;

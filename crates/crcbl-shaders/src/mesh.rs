@@ -6715,11 +6715,13 @@ mod tests {
             // The band sits at the outer edge: `blend` is zero until the
             // fragment is within `band` of this cascade's reach, and one at it.
             "float band = reach * CASCADE_FADE_FRACTION;",
-            "float blend = saturate((eye_distance - (reach - band)) / band);",
+            "blend = saturate((eye_distance - (reach - band)) / band);",
             // And what it grows towards is the next cascade out, which is the
-            // half a swapped `lerp` would keep silent.
-            "float next = cascade_visibility(cascade + 1, world_position, to_light, \
-             geometric_normal, pixel); return lerp(visibility, next, blend);",
+            // half a swapped `lerp` would keep silent: the loop's first lookup
+            // is this cascade's and its second the next one's.
+            "float taken = cascade_visibility(cascade + step, world_position, to_light, \
+             geometric_normal, pixel); if (step == 0u) { visibility = taken; } else { next = taken; }",
+            "return lookups == 1u ? visibility : lerp(visibility, next, blend);",
         ] {
             let wanted = expected.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(

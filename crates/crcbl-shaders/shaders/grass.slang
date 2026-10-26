@@ -139,6 +139,8 @@ static const uint SHADOW_LIGHT_TILES = 14;
 
 static const uint SHADOW_POINT_FACES = 6;
 
+static const uint NO_SHADOW_TILE = 0xffffffffu;
+
 static const uint SHADOW_ATLAS_TILES = 16;
 
 static const uint KIND_DIRECTIONAL = 0;
@@ -263,7 +265,7 @@ struct FrameUniforms
     ///
     /// **Indexed by tile rather than by light**, which is what lets one light own
     /// six: `GpuLight::shadow_tile` names the first of a light's tiles and
-    /// `point_visibility` adds the face it selected. A tile no light holds is
+    /// `fragmentMain` adds the face `point_map_world` selected. A tile no light holds is
     /// read by nothing, because the rows that would name it carry
     /// `NO_SHADOW_TILE`. **Last in the block rather than beside the cascades**,
     /// so adding it moved no existing member's offset — which is what let the
@@ -460,7 +462,7 @@ struct GpuLight
     /// occludes through, or `NO_SHADOW_TILE` if it was given none.
     ///
     /// A spot occludes through that one tile; a point light through the
-    /// `SHADOW_POINT_FACES` tiles from here, and `point_visibility` adds the face
+    /// `SHADOW_POINT_FACES` tiles from here, and `fragmentMain` adds the face `point_map_world`
     /// it selected. The atlas holds `SHADOW_LIGHT_TILES` of them and a scene may
     /// want more than they hold, so a row saying "no tile" is the ordinary case:
     /// Topic 45's third decision is that such a light still lights
@@ -1172,14 +1174,17 @@ float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
     {
         return tile_box_pcf(cascade, tile_uv, ndc.z);
     }
-    if (mode == SHADOW_FILTER_DISC)
+    // The disc at its fixed reach is the ninth decision without the tenth, so
+    // the penumbra is the same width wherever its caster stands. **One
+    // `tile_pcf` for both modes**, with only the radius chosen: every call is
+    // inlined, and two would put two copies of its taps in this stage —
+    // mesh.slang's `fragmentMain` says what that cost on ANV.
+    float radius = SHADOW_FILTER_TEXELS;
+    if (mode != SHADOW_FILTER_DISC)
     {
-        // The disc at its fixed reach: the ninth decision without the tenth, so
-        // the penumbra is the same width wherever its caster stands.
-        return tile_pcf(cascade, tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
+        float2 rotation = shadow_rotation(pixel);
+        radius = sun_penumbra_texels(cascade, tile_uv, ndc.z, rotation);
     }
-    float2 rotation = shadow_rotation(pixel);
-    float radius = sun_penumbra_texels(cascade, tile_uv, ndc.z, rotation);
     return tile_pcf(cascade, tile_uv, ndc.z, pixel, radius);
 }
 
@@ -1228,41 +1233,52 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
         selected = cascade;
     }
 
-    float visibility =
-        cascade_visibility(cascade, world_position, to_light, geometric_normal, pixel);
-    if (cascade + 1 >= SHADOW_CASCADES)
-    {
-        // The last cascade has nothing to fade into. Everything past its reach
-        // selects it too — the loop's fallback — and gets its answer unmixed,
-        // which the box test inside turns into "lit" soon enough.
-        return visibility;
-    }
-
     // The band, at the outer edge of this cascade's reach. `reach` is strictly
     // positive here: the loop only leaves a cascade selected whose far distance
     // *exceeds* this fragment's, and the one case where it does not — nothing
-    // matched — returned above.
-    float reach = frame.cascade_far[cascade];
-    float band = reach * CASCADE_FADE_FRACTION;
-    float blend = saturate((eye_distance - (reach - band)) / band);
-    // Before the early return, not after it: `saturate` has already made a
-    // fragment short of the band an exact zero, and reporting it there as well
-    // is what keeps this parameter written on every path.
-    fade = blend;
-    if (blend <= 0.0)
+    // matched — selects the last cascade, which has nothing to fade into.
+    // Everything past its reach gets its answer unmixed, which the box test
+    // inside turns into "lit" soon enough.
+    float blend = 0.0;
+    if (cascade + 1 < SHADOW_CASCADES)
     {
-        return visibility;
+        float reach = frame.cascade_far[cascade];
+        float band = reach * CASCADE_FADE_FRACTION;
+        blend = saturate((eye_distance - (reach - band)) / band);
     }
+    // Written on every path, the last cascade's included: `saturate` has
+    // already made a fragment short of the band an exact zero.
+    fade = blend;
 
-    // The next cascade is guaranteed to contain this fragment, which is what
-    // makes the mix well defined rather than a blend with the `1.0` an outside
-    // fragment gets: the cascades are spheres about the same eye with strictly
-    // growing radii — `crcbl_render::shadow::cascade_matrix` fits every one of
-    // them to `eye` — so anything inside cascade `i` is inside cascade `i + 1`
-    // by construction, not by a margin someone has to maintain.
-    float next =
-        cascade_visibility(cascade + 1, world_position, to_light, geometric_normal, pixel);
-    return lerp(visibility, next, blend);
+    // A fragment in the band also reads the next cascade, which is guaranteed
+    // to contain it — and that is what makes the mix well defined rather than a
+    // blend with the `1.0` an outside fragment gets: the cascades are spheres
+    // about the same eye with strictly growing radii —
+    // `crcbl_render::shadow::cascade_matrix` fits every one of them to `eye` —
+    // so anything inside cascade `i` is inside cascade `i + 1` by construction.
+    //
+    // **One `cascade_visibility` in a loop that is not unrolled**, rather than
+    // two calls: every call is inlined, and each copy is a whole filter and
+    // penumbra search, which on ANV — this stage at SIMD8 only, and spilling —
+    // was the largest share of its code. The arithmetic is the two calls'
+    // exactly, mixed by the same `lerp`.
+    uint lookups = blend > 0.0 ? 2u : 1u;
+    float visibility = 1.0;
+    float next = 1.0;
+    [loop]
+    for (uint step = 0u; step < lookups; ++step)
+    {
+        float taken = cascade_visibility(cascade + step, world_position, to_light, geometric_normal, pixel);
+        if (step == 0u)
+        {
+            visibility = taken;
+        }
+        else
+        {
+            next = taken;
+        }
+    }
+    return lookups == 1u ? visibility : lerp(visibility, next, blend);
 }
 
 float punctual_visibility(uint tile, float3 world_position, float3 to_light, float n_dot_l,
@@ -1326,16 +1342,10 @@ float punctual_visibility(uint tile, float3 world_position, float3 to_light, flo
     return tile_pcf(atlas, tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
 }
 
-float spot_visibility(GpuLight light, uint tile, float3 world_position, float3 to_light,
-                      float n_dot_l, float3 geometric_normal, float2 pixel)
+/// The world width a spot's map covers at `world_position`: what
+/// `punctual_visibility` takes as `map_world` for it.
+float spot_map_world(GpuLight light, float3 world_position)
 {
-    if (n_dot_l <= 0.0)
-    {
-        // Facing away: black from the diffuse term already, and the place
-        // self-shadowing acne is worst. `sun_visibility`'s reason exactly.
-        return 1.0;
-    }
-
     // The cone's outer half-angle, as a tangent, out of the cosine the row
     // carries: `tan(acos(c)) == sqrt(1 - c²) / c`. `Light::row` refuses a
     // non-positive one on the way in and `Selection` refuses a cone at or past
@@ -1347,8 +1357,7 @@ float spot_visibility(GpuLight light, uint tile, float3 world_position, float3 t
     // *before* the matrix, and a radial distance would be up to `1 / cos_outer`
     // too large at the rim.
     float axial = max(dot(world_position - light.position.xyz, normalize(light.direction.xyz)), 0.0);
-    return punctual_visibility(tile, world_position, to_light, n_dot_l, 2.0 * tan_outer * axial,
-                               geometric_normal, pixel);
+    return 2.0 * tan_outer * axial;
 }
 
 uint point_face(float3 from_light)
@@ -1365,22 +1374,19 @@ uint point_face(float3 from_light)
     return from_light.z >= 0.0 ? 4u : 5u;
 }
 
-float point_visibility(GpuLight light, uint base, float3 world_position, float3 to_light,
-                       float n_dot_l, float3 geometric_normal, float2 pixel)
+/// The world width a **point** light's map covers at `world_position`, and in
+/// `face` which of its `SHADOW_POINT_FACES` maps that is: added to the light's
+/// `shadow_tile`, the first of the tiles it holds, it names the tile to read.
+float point_map_world(GpuLight light, float3 world_position, out uint face)
 {
-    if (n_dot_l <= 0.0)
-    {
-        return 1.0;
-    }
-
     float3 from_light = world_position - light.position.xyz;
     // A face is a 90° frustum, so its half-angle's tangent is 1 and the axial
     // depth is the largest component of the offset — which is the same
     // `2 d tan θ` a spot computes, with both terms known rather than read off
     // the row.
     float axial = max(max(abs(from_light.x), abs(from_light.y)), abs(from_light.z));
-    return punctual_visibility(base + point_face(from_light), world_position, to_light, n_dot_l,
-                               2.0 * axial, geometric_normal, pixel);
+    face = point_face(from_light);
+    return 2.0 * axial;
 }
 
 float range_window(float distance, float radius)
@@ -1621,18 +1627,32 @@ float3 grass_light(float3 world_position, float3 normal, float2 pixel)
             reach = sun_visibility(world_position, to_light, n_dot_l, geometric_normal, pixel,
                                    sun_cascade, sun_fade);
         }
-        else if (light.kind == KIND_POINT)
+        else
         {
-            if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
+            // One `punctual_visibility` for both kinds, on mesh.slang's
+            // `fragmentMain`'s terms: every call is inlined, and two would put
+            // two copies of the filter's taps in this loop.
+            uint tile = NO_SHADOW_TILE;
+            float map_world = 0.0;
+            if (light.kind == KIND_POINT)
             {
-                reach *= point_visibility(light, light.shadow_tile, world_position, to_light,
-                                          n_dot_l, geometric_normal, pixel);
+                if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
+                {
+                    uint face;
+                    map_world = point_map_world(light, world_position, face);
+                    tile = light.shadow_tile + face;
+                }
             }
-        }
-        else if (light.shadow_tile < SHADOW_LIGHT_TILES)
-        {
-            reach *= spot_visibility(light, light.shadow_tile, world_position, to_light, n_dot_l,
-                                     geometric_normal, pixel);
+            else if (light.shadow_tile < SHADOW_LIGHT_TILES)
+            {
+                tile = light.shadow_tile;
+                map_world = spot_map_world(light, world_position);
+            }
+            if (tile != NO_SHADOW_TILE && n_dot_l > 0.0)
+            {
+                reach *= punctual_visibility(tile, world_position, to_light, n_dot_l, map_world,
+                                             geometric_normal, pixel);
+            }
         }
 
         direct += light.color.rgb * (max(n_dot_l, 0.0) * reach);
