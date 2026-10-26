@@ -19,9 +19,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   it now carries the floating-point `surface_area_cost`.
 - **`crcbl_phys::CompoundError` has a new variant, `UnweighableMass`**, so an
   exhaustive `match` on it needs an arm for it.
+- **`crcbl_ui::tree::TextInput` has a new field, `preedit`**, so a struct
+  literal of it names `preedit: None` or ends in `..TextInput::default()`.
 
 ### Added
 
+- **A text input shows an input method's composition.** An engaged, unmasked
+  `Ui::text_input` (and a drag-value being typed into) draws the
+  `TextInput::preedit` it is handed at its caret, underlined by a
+  `.text-input-preedit` block, with the caret at the input method's cursor; the
+  value does not hold it until the input method commits it.
+  `crcbl::text_input::TextPump` keeps the latest `ShellEvent::TextPreedit` until
+  a commit, an empty one or the field's end clears it, and hands it over each
+  frame. `Ui::text_input_area` is the engaged caret's box, and the new
+  `TextPump::place` carries it to `Shell::set_text_input_area` in device pixels,
+  so the candidate window opens at the caret rather than at the window's corner;
+  the engine's console and the editor do both. `HeadlessShell::preedit_text`
+  injects a composition and `HeadlessShell::text_input_area` reads the area
+  back.
 - **`crcbl_phys::Bvh::surface_area_cost` and
   `BroadphaseStats::surface_area_cost`**: the summed half-surface area of the
   tree's live internal nodes. Refits keep the depth and node count unchanged

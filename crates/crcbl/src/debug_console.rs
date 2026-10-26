@@ -816,6 +816,14 @@ impl Console {
         self.panel.take_clipboard_requests()
     }
 
+    /// Where the field's caret is while it is engaged, in the console's logical
+    /// pixels, for the loop to carry to the shell through
+    /// [`TextPump::place`](crate::text_input::TextPump::place).
+    #[must_use]
+    pub fn text_input_area(&self) -> Option<(glam::Vec2, glam::Vec2)> {
+        self.panel.text_input_area()
+    }
+
     /// Whether the panel's field is taking typed text: what the loop reads the
     /// shell's keys into [`Edit`]s for, and what it syncs the reserved `text`
     /// context on.

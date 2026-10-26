@@ -27,6 +27,7 @@ fn typed(edits: impl IntoIterator<Item = Edit>) -> TextInput {
         dt: FRAME,
         edits: edits.into_iter().collect(),
         clipboard: Vec::new(),
+        preedit: None,
     }
 }
 
@@ -1010,4 +1011,129 @@ fn a_masked_input_is_a_password_to_the_input_method_and_nothing_is_none() {
     let engaged = page(&mut ui, idle(), NavInput::ACCEPT, quiet(), &mut values);
     assert_eq!(engaged.pass.engagement, Engagement::Began);
     assert_eq!(ui.text_editing_purpose(), Some(TextPurpose::Password));
+}
+
+/// A frame's text input carrying `preedit` and no edits.
+fn composing(text: &str, cursor: Option<usize>) -> TextInput {
+    TextInput {
+        preedit: Some(crate::tree::Preedit {
+            text: text.to_owned(),
+            cursor,
+        }),
+        ..quiet()
+    }
+}
+
+/// **An input method's composition shows at the caret, underlined, and is not
+/// the value**: the span draws it between the text before and after the
+/// caret, a `.text-input-preedit` block lies under exactly its glyphs at the
+/// span's foot, the caret stands at the input method's cursor inside it — at
+/// its end when there is none — and nothing is selected; the commit is an
+/// ordinary insert, after which no underline is left.
+#[test]
+fn a_composition_shows_at_the_caret_underlined_and_is_not_the_value() {
+    let (mut ui, mut values) = engaged_on("ab");
+    page(
+        &mut ui,
+        idle(),
+        NavInput::NAVIGATION,
+        typed([step(Motion::Home, false), step(Motion::Right, false)]),
+        &mut values,
+    );
+    let shown_with = |ui: &mut Ui, values: &mut [String; 2], input| {
+        let key = page(ui, idle(), NavInput::NAVIGATION, input, values)
+            .name
+            .key;
+        let span = part(ui, key, ".text-input-text").expect("text");
+        (key, span)
+    };
+
+    let (key, span) = shown_with(&mut ui, &mut values, composing("xy", Some(1)));
+    assert_eq!(values[0], "ab", "the composition reached the value");
+    assert_eq!(shown(&ui, span), "axyb");
+    assert!(
+        part(&ui, key, ".text-input-selection").is_none(),
+        "something is selected while composing"
+    );
+    let (text_min, text_max) = rect(&ui, span);
+    let [a, ax, axy] = ["a", "ax", "axy"].map(|text| text_min.x + bitmap_width(&ui, span, text));
+    let underline = part(&ui, key, ".text-input-preedit").expect("an underline");
+    let (under_min, under_max) = rect(&ui, underline);
+    assert_eq!((under_min.x, under_max.x), (a, axy));
+    assert_eq!(
+        under_max.y, text_max.y,
+        "the underline is not at the text's foot"
+    );
+    let caret = part(&ui, key, ".text-input-caret").expect("caret");
+    assert_eq!(rect(&ui, caret).0.x, ax, "the caret is not at the cursor");
+
+    shown_with(&mut ui, &mut values, composing("xy", None));
+    let caret = part(&ui, key, ".text-input-caret").expect("caret");
+    assert_eq!(rect(&ui, caret).0.x, axy, "no cursor is not the end");
+
+    let (_, span) = shown_with(&mut ui, &mut values, typed([insert("xy")]));
+    assert_eq!(values[0], "axyb");
+    assert_eq!(shown(&ui, span), "axyb");
+    assert!(
+        part(&ui, key, ".text-input-preedit").is_none(),
+        "an underline outlived the composition"
+    );
+}
+
+/// **The caret's area is where the caret is drawn**, in screen pixels, while
+/// an input is engaged, and nowhere once it is not.
+#[test]
+fn the_text_input_area_is_the_engaged_caret() {
+    let (mut ui, mut values) = engaged_on("abc");
+    let key = page(
+        &mut ui,
+        idle(),
+        NavInput::NAVIGATION,
+        typed([step(Motion::Home, false), step(Motion::Right, false)]),
+        &mut values,
+    )
+    .name
+    .key;
+    let caret = part(&ui, key, ".text-input-caret").expect("caret");
+    assert_eq!(ui.text_input_area(), Some(rect(&ui, caret)));
+
+    page(&mut ui, idle(), NavInput::ACCEPT, quiet(), &mut values);
+    assert!(!ui.text_editing());
+    assert_eq!(
+        ui.text_input_area(),
+        None,
+        "an area outlived the engagement"
+    );
+}
+
+/// **A composition over a selection shows in its place**, which is where its
+/// commit lands: accept selects the whole text, so the composition is all
+/// the span draws, and the commit replaces the text.
+#[test]
+fn a_composition_over_a_selection_shows_in_its_place() {
+    let (mut ui, mut values) = engaged_on("abc");
+    let key = page(
+        &mut ui,
+        idle(),
+        NavInput::NAVIGATION,
+        composing("xy", None),
+        &mut values,
+    )
+    .name
+    .key;
+    let span = part(&ui, key, ".text-input-text").expect("text");
+    assert_eq!(shown(&ui, span), "xy");
+    assert_eq!(values[0], "abc", "the composition reached the value");
+
+    page(
+        &mut ui,
+        idle(),
+        NavInput::NAVIGATION,
+        typed([insert("xy")]),
+        &mut values,
+    );
+    assert_eq!(
+        values[0], "xy",
+        "the commit did not land where it was shown"
+    );
 }

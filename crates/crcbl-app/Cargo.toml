@@ -19,6 +19,8 @@ crcbl-hal = { workspace = true }
 crcbl-shell = { workspace = true }
 # The tree's `TextInput`, edits and clipboard requests `TextPump` carries.
 crcbl-ui = { workspace = true }
+# The caret area `TextPump::place` takes, in the tree's own `Vec2`s.
+glam = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 
@@ -58,7 +60,6 @@ crcbl-dx12 = { workspace = true }
 # does not wait on it: the presenter takes whatever command buffer a caller
 # records, and `crcbl-frame` is one way to record it.
 crcbl-frame = { path = "../crcbl-frame" }
-glam = { workspace = true }
 # `src/present/tests.rs` re-runs its own test binary with the trace on, so the
 # present-wait span is recorded in a process no other test shares.
 crcbl-spawn = { path = "../crcbl-spawn" }

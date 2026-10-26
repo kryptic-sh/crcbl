@@ -80,6 +80,18 @@
 //! The caret blinks on [`crate::console::caret_shown`]'s interval, and is shown
 //! solid from any edit or caret move. A hidden caret is the same block with a
 //! transparent background, so the blink changes no layout.
+//!
+//! # An input method's composition
+//!
+//! While an engaged, unmasked input has a [`TextInput::preedit`], the span
+//! shows it in the selection's place — at the caret when nothing is selected —
+//! which is where its commit, an ordinary [`Edit::Insert`], will land; the
+//! caret stands at the input method's cursor inside it, and a
+//! `.text-input-preedit` block, placed after layout under exactly its glyphs,
+//! underlines it. The value does not hold it until the input method commits
+//! it, and holds it not at all if the input method takes it back.
+//! [`Ui::text_input_area`] is where the caret is, for the input method's
+//! candidate window.
 
 use std::panic::Location;
 use std::time::Duration;
@@ -118,6 +130,20 @@ pub struct TextInput {
     pub edits: Vec<Edit>,
     /// The clipboard's answers that arrived for this frame.
     pub clipboard: Vec<ClipboardAnswer>,
+    /// The input method's composition in progress, which the engaged input
+    /// shows at its caret; see the module docs. `None` while there is none.
+    pub preedit: Option<Preedit>,
+}
+
+/// An input method's composition in progress: text shown at the caret that is
+/// not yet the input's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Preedit {
+    /// The composition so far.
+    pub text: String,
+    /// Where the input method's cursor sits in `text`, as a byte offset on a
+    /// `char` boundary; `None` puts it after the composition.
+    pub cursor: Option<usize>,
 }
 
 /// What a text input asks of the clipboard; see the module docs.
@@ -194,6 +220,11 @@ pub(crate) struct EditState {
     engaged: bool,
     /// Whether it was built masked last, as a password field is.
     masked: bool,
+    /// The composition it showed last, so a change shows the caret solid.
+    preedit: Option<Preedit>,
+    /// The caret's box from the block's border box, unscrolled, as last laid
+    /// out: its top-left corner and its size.
+    caret_box: (Vec2, Vec2),
 }
 
 impl EditState {
@@ -262,6 +293,9 @@ pub(crate) struct TextFit {
     active: bool,
     /// The span shows the placeholder, so every caret stop is its start.
     placeholder: bool,
+    /// The `.text-input-preedit` block and the chars of the composition it
+    /// underlines.
+    preedit: Option<(usize, core::ops::Range<usize>)>,
 }
 
 /// The caret stops and cluster edges of `text` at `style`'s size in `font` —
@@ -435,17 +469,54 @@ impl Ui {
         }
 
         let active = engaged || interaction.pressed;
-        let placeholder = value.is_empty() && !options.placeholder.is_empty();
+        let preedit = self
+            .text_frame
+            .preedit
+            .clone()
+            .filter(|preedit| engaged && !options.masked && !preedit.text.is_empty());
+        if preedit != state.preedit {
+            state.blink = Duration::ZERO;
+            state.preedit.clone_from(&preedit);
+        }
+        let placeholder = value.is_empty() && !options.placeholder.is_empty() && preedit.is_none();
+        let caret = state.line.caret();
         let masked: String;
-        let shown = if placeholder {
-            options.placeholder
+        let composed: String;
+        let (shown, caret_at, composing) = if placeholder {
+            (options.placeholder, caret, None)
         } else if options.masked {
             masked = core::iter::repeat_n(MASK, state.line.len()).collect();
-            &masked
+            (masked.as_str(), caret, None)
+        } else if let Some(preedit) = &preedit {
+            // In the selection's place, which the commit will replace; at the
+            // caret when nothing is selected.
+            let text = state.line.text();
+            let over = state.line.selection();
+            let byte = |at: usize| text.char_indices().nth(at).map_or(text.len(), |(at, _)| at);
+            composed = [
+                &text[..byte(over.start)],
+                preedit.text.as_str(),
+                &text[byte(over.end)..],
+            ]
+            .concat();
+            let cursor = preedit
+                .cursor
+                .and_then(|cursor| preedit.text.get(..cursor))
+                .unwrap_or(&preedit.text);
+            let chars = over.start..over.start + preedit.text.chars().count();
+            (
+                composed.as_str(),
+                over.start + cursor.chars().count(),
+                Some(chars),
+            )
         } else {
-            state.line.text()
+            (state.line.text(), caret, None)
         };
-        let range = state.line.selection();
+        let range = if composing.is_some() {
+            0..0
+        } else {
+            state.line.selection()
+        };
         let pseudo = if state.refused {
             PseudoClasses::REFUSED
         } else {
@@ -463,9 +534,10 @@ impl Ui {
             text: 0,
             selection: Vec::new(),
             caret: None,
-            caret_at: state.line.caret(),
+            caret_at,
             active,
             placeholder,
+            preedit: None,
         };
         let response = self.open_block(key, parsed, inline, Behavior::ENGAGE, pseudo, |ui| {
             if active && !placeholder && !range.is_empty() {
@@ -484,6 +556,10 @@ impl Ui {
                 ".text-input-text"
             };
             ui.span(class, shown, &[]);
+            if let Some(chars) = composing {
+                fit.preedit = Some((ui.nodes.len(), chars));
+                ui.block(".text-input-preedit", &[], |_| {});
+            }
             if engaged {
                 fit.caret = Some(ui.nodes.len());
                 ui.block(".text-input-caret", caret_style, |_| {});
@@ -582,6 +658,23 @@ impl Ui {
             .map(|state| (state.line.caret(), state.line.anchor()))
     }
 
+    /// Where the engaged text input's caret is, in screen pixels, as last laid
+    /// out: its border box's top-left and bottom-right corners, for the
+    /// platform input method to open its candidate window beside — see
+    /// `crcbl_shell::Shell::set_text_input_area`. `None` while
+    /// [`text_editing`](Self::text_editing) is false.
+    #[must_use]
+    pub fn text_input_area(&self) -> Option<(Vec2, Vec2)> {
+        let key = self.engaged()?;
+        let node = self.store.by_key(key)?;
+        if !node.widget.types() {
+            return None;
+        }
+        let (corner, size) = self.edits.get(&key)?.caret_box;
+        let min = node.rect.0 - node.scroll_offset + corner;
+        Some((min, min + size))
+    }
+
     /// Places every text input's selection and caret on the boundaries of the
     /// glyphs they name, and scrolls each block to keep its caret in view:
     /// after Taffy's layout is rounded, before scroll offsets are clamped and
@@ -660,11 +753,27 @@ impl Ui {
                     height,
                 };
             }
+            if let Some((index, chars)) = &fit.preedit {
+                let shown_chars = carets.trailing.len();
+                let chars = chars.start.min(shown_chars)..chars.end.min(shown_chars);
+                let (left, right) = carets.span(chars);
+                let (left, right) = ((origin + left).round(), (origin + right).round());
+                let layout = &mut self.nodes[*index].layout;
+                layout.location = taffy::Point {
+                    x: left,
+                    y: top + height - layout.size.height,
+                };
+                layout.size.width = right - left;
+            }
             if let Some(index) = fit.caret {
                 let layout = &mut self.nodes[index].layout;
                 layout.location = taffy::Point { x: caret_x, y: top };
                 layout.size.height = height;
             }
+            state.caret_box = (
+                Vec2::new(caret_x, top),
+                Vec2::new(caret_width.max(1.0), height),
+            );
         }
         self.fits = fits;
         self.fits.clear();

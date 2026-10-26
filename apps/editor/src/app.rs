@@ -818,6 +818,13 @@ impl<S: Shell + ?Sized> Editor<S> {
             self.shell.as_mut(),
             self.window,
         );
+        // The panels are laid out in the window's device pixels.
+        self.text_pump.place(
+            self.panels.text_input_area(),
+            1.0,
+            self.shell.as_mut(),
+            self.window,
+        );
         self.sync_contexts();
 
         // Before this frame's actions: the time the frame covers passed before

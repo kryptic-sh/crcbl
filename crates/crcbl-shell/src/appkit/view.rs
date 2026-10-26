@@ -961,7 +961,9 @@ unsafe extern "C" fn attributed_substring(
 /// `validAttributesForMarkedText` — an empty array.
 ///
 /// The attributes a client is willing to have applied to its pre-edit, and this
-/// one draws no pre-edit at all.
+/// view applies none: the pre-edit goes to the app as
+/// [`ShellEvent::TextPreedit`](crate::ShellEvent::TextPreedit), whose text
+/// input draws it.
 ///
 /// # Safety
 ///

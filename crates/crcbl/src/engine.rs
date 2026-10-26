@@ -6697,6 +6697,12 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             self.shell.as_mut(),
             self.window,
         );
+        self.text_pump.place(
+            self.console.text_input_area(),
+            self.ui_scale,
+            self.shell.as_mut(),
+            self.window,
+        );
         // Where a console write reaches the frame. `Binding`s record into a
         // `settings::Deferred` because they are handed their host as
         // `&mut dyn Any` and cannot hold a borrow of the renderer; this is the

@@ -123,7 +123,7 @@ pub use scrollbar::MIN_SCROLL_HANDLE;
 pub use select::SELECT_CARET;
 pub use split::{SPLIT_NAV_STEP, SplitAxis};
 pub use text_input::{
-    ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, MASK, TextInput,
+    ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, MASK, Preedit, TextInput,
     TextInputOptions,
 };
 pub(crate) use text_input::{EditState, TextFit};

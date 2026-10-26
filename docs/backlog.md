@@ -296,10 +296,9 @@ SVG text shaping and the Unicode text work have shipped; what is left:
    its own loop (not `crcbl-app`), already calls `set_text_input`, and is wiring
    `TextPreedit` and `set_text_input_area` itself against 0.5.0's Win32 backend,
    which it will verify with the Microsoft IME; AppKit's half shipped
-   2026-10-19. Separately, for `crcbl-app`'s own users and not pikr:
-   `crcbl_app::TextPump` draws no pre-edit at the caret and never calls
-   `set_text_input_area`, so the candidate window sits at the window's origin.
-   Build both in `crcbl-app` and `crcbl-ui`'s text field.
+   2026-10-19. For `crcbl-app`'s own users the field's half is in (2026-10-26):
+   the engaged text input draws the pre-edit underlined at its caret, and
+   `TextPump::place` hands `Ui::text_input_area` to `set_text_input_area`.
 2. **Owed by pikr: the Japanese IME re-check on the release after 0.9.0.**
    pikr's run on 0.8.1 (2026-10-23) found the IME's own composition window still
    showing beside the inline pre-edit, and again on 0.9.0, which predates the
@@ -7575,8 +7574,7 @@ in `crcbl_input::list`). Decisions, then what is left.
     elsewhere drops it: focus has moved on, so there is no field to mend it in.
     Accept is still the way to keep a refused field open.
 - **Not covered by typing into a drag-value**: there is no expression evaluation
-  (`2*3`) and no unit suffix; and a pre-edit (IME) string is not shown, as for
-  every text input.
+  (`2*3`) and no unit suffix.
 - **Decisions taken with the 64-bit drag-value (2026-10-03, `DragNumber` in
   `crates/crcbl-ui/src/tree/widgets/value.rs`)**, which still bind. No reflected
   leaf goes through the slider, so it stayed `f32`.
@@ -7786,16 +7784,17 @@ in `crcbl_input::list`). Decisions, then what is left.
 `Ui::text_input`, `crcbl_ui::edit` and `crcbl::text_input::TextPump` landed with
 the gaps below.
 
-- **Pre-edit is not drawn**: the seam carries `ShellEvent::TextPreedit` and
-  `Shell::set_text_input_area` (merged 2026-10-06), and the Win32 backend sends
-  and honours them, unverified against a real input method (see _No verified IME
-  pre-edit_ under Win32 below). `crcbl::text_input` does neither yet: drawing
-  the pre-edit underlined at the caret, and telling the shell the caret's
-  rectangle, are the field's half. AppKit sends the pre-edit and places its
-  candidate window at the area too (`appkit/view.rs`), unverified against a real
-  input method. Wayland sends both through `text-input-v3`, but only for a
-  window that has named a field with `Shell::set_text_input`, which
-  `crcbl::text_input::TextPump::engage` does each frame the field changes.
+- **The pre-edit is drawn and the caret's area is told (2026-10-26), proven on
+  the tree and `HeadlessShell` only.** The engaged field underlines
+  `TextInput::preedit` in the selection's place (at the caret when nothing is
+  selected), where its commit lands, and `TextPump::place` carries
+  `Ui::text_input_area` to `Shell::set_text_input_area`
+  (`a_composition_shows_at_the_caret_underlined_and_is_not_the_value`,
+  `a_composition_over_a_selection_shows_in_its_place`,
+  `the_text_input_area_is_the_engaged_caret`, and the pump's two tests, each red
+  under a hand mutant). Unverified: a real input method end to end on any
+  backend. Not done: the input method's own segment styles (a converted clause
+  against the one being edited), which no backend reports.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
   fallback so copy and paste work within one page.

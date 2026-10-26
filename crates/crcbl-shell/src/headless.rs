@@ -238,6 +238,8 @@ struct HeadlessWindow {
     panel: Option<crate::role::KeptPanel>,
     /// [`Shell::set_text_input`]'s last word.
     text_input: Option<TextPurpose>,
+    /// [`Shell::set_text_input_area`]'s last word.
+    text_input_area: Option<PhysicalRect>,
     /// [`Shell::set_input_region`]'s last word: `None` for the whole window.
     input_region: Option<Vec<PhysicalRect>>,
     /// Whether a pretend assistive technology is reading the window, and what
@@ -957,6 +959,39 @@ impl HeadlessShell {
         Ok(())
     }
 
+    /// Injects a composition in progress, as an input method would: `text`
+    /// so far, its cursor at the byte offset `cursor`, and an empty `text` for
+    /// a composition that ended.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    ///
+    /// # Panics
+    ///
+    /// If `cursor` is not on a `char` boundary of `text`, or is given for an
+    /// empty `text` — [`ShellEvent::TextPreedit`] documents both.
+    pub fn preedit_text(
+        &mut self,
+        window: WindowId,
+        text: &str,
+        cursor: Option<usize>,
+    ) -> Result<(), ShellError> {
+        assert!(
+            cursor.is_none_or(|cursor| !text.is_empty() && text.is_char_boundary(cursor)),
+            "a pre-edit's cursor is a char boundary of a non-empty text"
+        );
+        self.check_window(window)?;
+        let event = ShellEvent::TextPreedit {
+            window,
+            time: self.now(),
+            text: text.to_string(),
+            cursor,
+        };
+        self.queue.push_back(event);
+        Ok(())
+    }
+
     /// Drops a file on the window.
     ///
     /// # Errors
@@ -1081,6 +1116,19 @@ impl HeadlessShell {
     /// [`ShellError::InvalidWindow`] if the handle is stale.
     pub fn text_input(&self, window: WindowId) -> Result<Option<TextPurpose>, ShellError> {
         Ok(self.window(window)?.text_input)
+    }
+
+    /// Where the window last said text is being entered, with
+    /// [`Shell::set_text_input_area`]; `None` until it said, or once it
+    /// handed placement back.
+    ///
+    /// Headless-only, for the same reason as [`title`](Self::title).
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    pub fn text_input_area(&self, window: WindowId) -> Result<Option<PhysicalRect>, ShellError> {
+        Ok(self.window(window)?.text_input_area)
     }
 
     /// What the panel was created with, or last given by
@@ -1614,6 +1662,7 @@ impl Shell for HeadlessShell {
                 popup_input,
                 panel,
                 text_input: None,
+                text_input_area: None,
                 input_region: None,
                 #[cfg(feature = "accesskit")]
                 accessibility: None,
@@ -1896,6 +1945,18 @@ impl Shell for HeadlessShell {
         field: Option<TextPurpose>,
     ) -> Result<(), ShellError> {
         self.window_mut(window)?.text_input = field;
+        Ok(())
+    }
+
+    /// Records the area, which
+    /// [`text_input_area`](HeadlessShell::text_input_area) reads back; there
+    /// is no input method to place.
+    fn set_text_input_area(
+        &mut self,
+        window: WindowId,
+        area: Option<PhysicalRect>,
+    ) -> Result<(), ShellError> {
+        self.window_mut(window)?.text_input_area = area;
         Ok(())
     }
 

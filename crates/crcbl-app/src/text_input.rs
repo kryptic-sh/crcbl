@@ -55,22 +55,33 @@
 //! # IME
 //!
 //! A [`ShellEvent::TextCommit`] is an [`Edit::Insert`], so an input method's
-//! committed text lands like typing. **Pre-edit is not drawn**: the shell reports
-//! a composition in progress as [`ShellEvent::TextPreedit`] (the Win32, Wayland
-//! and AppKit backends do), and this field does not yet underline it at the
-//! caret or call `Shell::set_text_input_area`. **The input method follows the
-//! field**: [`TextPump::engage`] turns it on while the tree is editing and off
-//! otherwise, which is what lets a Wayland input method compose at all (see
-//! `Shell::set_text_input`).
+//! committed text lands like typing. **A composition in progress is shown**:
+//! the shell reports it as [`ShellEvent::TextPreedit`] (the Win32, Wayland and
+//! AppKit backends do), the pump keeps the latest until a commit, an empty one
+//! or the field's end clears it, and hands it to the tree each frame as
+//! [`TextInput::preedit`], which the engaged field underlines at its caret.
+//! **The input method follows the field**: [`TextPump::engage`] turns it on
+//! while the tree is editing and off otherwise, which is what lets a Wayland
+//! input method compose at all (see `Shell::set_text_input`), and
+//! [`TextPump::place`] tells it where the caret is, so its candidate window
+//! opens there rather than at the window's corner.
+//!
+//! ```text
+//! pump.engage(ui.text_editing_purpose(), shell, window)
+//! pump.place(ui.text_input_area(), scale, shell, window)   // after engage
+//! ```
 
 use std::time::Duration;
 
 use crcbl_shell::{
-    ButtonState, ClipboardContent, ClipboardOffer, ClipboardRequestId, MimeType, Shell, ShellEvent,
-    TextPurpose, WindowId,
+    ButtonState, ClipboardContent, ClipboardOffer, ClipboardRequestId, MimeType, PhysicalRect,
+    Shell, ShellEvent, TextPurpose, WindowId,
 };
 use crcbl_ui::edit::{ClipboardOp, Edit};
-use crcbl_ui::tree::{ClipboardAnswer, ClipboardReply, ClipboardRequest, NodeKey, TextInput};
+use crcbl_ui::tree::{
+    ClipboardAnswer, ClipboardReply, ClipboardRequest, NodeKey, Preedit, TextInput,
+};
+use glam::Vec2;
 
 /// Collects a frame's text input from shell events and carries the tree's
 /// clipboard requests to the shell. See the module docs.
@@ -85,6 +96,12 @@ pub struct TextPump {
     /// What [`engage`](Self::engage) last told the shell, so it asks only on a
     /// change; `None` until it has told it anything.
     engaged: Option<Option<TextPurpose>>,
+    /// The input method's composition in progress, until a commit, an empty
+    /// one or the field's end clears it.
+    preedit: Option<Preedit>,
+    /// What [`place`](Self::place) last told the shell, so it asks only on a
+    /// change; `None` until it has, and again whenever the field changes.
+    area: Option<Option<PhysicalRect>>,
 }
 
 impl TextPump {
@@ -116,6 +133,14 @@ impl TextPump {
             },
             ShellEvent::TextCommit { text, .. } if editing => {
                 self.edits.push(Edit::Insert(text.clone()));
+                self.preedit = None;
+                true
+            }
+            ShellEvent::TextPreedit { text, cursor, .. } if editing => {
+                self.preedit = (!text.is_empty()).then(|| Preedit {
+                    text: text.clone(),
+                    cursor: *cursor,
+                });
                 true
             }
             ShellEvent::ClipboardData {
@@ -146,7 +171,8 @@ impl TextPump {
     }
 
     /// This frame's text input for [`Ui::set_text_input`], `dt` long: every
-    /// edit and answer observed since the last call.
+    /// edit and answer observed since the last call, and the composition in
+    /// progress, which lasts until it is cleared.
     ///
     /// [`Ui::set_text_input`]: crcbl_ui::tree::Ui::set_text_input
     pub fn frame(&mut self, dt: Duration) -> TextInput {
@@ -154,6 +180,7 @@ impl TextPump {
             dt,
             edits: std::mem::take(&mut self.edits),
             clipboard: std::mem::take(&mut self.answers),
+            preedit: self.preedit.clone(),
         }
     }
 
@@ -209,12 +236,61 @@ impl TextPump {
         if self.engaged == Some(field) {
             return;
         }
+        // A field's end ends its composition, and a new field's input method
+        // has not been told where it is.
+        if field.is_none() {
+            self.preedit = None;
+        }
+        self.area = None;
         match shell.set_text_input(window, field) {
             Ok(()) => self.engaged = Some(field),
             Err(error) => crcbl_core::warn!(
                 "text input: the shell refused to set the input method to {field:?} — {error}"
             ),
         }
+    }
+
+    /// Tells the platform input method where the field of `window` taking
+    /// typing has its caret, with [`Shell::set_text_input_area`]: `area` is
+    /// [`Ui::text_input_area`](crcbl_ui::tree::Ui::text_input_area)'s corners
+    /// in the tree's pixels, which `scale` turns into the window's device
+    /// pixels — `1.0` for a tree laid out in them. Call it after
+    /// [`engage`](Self::engage), which a Wayland input method needs first.
+    /// The shell is asked only when the area changes.
+    pub fn place<S: Shell + ?Sized>(
+        &mut self,
+        area: Option<(Vec2, Vec2)>,
+        scale: f32,
+        shell: &mut S,
+        window: WindowId,
+    ) {
+        let area = area.map(|(min, max)| device_rect(min * scale, max * scale));
+        if self.area == Some(area) {
+            return;
+        }
+        match shell.set_text_input_area(window, area) {
+            Ok(()) => self.area = Some(area),
+            Err(error) => crcbl_core::warn!(
+                "text input: the shell refused to place the input method at {area:?} — {error}"
+            ),
+        }
+    }
+}
+
+/// The device pixels a box from `min` to `max` covers: out to whole pixels on
+/// every side, and never narrower or shorter than one.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a window's pixels fit an i32, and a floored-and-ceiled extent of at least one is positive"
+)]
+fn device_rect(min: Vec2, max: Vec2) -> PhysicalRect {
+    let (min, max) = (min.floor(), max.ceil());
+    PhysicalRect {
+        x: min.x as i32,
+        y: min.y as i32,
+        width: (max.x - min.x).max(1.0) as u32,
+        height: (max.y - min.y).max(1.0) as u32,
     }
 }
 
@@ -296,5 +372,109 @@ mod tests {
         pump.engage(Some(TextPurpose::Normal), &mut shell, window);
         pump.engage(None, &mut shell, window);
         assert_eq!(field(&shell), None);
+    }
+
+    /// Pumps `shell` into `pump`, editing, and hands back the frame after.
+    fn pumped(shell: &mut HeadlessShell, pump: &mut TextPump) -> TextInput {
+        let mut events = Vec::new();
+        shell.pump(&mut |event| events.push(event));
+        for event in &events {
+            pump.observe(event, true);
+        }
+        pump.frame(FRAME)
+    }
+
+    /// **A composition is held until a commit, an empty one or the field's
+    /// end clears it**, frame after frame, and one arriving while nothing is
+    /// editing is not the pump's.
+    #[test]
+    fn a_composition_is_held_until_a_commit_an_empty_one_or_the_fields_end() {
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("a headless window");
+        let mut pump = TextPump::new();
+        let kana = Some(Preedit {
+            text: "かな".to_owned(),
+            cursor: Some(3),
+        });
+
+        shell.preedit_text(window, "かな", Some(3)).expect("live");
+        assert_eq!(pumped(&mut shell, &mut pump).preedit, kana);
+        assert_eq!(
+            pumped(&mut shell, &mut pump).preedit,
+            kana,
+            "the composition was not held to the next frame"
+        );
+
+        shell.commit_text(window, "仮名").expect("live");
+        let committed = pumped(&mut shell, &mut pump);
+        assert_eq!(committed.edits, [Edit::Insert("仮名".to_owned())]);
+        assert_eq!(committed.preedit, None, "a commit left its composition");
+
+        shell.preedit_text(window, "かな", Some(3)).expect("live");
+        pumped(&mut shell, &mut pump);
+        shell.preedit_text(window, "", None).expect("live");
+        assert_eq!(
+            pumped(&mut shell, &mut pump).preedit,
+            None,
+            "an empty one did not clear it"
+        );
+
+        shell.preedit_text(window, "かな", Some(3)).expect("live");
+        pumped(&mut shell, &mut pump);
+        pump.engage(Some(TextPurpose::Normal), &mut shell, window);
+        pump.engage(None, &mut shell, window);
+        assert_eq!(
+            pump.frame(FRAME).preedit,
+            None,
+            "the field's end did not clear it"
+        );
+
+        shell.preedit_text(window, "かな", None).expect("live");
+        let mut events = Vec::new();
+        shell.pump(&mut |event| events.push(event));
+        assert!(
+            !pump.observe(&events[0], false),
+            "taken while nothing edits"
+        );
+        assert_eq!(pump.frame(FRAME).preedit, None);
+    }
+
+    /// **The caret's area reaches the shell in device pixels**, out to whole
+    /// pixels, only when it changes — and again once the field changes, whose
+    /// input method has not been told it.
+    #[test]
+    fn the_caret_area_is_told_in_device_pixels_when_it_changes() {
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("a headless window");
+        let mut pump = TextPump::new();
+        let area = |shell: &HeadlessShell| shell.text_input_area(window).expect("live");
+        let caret = Some((Vec2::new(10.2, 20.0), Vec2::new(11.2, 36.0)));
+        let told = Some(PhysicalRect {
+            x: 20,
+            y: 40,
+            width: 3,
+            height: 32,
+        });
+
+        pump.engage(Some(TextPurpose::Normal), &mut shell, window);
+        pump.place(caret, 2.0, &mut shell, window);
+        assert_eq!(area(&shell), told);
+
+        shell
+            .set_text_input_area(window, None)
+            .expect("cleared behind the pump's back");
+        pump.place(caret, 2.0, &mut shell, window);
+        assert_eq!(area(&shell), None, "no change, so nothing was asked");
+
+        pump.engage(Some(TextPurpose::Password), &mut shell, window);
+        pump.place(caret, 2.0, &mut shell, window);
+        assert_eq!(area(&shell), told, "a new field was not told");
+
+        pump.place(None, 2.0, &mut shell, window);
+        assert_eq!(area(&shell), None);
     }
 }

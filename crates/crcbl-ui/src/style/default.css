@@ -387,6 +387,13 @@ text-input {
   background: #3d8bfd;
 }
 
+/* An input method's composition, underlined in the text's colour. */
+.text-input-preedit {
+  position: absolute;
+  height: 1px;
+  background: #e6e9ef;
+}
+
 text-input:hover {
   border-color: #e6e9ef;
 }
@@ -918,6 +925,10 @@ text-input.console-input > .text-input-caret {
 
 text-input.console-input > .text-input-selection {
   background: color(srgb-linear 0.24 0.27 0.44);
+}
+
+text-input.console-input > .text-input-preedit {
+  background: color(srgb-linear 0.94 0.95 1);
 }
 
 button.console-send {

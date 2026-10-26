@@ -283,6 +283,7 @@ fn typing(text: &str, dt: Duration) -> TextInput {
         dt,
         edits: vec![Edit::Insert(text.to_owned())],
         clipboard: Vec::new(),
+        preedit: None,
     }
 }
 

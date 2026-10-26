@@ -692,6 +692,14 @@ impl Panels {
         self.ui.text_editing_purpose()
     }
 
+    /// Where the field being typed into has its caret, in the window's device
+    /// pixels, for the platform input method; see
+    /// [`Ui::text_input_area`](crcbl::ui::tree::Ui::text_input_area).
+    #[must_use]
+    pub fn text_input_area(&self) -> Option<(Vec2, Vec2)> {
+        self.ui.text_input_area()
+    }
+
     /// Whether a drop-down's list or a context menu is open and takes the
     /// keyboard's typing and jump keys: what the reserved `list` context is
     /// pushed on.

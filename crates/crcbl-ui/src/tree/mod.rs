@@ -275,8 +275,8 @@ pub use widgets::{
     ContextMenuResponse, DOUBLE_CLICK_TIME, DockLayout, DockSide, DragNumber, FieldEdit, FieldRow,
     INSPECTOR_STEP, Inspection, InspectorOptions, LIST_OVERSCAN, MASK, MIN_SCROLL_HANDLE,
     OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions,
-    OutlinerRow, OutlinerState, Overrides, RowBuilder, SELECT_CARET, SPLIT_NAV_STEP, SelectMode,
-    SplitAxis, TextInput, TextInputOptions, VARIANT_LABEL, VariantEdit, WHOLE_STEP,
+    OutlinerRow, OutlinerState, Overrides, Preedit, RowBuilder, SELECT_CARET, SPLIT_NAV_STEP,
+    SelectMode, SplitAxis, TextInput, TextInputOptions, VARIANT_LABEL, VariantEdit, WHOLE_STEP,
 };
 
 /// How far the pointer must move from where a press began, in pixels, before

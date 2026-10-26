@@ -385,6 +385,13 @@ impl ConsolePanel {
         self.ui.take_clipboard_requests()
     }
 
+    /// Where the field's caret is while it is engaged, for the platform input
+    /// method — [`Ui::text_input_area`].
+    #[must_use]
+    pub fn text_input_area(&self) -> Option<(Vec2, Vec2)> {
+        self.ui.text_input_area()
+    }
+
     /// What this frame's pointer produced: a line **Send** or the on-screen
     /// keyboard's return key submitted, or a key the keyboard was tapped on.
     /// Call it after [`ConsolePanel::layout`], with the same pointer.
@@ -505,6 +512,7 @@ impl ConsolePanel {
             dt: input.dt,
             edits,
             clipboard: input.clipboard,
+            preedit: input.preedit,
         });
 
         let built = {

@@ -23,6 +23,7 @@ fn typed(edits: impl IntoIterator<Item = Edit>) -> TextInput {
         dt: FRAME,
         edits: edits.into_iter().collect(),
         clipboard: Vec::new(),
+        preedit: None,
     }
 }
 
