@@ -110,6 +110,36 @@ fn a_span_measures_and_draws_each_char_in_its_fallback_face() {
     assert_eq!(glyphs[0].glyph, smile);
 }
 
+/// **A tree reads a lazy fallback face only for text that needs it**:
+/// setting the list, and building, laying out and drawing Latin text, leave
+/// it unread; the first emoji reads it, and draws in it.
+#[test]
+fn a_lazy_fallback_face_is_read_when_text_first_needs_it() {
+    let lazy = Font::lazy(|| {
+        Ok::<_, String>(include_bytes!("../../tests/fixtures/emoji/cbdt.ttf").as_slice())
+    });
+    let mut ui = tree();
+    ui.set_fallback_fonts([lazy.clone()]);
+    let mut list = DrawList::new();
+    frame(&mut ui, idle(), |ui| {
+        ui.span(".t", "plain text", &[]);
+    });
+    ui.emit(&mut list);
+    assert!(!lazy.is_loaded(), "nothing in Latin-1 reads it");
+
+    let mut key = None;
+    frame(&mut ui, idle(), |ui| {
+        key = Some(ui.span(".t", "a\u{1F600}", &[]).key);
+    });
+    assert!(lazy.is_loaded());
+    let (min, max) = ui.rect(key.expect("built")).expect("laid out");
+    assert_eq!(max.x - min.x, NARROW + WIDE);
+    let mut list = DrawList::new();
+    ui.emit(&mut list);
+    let fonts: Vec<Font> = runs(&list).into_iter().map(|(font, _, _)| font).collect();
+    assert_eq!(fonts, [primary().clone(), lazy]);
+}
+
 /// **A paragraph's runs fall back the same way**, and a run's fragment —
 /// what it is hit on — is as wide as its glyphs, the emoji's included.
 #[test]

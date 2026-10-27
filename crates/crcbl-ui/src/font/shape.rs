@@ -108,7 +108,7 @@ fn shape_run(
     _rtl: bool,
     _out: &mut Vec<ShapedGlyph>,
 ) {
-    match font.face(face).parsed.never {}
+    match font.face(face).source.never {}
 }
 
 /// Appends `range` of `text` shaped in `font`'s face `face` at `size`, right
@@ -131,7 +131,7 @@ fn shape_run(
     } else {
         0.0
     };
-    let Some(shaper) = &drawn.parsed.shaper else {
+    let Some(shaper) = &drawn.parsed().shaper else {
         nominal(drawn, face, scale, text, range, out);
         return;
     };
@@ -200,7 +200,7 @@ fn run_shaper(
 /// outlines, and which only a GSUB ligature colours, counts as colour.
 #[cfg(feature = "parsed-font")]
 pub(super) fn shapes_to_colour(face: &Font, cluster: &str) -> bool {
-    match &face.parsed.shaper {
+    match &face.parsed().shaper {
         Some(shaper) => run_shaper(shaper, cluster, 0..cluster.len(), false)
             .glyph_infos()
             .iter()
@@ -214,7 +214,7 @@ pub(super) fn shapes_to_colour(face: &Font, cluster: &str) -> bool {
 /// Without the `parsed-font` feature there is no face to shape in.
 #[cfg(not(feature = "parsed-font"))]
 pub(super) fn shapes_to_colour(face: &Font, _cluster: &str) -> bool {
-    match face.parsed.never {}
+    match face.source.never {}
 }
 
 /// `range` of `text` in `face` with no tables to shape with: each char that

@@ -92,7 +92,7 @@ pub(crate) fn has_color_glyph(font: &FontRef<'_>, glyph: skrifa::GlyphId) -> boo
 /// Without the `parsed-font` feature there is no font to draw from.
 #[cfg(not(feature = "parsed-font"))]
 pub(crate) fn rasterize(font: &Font, _glyph: GlyphId, _size: f32) -> Option<ColorBitmap> {
-    match font.parsed.never {}
+    match font.source.never {}
 }
 
 /// `glyph` of `font` drawn in colour at `size` pixels per em, or `None` when

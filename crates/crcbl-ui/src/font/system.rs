@@ -10,11 +10,10 @@
 //! let mut ui = Ui::new();
 //! // `font-family: body` now draws in the system's sans-serif.
 //! ui.register_system_font("body", &fonts, &FontQuery::new("sans-serif"))?;
-//! // Its fallbacks, for the chars that face has no glyph for.
+//! // Its fallbacks, for the chars that face has no glyph for: each read
+//! // only when a char first misses every face before it.
 //! let query = FontQuery::new("sans-serif");
-//! ui.set_fallback_fonts(
-//!     fonts.fallbacks(&query).iter().filter_map(|face| Font::from_system(face).ok()),
-//! );
+//! ui.set_fallback_fonts(fonts.fallbacks(&query).into_iter().map(Font::from_system_lazy));
 //! # Ok::<(), crcbl_ui::font::system::SystemFontError>(())
 //! ```
 
@@ -75,6 +74,16 @@ impl Font {
     pub fn from_system(face: &FontMatch) -> Result<Self, SystemFontError> {
         let bytes = face.read().map_err(SystemFontError::Read)?;
         Self::parse(bytes).map_err(SystemFontError::Parse)
+    }
+
+    /// The face `face` names, read and parsed the first time it is asked a
+    /// question rather than now: [`Font::lazy`] over [`FontMatch::read`].
+    /// What a list of system fallback faces is for, which a launcher would
+    /// otherwise read whole before its first frame; see [`Font::lazy`] for
+    /// what a face that fails to read answers.
+    #[must_use]
+    pub fn from_system_lazy(face: FontMatch) -> Self {
+        Self::lazy(move || face.read())
     }
 }
 

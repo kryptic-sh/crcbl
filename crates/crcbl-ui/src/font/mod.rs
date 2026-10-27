@@ -99,11 +99,11 @@ pub mod system;
 pub use crcbl_image::raster;
 
 use core::fmt;
-use std::sync::Arc;
-#[cfg(feature = "parsed-font")]
-use std::sync::OnceLock;
 #[cfg(feature = "parsed-font")]
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
+#[cfg(feature = "parsed-font")]
+use std::sync::{Mutex, PoisonError};
 
 #[cfg(feature = "parsed-font")]
 use skrifa::instance::{LocationRef, Size};
@@ -392,7 +392,7 @@ impl From<Box<[u8]>> for FontData {
 /// module docs.
 #[derive(Clone)]
 pub struct Font {
-    parsed: Arc<Parsed>,
+    source: Arc<Source>,
     /// What this handle draws of the face that it lacks; see [`face`].
     synthesis: Synthesis,
     /// The faces asked, in order, for a char this one has no glyph for; see
@@ -400,15 +400,33 @@ pub struct Font {
     fallback: Arc<[Font]>,
 }
 
-/// What one parse read, shared by every clone of its [`Font`].
-struct Parsed {
+/// One face, shared by every clone of its [`Font`]: who it is from the start,
+/// and what its parse read from the first time anything asks.
+struct Source {
     /// Uninhabited, so a build without the feature can name a `Font` and never
     /// hold one: a body that reads the font's bytes matches on this instead.
     #[cfg(not(feature = "parsed-font"))]
     never: NoParsedFont,
-    /// This parse's identity under each [`Synthesis`], by
+    /// This face's identity under each [`Synthesis`], by
     /// [`Synthesis::index`]: a synthesised face's glyphs are not the face's.
+    /// Given when the handle is made, so a [`Font::lazy`] face has one
+    /// before it is read.
     ids: [FontId; SYNTHESES],
+    /// Its parse: set when the handle is made by [`Font::parse`], and on
+    /// first use for a [`Font::lazy`] one.
+    parsed: OnceLock<Parsed>,
+    /// What reads a [`Font::lazy`] face's bytes, taken by its first use;
+    /// `None` for a face parsed when it was made.
+    #[cfg(feature = "parsed-font")]
+    load: Mutex<Option<Loader>>,
+}
+
+/// What [`Font::lazy`] keeps to read its face: its bytes, or why not.
+#[cfg(feature = "parsed-font")]
+type Loader = Box<dyn FnOnce() -> Result<FontData, String> + Send>;
+
+/// What one parse read.
+struct Parsed {
     data: FontData,
     metrics: FontMetrics,
     /// Its `post` table's underline, if it has one.
@@ -433,16 +451,22 @@ struct Parsed {
 }
 
 impl fmt::Debug for Font {
-    /// The id and the metrics; not the tables.
+    /// The id and the metrics; not the tables. A [`Font::lazy`] face not yet
+    /// read says so rather than being read to be printed.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Font")
-            .field("id", &self.id())
-            .field("metrics", &self.parsed.metrics)
-            .field("weight", &self.parsed.weight)
-            .field("italic", &self.parsed.italic)
+        let mut debug = f.debug_struct("Font");
+        debug.field("id", &self.id());
+        match self.source.parsed.get() {
+            Some(parsed) => debug
+                .field("metrics", &parsed.metrics)
+                .field("weight", &parsed.weight)
+                .field("italic", &parsed.italic)
+                .field("glyphs", &parsed.advances.len()),
+            None => debug.field("read", &false),
+        };
+        debug
             .field("synthesis", &self.synthesis)
             .field("fallback", &self.fallback.len())
-            .field("glyphs", &self.parsed.advances.len())
             .finish_non_exhaustive()
     }
 }
@@ -514,7 +538,77 @@ impl Font {
     /// by `harfrust`, or the font has no units per em.
     #[cfg(feature = "parsed-font")]
     pub fn parse(data: impl Into<FontData>) -> Result<Self, FontError> {
-        let data = data.into();
+        Ok(Self::of(Source {
+            ids: next_ids(),
+            parsed: OnceLock::from(Parsed::read(data.into())?),
+            load: Mutex::new(None),
+        }))
+    }
+
+    /// A face read from `load`'s bytes the first time anything asks it a
+    /// question — a glyph, a metric, an outline — rather than now.
+    ///
+    /// **What it is for is fallback faces** ([`Font::with_fallback`],
+    /// [`Ui::set_fallback_fonts`](crate::tree::Ui::set_fallback_fonts)): a
+    /// cluster asks them in order and stops at the first that maps it, so a
+    /// face is read only when a char first misses every face before it, and a
+    /// launcher that lists a dozen system fallbacks, CJK collections among
+    /// them, reads none of them until the text needs one. Its [`Font::id`] is
+    /// given now, so a tree's fallback list hashes without reading anything.
+    ///
+    /// A face that fails to load or to parse is logged once and maps no
+    /// char from then on, so fallback goes past it, as it would past a face
+    /// that lacks the glyph.
+    #[cfg(feature = "parsed-font")]
+    #[must_use]
+    pub fn lazy<D, E>(load: impl FnOnce() -> Result<D, E> + Send + 'static) -> Self
+    where
+        D: Into<FontData>,
+        E: fmt::Display,
+    {
+        let load: Loader =
+            Box::new(move || load().map(Into::into).map_err(|error| error.to_string()));
+        Self::of(Source {
+            ids: next_ids(),
+            parsed: OnceLock::new(),
+            load: Mutex::new(Some(load)),
+        })
+    }
+
+    /// Whether this face has been read: always for one [`Font::parse`]
+    /// made, and for a [`Font::lazy`] one once something asked it.
+    #[must_use]
+    pub fn is_loaded(&self) -> bool {
+        self.source.parsed.get().is_some()
+    }
+
+    /// A handle on `source`, drawn as it is, with no fallback faces.
+    #[cfg(feature = "parsed-font")]
+    fn of(source: Source) -> Self {
+        Self {
+            source: Arc::new(source),
+            synthesis: Synthesis::NONE,
+            fallback: no_fallback(),
+        }
+    }
+
+    /// The parse, read now if this is a [`Font::lazy`] face not yet asked.
+    #[cfg(feature = "parsed-font")]
+    fn parsed(&self) -> &Parsed {
+        self.source.parsed.get_or_init(|| self.source.read())
+    }
+
+    /// Without the `parsed-font` feature there is no font to ask.
+    #[cfg(not(feature = "parsed-font"))]
+    fn parsed(&self) -> &Parsed {
+        match self.source.never {}
+    }
+}
+
+#[cfg(feature = "parsed-font")]
+impl Parsed {
+    /// What [`Font::parse`] reads from `data`.
+    fn read(data: FontData) -> Result<Self, FontError> {
         let font = FontRef::new(data.as_bytes())
             .map_err(|error| FontError::Unreadable(error.to_string()))?;
         let unscaled = font.metrics(Size::unscaled(), LocationRef::default());
@@ -558,27 +652,68 @@ impl Font {
         .ok_or_else(|| FontError::Unreadable("harfrust cannot read it".to_owned()))?;
 
         Ok(Self {
-            parsed: Arc::new(Parsed {
-                ids: next_ids(),
-                data,
-                metrics,
-                underline,
-                weight: attributes.weight.value(),
-                italic: attributes.style != skrifa::attribute::Style::Normal,
-                color,
-                latin1,
-                advances,
-                shaper: Some(shaper),
-            }),
-            synthesis: Synthesis::NONE,
-            fallback: no_fallback(),
+            data,
+            metrics,
+            underline,
+            weight: attributes.weight.value(),
+            italic: attributes.style != skrifa::attribute::Style::Normal,
+            color,
+            latin1,
+            advances,
+            shaper: Some(shaper),
         })
     }
 
+    /// What a [`Font::lazy`] face that could not be read answers: no glyph
+    /// for any char, so fallback goes past it, and no bytes to shape.
+    fn empty() -> Self {
+        Self {
+            data: FontData::from(&[]),
+            metrics: FontMetrics {
+                units_per_em: 1,
+                ascent: 0.0,
+                descent: 0.0,
+                line_gap: 0.0,
+            },
+            underline: None,
+            weight: 400.0,
+            italic: false,
+            color: false,
+            latin1: [0; LATIN1_END as usize],
+            advances: Box::new([]),
+            shaper: None,
+        }
+    }
+}
+
+#[cfg(feature = "parsed-font")]
+impl Source {
+    /// A [`Font::lazy`] face's parse, read from its loader, or
+    /// [`Parsed::empty`] with a warning when it cannot be.
+    fn read(&self) -> Parsed {
+        let load = self
+            .load
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        // `parsed` runs this at most once, so a face made without a loader —
+        // one `Font::parse` made — has its parse set and never gets here.
+        let read = load
+            .ok_or_else(|| "it has no loader".to_owned())
+            .and_then(|load| load())
+            .and_then(|data| Parsed::read(data).map_err(|error| error.to_string()));
+        read.unwrap_or_else(|error| {
+            crcbl_core::warn!("a lazily loaded font face maps no char: {error}");
+            Parsed::empty()
+        })
+    }
+}
+
+impl Font {
     /// This font's identity: one per parse and [`Synthesis`].
     #[must_use]
     pub fn id(&self) -> FontId {
-        self.parsed.ids[self.synthesis.index()]
+        self.source.ids[self.synthesis.index()]
     }
 
     /// This face drawn with `synthesis` — see [`face`] — sharing its parse:
@@ -587,7 +722,7 @@ impl Font {
     #[must_use]
     pub fn synthesized(&self, synthesis: Synthesis) -> Self {
         Self {
-            parsed: Arc::clone(&self.parsed),
+            source: Arc::clone(&self.source),
             synthesis,
             fallback: Arc::clone(&self.fallback),
         }
@@ -603,13 +738,13 @@ impl Font {
             .iter()
             .take(fallback::MAX_FALLBACK_FACES)
             .map(|face| Self {
-                parsed: Arc::clone(&face.parsed),
+                source: Arc::clone(&face.source),
                 synthesis: face.synthesis,
                 fallback: no_fallback(),
             })
             .collect();
         Self {
-            parsed: Arc::clone(&self.parsed),
+            source: Arc::clone(&self.source),
             synthesis: self.synthesis,
             fallback: faces,
         }
@@ -636,20 +771,20 @@ impl Font {
     #[cfg(not(feature = "parsed-font"))]
     #[must_use]
     pub fn has_color_glyph(&self, _glyph: GlyphId) -> bool {
-        match self.parsed.never {}
+        match self.source.never {}
     }
 
     /// Without the `parsed-font` feature there is no font to ask.
     #[cfg(not(feature = "parsed-font"))]
     pub(crate) fn has_color_tables(&self) -> bool {
-        match self.parsed.never {}
+        match self.source.never {}
     }
 
     /// Whether any of its glyphs can be a colour glyph: whether it has a
     /// `COLR`, `CBDT` or `sbix` table. Read once, when it was parsed.
     #[cfg(feature = "parsed-font")]
     pub(crate) fn has_color_tables(&self) -> bool {
-        self.parsed.color
+        self.parsed().color
     }
 
     /// Whether `glyph` has a colour representation: a `COLR` layer list or
@@ -657,7 +792,7 @@ impl Font {
     #[cfg(feature = "parsed-font")]
     #[must_use]
     pub fn has_color_glyph(&self, glyph: GlyphId) -> bool {
-        self.parsed.color
+        self.parsed().color
             && FontRef::new(self.data())
                 .is_ok_and(|font| color::has_color_glyph(&font, skrifa::GlyphId::new(glyph.0)))
     }
@@ -673,38 +808,38 @@ impl Font {
     /// its `head` table's bold bit, for a font with none.
     #[must_use]
     pub fn weight(&self) -> f32 {
-        self.parsed.weight
+        self.parsed().weight
     }
 
     /// Whether the face is italic or oblique, by its `OS/2` or `head` table.
     #[must_use]
     pub fn is_italic(&self) -> bool {
-        self.parsed.italic
+        self.parsed().italic
     }
 
     /// Where the font says an underline goes, or `None` when it does not
     /// say.
     #[must_use]
     pub fn underline(&self) -> Option<Underline> {
-        self.parsed.underline
+        self.parsed().underline
     }
 
     /// The bytes it was parsed from.
     #[must_use]
     pub fn data(&self) -> &[u8] {
-        self.parsed.data.as_bytes()
+        self.parsed().data.as_bytes()
     }
 
     /// Its line metrics.
     #[must_use]
     pub fn metrics(&self) -> FontMetrics {
-        self.parsed.metrics
+        self.parsed().metrics
     }
 
     /// How many glyphs it holds.
     #[must_use]
     pub fn glyph_count(&self) -> usize {
-        self.parsed.advances.len()
+        self.parsed().advances.len()
     }
 
     /// The glyph `c` draws as: through the cmap, or [`GlyphId::NOTDEF`] when
@@ -713,10 +848,10 @@ impl Font {
     pub fn glyph_id(&self, c: char) -> GlyphId {
         let codepoint = c as u32;
         if codepoint < LATIN1_END {
-            return GlyphId(self.parsed.latin1[codepoint as usize]);
+            return GlyphId(self.parsed().latin1[codepoint as usize]);
         }
         #[cfg(not(feature = "parsed-font"))]
-        match self.parsed.never {}
+        match self.source.never {}
         #[cfg(feature = "parsed-font")]
         FontRef::new(self.data())
             .ok()
@@ -728,11 +863,11 @@ impl Font {
     /// [`face::SYNTHETIC_BOLD_EM`]; zero for a glyph the font does not have.
     #[must_use]
     pub fn advance(&self, glyph: GlyphId) -> f32 {
-        let Some(&advance) = self.parsed.advances.get(glyph.0 as usize) else {
+        let Some(&advance) = self.parsed().advances.get(glyph.0 as usize) else {
             return 0.0;
         };
         if self.synthesis.bold {
-            advance + f32::from(self.parsed.metrics.units_per_em) * face::SYNTHETIC_BOLD_EM
+            advance + f32::from(self.parsed().metrics.units_per_em) * face::SYNTHETIC_BOLD_EM
         } else {
             advance
         }
@@ -756,9 +891,9 @@ impl Font {
         weight: f32,
         italic: bool,
     ) -> &'static Self {
-        Box::leak(Box::new(Self {
-            parsed: Arc::new(Parsed {
-                ids: next_ids(),
+        Box::leak(Box::new(Self::of(Source {
+            ids: next_ids(),
+            parsed: OnceLock::from(Parsed {
                 data: FontData::from(&[]),
                 metrics,
                 underline: None,
@@ -769,9 +904,8 @@ impl Font {
                 advances: Box::new([0.0, advance]),
                 shaper: None,
             }),
-            synthesis: Synthesis::NONE,
-            fallback: no_fallback(),
-        }))
+            load: Mutex::new(None),
+        })))
     }
 }
 
@@ -824,7 +958,7 @@ mod tests {
             );
         }
         assert!(
-            font.parsed.shaper.is_some(),
+            font.parsed().shaper.is_some(),
             "the committed font is not ready to shape"
         );
     }

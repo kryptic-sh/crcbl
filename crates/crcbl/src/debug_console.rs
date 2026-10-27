@@ -512,8 +512,9 @@ pub struct Console {
     fonts_asked: bool,
 }
 
-/// The system's fallback faces for `monospace`, parsed, in the order the
-/// system gives them; a face that will not read or parse is left out.
+/// The system's fallback faces for `monospace`, in the order the system gives
+/// them, each read only when a char first misses every face before it
+/// ([`Font::from_system_lazy`](crcbl_ui::font::Font::from_system_lazy)).
 #[cfg(feature = "system-fonts")]
 fn system_fallbacks() -> Vec<crcbl_ui::font::Font> {
     use crcbl_ui::font::Font;
@@ -521,11 +522,11 @@ fn system_fallbacks() -> Vec<crcbl_ui::font::Font> {
     let started = std::time::Instant::now();
     let faces: Vec<Font> = SystemFonts::new()
         .fallbacks(&FontQuery::new("monospace"))
-        .iter()
-        .filter_map(|face| Font::from_system(face).ok())
+        .into_iter()
+        .map(Font::from_system_lazy)
         .collect();
     crcbl_core::info!(
-        "console: {} fallback faces read in {:?}",
+        "console: {} fallback faces listed in {:?}",
         faces.len(),
         started.elapsed()
     );
@@ -635,7 +636,7 @@ impl Console {
     /// panel the system's fallback faces for `monospace`, so text the bitmap
     /// font has no glyph for — Japanese typed through an input method, say —
     /// draws in them rather than as `.notdef`. Then and not at boot: a run
-    /// that never opens the console reads no font, and a golden run's console
+    /// that never opens the console looks no font up, and a golden run's console
     /// does not depend on the machine's.
     pub fn open(&mut self) {
         self.open = true;

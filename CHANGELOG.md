@@ -15,6 +15,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Fallback faces read only when text needs them.** `Font::lazy` makes a face
+  that is read and parsed the first time it is asked anything, and
+  `Font::from_system_lazy` does so for a `crcbl-font` match. Fallback asks faces
+  in order and stops at the first that maps a cluster, so a face in
+  `Ui::set_fallback_fonts` is read only when a char first misses every face
+  before it. On the office laptop, the 18 system fallbacks for `sans-serif` (68
+  MB, the Noto CJK collections among them) took 51 ms to read up front; listed
+  lazily they cost 19 µs and nothing is read until the first CJK char, which
+  reads two faces in 18 ms. A face that fails to load or parse is logged and
+  maps no char. `Font::is_loaded` says whether a face has been read. The debug
+  console's fallbacks are lazy too. Asked for by pikr, whose first paint waited
+  on reading every face.
 - **`Presenter::gpu_choice_overridden` and `GpuContext::gpu_choice_overridden`**
   name what chose an open's adapter over any saved choice — the adapter pin, the
   program's pick or a Vulkan loader driver variable — whether or not a choice

@@ -105,6 +105,59 @@ mod tests {
         Font::sans().clone()
     }
 
+    /// The emoji fixtures' bytes, for faces made lazily from them.
+    const CBDT: &[u8] = include_bytes!("../../tests/fixtures/emoji/cbdt.ttf");
+    const COLRV0: &[u8] = include_bytes!("../../tests/fixtures/emoji/colrv0.ttf");
+
+    /// **A lazy face is read only when a cluster misses every face before
+    /// it**, once whichever handle asks, and then answers as the face its
+    /// bytes hold.
+    #[test]
+    fn a_lazy_face_is_read_only_when_every_face_before_it_misses() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let lazy = |bytes: &'static [u8]| {
+            let reads = Arc::clone(&reads);
+            Font::lazy(move || {
+                reads.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, String>(bytes)
+            })
+        };
+        let (cbdt, colr) = (lazy(CBDT), lazy(COLRV0));
+        let font = latin1().with_fallback(&[cbdt.clone(), colr.clone()]);
+        assert_ne!(cbdt.id(), colr.id(), "each has its identity unread");
+        assert_eq!(cluster_face(&font, "a"), 0);
+        assert!(!cbdt.is_loaded() && !colr.is_loaded());
+        // The first fallback face maps U+1F600: the second is not reached.
+        assert_eq!(cluster_face(&font, "\u{1F600}"), 1);
+        assert!(cbdt.is_loaded() && !colr.is_loaded());
+        // Only the second maps U+1F601.
+        assert_eq!(cluster_face(&font, "\u{1F601}"), 2);
+        assert!(colr.is_loaded());
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            font.face(1).glyph_id('\u{1F600}'),
+            fixtures::cbdt().glyph_id('\u{1F600}')
+        );
+    }
+
+    /// **A lazy face that cannot be read maps no char**, so fallback goes
+    /// past it to the next face, as it does past a face lacking the glyph.
+    #[test]
+    fn a_lazy_face_that_cannot_be_read_is_passed_over() {
+        let gone = Font::lazy(|| Err::<&'static [u8], _>("the file went"));
+        let garbage = Font::lazy(|| Ok::<_, String>(b"not a font".as_slice()));
+        let font = latin1().with_fallback(&[gone.clone(), garbage.clone(), fixtures::cbdt()]);
+        assert_eq!(cluster_face(&font, "\u{1F600}"), 3);
+        for face in [&gone, &garbage] {
+            assert!(face.is_loaded());
+            assert_eq!(face.glyph_id('\u{1F600}'), GlyphId::NOTDEF);
+            assert_eq!(face.glyph_id('a'), GlyphId::NOTDEF);
+        }
+    }
+
     /// **A lone char goes to the first face that maps it**: the handle's own
     /// face for what it has, then the fallback faces in order, and the
     /// handle's own face when none maps it.
