@@ -970,7 +970,7 @@ pub struct PendingPresenter {
     /// What has become of the choice so far.
     outcome: ChoiceOutcome,
     /// The manifest of the Vulkan driver the instance being opened holds
-    /// alone because it drives the window's display ([`display_driver`]), so
+    /// alone because it drives the window's display (`display_driver`), so
     /// a refusal there means reopening on every driver.
     display_driver: Option<std::path::PathBuf>,
 }
