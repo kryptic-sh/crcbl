@@ -1467,7 +1467,7 @@ Size=48
         let written = std::fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
             .expect("a modification time");
-        std::fs::File::open(scratch.0.join("icons/cached"))
+        open_directory(&scratch.0.join("icons/cached"))
             .and_then(|dir| dir.set_modified(written + Duration::from_secs(10)))
             .expect("the theme directory's time moved on");
         let mut themes = IconThemes::new(search(&scratch), "cached", Duration::from_secs(3600));
@@ -1476,6 +1476,26 @@ Size=48
             themes.lookup("real", 48, 1),
             Some(scratch.0.join("icons/cached/48x48/apps/real.png"))
         );
+    }
+
+    /// A handle on the directory `path`, to set its time through.
+    #[cfg(not(windows))]
+    fn open_directory(path: &Path) -> std::io::Result<std::fs::File> {
+        std::fs::File::open(path)
+    }
+
+    /// A handle on the directory `path`, to set its time through: Windows
+    /// opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`, and writes
+    /// its times only through a handle opened for writing.
+    #[cfg(windows)]
+    fn open_directory(path: &Path) -> std::io::Result<std::fs::File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        /// `FILE_FLAG_BACKUP_SEMANTICS`, from `winbase.h`.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
     }
 
     /// **A cache that does not read answers nothing, and ends**: a chain
