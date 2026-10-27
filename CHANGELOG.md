@@ -20,6 +20,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   program's pick or a Vulkan loader driver variable — whether or not a choice
   was given. A program with nothing saved yet otherwise had to repeat that rule
   itself to avoid saving a one-off pin as its choice.
+- **`HeadlessShell::schedule(pumps, script)`** runs a script against the shell
+  at a later pump, so a scripted run that a program's own loop consumes can put
+  input between frames. Before, everything injected arrived in the first pump,
+  so layout, present or an out-of-date retry could not be exercised between
+  keys. The script runs at its pump, so the typed input helpers it calls stamp
+  that pump's time.
 
 ### Changed
 

@@ -434,12 +434,6 @@ four hand mutants — see the gap below). **Owed:**
 
 **Open from 2026-10-19, raised by pikr and lyr, not started:**
 
-- **`HeadlessShell` cannot schedule input after frame N** (a limit, pikr).
-  Everything injected before a run arrives in the first pump, so a scripted run
-  ends before the consumer draws, and layout, present or an out-of-date retry
-  cannot be exercised between keys. Options: an "events due at pump N" queue on
-  `HeadlessShell`, or holding injected events until the next `wait_events`. The
-  first is explicit and keeps `inject` as it is; prefer it.
 - **`Shell::set_input_region` (S5): what is unverified, and AppKit.** Built
   2026-10-20 on Wayland (`wl_surface.set_input_region`, committed at once, in
   `wayland/region.rs`), X11 (a SHAPE input shape through a `dlopen`ed

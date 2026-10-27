@@ -212,6 +212,21 @@ struct PendingConfigure {
     countdown: u32,
 }
 
+/// A script [`HeadlessShell::schedule`] holds until its pump comes.
+struct ScheduledScript {
+    /// Pumps still to go before this runs.
+    countdown: u32,
+    script: Box<dyn FnOnce(&mut HeadlessShell) + Send>,
+}
+
+impl core::fmt::Debug for ScheduledScript {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ScheduledScript")
+            .field("countdown", &self.countdown)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A window inside the headless shell.
 #[derive(Clone, Debug)]
 struct HeadlessWindow {
@@ -316,6 +331,9 @@ pub struct HeadlessShell {
     next_monitor_id: u32,
     windows: Pool<HeadlessWindow>,
     queue: VecDeque<ShellEvent>,
+    /// Scripts waiting for their pump, in the order they were scheduled; see
+    /// [`schedule`](HeadlessShell::schedule).
+    scripts: Vec<ScheduledScript>,
     clock: ManualTime,
     modifiers: Modifiers,
     clipboard: Vec<(ReceivedMime, Vec<u8>)>,
@@ -418,6 +436,7 @@ impl HeadlessShell {
             next_monitor_id: 2,
             windows: Pool::new(),
             queue: VecDeque::new(),
+            scripts: Vec::new(),
             clock: ManualTime::new(),
             modifiers: Modifiers::empty(),
             clipboard: Vec::new(),
@@ -586,6 +605,31 @@ impl HeadlessShell {
     /// helpers below keep the shell's state consistent; this one does not.
     pub fn inject(&mut self, event: ShellEvent) {
         self.queue.push_back(event);
+    }
+
+    /// Runs `script` on this shell at the top of the pump `pumps` pumps from
+    /// now, so what it injects is delivered by that pump; `0` is the next one.
+    ///
+    /// Everything injected directly arrives in the next pump, so a consumer
+    /// that runs its own loop over this shell would see a whole scripted run
+    /// at once, before it has drawn a frame. A schedule spreads the run over
+    /// frames: layout, present and an out-of-date retry happen between keys.
+    /// The script runs then, not now, so the typed helpers it calls stamp the
+    /// clock as it stands at that pump and see the windows as they are then.
+    ///
+    /// Every turn of the window system counts, as for
+    /// [`set_configure_delay`](Self::set_configure_delay): a script that comes
+    /// due in [`keep_alive`](Shell::keep_alive) runs there, and what it injects
+    /// waits for the next pump. Scripts due at the same pump run in the order
+    /// they were scheduled; one scheduled by a script is counted from the pump
+    /// after the one it was scheduled in. While a script waits,
+    /// [`wait_events`](Shell::wait_events) returns at once, since only pumping
+    /// brings it closer.
+    pub fn schedule(&mut self, pumps: u32, script: impl FnOnce(&mut Self) + Send + 'static) {
+        self.scripts.push(ScheduledScript {
+            countdown: pumps,
+            script: Box::new(script),
+        });
     }
 
     /// Delivers a configure at `size` immediately, as a compositor answering a
@@ -1507,6 +1551,25 @@ impl HeadlessShell {
         }
     }
 
+    /// Runs every script whose countdown has run out, and ticks the rest.
+    fn run_due_scripts(&mut self) {
+        if self.scripts.is_empty() {
+            return;
+        }
+        let mut due = Vec::new();
+        for mut scheduled in core::mem::take(&mut self.scripts) {
+            if scheduled.countdown > 0 {
+                scheduled.countdown -= 1;
+                self.scripts.push(scheduled);
+            } else {
+                due.push(scheduled.script);
+            }
+        }
+        for script in due {
+            script(self);
+        }
+    }
+
     fn window(&self, window: WindowId) -> Result<&HeadlessWindow, ShellError> {
         self.windows
             .get(window.cast())
@@ -1855,23 +1918,26 @@ impl Shell for HeadlessShell {
         }
     }
 
-    /// Lets the configures and the held reads come due, and keeps what they
-    /// produce.
+    /// Lets the configures, the held reads and the scheduled scripts come due,
+    /// and keeps what they produce.
     ///
-    /// **This counts as a pump** for both of this shell's pump-counted delays,
-    /// [`set_configure_delay`](Self::set_configure_delay) and
-    /// [`clipboard_deadline`](Self::clipboard_deadline): each counts the window
-    /// system's turns, and delivery is the only part of a turn this leaves out.
+    /// **This counts as a pump** for each of this shell's pump-counted delays,
+    /// [`set_configure_delay`](Self::set_configure_delay),
+    /// [`clipboard_deadline`](Self::clipboard_deadline) and
+    /// [`schedule`](Self::schedule): each counts the window system's turns, and
+    /// delivery is the only part of a turn this leaves out.
     fn keep_alive(&mut self) {
         self.deliver_due_configures();
         self.resolve_reads();
+        self.run_due_scripts();
     }
 
     /// Sleeps as far as a shell with no window system behind it can.
     ///
     /// This shell reports [`ShellCaps::EVENT_WAIT`] by default, and that bit
     /// says `wait_events` *genuinely blocks* — so it does: with the capability
-    /// set, nothing already queued and no frame due, this really sleeps for
+    /// set, nothing already queued, no frame due and no script
+    /// [scheduled](Self::schedule), this really sleeps for
     /// `timeout`, and an editor-style idle loop tested here idles rather than
     /// spinning. Without
     /// the capability it returns immediately, like every backend that cannot
@@ -1890,6 +1956,7 @@ impl Shell for HeadlessShell {
         self.waits += 1;
         if !self.caps.contains(ShellCaps::EVENT_WAIT)
             || !self.queue.is_empty()
+            || !self.scripts.is_empty()
             || (self.outputs_powered && self.frames.is_pending())
         {
             return;
@@ -2948,6 +3015,89 @@ mod tests {
             .saturating_since(events[0].time().expect("input"));
         assert_eq!(held, Duration::from_millis(180));
         assert_eq!(events[0].time(), Some(EventTime::from_millis(2_000)));
+    }
+
+    /// A scheduled script runs at its pump, not before, and what it injects
+    /// is stamped with the clock as it stands then.
+    #[test]
+    fn a_scheduled_script_injects_at_its_pump_with_that_pumps_time() {
+        let (mut shell, window) = shell_with_configured_window();
+        shell.schedule(2, move |shell| {
+            shell.key_press(window, KeyCode::Space).expect("press");
+        });
+
+        for pump in 0..2 {
+            shell.advance(Duration::from_millis(16));
+            assert_eq!(drain(&mut shell), Vec::new(), "pump {pump} came early");
+        }
+        shell.set_time(Duration::from_secs(3));
+        let events = drain(&mut shell);
+        assert_eq!(names(&events), ["Key"]);
+        assert_eq!(events[0].time(), Some(EventTime::from_millis(3_000)));
+        assert_eq!(drain(&mut shell), Vec::new(), "and it ran once");
+    }
+
+    /// Scripts due together run in the order scheduled; one a script
+    /// schedules at zero waits for the pump after.
+    #[test]
+    fn scheduled_scripts_run_in_order_and_a_nested_one_waits_a_pump() {
+        let (mut shell, window) = shell_with_configured_window();
+        shell.schedule(0, move |shell| {
+            shell.key_press(window, KeyCode::KeyA).expect("press");
+            shell.schedule(0, move |shell| {
+                shell.key_press(window, KeyCode::KeyC).expect("press");
+            });
+        });
+        shell.schedule(0, move |shell| {
+            shell.key_press(window, KeyCode::KeyB).expect("press");
+        });
+
+        let keys = |events: Vec<ShellEvent>| -> Vec<Option<KeyCode>> {
+            events
+                .into_iter()
+                .map(|event| match event {
+                    ShellEvent::Key { key_code, .. } => key_code,
+                    other => panic!("not a key: {other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            keys(drain(&mut shell)),
+            [Some(KeyCode::KeyA), Some(KeyCode::KeyB)]
+        );
+        assert_eq!(keys(drain(&mut shell)), [Some(KeyCode::KeyC)]);
+    }
+
+    /// `keep_alive` is a turn for a script as for a configure: it runs
+    /// there, and the next pump delivers what it injected.
+    #[test]
+    fn keep_alive_runs_a_due_script_and_keeps_its_events() {
+        let (mut shell, window) = shell_with_configured_window();
+        shell.schedule(1, move |shell| {
+            shell.key_press(window, KeyCode::Enter).expect("press");
+        });
+        shell.keep_alive();
+        shell.keep_alive();
+        assert_eq!(shell.pending_events(), 1, "the script ran in keep_alive");
+        assert_eq!(names(&drain(&mut shell)), ["Key"]);
+    }
+
+    /// A wait while a script is scheduled returns at once: only a pump brings
+    /// the script closer, so sleeping would only delay it, and an untimed
+    /// wait with a waker out would never end.
+    #[test]
+    fn a_wait_does_not_sleep_while_a_script_is_scheduled() {
+        let (mut shell, window) = shell_with_configured_window();
+        shell.schedule(1, move |shell| {
+            shell.key_press(window, KeyCode::Space).expect("press");
+        });
+        let start = std::time::Instant::now();
+        shell.wait_events(Some(LONG_WAIT));
+        assert!(
+            start.elapsed() < LONG_WAIT / 2,
+            "the wait slept {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
