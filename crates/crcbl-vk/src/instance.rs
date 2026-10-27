@@ -844,7 +844,7 @@ impl VkInstance {
         let win32_ext = has_extension(khr::win32_surface::NAME)
             .then(|| khr::win32_surface::Instance::new(&entry, &raw));
 
-        let adapters = adapter::enumerate(&raw, debug_utils, surface_caps2);
+        let adapters = adapter::enumerate(&raw, debug_utils, surface_caps2, direct.is_some());
         if adapters.is_empty() {
             // Tear the instance down by hand: `InstanceInner` does not exist
             // yet, so there is no `Drop` to do it.

@@ -37,7 +37,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the window, it opens on every driver as before. The `GpuChoice` it hands back
   already names the driver, so `locate_vulkan_driver` is not needed. On the
   office laptop, with the panel on the Intel iGPU, a status bar's first start no
-  longer loads NVIDIA's driver or holds its device files open. Asked for by lyr.
+  longer loads NVIDIA's driver or holds its device files open. A driver tried
+  alone that has no device here (Intel's Gen7/8 driver beside a newer Intel GPU)
+  is logged at debug, not as a warning. Asked for by lyr.
 - **Fallback faces read only when text needs them.** `Font::lazy` makes a face
   that is read and parsed the first time it is asked anything, and
   `Font::from_system_lazy` does so for a `crcbl-font` match. Fallback asks faces

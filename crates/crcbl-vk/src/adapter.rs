@@ -651,10 +651,20 @@ pub(crate) fn enumerate(
     instance: &ash::Instance,
     debug_utils: bool,
     surface_caps2: bool,
+    one_driver: bool,
 ) -> Vec<AdapterRecord> {
     // SAFETY: `instance` is live and the call only reads driver-owned tables.
     let physicals = match unsafe { instance.enumerate_physical_devices() } {
         Ok(physicals) => physicals,
+        // A driver opened alone fails this when it has no device here —
+        // Intel's Gen7/8 driver beside a newer Intel GPU — and the caller
+        // trying drivers one at a time expects that answer, which the open's
+        // `NoAdapters` gives it. Logged at debug there, as the loader's own
+        // no-GPU message is.
+        Err(error) if one_driver => {
+            crcbl_core::log::debug!("crcbl-vk: vkEnumeratePhysicalDevices failed: {error:?}");
+            return Vec::new();
+        }
         Err(error) => {
             crcbl_core::log::warn!("crcbl-vk: vkEnumeratePhysicalDevices failed: {error:?}");
             return Vec::new();
