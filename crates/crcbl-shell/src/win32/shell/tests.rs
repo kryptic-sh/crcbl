@@ -2086,44 +2086,46 @@ fn app_id_is_the_windows_own_app_user_model_id() {
     shell.destroy_window(unlabelled).expect("destroy");
 }
 
-/// **A leave the wait's own drain dispatches ends the wait.** lyr's stuck
+/// **An event the wait's own drain records ends the wait.** lyr's stuck
 /// tooltip: the pointer left, the posted `WM_MOUSELEAVE` arrived just after a
 /// pump, the drain at the top of the next wait dispatched it and recorded the
 /// leave, and the wait then slept on with the event undelivered.
+///
+/// **A posted `WM_CLOSE` stands in for the leave**, because a leave posted by
+/// hand races the system's own. Entering arms `TrackMouseEvent`, and with the
+/// desktop's real cursor elsewhere the system soon posts a `WM_MOUSELEAVE` of
+/// its own; when that one landed in the pump before the test's, the test's was
+/// stale, the drain recorded nothing, and the wait woke on the next message
+/// (CI, twice: `Wake::Message` after 136 µs and 48.9 µs). Every posted
+/// `WM_CLOSE` is recorded, as `CloseRequested`, and nothing else posts one, so
+/// the drain is the only thing that can have recorded it.
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
-fn a_leave_dispatched_by_the_waits_own_drain_ends_the_wait() {
+fn an_event_the_waits_own_drain_records_ends_the_wait() {
     const LONG: Duration = Duration::from_secs(20);
     let mut shell = shell();
     let window = window(&mut shell);
     let hwnd = hwnd_of(&shell, window);
     shell.pump(&mut |_| {});
-    // Put the derived "is the pointer inside?" state on a known edge, then
-    // enter: the leave posted next is one this window is tracked for.
-    send_leave(hwnd);
-    send_mouse(hwnd, msg::MOUSE_MOVE, 0, 40, 30);
-    shell.pump(&mut |_| {});
 
-    // SAFETY: a pointer-crossing message posted to this shell's own window,
-    // with the zero parameters `winuser.h` documents for it.
-    let posted = unsafe { ffi::PostMessageW(hwnd, msg::MOUSE_LEAVE, 0, 0) };
-    assert_ne!(posted, 0, "the leave is posted");
+    // SAFETY: a message posted to this shell's own window, with the zero
+    // parameters `winuser.h` documents for it. Posted, not sent, so it waits
+    // in the queue for the drain rather than running here.
+    let posted = unsafe { ffi::PostMessageW(hwnd, msg::CLOSE, 0, 0) };
+    assert_ne!(posted, 0, "the close is posted");
     let start = Instant::now();
     let woke = shell.wait(Some(LONG));
     let waited = start.elapsed();
     assert_eq!(
         woke,
         Wake::Recorded,
-        "the drain recorded the leave, so the wait must not sleep (returned after {waited:?})"
+        "the drain recorded the close, so the wait must not sleep (returned after {waited:?})"
     );
-    let mut left = false;
+    let mut asked = false;
     shell.pump(&mut |event| {
-        left |= matches!(
-            event,
-            ShellEvent::PointerFocus { window: w, entered: false, .. } if w == window
-        );
+        asked |= matches!(event, ShellEvent::CloseRequested { window: w } if w == window);
     });
-    assert!(left, "the next pump delivers the leave");
+    assert!(asked, "the next pump delivers the close request");
     shell.destroy_window(window).expect("destroy");
 }
 

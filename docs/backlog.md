@@ -485,20 +485,20 @@ four hand mutants — see the gap below). **Owed:**
   `WM_MOUSELEAVE` arrived just after a pump, `Win32Shell::wait`'s drain before
   sleeping dispatched it, and the wait then slept with the event recorded and
   undelivered. `wait` now returns `Wake::Recorded` at once when its drain
-  recorded anything (`a_leave_dispatched_by_the_waits_own_drain_ends_the_wait`,
-  a desktop test). The `Shared::enter` change made while looking (an arrival
+  recorded anything (`an_event_the_waits_own_drain_records_ends_the_wait`, a
+  desktop test). The `Shared::enter` change made while looking (an arrival
   queues the last window's leave) is a real defect too, but was not lyr's. Not
   yet re-run in lyr's bar with the fix; lyr re-checks on the release that
   carries it.
-  - **Flaked once on CI's desktop.** Main's CI run 40049613156 (`09780bf0`,
-    2026-10-24) failed
-    `a_leave_dispatched_by_the_waits_own_drain_ends_the_wait`: the wait returned
-    `Wake::Message` after 136 µs instead of `Wake::Recorded`, and the rerun of
-    the job passed. A guess, unverified: another message reached the queue
-    before the posted leave was drained. Not investigated. **Again** on main's
-    run 40296623283 (`47a1f1b6`, 2026-10-26, a D3D12-only change):
-    `Wake::Message` after 48.9 µs; the job was rerun. Twice in two days makes it
-    a flake to fix, not a one-off.
+  - **The desktop test flaked on CI twice (2026-10-24, 10-26) and was the test's
+    race, not the wait's; rewritten 2026-10-27.** It entered with a hand-sent
+    move, which arms `TrackMouseEvent`, and with the runner's cursor elsewhere
+    the system then posts its own `WM_MOUSELEAVE`. When that landed in the pump
+    before the test posted its leave, the test's was stale, the drain recorded
+    nothing, and the wait woke on the next message (`Wake::Message` after 136 µs
+    and 48.9 µs). The test now posts `WM_CLOSE`, which is always recorded and
+    which nothing else posts. **Mechanism inferred from the code, not observed
+    in a trace.**
 - **AppKit input method: mutants not run.** The `appkit_session` additions went
   red on CI for removing the pre-edit gate in `record_preedit` and the
   end-of-pre-edit block in `insert_text`. Cancelled unrun: the
