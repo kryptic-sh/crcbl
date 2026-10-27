@@ -411,6 +411,13 @@ four hand mutants — see the gap below). **Owed:**
   and the iGPU drives nothing. Not seen: a hybrid laptop (does DXGI list the
   panel under the iGPU, and does a MUX switch change it), the iGPU driving the
   display, and an Intel or NVIDIA adapter under the DXGI memory rule below.
+- **Behaviour, not a bug: on that desktop Vulkan lists every AMD GPU twice**
+  (2026-10-27): two AMD driver packages are registered (`u0199522` and
+  `u0204441` in the DriverStore), so the loader loads the ICD twice and
+  `CRCBL_ADAPTER=discrete` refuses as ambiguous, as `crcbl::adapter` is meant
+  to. Run the Vulkan suites there unpinned; the first enumerated adapter is the
+  RX 7900 XTX, and each harness logs the one it opened. D3D12 lists each GPU
+  once.
 - **D3D12 classes an adapter integrated when DXGI reports no non-local memory
   budget** (`QueryVideoMemoryInfo`, `DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL`),
   which needs no device. Held against the device's

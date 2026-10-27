@@ -610,6 +610,10 @@ unsafe fn messenger_body(
         crcbl_core::log::debug!("vk general: {id}: {text} (a driver probed alone)");
         return;
     }
+    if general && is_duplicate_layer(&id, &text) {
+        crcbl_core::log::info!("vk general: {id}: {text}");
+        return;
+    }
 
     let severity = Severity::from_flags(severity);
     let kind = if kinds.contains(vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION) {
@@ -636,6 +640,21 @@ unsafe fn messenger_body(
 /// loader's own id and wording, since it carries no VUID.
 fn is_no_gpu_found(id: &str, text: &str) -> bool {
     id == "Loader Message" && text.contains("Failed to detect any valid GPUs")
+}
+
+/// Whether a message is the Vulkan loader dropping a layer manifest that
+/// repeats another, which describes the machine's driver installation and
+/// nothing the program did.
+///
+/// A graphics driver whose old package stays registered beside the new one
+/// lists every layer it carries twice; seen with AMD's
+/// `VK_LAYER_AMD_switchable_graphics` on Windows (2026-10-27). The loader
+/// keeps one and warns about the other on every instance, so as a warning it
+/// failed every run's zero-warnings gate on that machine. Logged at info and
+/// not kept. Matched on the loader's own id and wording, since it carries no
+/// VUID.
+fn is_duplicate_layer(id: &str, text: &str) -> bool {
+    id == "Loader Message" && text.contains(" because it is a duplicate of ")
 }
 
 /// Copies a possibly-null C string into an owned `String`.
@@ -805,6 +824,60 @@ mod tests {
             "VUID-vkCmdDraw-None-02700",
             "Failed to detect any valid GPUs"
         ));
+    }
+
+    /// The loader's wording on the Windows desktop's AMD driver (2026-10-27),
+    /// paths shortened, and two messages it must not swallow.
+    #[test]
+    fn only_the_loaders_duplicate_layer_message_is_about_the_installation() {
+        assert!(is_duplicate_layer(
+            "Loader Message",
+            "Removing layer VK_LAYER_AMD_switchable_graphics (a/amd-vulkan64.json) because it \
+             is a duplicate of VK_LAYER_AMD_switchable_graphics (b/amd-vulkan64.json)"
+        ));
+        assert!(!is_duplicate_layer(
+            "Loader Message",
+            "loader_scanned_icd_add: Could not get layer"
+        ));
+        assert!(!is_duplicate_layer(
+            "VUID-vkCreateInstance-ppEnabledLayerNames-01111",
+            "Removing layer X because it is a duplicate of Y"
+        ));
+    }
+
+    /// Drives the messenger itself: the duplicate-layer warning is not kept,
+    /// and any other loader warning still is.
+    #[test]
+    fn the_messenger_keeps_no_duplicate_layer_warning() {
+        let send = |sink: &ValidationSink, text: &core::ffi::CStr| {
+            let data = vk::DebugUtilsMessengerCallbackDataEXT::default()
+                .message_id_name(c"Loader Message")
+                .message(text);
+            let raw = messenger_user_data(sink);
+            // SAFETY: `data` and the strings it points at outlive the call,
+            // and `raw` is a live user-data pointer reclaimed just after.
+            unsafe {
+                messenger_body(
+                    vk::DebugUtilsMessageSeverityFlagsEXT::WARNING,
+                    vk::DebugUtilsMessageTypeFlagsEXT::GENERAL,
+                    &raw const data,
+                    raw,
+                );
+                drop_messenger_user_data(raw);
+            }
+        };
+        let sink = ValidationSink::new();
+        send(
+            &sink,
+            c"Removing layer VK_LAYER_A (a.json) because it is a duplicate of VK_LAYER_A (b.json)",
+        );
+        assert!(sink.report(true).is_clean(), "the duplicate was kept");
+        send(&sink, c"loader_scanned_icd_add: Could not get layer");
+        assert_eq!(
+            sink.report(true).warnings,
+            1,
+            "another loader warning was dropped"
+        );
     }
 
     #[test]

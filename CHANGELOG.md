@@ -49,6 +49,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   counted as a validation error. On an instance opened on one driver it is now
   logged at debug and not kept; the open still returns `OpenError::NoAdapters`.
 
+- **The Vulkan loader dropping a duplicate layer manifest is no longer a
+  validation warning.** A graphics driver whose old package stays registered
+  beside the new one (seen with AMD's `VK_LAYER_AMD_switchable_graphics` on
+  Windows) makes the loader warn "Removing layer … because it is a duplicate of
+  …" on every instance. crcbl-vk's messenger logged that at WARN and counted it,
+  so every run on such a machine failed the zero-warnings gate though the
+  program did nothing wrong. It is now logged at info and not kept.
+
 - **`crcbl_phys::CharacterController` leaves a rounded edge at the same height
   however its walk is cut into moves.** Since 0.10.0 rounded box edges, a
   grounded character walking off one followed the rounding down while it was
