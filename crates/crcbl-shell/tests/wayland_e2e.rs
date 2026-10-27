@@ -523,6 +523,49 @@ fn a_window_is_unconfigured_until_the_compositor_says_otherwise() {
 
 /// The compositor's first configure typically dictates **no** size at all —
 /// the single biggest difference from what `HeadlessShell` models.
+/// A compositor that dies takes every window with it, and the program hears it.
+///
+/// Before, the shell logged the loss and said nothing more: the engine waited
+/// on a connection that answered at once, and a sandbox whose sway was killed
+/// ran on at 80% of a core with no window, for hours, until something killed
+/// it too. `WindowDestroyed` is what the seam says when a window goes without
+/// being asked, so a lost connection says it once per window — the mapped one
+/// and the one never mapped — and both handles go stale.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_lost_connection_reports_every_window_destroyed() {
+    let mut session = Session::open();
+    let mapped = session.create_mapped(&desc(
+        "crcbl e2e lost mapped",
+        LogicalSize::new(320.0, 200.0),
+    ));
+    let unmapped = session.create(&desc(
+        "crcbl e2e lost unmapped",
+        LogicalSize::new(320.0, 200.0),
+    ));
+    session.pump();
+    session.events.clear();
+
+    crcbl_shell::wayland_test_support::sever(&*session.shell, mapped).expect("sever");
+    let destroyed = |session: &Session, window: WindowId| {
+        session
+            .events
+            .contains(&ShellEvent::WindowDestroyed { window })
+    };
+    session.pump_until("every window reported destroyed", |session| {
+        destroyed(session, mapped) && destroyed(session, unmapped)
+    });
+    for window in [mapped, unmapped] {
+        assert!(
+            matches!(
+                session.shell.window_state(window),
+                Err(ShellError::InvalidWindow { .. })
+            ),
+            "a window the connection took is a stale handle"
+        );
+    }
+}
+
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
 fn the_first_configure_falls_back_to_the_requested_size() {

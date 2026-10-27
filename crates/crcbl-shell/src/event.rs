@@ -129,7 +129,8 @@ pub enum ShellEvent {
     ///
     /// Follows a [`CloseReply::Close`](crate::CloseReply::Close), an explicit
     /// [`destroy_window`](crate::Shell::destroy_window), or the compositor
-    /// taking the window away.
+    /// taking the window away — every window at once when the connection to
+    /// the window system is lost.
     WindowDestroyed {
         /// The window that is gone.
         window: WindowId,

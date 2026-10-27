@@ -82,7 +82,11 @@ unsafe extern "C" {
     fn ftruncate(fd: c_int, length: i64) -> c_int;
     fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
     fn close(fd: c_int) -> c_int;
+    fn shutdown(fd: c_int, how: c_int) -> c_int;
 }
+
+/// `SHUT_RDWR`, the same value on Linux and the BSDs.
+const SHUT_RDWR: c_int = 2;
 
 /// State the registry dispatcher below fills in.
 struct ShmBinding {
@@ -381,6 +385,33 @@ pub fn read_without_dispatching(
         }
     }
     Ok(true)
+}
+
+/// Cuts the shell's connection the way a compositor that died does: the
+/// socket is shut both ways under libwayland, so the next read finds it
+/// closed. The descriptor stays open, and the shell's own teardown closes it.
+///
+/// # Errors
+///
+/// As [`roundtrip`], and [`ShellError::Backend`] if `shutdown` fails.
+pub fn sever(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError> {
+    let SurfaceTarget::Wayland { display, .. } = shell.surface_target(window)? else {
+        return Err(ShellError::Backend(
+            "not a Wayland window; this helper is only for the Wayland backend".to_string(),
+        ));
+    };
+    let lib = ffi::load().map_err(|detail| ShellError::Backend(detail.to_string()))?;
+    let display: *mut WlDisplay = display.as_ptr().cast();
+    // SAFETY: the display belongs to the shell and is live while it is
+    // borrowed; `shutdown` changes the socket's state and frees nothing.
+    let severed = unsafe { shutdown((lib.display_get_fd)(display), SHUT_RDWR) };
+    if severed != 0 {
+        return Err(ShellError::Backend(format!(
+            "shutdown failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
 }
 
 /// The most clipboard payloads one selection may have in flight at once.

@@ -146,6 +146,18 @@ impl X11Shell {
         {
             crcbl_core::log::error!("x11 connection lost: {detail}");
             self.lost = Some(detail);
+            // The server took every window with it, which is a session ending
+            // as `handle_destroy` already answers it, once per window. Without
+            // this nothing told the program, and a game ran on with no window
+            // until something killed it.
+            let windows: Vec<(WindowId, u32)> = self
+                .windows
+                .iter()
+                .map(|(handle, window)| (handle.cast(), window.id))
+                .collect();
+            for (window, xid) in windows {
+                self.window_gone(window, xid);
+            }
         }
     }
 
@@ -505,11 +517,16 @@ impl X11Shell {
         let Some(window) = self.window_by_xid(event.window) else {
             return;
         };
+        self.window_gone(window, event.window);
+    }
+
+    /// Forgets a window the server took away and says so.
+    fn window_gone(&mut self, window: WindowId, xid: u32) {
         self.windows.remove(window.cast());
         // The same cleanup the explicit path does, through the same function:
         // an outstanding read left alive here answered two seconds later,
         // naming a window this very event has just reported as destroyed.
-        self.forget_selection_state(window, event.window);
+        self.forget_selection_state(window, xid);
         #[cfg(feature = "accesskit")]
         self.access.close(window);
         self.queue.push_back(ShellEvent::WindowDestroyed { window });

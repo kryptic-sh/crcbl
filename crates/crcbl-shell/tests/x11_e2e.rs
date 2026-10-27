@@ -812,6 +812,40 @@ fn capabilities_never_change_during_a_session() {
 // The window lifecycle
 // ---------------------------------------------------------------------------
 
+/// A server that dies takes every window with it, and the program hears it.
+///
+/// Before, the shell logged the loss and said nothing more, so a game whose
+/// server went away ran on with no window. A window the server takes away is
+/// already a [`ShellEvent::WindowDestroyed`] here, so a lost connection says
+/// it once per window, and both handles go stale.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_lost_connection_reports_every_window_destroyed() {
+    let mut session = Session::open();
+    let first = session.window(&desc("lost first"));
+    let second = session.window(&desc("lost second"));
+    session.events.clear();
+
+    crcbl_shell::x11_test_support::sever(&*session.shell, first).expect("sever");
+    let destroyed = |session: &Session, window: WindowId| {
+        session
+            .events
+            .contains(&ShellEvent::WindowDestroyed { window })
+    };
+    session.pump_until("every window reported destroyed", |session| {
+        destroyed(session, first) && destroyed(session, second)
+    });
+    for window in [first, second] {
+        assert!(
+            matches!(
+                session.shell.window_state(window),
+                Err(ShellError::InvalidWindow { .. })
+            ),
+            "a window the connection took is a stale handle"
+        );
+    }
+}
+
 /// The P0.4 contract holds on a platform that knew the answer all along.
 ///
 /// X11's `CreateWindow` takes a size and the server keeps it, so there is no

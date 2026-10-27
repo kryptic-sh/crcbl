@@ -2877,6 +2877,16 @@ driver and openbox installed). Last run 2026-10-24 at `de958005`:
 both, fullscreen and F11 refused without a window manager and granted under it;
 `run-x11-xorg-e2e.sh`'s five `xorg_` tests pass both ways.
 
+**A lost window-system connection, what was left out (2026-10-27).** The Wayland
+and X11 shells now report every window destroyed when their connection goes
+(`WaylandShell::lose`, the X11 `drain`), verified by
+`a_lost_connection_reports_every_window_destroyed` in both e2e suites and by
+killing sway under a running sandbox. Not done: `ShellError::Disconnected` and
+`is_fatal` still reach no caller, since nothing returns the error to the
+program; and the Wayland `Conn::drain` returns early on any failed flush, not
+only a full socket. Limiting that to `EAGAIN` changed nothing observable (the
+test and the sway kill passed either way), so it was left as it is.
+
 **Sway loses a `resize set` sent while it waits for the commit of the one before
 (2026-10-26; surprising, not a crcbl bug).** Since a resized surface leaves its
 commit to its next frame, a floating window's resize transaction stays open

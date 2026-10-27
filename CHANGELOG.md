@@ -52,6 +52,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A program whose compositor or X server goes away now stops instead of
+  running on with no window.** The Wayland and X11 shells logged the lost
+  connection and reported nothing else, so the engine's loop kept going: a
+  sandbox whose sway was killed ran for hours at most of a core. A lost
+  connection is now one `ShellEvent::WindowDestroyed` per window, every handle
+  goes stale, and the engine stops with `ExitReason::WindowDestroyed` as it does
+  when a window manager takes a window away. On Wayland the windows' protocol
+  objects are kept until the shell drops, because a swapchain may still name the
+  `wl_surface`.
 - **Finding a saved GPU choice's Vulkan driver no longer logs errors for drivers
   with no GPU behind them.** `GpuChoice::locate_vulkan_driver` opens every
   installed driver alone, and the loader answers one with nothing behind it

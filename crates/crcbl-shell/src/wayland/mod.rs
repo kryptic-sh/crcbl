@@ -2113,6 +2113,11 @@ pub struct WaylandShell {
     /// and polled beside the connection from then on.
     wake: Option<std::sync::Arc<crate::linux::wake::WakePipe>>,
     lost: Option<String>,
+    /// The windows a lost connection took away: already reported destroyed and
+    /// out of `windows`, their proxies held until [`Drop`] rather than freed at
+    /// the loss, because the program's swapchain may still name the
+    /// `wl_surface` until it tears down.
+    orphans: Vec<(WindowId, WlWindow)>,
     /// The default dmabuf feedback, and the main device its last whole batch
     /// named and the one its batch in flight names; see [`dmabuf`].
     dmabuf_feedback: *mut WlProxy,
@@ -2215,6 +2220,7 @@ impl WaylandShell {
             caps: ShellCaps::empty(),
             wake: None,
             lost: None,
+            orphans: Vec::new(),
             dmabuf_feedback: ptr::null_mut(),
             main_device: None,
             pending_main_device: None,
@@ -3698,8 +3704,42 @@ unsafe fn set_viewport(viewport: *mut WlProxy, logical: LogicalSize) {
     unsafe { wp_viewport::set_destination(viewport, round(logical.width), round(logical.height)) };
 }
 
+impl WaylandShell {
+    /// Latches a lost connection and reports every window destroyed.
+    ///
+    /// The compositor took every window with it, and
+    /// [`WindowDestroyed`](ShellEvent::WindowDestroyed) is what the seam says
+    /// when a window goes without being asked. Without it nothing told the
+    /// program: a game whose compositor died ran on with no window, spinning on
+    /// a wait that returns at once, until something killed it.
+    fn lose(&mut self, error: &ShellError) {
+        crcbl_core::log::error!("wayland connection lost: {error}");
+        self.lost = Some(error.to_string());
+        let windows: Vec<WindowId> = self
+            .windows
+            .iter()
+            .map(|(handle, _)| handle.cast())
+            .collect();
+        for id in windows {
+            if let Some(window) = self.windows.remove(id.cast()) {
+                self.orphans.push((id, window));
+                #[cfg(feature = "accesskit")]
+                self.access.close(id);
+                self.queue
+                    .push_back(ShellEvent::WindowDestroyed { window: id });
+            }
+        }
+    }
+}
+
 impl Drop for WaylandShell {
     fn drop(&mut self) {
+        // Nothing reaches a compositor from here — libwayland sends no request
+        // once the display holds an error — so the popups-first order below
+        // has nothing to protect, and these go in any order.
+        for (id, window) in std::mem::take(&mut self.orphans) {
+            self.destroy_objects(id, &window);
+        }
         // Popups before the windows they belong to, at every depth: a surface
         // destroyed under a live popup is a protocol error. Each pass takes
         // the windows nothing names as a parent.
@@ -4226,8 +4266,7 @@ impl Shell for WaylandShell {
         if self.lost.is_none()
             && let Err(error) = self.conn.drain(0, &[])
         {
-            crcbl_core::log::error!("wayland connection lost: {error}");
-            self.lost = Some(error.to_string());
+            self.lose(&error);
         }
         self.process_raw();
         // After the socket, because a `wl_data_source.send` that arrived in
@@ -4277,8 +4316,7 @@ impl Shell for WaylandShell {
             aux.push(wake.fd());
         }
         if let Err(error) = self.conn.drain(timeout_ms, &aux) {
-            crcbl_core::log::error!("wayland connection lost: {error}");
-            self.lost = Some(error.to_string());
+            self.lose(&error);
         }
         if let Some(wake) = &self.wake {
             wake.clear();

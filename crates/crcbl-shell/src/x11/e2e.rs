@@ -38,8 +38,11 @@ use core::ptr;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crcbl_core::SurfaceTarget;
+
 use super::ffi::{self, Connection, Lib};
 use super::read_wire;
+use crate::{ShellError, WindowId};
 
 /// `xcb_test_fake_input`'s event types.
 mod fake {
@@ -75,10 +78,46 @@ struct TestLib {
 unsafe extern "C" {
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn shutdown(fd: c_int, how: c_int) -> c_int;
 }
 
 /// `RTLD_NOW`.
 const RTLD_NOW: c_int = 2;
+/// `SHUT_RDWR`, the same value on Linux and the BSDs.
+const SHUT_RDWR: c_int = 2;
+
+/// Cuts the shell's connection the way a server that died does: the socket is
+/// shut both ways under libxcb, so its next read finds it closed. The
+/// descriptor stays open, and the shell's own teardown closes it.
+///
+/// # Errors
+///
+/// [`ShellError::InvalidWindow`] for a stale handle, or [`ShellError::Backend`]
+/// if this is not an X11 window, if libxcb cannot be loaded, or if `shutdown`
+/// fails.
+pub fn sever(shell: &dyn crate::Shell, window: WindowId) -> Result<(), ShellError> {
+    let SurfaceTarget::Xcb { connection, .. } = shell.surface_target(window)? else {
+        return Err(ShellError::Backend(
+            "not an X11 window; this helper is only for the X11 backend".to_string(),
+        ));
+    };
+    let lib = ffi::load().map_err(|detail| ShellError::Backend(detail.to_string()))?;
+    // SAFETY: the connection belongs to the shell and is live while it is
+    // borrowed; `shutdown` changes the socket's state and frees nothing.
+    let severed = unsafe {
+        shutdown(
+            (lib.get_file_descriptor)(connection.as_ptr().cast()),
+            SHUT_RDWR,
+        )
+    };
+    if severed != 0 {
+        return Err(ShellError::Backend(format!(
+            "shutdown failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
 
 fn load_test_lib() -> Option<TestLib> {
     // SAFETY: both are NUL-terminated literals and `RTLD_NOW` is valid.
