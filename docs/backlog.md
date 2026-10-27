@@ -2890,8 +2890,10 @@ the container to match), not confirmed in its source. Any client that commits
 its new size with a buffer, which is every ordinary one, gets the same. The
 harness now waits after each resize for a second `FrameReady` past the
 reconfigure (`wait_for_frame_at` in `run-wayland-e2e.sh`) before sending the
-next one. Sway's IPC `geometry` stays at the size at first map after a resize,
-with or without the fix, so it cannot serve as that cue.
+next one, and after each F11 flip back to windowed, which raced the soak's first
+resize the same way (CI, 2026-10-27: "timed out after 20s waiting for resize 1
+to 900x500"). Sway's IPC `geometry` stays at the size at first map after a
+resize, with or without the fix, so it cannot serve as that cue.
 
 ## A move that ends past a rounded edge's reach falls from the top (2026-10-26)
 

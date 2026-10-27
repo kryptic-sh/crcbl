@@ -889,6 +889,9 @@ run_sandbox_soak() {
         echo "$KEY_F11" >&9
         wait_for_count "flip $flip back to windowed" "$log" \
             "$reconfigure ${SANDBOX_WINDOWED}" "$flip"
+        # The resizes below are `resize set`s, which race the flip's own commit
+        # exactly as they race each other's.
+        wait_for_frame_at "$log" "${SANDBOX_WINDOWED}" "$flip"
     done
 
     local resize size
