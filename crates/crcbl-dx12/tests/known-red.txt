@@ -17,8 +17,8 @@
 
 # Both drive a mesh pipeline with no pixel shader, which removes the WARP
 # device; given a pixel shader, both draw there. The second runs the toy stages
-# six colour-target probes pass on. On hardware the toy passes, and the first
-# is red on an RX 7900 XTX for another reason: its amplification stage rejects
-# every cluster by the frustum. `ci.yml` runs WARP only.
+# six colour-target probes pass on. On hardware both pass (an RX 7900 XTX,
+# 2026-10-27; the first was red there until then, its amplification stage
+# rejecting every cluster). `ci.yml` runs WARP only.
 the_cluster_shaders_dag_descent_draws_the_cut_it_chose
 a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device

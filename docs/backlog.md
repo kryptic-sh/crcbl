@@ -10451,13 +10451,10 @@ dynamic-offset, froxel, exposure and cross-path groups it listed all pass on the
   read back correctly on the 7900 XTX and on WARP, so no hazard has been
   observed. If another GPU ever fails it, the fix is a barrier there.
 - `crcbl-dx12`'s own device tests (`--run-ignored only`, pin unset so the
-  discrete GPU is used) fail three on hardware and four on WARP, and did before
-  these fixes: the two debug-layer self-tests (no layer installed here),
-  `the_cluster_shaders_dag_descent_draws_the_cut_it_chose` (the mesh pipeline
-  declares a 20-byte stride at set 0 binding 12 where the shader's SRV register
-  9 holds 4-byte elements), and, on WARP only,
-  `a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device` (see the
-  mesh-shading `DEFERRED` entry).
+  discrete GPU is used) pass on hardware but for the two debug-layer self-tests,
+  which need the layer this desktop does not have (2026-10-27, 97 of 99 with
+  `CRCBL_DX12_VALIDATION=0`). On WARP the two in `known-red.txt` still fail, for
+  the mesh-shading `DEFERRED` entry's null-pixel-shader reason.
 - No CI job runs D3D12 on hardware (`windows-latest` has no GPU), so these
   results live only in this entry.
 
@@ -26851,12 +26848,29 @@ the hardware can run it; the fault is on the D3D12 side.
 regresses nothing that draws today, and (c) needs measurements that do not exist
 yet. Revisit when either a newer AMD driver on the 7900 XTX or non-AMD D3D12
 hardware passes `the_cluster_shaders_dag_descent_draws_the_cut_it_chose` with
-the reporting re-applied.**Re-checked 2026-10-22: the trigger has not
-happened.** The 7900 XTX still runs driver 32.0.21036.18, the one measured; this
-machine's Raphael iGPU has a newer AMD driver (32.0.21042.62, dated 2026-09-18),
-which is not the card the decision names but would be a second AMD data point
-for option (c) if the reporting is re-applied and the test pinned to it. The
-options were:
+the reporting re-applied.
+
+**Re-checked 2026-10-27: the frustum fault is gone on the same driver, so it was
+not the driver's.** On `7016cd00`, with the RX 7900 XTX still on 32.0.21036.18,
+`the_cluster_shaders_dag_descent_draws_the_cut_it_chose` passes on hardware (it
+stays in `known-red.txt` for WARP's null-pixel-shader removal). The likeliest
+reason is a tree change since 2026-09-22 (`3bb2372d` took registers from binding
+numbers; `cf525442` took DXIL from CI's pinned dxc), not confirmed by bisecting.
+With the reporting re-applied in a scratch worktree (both flags on hardware at
+`MeshShaderTier` 1 and SM 6.6, never committed), the D3D12 hardware suites ran
+on `GeometryPath::MeshShader`: forward 53/53, hal-seam 32/32, tiling, glTF and
+sprite all passing, render 104/105, mesh 114/120, draw-gen 17/19, against 140
+failures in September. The nine: three `OutOfDeviceMemory` building the renderer
+(seen in September too, not investigated; the same suites pass with the flag
+off); three tests that assume this backend has no mesh path (draw-gen's two
+two-bucket tests expect the uniform-cut path, and the flat-task and task-chunk
+arms find the device granting the task stage they dropped); grass's shell-cost
+shape (0.0002 ms at 32 shells against 0.054 ms at 4); and
+`the_specular_aa_scene_draws_the_same_frame_on_every_geometry_path`, two
+channels off by 1 where the scene allows none. **The decision is the owner's
+again**: the trigger's premise, a driver defect, is gone, and what is left is
+the nine above plus WARP, which still needs a pixel shader on depth-only mesh
+pipelines, so CI would cover no D3D12 mesh path. The options were:
 
 - (a) Withhold everywhere until the 7900 XTX draws. Honest, and what the tree
   does. Costs nothing that works today.
