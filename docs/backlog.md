@@ -2848,9 +2848,10 @@ next moves, every click goes to that surface at a position outside it, such as
 (569, -41), so a panel without a grab sees presses outside its own bounds. lyr
 handles it; crcbl passes the coordinates on as the compositor sent them.
 
-**`run-wayland-e2e-hyprland.sh` on the office laptop, 2026-10-23 and again
-2026-10-24 at `128d5393`:** 56 of 56 passed against the nested Hyprland 0.56.2,
-the five sway-only tests excluded by name as the script lists them.
+**`run-wayland-e2e-hyprland.sh` on the office laptop, 2026-10-23, 2026-10-24 at
+`128d5393`, and 2026-10-27 at `bf490c72`:** 56 of 56, then 57 of 57 with the
+lost-connection test, passed against the nested Hyprland 0.56.2, the five
+sway-only tests excluded by name as the script lists them.
 
 **Hyprland runs nested inside the live Hyprland, hidden** (owner's go-ahead,
 2026-10-21; it cannot nest in headless sway, whose `xdg_wm_base` 5 is below the
