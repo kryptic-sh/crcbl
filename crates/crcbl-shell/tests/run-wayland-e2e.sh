@@ -886,11 +886,13 @@ run_sandbox_soak() {
         echo "$KEY_F11" >&9
         wait_for_count "flip $flip to borderless" "$log" \
             "$reconfigure ${SANDBOX_BORDERLESS}" "$flip"
+        # Each change waits for a frame at its size before the next is sent:
+        # the next F11, and the resizes below, race this one's commit as the
+        # resizes race each other's. An F11 sent before it was lost on CI.
+        wait_for_frame_at "$log" "${SANDBOX_BORDERLESS}" "$flip"
         echo "$KEY_F11" >&9
         wait_for_count "flip $flip back to windowed" "$log" \
             "$reconfigure ${SANDBOX_WINDOWED}" "$flip"
-        # The resizes below are `resize set`s, which race the flip's own commit
-        # exactly as they race each other's.
         wait_for_frame_at "$log" "${SANDBOX_WINDOWED}" "$flip"
     done
 
