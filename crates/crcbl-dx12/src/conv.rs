@@ -332,19 +332,21 @@ pub(crate) const fn heap_type(memory: MemoryLocation, gpu_upload: bool) -> D3D12
     }
 }
 
-/// The resource state a newly created resource must be given.
+/// The resource state a resource newly created on `heap` must be given.
 ///
-/// **Not a preference — D3D12 rejects the other values.** A resource on the
-/// upload heap must start in `GENERIC_READ` and one on the readback heap must
-/// start in `COPY_DEST`; only the default heap takes a free choice, and
-/// `COMMON` is the state a transition out of costs nothing from. The GPU
-/// upload heap takes any state, and gets the upload heap's, so a
-/// [`MemoryLocation::HostUpload`] buffer is in the same state on either.
-pub(crate) const fn initial_state(memory: MemoryLocation) -> D3D12_RESOURCE_STATES {
-    match memory {
-        MemoryLocation::DeviceLocal => D3D12_RESOURCE_STATE_COMMON,
-        MemoryLocation::HostUpload => D3D12_RESOURCE_STATE_GENERIC_READ,
-        MemoryLocation::HostReadback => D3D12_RESOURCE_STATE_COPY_DEST,
+/// **Not a preference — D3D12 rejects or ignores the other values.** A
+/// resource on the upload heap must start in `GENERIC_READ` and one on the
+/// readback heap in `COPY_DEST`. A buffer on the default heap or the GPU upload
+/// heap starts in `COMMON` whatever it is given, and the debug layer warns at
+/// any other value, so it is given `COMMON`; a buffer promotes out of it into a
+/// read state implicitly, which is what lets [`MemoryLocation::HostUpload`]
+/// buffers go unbarriered on either upload heap. Keyed on the heap rather than
+/// the location because one location has two heaps.
+pub(crate) const fn initial_state(heap: D3D12_HEAP_TYPE) -> D3D12_RESOURCE_STATES {
+    match heap {
+        D3D12_HEAP_TYPE_UPLOAD => D3D12_RESOURCE_STATE_GENERIC_READ,
+        D3D12_HEAP_TYPE_READBACK => D3D12_RESOURCE_STATE_COPY_DEST,
+        _ => D3D12_RESOURCE_STATE_COMMON,
     }
 }
 
@@ -1336,15 +1338,20 @@ mod tests {
             );
         }
         assert_eq!(
-            initial_state(MemoryLocation::HostUpload),
+            initial_state(D3D12_HEAP_TYPE_UPLOAD),
             D3D12_RESOURCE_STATE_GENERIC_READ
         );
         assert_eq!(
-            initial_state(MemoryLocation::HostReadback),
+            initial_state(D3D12_HEAP_TYPE_READBACK),
             D3D12_RESOURCE_STATE_COPY_DEST
         );
+        // The two heaps that keep a buffer in `COMMON`, whatever it is given.
         assert_eq!(
-            initial_state(MemoryLocation::DeviceLocal),
+            initial_state(D3D12_HEAP_TYPE_DEFAULT),
+            D3D12_RESOURCE_STATE_COMMON
+        );
+        assert_eq!(
+            initial_state(D3D12_HEAP_TYPE_GPU_UPLOAD),
             D3D12_RESOURCE_STATE_COMMON
         );
     }

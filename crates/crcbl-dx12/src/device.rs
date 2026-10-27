@@ -1604,7 +1604,7 @@ fn zero_source(device: &ID3D12Device) -> Result<ID3D12Resource, HalError> {
             &properties,
             D3D12_HEAP_FLAG_NONE,
             &resource_desc,
-            conv::initial_state(MemoryLocation::DeviceLocal),
+            conv::initial_state(D3D12_HEAP_TYPE_DEFAULT),
             None,
             &mut resource,
         )
@@ -2450,7 +2450,7 @@ impl Device for Dx12Device {
                     &properties,
                     D3D12_HEAP_FLAG_NONE,
                     &resource_desc,
-                    conv::initial_state(desc.memory),
+                    conv::initial_state(heap),
                     None,
                     &mut resource,
                 )
@@ -2873,7 +2873,7 @@ impl Device for Dx12Device {
                 &properties,
                 D3D12_HEAP_FLAG_NONE,
                 &resource_desc,
-                conv::initial_state(MemoryLocation::DeviceLocal),
+                conv::initial_state(D3D12_HEAP_TYPE_DEFAULT),
                 None,
                 &mut resource,
             )

@@ -876,8 +876,10 @@ impl Dx12CommandEncoder {
             // resource on the upload heap to `GENERIC_READ` and one on the
             // readback heap to `COPY_DEST` for its whole lifetime — see
             // `conv::initial_state`, which is where creation gets the same rule
-            // — so a barrier on one is not merely redundant, it is illegal. The
-            // seam has no vocabulary for that, so the backend absorbs it.
+            // — so a barrier on one is not merely redundant, it is illegal. One
+            // on the GPU upload heap starts in `COMMON` and promotes into each
+            // read implicitly, so it needs none either. The seam has no
+            // vocabulary for that, so the backend absorbs it.
             if !matches!(buffer.location, MemoryLocation::DeviceLocal) {
                 continue;
             }
