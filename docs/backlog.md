@@ -4376,10 +4376,26 @@ and every trial it rejected is folded into "Declined" below.
   that far on small source changes, so a change here is timed, not inferred from
   its instruction count. On the Intel GPU and lavapipe the forward and render
   e2e suites and the lantern, horde and tide goldens pass, with every golden's
-  difference line identical to `b15153ef`'s. **Left:** ANV still builds the
-  stage at SIMD8 only and still spills; the next share is the area light's LTC
-  branch and the probe grid. Not measured: lavapipe's timing, and the RX 7900
-  XTX on D3D12 and Vulkan, which the Windows session runs.
+  difference line identical to `b15153ef`'s. **RX 7900 XTX (2026-10-27, Windows
+  desktop, AMD 25.10.36),** `b15153ef` against `cd4c41d8`, six mirrored runs per
+  side, mean `forward` p50 with the runs' range. Vulkan: `lights-fit` 0.319
+  [0.312–0.323] → 0.345 [0.340–0.347] ms (+8.3%, every run of the change slower
+  than every run of the baseline), `specular-lights-fit` 0.467 → 0.490 ms
+  (+4.9%; five runs a side at 0.471–0.473 against 0.494–0.495),
+  `area-lights-fit` 0.955 → 0.958 ms (+0.3%, within the spread),
+  `area-fill-lights-fit` 0.650 → 0.658 ms (+1.4%, just apart). D3D12:
+  `lights-fit` 0.419 [0.412–0.423] → 0.392 [0.388–0.396] ms (−6.4%),
+  `specular-lights-fit` 0.597–0.608 → 0.581–0.585 ms in five runs a side (one
+  run of the change at 1.032 ms is an outlier), `area-lights-fit` 0.973 → 0.976
+  ms and `area-fill-lights-fit` 0.679 → 0.670 ms, both within the spread. On
+  `9d6abb00`, which carries the change, the render, forward and mesh e2e suites
+  pass on both backends and the lantern, horde and tide goldens on Vulkan.
+  **Left:** **RDNA3 Vulkan +8.3% on `lights-fit`** (+4.9% on
+  `specular-lights-fit`), about 0.025 ms of `forward`, the one adapter and API
+  where the change costs ordinary lights; kept for now against ANV's 1–2 ms a
+  frame, and put to the owner by the office session. ANV still builds the stage
+  at SIMD8 only and still spills; the next share is the area light's LTC branch
+  and the probe grid. Not measured: lavapipe's timing.
 - **Unmeasured paths.** A populated probe volume pays the empty-probe early
   return's uniform branch, which no fixture has probes to time; water's own pass
   was not timed either. Slang's MSL output allocates the tile-local exposure
