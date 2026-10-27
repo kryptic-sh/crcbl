@@ -483,6 +483,19 @@ impl VkInstance {
         Self::open_with(Some(entry_point))
     }
 
+    /// The adapter whose primary or render node is the DRM device number
+    /// `device` — what [`display_adapter`](crcbl_hal::Instance::display_adapter)
+    /// matches a window's surface on, asked without one. `None` when no
+    /// adapter here reports that node, or none reports DRM nodes at all.
+    #[must_use]
+    pub fn drm_adapter(&self, device: u64) -> Option<AdapterInfo> {
+        self.inner
+            .adapters
+            .iter()
+            .find(|record| record.drm.contains(device))
+            .map(|record| record.info.clone())
+    }
+
     /// [`open`](Self::open), on the one driver whose
     /// `vk_icdGetInstanceProcAddr` is `direct` when there is one.
     fn open_with(direct: Option<vk::PFN_vkGetInstanceProcAddrLUNARG>) -> Result<Self, OpenError> {

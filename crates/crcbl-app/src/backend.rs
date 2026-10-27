@@ -646,6 +646,19 @@ pub fn request_open() -> Result<PendingInstance, GpuError> {
     }
 }
 
+/// The backend an open asked for `backend` tries first: that one when given,
+/// else the one [`BACKEND_ENV_VAR`] names, else the table's first. `None` when
+/// the variable names no backend this build knows.
+pub(crate) fn first_tried(backend: Option<GpuBackend>) -> Option<GpuBackend> {
+    if backend.is_some() {
+        return backend;
+    }
+    match std::env::var(BACKEND_ENV_VAR) {
+        Ok(value) if !value.trim().is_empty() => GpuBackend::from_name(&value),
+        _ => REGISTRY.first().map(|entry| entry.backend),
+    }
+}
+
 /// Starts opening a specific backend, without blocking and ignoring
 /// [`BACKEND_ENV_VAR`].
 ///

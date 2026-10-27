@@ -15,6 +15,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A first start opens on the display's Vulkan driver alone.** With no saved
+  GPU choice, a presenter on Linux reads the display's DRM device (Wayland's
+  dmabuf `main_device`, X11's DRI3 device) and its PCI vendor from sysfs, and
+  opens only the drivers whose library could serve that vendor
+  (`crcbl_vk::drivers::for_vendor`, `Driver::vendor_hint`), stopping at the
+  first that shows the display's adapter (`VkInstance::drm_adapter`). It does so
+  only where `adapter::rank` would choose that adapter anyway — it is discrete,
+  or integrated with `PowerPreference::LowPower` — and not when an adapter pin,
+  pick or loader driver variable chooses; otherwise, and if that device refuses
+  the window, it opens on every driver as before. The `GpuChoice` it hands back
+  already names the driver, so `locate_vulkan_driver` is not needed. On the
+  office laptop, with the panel on the Intel iGPU, a status bar's first start no
+  longer loads NVIDIA's driver or holds its device files open. Asked for by lyr.
 - **Fallback faces read only when text needs them.** `Font::lazy` makes a face
   that is read and parsed the first time it is asked anything, and
   `Font::from_system_lazy` does so for a `crcbl-font` match. Fallback asks faces
@@ -23,10 +36,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   before it. On the office laptop, the 18 system fallbacks for `sans-serif` (68
   MB, the Noto CJK collections among them) took 51 ms to read up front; listed
   lazily they cost 19 µs and nothing is read until the first CJK char, which
-  reads two faces in 18 ms. A face that fails to load or parse is logged and
-  maps no char. `Font::is_loaded` says whether a face has been read. The debug
-  console's fallbacks are lazy too. Asked for by pikr, whose first paint waited
-  on reading every face.
+  reads two faces in 18 ms. A face that fails to load or parse is logged as a
+  warning, naming the file for one `Font::from_system_lazy` made, and maps no
+  char. `Font::is_loaded` says whether a face has been read. The debug console's
+  fallbacks are lazy too. Asked for by pikr, whose first paint waited on reading
+  every face.
 - **`Presenter::gpu_choice_overridden` and `GpuContext::gpu_choice_overridden`**
   name what chose an open's adapter over any saved choice — the adapter pin, the
   program's pick or a Vulkan loader driver variable — whether or not a choice

@@ -102,6 +102,17 @@ fn makedev(major: u32, minor: u32) -> u64 {
         | ((minor & 0xffff_ff00) << 12)
 }
 
+/// The major and minor numbers of Linux's `dev_t` `device`: [`makedev`]
+/// undone, transcribed from glibc's `__gnu_dev_major` and `__gnu_dev_minor`.
+/// Linux's: what it is for is naming a device in sysfs.
+#[cfg(target_os = "linux")]
+pub(crate) fn major_minor(device: u64) -> (u32, u32) {
+    // Each half is masked to 32 bits before the cast, so neither truncates.
+    let major = ((device >> 8) & 0x0000_0fff) | ((device >> 32) & 0xffff_f000);
+    let minor = (device & 0x0000_00ff) | ((device >> 12) & 0xffff_ff00);
+    (major as u32, minor as u32)
+}
+
 /// Which of the Vulkan 1.3 baseline features a device has.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Core13Support {
@@ -926,6 +937,17 @@ mod tests {
         assert_eq!(makedev(226, 128), 0xe280);
         assert_eq!(makedev(0x12345, 0x6789a), 0x0001_2000_6783_459a);
         assert_eq!(makedev(u32::MAX, u32::MAX), u64::MAX);
+    }
+
+    /// **[`major_minor`] undoes [`makedev`]** on the values glibc printed and
+    /// at both ends of the range.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn major_minor_undoes_makedev() {
+        for (major, minor) in [(226, 128), (0x12345, 0x6789a), (0, 0), (u32::MAX, u32::MAX)] {
+            assert_eq!(major_minor(makedev(major, minor)), (major, minor));
+        }
+        assert_eq!(major_minor(0xe280), (226, 128));
     }
 
     /// A feedback `dev_t` names either node, so either matches, and a device

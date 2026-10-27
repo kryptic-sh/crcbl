@@ -374,6 +374,22 @@ four hand mutants — see the gap below). **Owed:**
   `SharedGpu` presenters inherit the first presenter's device, so they take no
   choice of their own.
 
+**A first start on the display's driver alone (built 2026-10-27, for lyr).**
+`present::display_driver` opens only the Vulkan drivers whose library could
+serve the display's PCI vendor (`crcbl_vk::drivers::for_vendor`), where the
+ranking would choose the display's adapter anyway. Verified on the office laptop
+by `crcbl-app`'s ignored `tests/display_driver.rs` under headless sway, once
+with sway on the Intel GPU (opened through `intel_icd.json`, no NVIDIA library
+mapped) and once on the MX550 (through `nvidia_icd.json`); the first test went
+red with the path turned off. **Not verified:** the X11 path (DRI3's device,
+same code, never run); a laptop with runtime D3 on, where the point is that the
+dGPU stays asleep (this MX550 has it off, and Hyprland holds `/dev/nvidia0`
+anyway); a driver whose library name `Driver::vendor_hint` does not know, which
+is tried after the vendor's own and so may be loaded needlessly (llvmpipe here).
+**Left:** `SharedGpu` presenters inherit the first one's instance, so lyr's
+later panels need nothing; a program that prefers high performance on an
+iGPU-driven display still loads every driver, by design.
+
 **Adapter choice, left over from the 2026-10-19 slice** (lazy describe,
 `PowerPreference`, `AdapterPick`, `Instance::display_adapter`; the policy is
 `crcbl_app::adapter::choose` and `rank`):

@@ -144,6 +144,87 @@ impl Driver {
     pub(crate) fn load(&self) -> Result<vk::PFN_vkGetInstanceProcAddrLUNARG, DriverError> {
         load(&self.library)
     }
+
+    /// The PCI vendor this driver serves, where its library's file name says:
+    /// a vendor's own driver (`libGLX_nvidia`, `amdvlk64`) or a Mesa driver
+    /// named for its hardware (`libvulkan_intel`, `libvulkan_radeon`,
+    /// `libvulkan_nouveau`). `None` for any other name, which may serve
+    /// anything: llvmpipe, a virtual GPU, a vendor this does not list.
+    #[must_use]
+    pub fn vendor_hint(&self) -> Option<u32> {
+        let name = self
+            .library
+            .file_name()?
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        LIBRARY_VENDORS
+            .iter()
+            .find(|(part, _)| name.contains(part))
+            .map(|&(_, vendor)| vendor)
+    }
+}
+
+/// NVIDIA's PCI vendor id.
+pub const PCI_VENDOR_NVIDIA: u32 = 0x10de;
+/// Intel's PCI vendor id.
+pub const PCI_VENDOR_INTEL: u32 = 0x8086;
+/// AMD's PCI vendor id.
+pub const PCI_VENDOR_AMD: u32 = 0x1002;
+
+/// The parts of a driver library's file name that give its vendor; see
+/// [`Driver::vendor_hint`].
+const LIBRARY_VENDORS: [(&str, u32); 5] = [
+    ("nvidia", PCI_VENDOR_NVIDIA),
+    ("nouveau", PCI_VENDOR_NVIDIA),
+    ("intel", PCI_VENDOR_INTEL),
+    ("radeon", PCI_VENDOR_AMD),
+    ("amdvlk", PCI_VENDOR_AMD),
+];
+
+/// The installed drivers that could serve a device of PCI vendor `vendor`,
+/// most likely first: [`manifests`] read, then [`by_vendor`]. A manifest that
+/// does not read is left out.
+#[must_use]
+pub fn for_vendor(vendor: u32) -> Vec<Driver> {
+    let drivers = manifests()
+        .iter()
+        .filter_map(|manifest| Driver::read(manifest).ok())
+        .collect();
+    by_vendor(drivers, vendor)
+}
+
+/// `drivers` that could serve a device of PCI vendor `vendor`: those whose
+/// [`Driver::vendor_hint`] is `vendor`, then those with none, each in the
+/// order given. One whose hint names another vendor is left out, which is
+/// the point: opening it would load that vendor's driver, and on a laptop
+/// wake that vendor's GPU, for a device it cannot serve.
+#[must_use]
+pub fn by_vendor(drivers: Vec<Driver>, vendor: u32) -> Vec<Driver> {
+    let (named, unnamed): (Vec<Driver>, Vec<Driver>) = drivers
+        .into_iter()
+        .filter(|driver| driver.vendor_hint().is_none_or(|hint| hint == vendor))
+        .partition(|driver| driver.vendor_hint().is_some());
+    named.into_iter().chain(unnamed).collect()
+}
+
+/// The PCI vendor of the device behind the DRM device number `device` — a
+/// compositor's dmabuf `main_device`, an X server's DRI3 device — as sysfs
+/// gives it. Linux only: `None` elsewhere, and when sysfs has no such device
+/// or it is not a PCI one.
+#[must_use]
+pub fn drm_vendor(device: u64) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let (major, minor) = crate::adapter::major_minor(device);
+        let text =
+            std::fs::read_to_string(format!("/sys/dev/char/{major}:{minor}/device/vendor")).ok()?;
+        u32::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = device;
+        None
+    }
 }
 
 /// Every ICD manifest the loader would find, in the order it would look,
@@ -319,6 +400,71 @@ mod tests {
             Driver::parse(manifest, "not json"),
             Err(DriverError::Manifest { .. })
         ));
+    }
+
+    /// A driver whose manifest names `library`.
+    fn named(library: &str) -> Driver {
+        Driver {
+            manifest: PathBuf::from(format!("/usr/share/vulkan/icd.d/{library}.json")),
+            library: PathBuf::from(library),
+        }
+    }
+
+    /// **A library's file name gives its vendor where it names one**, in
+    /// whatever case and at whatever path, and nothing for one that does not.
+    #[test]
+    fn a_driver_library_names_its_vendor() {
+        for (library, vendor) in [
+            ("/usr/lib/libvulkan_intel.so", Some(PCI_VENDOR_INTEL)),
+            ("libvulkan_intel_hasvk.so", Some(PCI_VENDOR_INTEL)),
+            ("libGLX_nvidia.so.0", Some(PCI_VENDOR_NVIDIA)),
+            ("libvulkan_nouveau.so", Some(PCI_VENDOR_NVIDIA)),
+            ("libvulkan_radeon.so", Some(PCI_VENDOR_AMD)),
+            ("/opt/amdvlk/AMDVLK64.SO", Some(PCI_VENDOR_AMD)),
+            ("libvulkan_lvp.so", None),
+            ("libvulkan_virtio.so", None),
+        ] {
+            assert_eq!(named(library).vendor_hint(), vendor, "{library}");
+        }
+    }
+
+    /// **The display's vendor's drivers go first and another vendor's are
+    /// left out**: an Intel display tries Intel's two Mesa drivers, then
+    /// llvmpipe, and never NVIDIA's.
+    #[test]
+    fn drivers_for_a_vendor_leave_out_every_other_vendors() {
+        let installed = vec![
+            named("libGLX_nvidia.so.0"),
+            named("libvulkan_lvp.so"),
+            named("libvulkan_intel_hasvk.so"),
+            named("libvulkan_nouveau.so"),
+            named("libvulkan_intel.so"),
+        ];
+        let libraries = |vendor| -> Vec<PathBuf> {
+            by_vendor(installed.clone(), vendor)
+                .into_iter()
+                .map(|driver| driver.library)
+                .collect()
+        };
+        assert_eq!(
+            libraries(PCI_VENDOR_INTEL),
+            [
+                "libvulkan_intel_hasvk.so",
+                "libvulkan_intel.so",
+                "libvulkan_lvp.so"
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(
+            libraries(PCI_VENDOR_NVIDIA),
+            [
+                "libGLX_nvidia.so.0",
+                "libvulkan_nouveau.so",
+                "libvulkan_lvp.so"
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(libraries(0x1af4), [PathBuf::from("libvulkan_lvp.so")]);
     }
 
     /// **A library that is not there is refused, naming it**, rather than

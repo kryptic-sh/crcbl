@@ -969,6 +969,10 @@ pub struct PendingPresenter {
     scoped: bool,
     /// What has become of the choice so far.
     outcome: ChoiceOutcome,
+    /// The manifest of the Vulkan driver the instance being opened holds
+    /// alone because it drives the window's display ([`display_driver`]), so
+    /// a refusal there means reopening on every driver.
+    display_driver: Option<std::path::PathBuf>,
 }
 
 /// An [`AdapterPick`] that owns its name, for a [`PendingPresenter`] that
@@ -1027,6 +1031,7 @@ impl PendingPresenter {
             choice: None,
             scoped: false,
             outcome: ChoiceOutcome::NotGiven,
+            display_driver: None,
         })
     }
 
@@ -1083,10 +1088,20 @@ impl PendingPresenter {
                         self.choice_stale(format!("no {on} adapter here is the one it names"))?;
                     }
                     let scoped = self.scoped;
+                    let display_driver = self.display_driver.is_some();
                     match Presenter::start_device(instance, self) {
                         Err(refusal) if scoped => {
                             let error: PresentError = refusal.into();
                             self.choice_stale(error.to_string())?;
+                        }
+                        Err(refusal) if display_driver => {
+                            let error: PresentError = refusal.into();
+                            log::info!(
+                                "hal: the display's driver alone cannot open this window \
+                                 ({error}); opening on every driver"
+                            );
+                            self.display_driver = None;
+                            self.stage = OpenStage::Instance(request_backend(self.backend)?);
                         }
                         Ok(stage) => self.stage = stage,
                         Err(StartRefusal::Surface(error)) if pending.fall_through(&error) => {
@@ -1169,6 +1184,15 @@ fn request_backend(backend: Option<GpuBackend>) -> Result<PendingInstance, Prese
 /// choice alone; see [`crate::gpu_choice`].
 fn start_open(desc: &PresenterDesc<'_>, open: &mut PendingPresenter) -> Result<(), PresentError> {
     let Some(choice) = desc.gpu_choice else {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((instance, manifest)) = display_driver(desc, &open.target) {
+            open.display_driver = Some(manifest);
+            open.stage = OpenStage::Instance(crate::backend::opened(
+                GpuBackend::Vulkan,
+                Box::new(instance),
+            ));
+            return Ok(());
+        }
         open.stage = OpenStage::Instance(request_backend(desc.backend)?);
         return Ok(());
     };
@@ -1230,6 +1254,72 @@ fn start_open(desc: &PresenterDesc<'_>, open: &mut PendingPresenter) -> Result<(
     }
     open.stage = OpenStage::Instance(request_backend(desc.backend)?);
     Ok(())
+}
+
+/// An instance on the Vulkan driver of the GPU driving `target`'s display,
+/// opened alone, and its manifest — for an open with no saved choice, so even
+/// a program's first start loads one driver rather than every one.
+///
+/// Taken only where it changes nothing but what is loaded: the open would be
+/// on Vulkan, nothing names an adapter (no pin, pick or loader driver
+/// variable), and [`adapter::rank`](crate::adapter::rank) would put the
+/// display's adapter first anyway — it is discrete, or it is integrated and
+/// the program prefers low power. A game preferring high performance on a
+/// laptop whose iGPU drives the panel wants the discrete GPU, so it opens on
+/// every driver. The display is the window system's DRM device (Wayland's
+/// dmabuf `main_device`, X11's DRI3 device) and its vendor sysfs's, so this
+/// is Linux's; elsewhere it answers `None` and the open goes on as before.
+/// Only drivers that could serve that vendor are opened
+/// ([`crcbl_vk::drivers::for_vendor`]), so on a laptop with an Intel panel
+/// NVIDIA's driver is never loaded.
+#[cfg(not(target_arch = "wasm32"))]
+fn display_driver(
+    desc: &PresenterDesc<'_>,
+    target: &crcbl_hal::SurfaceTarget,
+) -> Option<(crcbl_vk::VkInstance, std::path::PathBuf)> {
+    use crcbl_hal::DeviceType;
+
+    let named = desc.adapter_pin.is_some()
+        || desc.adapter_pick.is_some()
+        || crate::gpu_choice::overridden(false, false, GpuBackend::Vulkan).is_some();
+    if named || crate::backend::first_tried(desc.backend) != Some(GpuBackend::Vulkan) {
+        return None;
+    }
+    let device = match target {
+        crcbl_hal::SurfaceTarget::Wayland { main_device, .. }
+        | crcbl_hal::SurfaceTarget::Xcb { main_device, .. } => (*main_device)?,
+        _ => return None,
+    };
+    let vendor = crcbl_vk::drivers::drm_vendor(device)?;
+    for driver in crcbl_vk::drivers::for_vendor(vendor) {
+        let Ok(instance) = crcbl_vk::VkInstance::open_driver(&driver) else {
+            continue;
+        };
+        let Some(adapter) = instance.drm_adapter(device) else {
+            continue;
+        };
+        let ranks_first = match adapter.device_type {
+            DeviceType::Discrete => true,
+            DeviceType::Integrated => desc.power_preference == PowerPreference::LowPower,
+            _ => false,
+        };
+        if !ranks_first {
+            log::debug!(
+                "hal: the display's adapter {:?} does not rank first for {:?}; \
+                 opening on every driver",
+                adapter.name,
+                desc.power_preference
+            );
+            return None;
+        }
+        log::info!(
+            "hal: opening on the display's driver alone, {} ({:?})",
+            driver.manifest.display(),
+            adapter.name
+        );
+        return Some((instance, driver.manifest));
+    }
+    None
 }
 
 impl Presenter {
@@ -1718,6 +1808,9 @@ impl Presenter {
             opened_backend,
         );
         let mut gpu_choice_outcome = open.outcome.clone();
+        if let Some(driver) = &open.display_driver {
+            gpu_choice = gpu_choice.with_vulkan_driver(driver.clone());
+        }
         if let Some(saved) = &open.choice {
             if saved.names(&opened_on) {
                 if let Some(driver) = saved.vulkan_driver().filter(|_| open.scoped) {
