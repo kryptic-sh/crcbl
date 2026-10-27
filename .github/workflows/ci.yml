@@ -1066,7 +1066,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          names=$(grep -v '^[[:space:]]*#' crates/crcbl-dx12/tests/known-red.txt | grep -v '^[[:space:]]*$')
+          # `|| true`: an empty list is a `grep` that selects nothing, which
+          # exits 1 and would end this `-e -o pipefail` step.
+          names=$(grep -v '^[[:space:]]*#' crates/crcbl-dx12/tests/known-red.txt | grep -v '^[[:space:]]*$' || true)
           filter=()
           if [[ -n "$names" ]]; then
             expression=""

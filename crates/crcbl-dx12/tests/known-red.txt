@@ -10,15 +10,7 @@
 # fails if it does not, so a stale entry cannot sit here quietly excluding
 # nothing. That check runs on every push, and covers this file for both readers.
 #
-# These are parked, not in progress: dx12 work stopped on 2026-08-21. See
-# docs/plan/09-backends-metal-dx12.md, docs/notes/backends.md's "DEFERRED -- dx12
-# mesh shading" record for the state, and docs/backlog.md's entry of the same
-# name for the next step.
-
-# Both drive a mesh pipeline with no pixel shader, which removes the WARP
-# device; given a pixel shader, both draw there. The second runs the toy stages
-# six colour-target probes pass on. On hardware both pass (an RX 7900 XTX,
-# 2026-10-27; the first was red there until then, its amplification stage
-# rejecting every cluster). `ci.yml` runs WARP only.
-the_cluster_shaders_dag_descent_draws_the_cut_it_chose
-a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device
+# Empty since 2026-10-27, when the last two left: a mesh pipeline with no pixel
+# shader removed the WARP device, and `crcbl-dx12` now gives such a pipeline
+# `null_pixel.slang`'s do-nothing pixel shader there. Both readers take an empty
+# list. Add a name only for a defect someone is working on.

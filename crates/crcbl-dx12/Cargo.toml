@@ -16,6 +16,14 @@ crcbl-hal = { workspace = true }
 [target.'cfg(target_os = "windows")'.dependencies.crcbl-core]
 workspace = true
 
+# The one shader this backend supplies itself: `null_pixel.slang`'s DXIL, put in
+# place of a mesh pipeline's absent pixel shader on WARP, which removes the
+# device without one (see `crate::pipeline::mesh`). Workspace-internal, and
+# target-gated for the reason above. Tests on every host still take the crate
+# as a dev-dependency below.
+[target.'cfg(target_os = "windows")'.dependencies.crcbl-shaders]
+workspace = true
+
 # The Win32 bindings, and only on the platform that has the ABI behind them.
 # `docs/plan/09-backends-metal-dx12.md`'s FFI correction is the rule this
 # satisfies: *bindings, not frameworks* — `windows-rs` is a thin binding to an

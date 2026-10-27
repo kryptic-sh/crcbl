@@ -26909,8 +26909,13 @@ ms at 32 shells against 0.054 ms at 4); and
 `the_specular_aa_scene_draws_the_same_frame_on_every_geometry_path`, two
 channels off by 1 where the scene allows none. **The decision is the owner's
 again**: the trigger's premise, a driver defect, is gone, and what is left is
-the six others above plus WARP, which still needs a pixel shader on depth-only
-mesh pipelines, so CI would cover no D3D12 mesh path. The options were:
+the six others above. **The owner chose (2026-10-27) to implement it on WARP and
+hardware.** Done so far: a D3D12 device grants only what it asked for
+(`DeviceDesc::granted`), which the four draw-gen and task-stage failures needed,
+and WARP draws a mesh pipeline with no pixel stage, through `null_pixel.slang`'s
+do-nothing pixel shader in `pipeline::mesh`, so `known-red.txt` is empty. Left:
+reporting the flags, grass's shell-cost shape and the `specular_aa` difference.
+The options were:
 
 - (a) Withhold everywhere until the 7900 XTX draws. Honest, and what the tree
   does. Costs nothing that works today.

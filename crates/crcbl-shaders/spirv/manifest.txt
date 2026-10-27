@@ -367,6 +367,15 @@ dxil = amplifiedMeshMain:dxil/mesh_shader.amplified_mesh.dxil:7f0a91482a7f898ebc
 dxil = fragmentMain:dxil/mesh_shader.fragment.dxil:fb6542d1fa84d15525bb7cd86438bf382bcafbfee6645791f494eebdde3c3129
 entry-points = meshMain:meshext, taskMain:taskext, amplifiedMeshMain:meshext, fragmentMain:fragment
 
+[null_pixel]
+source = shaders/null_pixel.slang
+source-sha256 = c904bc0dc2b5724974ffb5c9df0f2f3f5670df6a9dd9d2b2be0cb7edb139d842
+targets = spirv, dxil
+spirv = spirv/null_pixel.spv
+spirv-sha256 = 7b447e78ef4e07410aef4eebd4ae690f4bdd58d29437792c0f71e2e231217044
+dxil = fragmentMain:dxil/null_pixel.fragment.dxil:097f320e02ec4f7055496ae138d2f6df6dd580a26e9f8b1e2a68ba22cc1a77d9
+entry-points = fragmentMain:fragment
+
 [probe_capture]
 source = shaders/probe_capture.slang
 source-sha256 = 6e5bf26dc55d166b48a775d45b4ccbc5803a0d2da09a53cb66fa8802ec7d2205

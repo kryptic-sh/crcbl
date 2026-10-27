@@ -784,6 +784,20 @@ fn add<T: Subobject>(stream: &mut Stream, object: T) {
     unsafe { slot.as_mut_ptr().cast::<T>().write_unaligned(object) };
 }
 
+/// The shader stages a mesh pipeline is built from, resolved from their
+/// handles by the device.
+#[derive(Clone, Copy)]
+pub(crate) struct MeshStages<'a> {
+    /// The amplification stage, when the descriptor names one.
+    pub(crate) task: Option<&'a ShaderModuleEntry>,
+    pub(crate) mesh: &'a ShaderModuleEntry,
+    /// The pixel stage, when the descriptor names one.
+    pub(crate) fragment: Option<&'a ShaderModuleEntry>,
+    /// What draws when `fragment` is absent, in place of a null pixel shader;
+    /// the device's `null_pixel`, present on a software adapter only.
+    pub(crate) null_pixel: Option<&'a Dxil>,
+}
+
 /// Builds a `D3D12_PIPELINE_STATE_STREAM_DESC` for a **mesh** pipeline and the
 /// object from it.
 ///
@@ -825,11 +839,15 @@ pub(crate) fn mesh(
     device: &ID3D12Device,
     desc: &MeshPipelineDesc<'_>,
     layout: &PipelineLayoutEntry,
-    task: Option<&ShaderModuleEntry>,
-    mesh: &ShaderModuleEntry,
-    fragment: Option<&ShaderModuleEntry>,
+    stages: &MeshStages<'_>,
     owner: u64,
 ) -> Result<GraphicsPipelineEntry, HalError> {
+    let MeshStages {
+        task,
+        mesh,
+        fragment,
+        null_pixel,
+    } = *stages;
     let label = desc.label.unwrap_or("<unlabelled>");
     let device2: ID3D12Device2 = device.cast().map_err(|error| {
         // The `HRESULT` goes to the log rather than into the refusal, because
@@ -866,7 +884,12 @@ pub(crate) fn mesh(
             dxil.require_storage_strides(&layout.storage, entry.entry_point)?;
             Some(dxil)
         }
-        _ => None,
+        // **On WARP, a pixel shader that does nothing rather than none.** WARP
+        // removes the device when a mesh pipeline with a null pixel shader
+        // draws, while the same pipeline with any real one draws; `null_pixel`
+        // is the device's stand-in, present on a software adapter only, and it
+        // reads and writes nothing, so a depth-only pass is unchanged.
+        _ => null_pixel,
     };
 
     if desc.color_targets.len() > RENDER_TARGETS {
@@ -905,15 +928,9 @@ pub(crate) fn mesh(
     // the raster path above does with `unwrap_or_default()`. An omitted
     // subobject and an empty one should mean the same thing — the stream's
     // default for `PS` is a null bytecode — and being explicit costs nothing.
-    //
-    // **It is not the fix for the WARP device removal**, which is worth saying
-    // because it was written as one. `docs/notes/backends.md`'s dx12
-    // mesh-shading record has the measurement: with this subobject present and
-    // empty,
-    // `a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device` still
-    // removes the device on run 32421732642, exactly as it did without it. The
-    // null bytecode itself is the trigger — the same pipeline with a real pixel
-    // shader draws on WARP — and no stream layout can supply one.
+    // It is not what keeps WARP's device: an empty subobject removed it as an
+    // omitted one did (`docs/notes/backends.md`'s dx12 mesh-shading record, run
+    // 32421732642). `null_pixel` above is what keeps it.
     add(
         &mut stream,
         PixelShader(fragment_dxil.map(Dxil::bytecode).unwrap_or_default()),

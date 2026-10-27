@@ -84,14 +84,14 @@ use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, Capability, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
-    ComputePipelineDesc, ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DisplayTiming,
-    Extent3d, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc,
-    ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle,
-    ImageViewType, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
-    QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
-    ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind,
-    ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support, SurfaceError, SwapchainDesc,
-    SwapchainHandle,
+    ComputePipelineDesc, ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DeviceType,
+    DisplayTiming, Extent3d, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle,
+    HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle,
+    PresentInfo, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
+    ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle,
+    SemaphoreKind, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support, SurfaceError,
+    SwapchainDesc, SwapchainHandle,
 };
 use windows::Win32::Foundation::{CloseHandle, E_OUTOFMEMORY, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY};
@@ -122,7 +122,7 @@ use crate::command::Dx12CommandEncoder;
 use crate::debug;
 use crate::descriptor::{Descriptors, Kind, Slot};
 use crate::draw::IndirectKind;
-use crate::dxil::ShaderModuleEntry;
+use crate::dxil::{Dxil, ShaderModuleEntry};
 use crate::handle::{self, Owned, Owner};
 use crate::instance::{AdapterRecord, InstanceInner, OFFSCREEN_HWND, next_owner_id};
 use crate::pipeline::{self, ComputePipelineEntry, GraphicsPipelineEntry, PipelineLayoutEntry};
@@ -593,6 +593,11 @@ pub(crate) struct DeviceInner {
     /// rather than the upload heap; see [`conv::heap_type`]. Asked of this
     /// device when it opens, through [`adapter::gpu_upload_heap`].
     pub(crate) gpu_upload_heap: bool,
+    /// What a mesh pipeline with no fragment stage draws with in place of a
+    /// null pixel shader, on a software adapter only: WARP removes the device
+    /// for a mesh pipeline whose pixel shader is null. See
+    /// [`pipeline::mesh`]. `None` on hardware, which keeps the null shader.
+    null_pixel: Option<Dxil>,
     /// [`ZERO_SOURCE_BYTES`] of zeroes on the default heap: the source every
     /// `clear_buffer` copies out of.
     ///
@@ -1777,6 +1782,21 @@ impl Dx12Device {
         })?;
         let timestamp_frequency = query::timestamp_frequency(frequency)?;
         let gpu_upload_heap = adapter::gpu_upload_heap(&raw);
+        let null_pixel = if record.info.device_type == DeviceType::Cpu {
+            let (_, bytes) = crcbl_shaders::NULL_PIXEL
+                .dxil_containers()
+                .into_iter()
+                .find(|(entry, _)| *entry == "fragmentMain")
+                .ok_or_else(|| {
+                    HalError::Backend(
+                        "crcbl-shaders carries no DXIL for null_pixel.slang's fragmentMain"
+                            .to_string(),
+                    )
+                })?;
+            Some(Dxil::parse(bytes, "null_pixel")?)
+        } else {
+            None
+        };
         let owner = Owner::new(next_owner_id());
         let state = DeviceState {
             buffers: Pool::new(),
@@ -1808,6 +1828,7 @@ impl Dx12Device {
             caps,
             timestamp_frequency,
             gpu_upload_heap,
+            null_pixel,
             zero,
             owner,
             state: Mutex::new(state),
@@ -3582,9 +3603,12 @@ impl Device for Dx12Device {
             &self.inner.raw,
             desc,
             layout,
-            task,
-            mesh,
-            fragment,
+            &pipeline::MeshStages {
+                task,
+                mesh,
+                fragment,
+                null_pixel: self.inner.null_pixel.as_ref(),
+            },
             self.inner.owner.id,
         )?;
         if let Some(label) = desc.label {
