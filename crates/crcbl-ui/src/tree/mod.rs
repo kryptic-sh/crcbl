@@ -209,7 +209,7 @@ mod fallback_tests;
 pub mod focus;
 #[cfg(all(test, feature = "parsed-font"))]
 mod font_tests;
-mod inline;
+pub(crate) mod inline;
 mod layout;
 mod paragraph;
 #[cfg(test)]

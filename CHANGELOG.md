@@ -15,6 +15,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`font::rich::RichLayout`: runs in different fonts laid out as one
+  paragraph.** For a caller that draws text itself and has more than one style
+  in a paragraph — a notification body with bold, italic and plain stretches. It
+  takes `RichRun`s (text, a `Font`, a size), a line height and an optional wrap
+  width, and answers lines (`RichLine`: top, baseline, height, width) made of
+  segments (`RichSegment`: the run, the bytes of its text, x and width), with
+  `measure` and `align`. It is the inline layout a `Ui` paragraph's runs already
+  use, so a word split across runs is never broken between them, breaks are UAX
+  #14's across the runs, a line's trailing spaces are not measured, and bidi and
+  fallback faces work across runs. Asked for by lyr, which laid toast bodies out
+  itself.
 - **Icon lookups read GTK's `icon-theme.cache` instead of listing the theme.**
   `IconThemes` used to list every directory of a theme before its first lookup.
   A copy of a theme with a current `icon-theme.cache` — the one

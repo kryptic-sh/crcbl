@@ -93,6 +93,7 @@ pub mod fallback;
 #[cfg(all(test, feature = "parsed-font"))]
 pub(crate) mod fixtures;
 pub mod layout;
+pub mod rich;
 pub mod shape;
 #[cfg(feature = "system-fonts")]
 pub mod system;
