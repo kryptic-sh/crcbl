@@ -13,6 +13,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Changed
+
+- **D3D12's shader-visible view heap holds 65,536 descriptors**, up from 4,096,
+  and `Limits::max_bindless_descriptors` reports the new size. The renderer on
+  the mesh path ran the old heap out while building itself and failed with
+  `OutOfDeviceMemory`; those frames peak at about 6,200. The heap costs 2 MiB on
+  an RX 7900 XTX (4 MiB on WARP), allocated once per device.
+
 ## [0.12.1] - 2026-10-27
 
 ### Added

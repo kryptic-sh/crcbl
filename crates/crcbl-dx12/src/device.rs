@@ -13651,6 +13651,44 @@ pub(crate) mod tests {
         );
     }
 
+    /// The shader-visible view heap has room past the size it was until
+    /// 2026-10-27, when the renderer on the mesh path ran it out: one group of
+    /// [`PAST_THE_OLD_HEAP`] views, partially bound so no view has to exist.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn one_bind_group_takes_more_views_than_the_heap_once_held() {
+        let (_instance, device) = open_device();
+        let layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("past the old heap"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    kind: BindingKind::SampledImage {
+                        view_type: ImageViewType::D2,
+                        sample_type: crcbl_hal::SampleType::Float,
+                    },
+                    count: PAST_THE_OLD_HEAP,
+                    flags: BindingFlags::VARIABLE_COUNT | BindingFlags::PARTIALLY_BOUND,
+                }],
+            })
+            .expect("a bindless layout under max_bindless_descriptors");
+        let group = device
+            .create_bind_group(&BindGroupDesc {
+                label: Some("past the old heap"),
+                layout,
+                entries: &[],
+                variable_count: Some(PAST_THE_OLD_HEAP),
+            })
+            .expect("the view heap has room for the block");
+        device.destroy_bind_group(group);
+        device.destroy_bind_group_layout(layout);
+    }
+
+    /// Twice the shader-visible view heap this backend allocated until
+    /// 2026-10-27, and under [`binding::VIEW_DESCRIPTORS`] now.
+    const PAST_THE_OLD_HEAP: u32 = 8192;
+
     /// **A uniform buffer smaller than D3D12's constant-buffer block gets a view
     /// over it and the device survives.**
     ///

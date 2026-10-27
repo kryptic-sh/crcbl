@@ -149,11 +149,16 @@ use crate::root;
 ///
 /// Not `D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2`, which is a
 /// million: the heap is allocated up front and in full, so the ceiling is also a
-/// per-device cost every caller pays. This is large enough for a bindless page
-/// of textures beside a frame's ordinary sets, and small enough to be
-/// unremarkable. Raising it is a one-line change with a measurable cost, which
-/// is the property that matters.
-pub(crate) const VIEW_DESCRIPTORS: u32 = 4096;
+/// per-device cost every caller pays, the descriptor size times this (32 bytes
+/// each on an RX 7900 XTX and 64 on WARP, measured 2026-10-27).
+///
+/// **Raised from 4096 on 2026-10-27**, when the renderer on the mesh path ran
+/// that heap out building itself: `create_bind_group` refused a block with
+/// 4093 views taken, and the same frames peaked at 6156 once there was room.
+/// The renderer's tables are not sized from
+/// [`max_bindless_descriptors`](crcbl_hal::Limits::max_bindless_descriptors),
+/// so a larger heap is headroom and not more use.
+pub(crate) const VIEW_DESCRIPTORS: u32 = 65_536;
 
 /// Descriptors in the one shader-visible sampler heap.
 ///

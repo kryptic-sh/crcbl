@@ -26902,17 +26902,19 @@ With the reporting re-applied in a scratch worktree (both flags on hardware at
 `MeshShaderTier` 1 and SM 6.6, never committed), the D3D12 hardware suites ran
 on `GeometryPath::MeshShader`: forward 53/53, hal-seam 32/32, tiling, glTF and
 sprite all passing, render 104/105, mesh 114/120, draw-gen 17/19, against 140
-failures in September. The nine: three `OutOfDeviceMemory` building the renderer
-(seen in September too, not investigated; the same suites pass with the flag
-off); three tests that assume this backend has no mesh path (draw-gen's two
-two-bucket tests expect the uniform-cut path, and the flat-task and task-chunk
-arms find the device granting the task stage they dropped); grass's shell-cost
-shape (0.0002 ms at 32 shells against 0.054 ms at 4); and
+failures in September. The nine: three `OutOfDeviceMemory` building the
+renderer, which was the shader-visible view heap running out (4093 of 4096
+taken; these frames peak at 6156), fixed the same day by
+`binding::VIEW_DESCRIPTORS` going to 65,536, after which all three pass; three
+tests that assume this backend has no mesh path (draw-gen's two two-bucket tests
+expect the uniform-cut path, and the flat-task and task-chunk arms find the
+device granting the task stage they dropped); grass's shell-cost shape (0.0002
+ms at 32 shells against 0.054 ms at 4); and
 `the_specular_aa_scene_draws_the_same_frame_on_every_geometry_path`, two
 channels off by 1 where the scene allows none. **The decision is the owner's
 again**: the trigger's premise, a driver defect, is gone, and what is left is
-the nine above plus WARP, which still needs a pixel shader on depth-only mesh
-pipelines, so CI would cover no D3D12 mesh path. The options were:
+the six others above plus WARP, which still needs a pixel shader on depth-only
+mesh pipelines, so CI would cover no D3D12 mesh path. The options were:
 
 - (a) Withhold everywhere until the 7900 XTX draws. Honest, and what the tree
   does. Costs nothing that works today.
