@@ -80,10 +80,11 @@ impl Font {
     /// question rather than now: [`Font::lazy`] over [`FontMatch::read`].
     /// What a list of system fallback faces is for, which a launcher would
     /// otherwise read whole before its first frame; see [`Font::lazy`] for
-    /// what a face that fails to read answers.
+    /// what a face that fails to read answers. Its warning names the file.
     #[must_use]
     pub fn from_system_lazy(face: FontMatch) -> Self {
-        Self::lazy(move || face.read())
+        let what = format!("the font face {} (#{})", face.path.display(), face.index);
+        Self::lazy_called(what, move || face.read())
     }
 }
 
@@ -159,6 +160,25 @@ mod tests {
             Font::from_system(&gone),
             Err(SystemFontError::Read(_))
         ));
+    }
+
+    /// **A system face made lazily is read on first use**, as the face its
+    /// file holds; one whose file went maps no char, and the warning it logs
+    /// names the file, since the caller no longer sees the failure itself.
+    #[test]
+    fn a_lazy_system_face_reads_on_first_use_and_names_its_file() {
+        let font = Font::from_system_lazy(committed(0));
+        assert!(!font.is_loaded());
+        let compiled = Font::parse(crate::font::SANS_TTF).expect("parses");
+        assert_eq!(font.glyph_id('a'), compiled.glyph_id('a'));
+        assert!(font.is_loaded());
+
+        let gone = Font::from_system_lazy(FontMatch {
+            path: PathBuf::from("no such font file.ttf"),
+            ..committed(0)
+        });
+        assert!(gone.source.what.contains("no such font file.ttf"));
+        assert_eq!(gone.glyph_id('a'), crate::font::GlyphId::NOTDEF);
     }
 
     #[test]

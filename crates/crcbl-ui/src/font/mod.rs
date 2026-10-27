@@ -419,6 +419,10 @@ struct Source {
     /// `None` for a face parsed when it was made.
     #[cfg(feature = "parsed-font")]
     load: Mutex<Option<Loader>>,
+    /// What a [`Font::lazy`] face's warning calls it when it cannot be read:
+    /// its file, for one [`Font::from_system_lazy`] made.
+    #[cfg(feature = "parsed-font")]
+    what: String,
 }
 
 /// What [`Font::lazy`] keeps to read its face: its bytes, or why not.
@@ -542,6 +546,7 @@ impl Font {
             ids: next_ids(),
             parsed: OnceLock::from(Parsed::read(data.into())?),
             load: Mutex::new(None),
+            what: String::new(),
         }))
     }
 
@@ -556,12 +561,25 @@ impl Font {
     /// them, reads none of them until the text needs one. Its [`Font::id`] is
     /// given now, so a tree's fallback list hashes without reading anything.
     ///
-    /// A face that fails to load or to parse is logged once and maps no
-    /// char from then on, so fallback goes past it, as it would past a face
-    /// that lacks the glyph.
+    /// A face that fails to load or to parse is logged once, as a warning,
+    /// and maps no char from then on, so fallback goes past it, as it would
+    /// past a face that lacks the glyph.
     #[cfg(feature = "parsed-font")]
     #[must_use]
     pub fn lazy<D, E>(load: impl FnOnce() -> Result<D, E> + Send + 'static) -> Self
+    where
+        D: Into<FontData>,
+        E: fmt::Display,
+    {
+        Self::lazy_called("a lazily loaded font face".to_owned(), load)
+    }
+
+    /// [`Font::lazy`], whose warning calls the face `what`.
+    #[cfg(feature = "parsed-font")]
+    pub(crate) fn lazy_called<D, E>(
+        what: String,
+        load: impl FnOnce() -> Result<D, E> + Send + 'static,
+    ) -> Self
     where
         D: Into<FontData>,
         E: fmt::Display,
@@ -572,6 +590,7 @@ impl Font {
             ids: next_ids(),
             parsed: OnceLock::new(),
             load: Mutex::new(Some(load)),
+            what,
         })
     }
 
@@ -703,7 +722,7 @@ impl Source {
             .and_then(|load| load())
             .and_then(|data| Parsed::read(data).map_err(|error| error.to_string()));
         read.unwrap_or_else(|error| {
-            crcbl_core::warn!("a lazily loaded font face maps no char: {error}");
+            crcbl_core::warn!("{} maps no char: {error}", self.what);
             Parsed::empty()
         })
     }
@@ -905,6 +924,7 @@ impl Font {
                 shaper: None,
             }),
             load: Mutex::new(None),
+            what: String::new(),
         })))
     }
 }
