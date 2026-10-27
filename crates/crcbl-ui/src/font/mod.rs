@@ -409,11 +409,11 @@ struct Source {
     never: NoParsedFont,
     /// This face's identity under each [`Synthesis`], by
     /// [`Synthesis::index`]: a synthesised face's glyphs are not the face's.
-    /// Given when the handle is made, so a [`Font::lazy`] face has one
+    /// Given when the handle is made, so a `Font::lazy` face has one
     /// before it is read.
     ids: [FontId; SYNTHESES],
     /// Its parse: set when the handle is made by [`Font::parse`], and on
-    /// first use for a [`Font::lazy`] one.
+    /// first use for a `Font::lazy` one.
     parsed: OnceLock<Parsed>,
     /// What reads a [`Font::lazy`] face's bytes, taken by its first use;
     /// `None` for a face parsed when it was made.
@@ -455,7 +455,7 @@ struct Parsed {
 }
 
 impl fmt::Debug for Font {
-    /// The id and the metrics; not the tables. A [`Font::lazy`] face not yet
+    /// The id and the metrics; not the tables. A `Font::lazy` face not yet
     /// read says so rather than being read to be printed.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("Font");
@@ -595,7 +595,7 @@ impl Font {
     }
 
     /// Whether this face has been read: always for one [`Font::parse`]
-    /// made, and for a [`Font::lazy`] one once something asked it.
+    /// made, and for a `Font::lazy` one once something asked it.
     #[must_use]
     pub fn is_loaded(&self) -> bool {
         self.source.parsed.get().is_some()
