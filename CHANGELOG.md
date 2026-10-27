@@ -13,6 +13,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-27
+
 ### Added
 
 - **`font::rich::RichLayout`: runs in different fonts laid out as one
@@ -85,7 +87,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 ### Changed
 
 - **The forward pass is 6–19% faster on Intel's Mesa driver**, with the same
-  picture and the NVIDIA MX550 within 2%. `mesh.slang`'s `fragmentMain` wrote
+  picture and the NVIDIA MX550 within 2%. On an RX 7900 XTX it is 6% faster on
+  D3D12 on `lights-fit` and up to 8% slower on Vulkan (about 0.025 ms there),
+  the one adapter and API where it costs. `mesh.slang`'s `fragmentMain` wrote
   the sun's shadow filter once per filter mode and twice more for the cascade
   blend, and every call is inlined, so its light loop held about six copies of
   the PCF taps; ANV, which builds the stage at SIMD8 only, spilled under them.
@@ -21656,7 +21660,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/kryptic-sh/crcbl/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/kryptic-sh/crcbl/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/kryptic-sh/crcbl/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/kryptic-sh/crcbl/compare/v0.9.0...v0.10.0
