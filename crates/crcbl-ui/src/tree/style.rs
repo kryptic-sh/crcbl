@@ -219,15 +219,17 @@ impl Overflow {
 /// space.
 ///
 /// Explicit newlines break under either value: the tree never collapses white
-/// space, so `nowrap` here is nearer CSS's `pre` than its `nowrap`, which would
-/// fold a newline into a space.
+/// space, so `normal` here is CSS's `pre-wrap` — the spaces a line ends with
+/// hang, taking no width — and `nowrap` is nearer CSS's `pre` than its
+/// `nowrap`, which would fold a newline into a space: a line keeps the spaces
+/// it ends with, so a span of one plain space is a space wide.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum WhiteSpace {
     /// Lines break at soft breaks to fit the width the span is laid out under.
     #[default]
     Normal,
     /// Lines break at newlines only, whatever they overflow: min-content is
-    /// max-content.
+    /// max-content. The spaces a line ends with take their width.
     NoWrap,
 }
 

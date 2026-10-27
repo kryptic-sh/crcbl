@@ -17,8 +17,10 @@
 //! * **The spaces a line breaks at belong to no line**: they are not drawn,
 //!   not measured, and the next line starts at the word after them. Spaces a
 //!   line ends with before a hard break or the end of the text are not
-//!   measured either. Spaces anywhere else — leading a paragraph, or several
-//!   between two words — take their advance.
+//!   measured either — CSS's `pre-wrap`, where they hang — except in a
+//!   [`TextLayout::nowrap`] layout, which measures them as CSS's `pre` does.
+//!   Spaces anywhere else — leading a paragraph, or several between two words
+//!   — take their advance.
 //! * **A stretch with no soft break in it is never broken**: wider than the
 //!   wrap width, it takes a line of its own and overflows it, which is CSS's
 //!   `overflow-wrap: normal`.
@@ -235,6 +237,30 @@ impl TextLayout {
     /// left.
     #[must_use]
     pub fn new(font: &Font, text: &str, size: f32, line_height: f32, wrap: Option<f32>) -> Self {
+        Self::lay_out(font, text, size, line_height, wrap, false)
+    }
+
+    /// Lays `text` out as `white-space: nowrap` text, which this crate draws
+    /// as CSS's `pre`: broken only at hard breaks, as [`TextLayout::new`] with
+    /// no wrap width is, but **a line keeps the spaces it ends with** — they
+    /// take their advance in its width and in [`TextLayout::measure`]. A span
+    /// of one plain space is a space wide, as a text field's block caret over
+    /// one needs.
+    #[must_use]
+    pub fn nowrap(font: &Font, text: &str, size: f32, line_height: f32) -> Self {
+        Self::lay_out(font, text, size, line_height, None, true)
+    }
+
+    /// [`TextLayout::new`], keeping each line's trailing spaces when
+    /// `keep_spaces`.
+    fn lay_out(
+        font: &Font,
+        text: &str,
+        size: f32,
+        line_height: f32,
+        wrap: Option<f32>,
+        keep_spaces: bool,
+    ) -> Self {
         let metrics = font.metrics();
         let scale = metrics.scale(size);
         let wrap = wrap.map(wrap_width);
@@ -252,7 +278,15 @@ impl TextLayout {
         };
         // Every glyph as shaped, beside `glyphs`: its advance and offset.
         let mut shaped: Vec<ShapedGlyph> = Vec::with_capacity(text.len());
-        fill::fill(&mut layout, &mut shaped, font, size, wrap, text);
+        fill::fill(
+            &mut layout,
+            &mut shaped,
+            font,
+            size,
+            wrap,
+            keep_spaces,
+            text,
+        );
 
         let ascent = metrics.ascent * scale;
         let descent = metrics.descent * scale;

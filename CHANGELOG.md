@@ -15,6 +15,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`white-space: nowrap` text keeps the width of the spaces a line ends with**,
+  as CSS's `pre` does; `normal` text still lets them hang, as `pre-wrap` does. A
+  `nowrap` span of one plain space was zero wide, so a text field's block caret
+  drawn over one had nothing to sit on; it is now a space wide, and a `nowrap`
+  span or paragraph ending in spaces measures, aligns, underlines and is
+  ellipsized with them. `TextLayout::nowrap` lays text out that way for a caller
+  of its own. Asked for by pikr, which drew a no-break space under its caret
+  instead.
 - **D3D12's shader-visible view heap holds 65,536 descriptors**, up from 4,096,
   and `Limits::max_bindless_descriptors` reports the new size. The renderer on
   the mesh path ran the old heap out while building itself and failed with

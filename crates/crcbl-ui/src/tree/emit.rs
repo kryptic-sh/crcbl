@@ -272,15 +272,17 @@ impl Ui {
                     // the unrounded one — unless it is `nowrap`, and
                     // aligned in the box it is drawn in, the rounded one.
                     let unrounded = &self.store.get(node.slot).unrounded;
-                    let wrap =
-                        (style.white_space == WhiteSpace::Normal).then(|| content_width(unrounded));
-                    let mut layout = TextLayout::new(
-                        font,
-                        text,
-                        style.font_size,
-                        style.text_line_height(font),
-                        wrap,
-                    );
+                    let (size, line_height) = (style.font_size, style.text_line_height(font));
+                    let mut layout = match style.white_space {
+                        WhiteSpace::Normal => TextLayout::new(
+                            font,
+                            text,
+                            size,
+                            line_height,
+                            Some(content_width(unrounded)),
+                        ),
+                        WhiteSpace::NoWrap => TextLayout::nowrap(font, text, size, line_height),
+                    };
                     layout.align(content_max.x - content_min.x, style.text_align);
                     let lines = layout
                         .lines()

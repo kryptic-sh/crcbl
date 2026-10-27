@@ -54,13 +54,16 @@ struct Filler<'a> {
 
 /// Lays every paragraph of `text` into `layout` — its glyphs, faces, bytes
 /// and lines — in `font` at `size`, broken to fit `wrap` whole pixels when
-/// given, each glyph's shaping written beside it to `shaped`.
+/// given, each glyph's shaping written beside it to `shaped`. A line keeps the
+/// spaces it ends with before a hard break or the text's end when
+/// `keep_spaces`, as [`TextLayout::nowrap`] asks.
 pub(super) fn fill(
     layout: &mut TextLayout,
     shaped: &mut Vec<ShapedGlyph>,
     font: &Font,
     size: f32,
     wrap: Option<f32>,
+    keep_spaces: bool,
     text: &str,
 ) {
     for bytes in breaks::paragraphs(text) {
@@ -92,7 +95,11 @@ pub(super) fn fill(
                 None => filler.add(piece, spaces, false),
             }
         }
-        let kept = filler.words_end(filler.line.len());
+        let kept = if keep_spaces {
+            filler.line.len()
+        } else {
+            filler.words_end(filler.line.len())
+        };
         filler.finish(kept);
     }
 }

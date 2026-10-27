@@ -125,8 +125,11 @@ impl<'a> InlineRun<'a> {
 /// Which width lines are broken at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Wrap {
-    /// Only at newlines: max-content, or `white-space: nowrap`.
+    /// Only at newlines: max-content. A line's trailing spaces are left out.
     None,
+    /// Only at newlines, and a line keeps the spaces it ends with:
+    /// `white-space: nowrap`, which this crate draws as CSS's `pre`.
+    Pre,
     /// At every soft break, with no word broken: min-content.
     MinContent,
     /// To fit this many pixels, words broken where one alone overflows.
@@ -395,12 +398,13 @@ impl InlineLayout {
             return layout;
         }
         let limit = match wrap {
-            Wrap::None => None,
+            Wrap::None | Wrap::Pre => None,
             Wrap::MinContent => Some(0.0),
             Wrap::Width(width) => Some(wrap_width(width)),
         };
         // Only a definite width breaks a word between clusters.
         let break_words = matches!(wrap, Wrap::Width(_));
+        let keep_spaces = wrap == Wrap::Pre;
         let joined = Joined::new(runs);
         let paragraphs: Vec<Paragraph<'_>> = breaks::paragraphs(&joined.text)
             .map(|bytes| Paragraph {
@@ -433,6 +437,9 @@ impl InlineLayout {
                     let start = layout.glyphs.len();
                     layout.push(&source, core::slice::from_ref(&segment), false);
                     line.pen = layout.place_from(line.pen, start);
+                    if keep_spaces {
+                        line.end = layout.glyphs.len();
+                    }
                 }
                 Token::Word(parts) => {
                     if let Some(&(run, _)) = parts.last() {

@@ -200,7 +200,7 @@ impl Ui {
                 WhiteSpace::Normal => {
                     Wrap::Width(content_width(&self.store.get(node.slot).unrounded))
                 }
-                WhiteSpace::NoWrap => Wrap::None,
+                WhiteSpace::NoWrap => Wrap::Pre,
             };
             let mut layout = InlineLayout::new(&inputs, wrap, atlas);
             layout.align(content_width(&node.layout), node.style.text_align);
@@ -348,7 +348,8 @@ pub(super) fn measure_runs(
     atlas: &FontAtlas,
 ) -> Size<f32> {
     let wrap = match (white_space, width) {
-        (WhiteSpace::NoWrap, _) | (_, AvailableSpace::MaxContent) => Wrap::None,
+        (WhiteSpace::NoWrap, _) => Wrap::Pre,
+        (_, AvailableSpace::MaxContent) => Wrap::None,
         (WhiteSpace::Normal, AvailableSpace::MinContent) => Wrap::MinContent,
         (WhiteSpace::Normal, AvailableSpace::Definite(width)) => Wrap::Width(width),
     };

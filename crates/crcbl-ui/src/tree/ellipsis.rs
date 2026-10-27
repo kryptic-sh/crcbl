@@ -115,7 +115,7 @@ impl Measure<'_> {
                 font,
                 size,
                 line_height,
-            } => TextLayout::new(font, line, *size, *line_height, None).width(),
+            } => TextLayout::nowrap(font, line, *size, *line_height).width(),
         }
     }
 

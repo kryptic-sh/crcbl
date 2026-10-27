@@ -334,3 +334,35 @@ fn a_bitmap_run_draws_a_missing_char_from_a_fallback_face() {
     assert_eq!(glyphs.len(), 1);
     assert_eq!(glyphs[0].3, texts[0].0 + Vec2::new(20.0 + 3.5, 20.0));
 }
+
+/// **A `nowrap` span or paragraph keeps the width of the spaces it ends
+/// with**, CSS's `pre`, where a `normal` one's hang: a span of one plain
+/// space is a space wide — a text field's block caret over it — and a
+/// `nowrap` paragraph's run ending in a space is that much wider.
+#[test]
+fn nowrap_text_keeps_the_width_of_its_trailing_spaces() {
+    let mut ui = tree();
+    ui.add_stylesheet(
+        "nowrap.css",
+        &format!(".n {{ font-family: primary; font-size: {SIZE}px; white-space: nowrap; }}"),
+    );
+    let mut keys = Vec::new();
+    frame(&mut ui, idle(), |ui| {
+        keys.push(ui.span(".n", " ", &[]).key);
+        keys.push(ui.span(".t", " ", &[]).key);
+        ui.paragraph(".n", &[], |p| {
+            keys.push(p.run("", "ab ", &[]).key);
+        });
+    });
+    let width = |key| {
+        let (min, max) = ui.rect(key).expect("laid out");
+        max.x - min.x
+    };
+    assert_eq!(width(keys[0]), NARROW, "a nowrap space");
+    assert_eq!(width(keys[1]), 0.0, "a normal space hangs");
+    assert_eq!(
+        width(keys[2]),
+        3.0 * NARROW,
+        "a nowrap run's trailing space"
+    );
+}

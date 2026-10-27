@@ -713,3 +713,33 @@ fn a_caret_in_empty_text_and_hard_breaks() {
     assert_eq!((layout.caret(4).line, layout.caret(4).x), (1, 0.0));
     assert_eq!((layout.caret(6).line, layout.caret(6).x), (2, 0.0));
 }
+
+/// **A `nowrap` layout keeps the spaces each line ends with**, before a hard
+/// break and at the text's end, where a wrapping layout with no width leaves
+/// them out; a line of one space is a space wide.
+#[test]
+fn a_nowrap_layout_keeps_the_spaces_its_lines_end_with() {
+    let text = "ab  \ncd ";
+    let kept = TextLayout::nowrap(Font::sans(), text, SIZE, LINE);
+    let hung = TextLayout::new(Font::sans(), text, SIZE, LINE, None);
+    let widths = |layout: &TextLayout| -> Vec<f32> {
+        layout.lines().iter().map(|line| line.width).collect()
+    };
+    let close = |got: Vec<f32>, want: [f32; 2]| {
+        assert!(
+            got.iter()
+                .zip(want)
+                .all(|(got, want)| (got - want).abs() < 1e-4),
+            "{got:?} against {want:?}"
+        );
+    };
+    close(widths(&kept), [width("ab  "), width("cd ")]);
+    close(widths(&hung), [width("ab"), width("cd")]);
+    assert!(width("ab  ") > width("ab"));
+    let space = TextLayout::nowrap(Font::sans(), " ", SIZE, LINE);
+    assert!((space.width() - width(" ")).abs() < 1e-4 && space.width() > 0.0);
+    assert_eq!(
+        TextLayout::new(Font::sans(), " ", SIZE, LINE, None).width(),
+        0.0
+    );
+}

@@ -89,18 +89,17 @@ impl MeasureCache {
                 }
             }
             Some(font) => {
+                let (size, line_height) = (style.font_size, style.text_line_height(font));
                 let wrap = match (style.white_space, width) {
-                    (WhiteSpace::NoWrap, _) | (_, AvailableSpace::MaxContent) => None,
-                    (WhiteSpace::Normal, AvailableSpace::MinContent) => Some(0.0),
-                    (WhiteSpace::Normal, AvailableSpace::Definite(width)) => Some(width),
+                    (WhiteSpace::NoWrap, _) => None,
+                    (_, AvailableSpace::MaxContent) => Some(None),
+                    (WhiteSpace::Normal, AvailableSpace::MinContent) => Some(Some(0.0)),
+                    (WhiteSpace::Normal, AvailableSpace::Definite(width)) => Some(Some(width)),
                 };
-                let measured = TextLayout::new(
-                    font,
-                    text,
-                    style.font_size,
-                    style.text_line_height(font),
-                    wrap,
-                )
+                let measured = match wrap {
+                    Some(wrap) => TextLayout::new(font, text, size, line_height, wrap),
+                    None => TextLayout::nowrap(font, text, size, line_height),
+                }
                 .measure();
                 Size {
                     width: measured.x,

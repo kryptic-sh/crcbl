@@ -387,18 +387,6 @@ which only calls `DrawList::image`), while `DrawList::image_rounded` and
 `texture_rounded` over a new variant break only exhaustive matches. A blur
 behind the card is its own offscreen pass, larger.
 
-**Needs a decision: a span of only spaces measures nothing (pikr, low).** A
-line's width leaves out the spaces it ends with, in `TextLayout`'s filler
-(`fill.rs`, `words_end`) and in the tree's own inline layout (`inline.rs`), so a
-span holding one plain space — pikr's Normal-mode block caret — is zero wide;
-pikr puts a no-break space there instead. The tree never collapses spaces, so
-`WhiteSpace::Normal` is CSS's `pre-wrap` (trailing spaces hang) and `NoWrap`,
-documented as nearer `pre`, could keep them the way `pre` does: count a `nowrap`
-line's trailing spaces in its width in both engines. That changes every existing
-`nowrap` span ending in spaces (wider by them, and an ellipsis judged against
-the wider box), so it is not done unasked. The other option, a `WhiteSpace::Pre`
-value, is a variant on an exhaustive public enum: a breaking change.
-
 **A first start on the display's driver alone (built 2026-10-27, for lyr).**
 `present::display_driver` opens only the Vulkan drivers whose library could
 serve the display's PCI vendor (`crcbl_vk::drivers::for_vendor`), where the
