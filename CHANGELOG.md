@@ -15,6 +15,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Icon lookups read GTK's `icon-theme.cache` instead of listing the theme.**
+  `IconThemes` used to list every directory of a theme before its first lookup.
+  A copy of a theme with a current `icon-theme.cache` — the one
+  `gtk-update-icon-cache` writes and distributions keep up to date, judged
+  current by GTK's own rule — is now looked up through it, a few short reads per
+  name; a copy without one is listed as before. On the office laptop,
+  Papirus-Dark's first lookup went from 30–43 ms to under 1 ms, and ten lookups
+  including a miss from 49–63 ms to 2–4 ms. Every installed theme's cache was
+  checked against listing it, icon by icon. Asked for by pikr, whose first paint
+  waited on the listing.
 - **A first start opens on the display's Vulkan driver alone.** With no saved
   GPU choice, a presenter on Linux reads the display's DRM device (Wayland's
   dmabuf `main_device`, X11's DRI3 device) and its PCI vendor from sysfs, and

@@ -38,7 +38,12 @@
 //! theme's directories are read once into an index of the icons they hold,
 //! rebuilt on the same clock, because the specification's algorithm would
 //! otherwise test hundreds of paths per icon; a lookup then ranks only the
-//! directories that hold the name, as GTK's `icon-theme.cache` lets it do.
+//! directories that hold the name. A copy of a theme with a current
+//! `icon-theme.cache` — GTK's, which `gtk-update-icon-cache` writes and
+//! distributions regenerate on install — is not listed at all: its cache
+//! already says which directories hold each name, and a lookup reads the few
+//! records that name needs, so a launcher's first icon no longer waits on a
+//! listing of every directory a large theme has.
 //! What a found file holds is the caller's to cache:
 //! [`FileVersion`] is the key that says when it changed.
 
@@ -212,17 +217,23 @@ impl ThemeDir {
 /// A theme as its `index.theme` describes it.
 #[derive(Debug)]
 struct Theme {
+    /// Every copy of the theme, `root/name`, in search-path order.
+    copies: Vec<PathBuf>,
     /// Each directory, with where it is in every copy of the theme, in
     /// search-path order.
     dirs: Vec<(ThemeDir, Vec<PathBuf>)>,
     inherits: Vec<String>,
 }
 
-/// Where a theme holds its icons: each icon's name, without its extension, to
-/// the copies of it, and when the directories were read.
+/// Where a theme holds its icons, and when that was read: each copy with a
+/// current GTK cache through the cache, and the rest as each icon's name,
+/// without its extension, to the copies of it their directories hold.
 #[derive(Debug)]
 struct Index {
     icons: HashMap<OsString, Vec<Spot>>,
+    /// Each copy read through its cache, by its position in
+    /// [`Theme::copies`].
+    caches: Vec<(usize, GtkCache)>,
     at: Instant,
 }
 
@@ -236,15 +247,31 @@ struct Spot {
 }
 
 impl Index {
-    /// Reads every directory of `theme`; a directory that cannot be read
-    /// holds nothing.
+    /// Opens each copy of `theme`'s cache, and reads every directory of the
+    /// copies without a current one; a directory that cannot be read holds
+    /// nothing.
     fn read(theme: &Theme, now: Instant) -> Self {
+        let caches = theme
+            .copies
+            .iter()
+            .enumerate()
+            .filter_map(|(root, copy)| Some((root, GtkCache::open(copy, &theme.dirs)?)))
+            .collect();
+        Self::with_caches(theme, caches, now)
+    }
+
+    /// `theme`'s index with `caches` for the copies they belong to, every
+    /// other copy listed.
+    fn with_caches(theme: &Theme, caches: Vec<(usize, GtkCache)>, now: Instant) -> Self {
         // Papirus lists each `@2x` directory as a symlink to its 1x one: read
         // every real directory once, for each place it is listed.
         let mut places: Vec<(PathBuf, Vec<(usize, usize)>)> = Vec::new();
         let mut seen: HashMap<PathBuf, usize> = HashMap::new();
         for (dir, (_, directories)) in theme.dirs.iter().enumerate() {
             for (root, directory) in directories.iter().enumerate() {
+                if caches.iter().any(|(cached, _)| *cached == root) {
+                    continue;
+                }
                 let Ok(real) = std::fs::canonicalize(directory) else {
                     continue;
                 };
@@ -287,8 +314,228 @@ impl Index {
                 }
             }
         }
-        Self { icons, at: now }
+        Self {
+            icons,
+            caches,
+            at: now,
+        }
     }
+
+    /// Every copy of `name` the theme holds, from the listed directories and
+    /// each cache.
+    fn spots(&self, name: &str) -> Vec<Spot> {
+        let mut spots = self
+            .icons
+            .get(OsStr::new(name))
+            .cloned()
+            .unwrap_or_default();
+        for (root, cache) in &self.caches {
+            for (dir, flags) in cache.images(name) {
+                spots.extend(
+                    EXTENSIONS
+                        .iter()
+                        .enumerate()
+                        .filter(|&(extension, _)| flags & GTK_CACHE_FLAGS[extension] != 0)
+                        .map(|(extension, _)| Spot {
+                            dir,
+                            root: *root,
+                            extension,
+                        }),
+                );
+            }
+        }
+        spots
+    }
+}
+
+/// The flag GTK's cache records each of [`EXTENSIONS`] with, in that order:
+/// `HAS_SUFFIX_PNG`, `HAS_SUFFIX_SVG` and `HAS_SUFFIX_XPM` in GTK's
+/// `updateiconcache.c`.
+const GTK_CACHE_FLAGS: [u16; 3] = [1 << 2, 1 << 1, 1 << 0];
+
+/// The cache format's major version this reads: GTK's writer has written 1
+/// since the format began.
+const GTK_CACHE_MAJOR: u16 = 1;
+
+/// What ends a chain of a bucket in GTK's cache.
+const GTK_CACHE_END: u32 = 0xffff_ffff;
+
+/// A name longer than this is not looked for in a cache: no icon has one, and
+/// it bounds the read that compares it.
+const GTK_CACHE_MAX_NAME: usize = 1024;
+
+/// One copy of a theme's `icon-theme.cache`: GTK's index of which directories
+/// hold each icon name, in which formats.
+///
+/// Transcribed from GTK 3's `gtkiconcache.c` (the reader) and
+/// `updateiconcache.c` (the writer). Big-endian throughout: a header of the
+/// major and minor version (two `u16`), the hash table's offset and the
+/// directory list's (two `u32`); the directory list is a count and an offset
+/// per directory to its NUL-terminated name, relative to the theme; the hash
+/// table is a bucket count and an offset per bucket to a chain of entries,
+/// each the next entry's offset ([`GTK_CACHE_END`] for none), its name's and
+/// its image list's; an image list is a count and, per image, the directory's
+/// index (`u16`), its flags (`u16`) and an offset to cached pixel data, which
+/// this does not read. A name's bucket is `icon_name_hash` of it modulo the
+/// bucket count; see [`gtk_icon_name_hash`].
+///
+/// **Read a record at a time rather than whole**: a lookup reads the bucket,
+/// each chain entry and its name until one matches, and that entry's image
+/// list — a handful of short reads from the page cache — so Papirus's three
+/// megabytes are never held. The file is someone else's, so every offset is
+/// checked against its length and a chain is cut off at the most entries the
+/// file could hold; a cache that does not read answers no images for the name.
+#[derive(Debug)]
+struct GtkCache {
+    file: std::fs::File,
+    len: u64,
+    /// Where the hash table is, and how many buckets it has.
+    hash: u32,
+    buckets: u32,
+    /// Each of the cache's directories, as the position in [`Theme::dirs`] of
+    /// the theme directory of that name; `None` for one the theme's
+    /// `index.theme` does not list, which the lookup never searches.
+    dirs: Vec<Option<usize>>,
+}
+
+impl GtkCache {
+    /// `copy`'s cache, if it has one GTK would use: no older, to the second,
+    /// than the theme's directory — GTK's rule, and the writer sets the
+    /// directory's time to the cache's for it — and of a version this reads.
+    fn open(copy: &Path, dirs: &[(ThemeDir, Vec<PathBuf>)]) -> Option<Self> {
+        let seconds = |path: &Path| -> Option<u64> {
+            let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+            Some(
+                modified
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs(),
+            )
+        };
+        let file = std::fs::File::open(copy.join("icon-theme.cache")).ok()?;
+        if seconds(&copy.join("icon-theme.cache"))? < seconds(copy)? {
+            return None;
+        }
+        let len = file.metadata().ok()?.len();
+        let mut cache = Self {
+            file,
+            len,
+            hash: 0,
+            buckets: 0,
+            dirs: Vec::new(),
+        };
+        if cache.u16_at(0)? != GTK_CACHE_MAJOR {
+            return None;
+        }
+        cache.hash = cache.u32_at(4)?;
+        cache.buckets = cache.u32_at(cache.hash)?;
+        if cache.buckets == 0 {
+            return None;
+        }
+        let list = cache.u32_at(8)?;
+        let count = cache.u32_at(list)?;
+        // Each directory takes at least its four-byte offset.
+        if u64::from(count) * 4 > len {
+            return None;
+        }
+        for at in 0..count {
+            let name = cache.string_at(cache.u32_at(list + 4 + 4 * at)?)?;
+            cache
+                .dirs
+                .push(dirs.iter().position(|(dir, _)| dir.path.as_bytes() == name));
+        }
+        Some(cache)
+    }
+
+    /// Each directory the theme lists that holds `name`, with the flags of
+    /// the formats it holds it in.
+    fn images(&self, name: &str) -> Vec<(usize, u16)> {
+        self.find(name).unwrap_or_default()
+    }
+
+    /// [`images`](Self::images), or `None` where the cache does not read.
+    fn find(&self, name: &str) -> Option<Vec<(usize, u16)>> {
+        if name.len() > GTK_CACHE_MAX_NAME {
+            return Some(Vec::new());
+        }
+        let bucket = gtk_icon_name_hash(name) % self.buckets;
+        let mut entry = self.u32_at(self.hash + 4 + 4 * bucket)?;
+        // Twelve bytes an entry: a chain longer than the file could hold has
+        // a loop in it.
+        for _ in 0..=self.len / 12 {
+            if entry == GTK_CACHE_END {
+                return Some(Vec::new());
+            }
+            if self.string_at(self.u32_at(entry + 4)?)? == name.as_bytes() {
+                let list = self.u32_at(entry + 8)?;
+                let count = self.u32_at(list)?;
+                if u64::from(count) * 8 > self.len {
+                    return None;
+                }
+                let mut images = Vec::new();
+                for at in 0..count {
+                    let image = list + 4 + 8 * at;
+                    let dir = usize::from(self.u16_at(image)?);
+                    if let Some(&Some(dir)) = self.dirs.get(dir) {
+                        images.push((dir, self.u16_at(image + 2)?));
+                    }
+                }
+                return Some(images);
+            }
+            entry = self.u32_at(entry)?;
+        }
+        None
+    }
+
+    /// `N` bytes at `offset`, or `None` past the end.
+    fn bytes_at<const N: usize>(&self, offset: u32) -> Option<[u8; N]> {
+        use std::io::{Read, Seek, SeekFrom};
+        if u64::from(offset) + N as u64 > self.len {
+            return None;
+        }
+        let mut bytes = [0; N];
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(u64::from(offset))).ok()?;
+        file.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    }
+
+    fn u16_at(&self, offset: u32) -> Option<u16> {
+        self.bytes_at(offset).map(u16::from_be_bytes)
+    }
+
+    fn u32_at(&self, offset: u32) -> Option<u32> {
+        self.bytes_at(offset).map(u32::from_be_bytes)
+    }
+
+    /// The NUL-terminated string at `offset`, without its NUL; `None` when it
+    /// runs past the end or past [`GTK_CACHE_MAX_NAME`].
+    fn string_at(&self, offset: u32) -> Option<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let room = self.len.checked_sub(u64::from(offset))?;
+        let wanted = room.min(GTK_CACHE_MAX_NAME as u64 + 1);
+        let mut bytes = vec![0; usize::try_from(wanted).ok()?];
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(u64::from(offset))).ok()?;
+        file.read_exact(&mut bytes).ok()?;
+        let end = bytes.iter().position(|&byte| byte == 0)?;
+        bytes.truncate(end);
+        Some(bytes)
+    }
+}
+
+/// GTK's `icon_name_hash`, which places a name in the cache's buckets: the
+/// first byte, then `h * 31 + byte` for each after it, with the bytes read as
+/// **signed** chars — a byte past ASCII is negative, as GTK's `signed char`
+/// pointer makes it — and the arithmetic wrapping in 32 bits.
+fn gtk_icon_name_hash(name: &str) -> u32 {
+    let mut bytes = name.bytes().map(|byte| i32::from(byte as i8) as u32);
+    let Some(first) = bytes.next() else {
+        return 0;
+    };
+    bytes.fold(first, |hash, byte| {
+        (hash << 5).wrapping_sub(hash).wrapping_add(byte)
+    })
 }
 
 /// Reads a theme's `index.theme`: the desktop-entry format, groups of
@@ -552,7 +799,12 @@ impl IconThemes {
                         (dir, directories)
                     })
                     .collect();
-                Arc::new(Theme { dirs, inherits })
+                let copies = roots.iter().map(|root| root.join(theme)).collect();
+                Arc::new(Theme {
+                    copies,
+                    dirs,
+                    inherits,
+                })
             });
         self.themes.insert(theme.to_owned(), parsed.clone());
         parsed
@@ -609,21 +861,17 @@ fn lookup_in(query: Query<'_>, theme: &Theme, index: &Index) -> Option<PathBuf> 
     // Lower is better: a match before a miss, then the specification's
     // distance (zero for a match), then the nominal size's gap. The first
     // directory, copy and extension keep a tie.
-    let spot = index
-        .icons
-        .get(OsStr::new(name))?
-        .iter()
-        .min_by_key(|spot| {
-            let (dir, _) = &theme.dirs[spot.dir];
-            (
-                !dir.matches(size, scale),
-                dir.distance(size, scale),
-                dir.nominal_gap(size, scale),
-                spot.dir,
-                spot.root,
-                spot.extension,
-            )
-        })?;
+    let spot = index.spots(name).into_iter().min_by_key(|spot| {
+        let (dir, _) = &theme.dirs[spot.dir];
+        (
+            !dir.matches(size, scale),
+            dir.distance(size, scale),
+            dir.nominal_gap(size, scale),
+            spot.dir,
+            spot.root,
+            spot.extension,
+        )
+    })?;
     let (_, directories) = &theme.dirs[spot.dir];
     Some(directories[spot.root].join(format!("{name}.{}", EXTENSIONS[spot.extension])))
 }
@@ -1083,5 +1331,226 @@ Type=Fixed
             custom.theme_roots[2],
             PathBuf::from("/usr/local/share/icons")
         );
+    }
+
+    /// GTK's `icon_name_hash`'s answers, from its C compiled verbatim:
+    /// ASCII, a name past ASCII whose bytes are negative as signed chars,
+    /// and the empty name.
+    #[test]
+    fn the_name_hash_is_gtks() {
+        for (name, hash) in [
+            ("", 0),
+            ("a", 97),
+            ("firefox", 3_445_514_969),
+            ("application-x-executable", 213_956_124),
+            ("org.gnome.Nautilus", 2_873_866_283),
+            ("caf\u{e9}", 94_414_350),
+            ("\u{65e5}\u{672c}", 3_450_900_514),
+        ] {
+            assert_eq!(gtk_icon_name_hash(name), hash, "{name:?}");
+        }
+    }
+
+    /// A GTK cache over `dirs` holding `icons` — each name with the
+    /// directories (by position in `dirs`) and flags it is in — hashed into
+    /// `buckets` buckets, laid out as `updateiconcache.c` lays one out.
+    fn gtk_cache(dirs: &[&str], icons: &[(&str, &[(u16, u16)])], buckets: u32) -> Vec<u8> {
+        fn put(out: &mut [u8], at: usize, value: u32) {
+            out[at..at + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        let offset = |out: &Vec<u8>| u32::try_from(out.len()).expect("small");
+        let mut out = Vec::new();
+        out.extend(GTK_CACHE_MAJOR.to_be_bytes());
+        out.extend(0_u16.to_be_bytes());
+        out.extend([0; 8]);
+        let hash = offset(&out);
+        put(&mut out, 4, hash);
+        out.extend(buckets.to_be_bytes());
+        for _ in 0..buckets {
+            out.extend(GTK_CACHE_END.to_be_bytes());
+        }
+        for (name, images) in icons {
+            let entry = offset(&out);
+            out.extend([0; 12]);
+            let bucket = (hash + 4 + 4 * (gtk_icon_name_hash(name) % buckets)) as usize;
+            // Prepended to its bucket's chain, as the writer does.
+            let next = u32::from_be_bytes(out[bucket..bucket + 4].try_into().expect("four"));
+            put(&mut out, entry as usize, next);
+            put(&mut out, bucket, entry);
+            let list = offset(&out);
+            put(&mut out, entry as usize + 8, list);
+            out.extend(u32::try_from(images.len()).expect("few").to_be_bytes());
+            for (dir, flags) in *images {
+                out.extend(dir.to_be_bytes());
+                out.extend(flags.to_be_bytes());
+                out.extend(0_u32.to_be_bytes());
+            }
+            let text = offset(&out);
+            put(&mut out, entry as usize + 4, text);
+            out.extend(name.as_bytes());
+            out.push(0);
+        }
+        let list = offset(&out);
+        put(&mut out, 8, list);
+        out.extend(u32::try_from(dirs.len()).expect("few").to_be_bytes());
+        let slots = out.len();
+        out.extend(vec![0; 4 * dirs.len()]);
+        for (at, dir) in dirs.iter().enumerate() {
+            let text = offset(&out);
+            put(&mut out, slots + 4 * at, text);
+            out.extend(dir.as_bytes());
+            out.push(0);
+        }
+        out
+    }
+
+    const CACHED_INDEX: &str = "\
+[Icon Theme]
+Name=Cached
+Directories=16x16/apps,48x48/apps
+
+[16x16/apps]
+Size=16
+Type=Fixed
+
+[48x48/apps]
+Size=48
+";
+
+    /// The PNG, SVG and XPM flags, as GTK writes them.
+    const PNG: u16 = GTK_CACHE_FLAGS[0];
+    const SVG: u16 = GTK_CACHE_FLAGS[1];
+
+    /// **A theme with a current cache is looked up through it, not listed**:
+    /// the cache names an icon no file holds, and the lookup returns it in
+    /// the directory and format the cache gives — the best size, PNG over
+    /// SVG — past a directory the theme does not list and down a chain of one
+    /// bucket. A name the cache does not hold misses.
+    #[test]
+    fn a_current_cache_answers_without_listing_the_theme() {
+        let scratch = Scratch::new();
+        scratch.write("icons/cached/index.theme", CACHED_INDEX);
+        let cache = gtk_cache(
+            &["unlisted/apps", "16x16/apps", "48x48/apps"],
+            &[
+                ("other", &[(2, PNG)]),
+                ("ghost", &[(0, PNG), (1, SVG), (2, PNG | SVG)]),
+                ("more", &[(1, PNG)]),
+            ],
+            1,
+        );
+        std::fs::write(scratch.0.join("icons/cached/icon-theme.cache"), cache).expect("cache");
+        let mut themes = IconThemes::new(search(&scratch), "cached", Duration::from_secs(3600));
+        let theme = scratch.0.join("icons/cached");
+        assert_eq!(
+            themes.lookup("ghost", 48, 1),
+            Some(theme.join("48x48/apps/ghost.png"))
+        );
+        assert_eq!(
+            themes.lookup("ghost", 16, 1),
+            Some(theme.join("16x16/apps/ghost.svg"))
+        );
+        assert_eq!(themes.lookup("missing", 48, 1), None);
+    }
+
+    /// **A cache older than its theme is not trusted**, by GTK's rule, and
+    /// the theme is listed instead: the icon only the cache names misses,
+    /// and the one only the directory holds is found.
+    #[test]
+    fn a_stale_cache_is_passed_over_for_the_listing() {
+        let scratch = Scratch::new();
+        scratch.write("icons/cached/index.theme", CACHED_INDEX);
+        scratch.write("icons/cached/48x48/apps/real.png", "png");
+        let cache = gtk_cache(&["48x48/apps"], &[("ghost", &[(0, PNG)])], 4);
+        let path = scratch.0.join("icons/cached/icon-theme.cache");
+        std::fs::write(&path, cache).expect("cache");
+        let written = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .expect("a modification time");
+        std::fs::File::open(scratch.0.join("icons/cached"))
+            .and_then(|dir| dir.set_modified(written + Duration::from_secs(10)))
+            .expect("the theme directory's time moved on");
+        let mut themes = IconThemes::new(search(&scratch), "cached", Duration::from_secs(3600));
+        assert_eq!(themes.lookup("ghost", 48, 1), None);
+        assert_eq!(
+            themes.lookup("real", 48, 1),
+            Some(scratch.0.join("icons/cached/48x48/apps/real.png"))
+        );
+    }
+
+    /// **A cache that does not read answers nothing, and ends**: a chain
+    /// that loops back on itself, and a file cut short.
+    #[test]
+    fn a_broken_cache_answers_nothing_and_ends() {
+        let dirs = [(
+            ThemeDir {
+                path: "48x48/apps".to_owned(),
+                size: 48,
+                scale: 1,
+                kind: SizeKind::Threshold(DEFAULT_THRESHOLD),
+            },
+            Vec::new(),
+        )];
+        let scratch = Scratch::new();
+        let open = |bytes: &[u8]| {
+            std::fs::write(scratch.0.join("icon-theme.cache"), bytes).expect("cache");
+            GtkCache::open(&scratch.0, &dirs)
+        };
+        let mut looped = gtk_cache(&["48x48/apps"], &[("ghost", &[(0, PNG)])], 1);
+        // The one entry, at the hash table's end, made its own next.
+        let entry = 12 + 4 + 4;
+        looped[entry..entry + 4].copy_from_slice(&(entry as u32).to_be_bytes());
+        let cache = open(&looped).expect("the header reads");
+        assert_eq!(cache.images("absent"), Vec::new());
+        let whole = gtk_cache(&["48x48/apps"], &[("ghost", &[(0, PNG)])], 1);
+        let cut = open(&whole[..whole.len() - 8]);
+        assert!(cut.is_none_or(|cache| cache.images("ghost").is_empty()));
+        assert_eq!(open(&whole).expect("whole").images("ghost"), vec![(0, PNG)]);
+    }
+
+    /// **Every installed theme's cache agrees with listing it**: for each icon
+    /// a listing finds in a theme with a current GTK cache, the cache gives
+    /// the same directories and formats. What tests the reader against
+    /// caches GTK itself wrote, Papirus's three megabytes among them.
+    /// Ignored: it reads `/usr/share/icons`, which a CI image may not have.
+    #[test]
+    #[ignore = "reads the installed icon themes"]
+    fn every_installed_cache_agrees_with_a_listing() {
+        let roots = SearchPath::from_environment();
+        let mut themes = IconThemes::new(roots.clone(), HICOLOR, Duration::from_secs(3600));
+        let names: Vec<String> = roots
+            .theme_roots
+            .iter()
+            .filter_map(|root| std::fs::read_dir(root).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().join("icon-theme.cache").is_file())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        let mut checked = 0;
+        for name in names {
+            let Some(theme) = themes.theme(&name) else {
+                continue;
+            };
+            let now = Instant::now();
+            let cached = Index::read(&theme, now);
+            if cached.caches.is_empty() {
+                eprintln!("{name}: no current cache");
+                continue;
+            }
+            let listed = Index::with_caches(&theme, Vec::new(), now);
+            for icon in listed.icons.keys() {
+                let icon = icon.to_str().expect("a UTF-8 name");
+                let key = |spot: &Spot| (spot.dir, spot.root, spot.extension);
+                let mut want: Vec<_> = listed.spots(icon).iter().map(key).collect();
+                let mut got: Vec<_> = cached.spots(icon).iter().map(key).collect();
+                want.sort_unstable();
+                got.sort_unstable();
+                assert_eq!(got, want, "{name}: {icon}");
+                checked += 1;
+            }
+            eprintln!("{name}: {} icons agree", listed.icons.len());
+        }
+        assert!(checked > 0, "no installed theme has a cache to check");
     }
 }
