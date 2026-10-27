@@ -3,7 +3,8 @@
 //! ranking would choose that GPU anyway, and on every driver where it would
 //! not.
 //!
-//! Ignored: it needs a Wayland compositor and Vulkan drivers. Each case reads
+//! Ignored: it needs a Wayland compositor (and, for the X11 case, an X server
+//! with DRI3: an Xwayland under it) and Vulkan drivers. Each case reads
 //! `/proc/self/maps` for the drivers this process loaded, so each must run in
 //! a process of its own, which nextest gives it. Run on the office laptop
 //! (Intel RPL-U on Mesa, NVIDIA MX550 on 615.78) under headless sway, once per
@@ -34,11 +35,10 @@ struct Opened {
     _shell: Box<dyn Shell>,
 }
 
-/// A window on the compositor, its presenter opened preferring `preference`
-/// with no saved choice.
-fn open(preference: PowerPreference) -> Opened {
-    let mut shell = crcbl_shell::open_backend(ShellBackend::Wayland)
-        .expect("WAYLAND_DISPLAY names a compositor");
+/// A window on `backend`'s display server, its presenter opened preferring
+/// `preference` with no saved choice.
+fn open(backend: ShellBackend, preference: PowerPreference) -> Opened {
+    let mut shell = crcbl_shell::open_backend(backend).expect("a display server to open on");
     let window = shell
         .create_window(&WindowDesc {
             title: "crcbl display driver",
@@ -47,12 +47,18 @@ fn open(preference: PowerPreference) -> Opened {
         })
         .expect("create_window");
     let extent = wait_for_configure(&mut *shell, window, &mut |_| {}).expect("a configure");
-    let Ok(SurfaceTarget::Wayland {
-        main_device: Some(device),
-        ..
-    }) = shell.surface_target(window)
-    else {
-        panic!("the compositor names no DRM device for the window");
+    let device = match shell.surface_target(window) {
+        Ok(
+            SurfaceTarget::Wayland {
+                main_device: Some(device),
+                ..
+            }
+            | SurfaceTarget::Xcb {
+                main_device: Some(device),
+                ..
+            },
+        ) => device,
+        other => panic!("the display server names no DRM device for the window: {other:?}"),
     };
     let presenter = Presenter::open(
         &*shell,
@@ -86,9 +92,21 @@ fn mapped(part: &str) -> bool {
 #[test]
 #[ignore = "needs a Wayland compositor and Vulkan drivers"]
 fn a_first_start_opens_on_the_displays_driver_alone() {
+    opens_on_the_displays_driver_alone(ShellBackend::Wayland);
+}
+
+/// **The same through X11**: the X server's DRI3 device names the display,
+/// here an Xwayland under the compositor.
+#[test]
+#[ignore = "needs an X server with DRI3 and Vulkan drivers"]
+fn a_first_start_on_x11_opens_on_the_displays_driver_alone() {
+    opens_on_the_displays_driver_alone(ShellBackend::X11);
+}
+
+fn opens_on_the_displays_driver_alone(backend: ShellBackend) {
     let Opened {
         presenter, device, ..
-    } = &open(PowerPreference::LowPower);
+    } = &open(backend, PowerPreference::LowPower);
     let device = *device;
     let opened = presenter.adapter().expect("an adapter");
     let vendor = crcbl_vk::drivers::drm_vendor(device).expect("sysfs names the display's vendor");
@@ -123,7 +141,7 @@ fn a_first_start_opens_on_the_displays_driver_alone() {
 fn a_game_on_an_integrated_display_opens_on_every_driver() {
     let Opened {
         presenter, device, ..
-    } = &open(PowerPreference::HighPerformance);
+    } = &open(ShellBackend::Wayland, PowerPreference::HighPerformance);
     let device = *device;
     let vendor = crcbl_vk::drivers::drm_vendor(device).expect("sysfs names the display's vendor");
     let display_class = {
