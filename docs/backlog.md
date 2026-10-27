@@ -374,6 +374,19 @@ four hand mutants — see the gap below). **Owed:**
   `SharedGpu` presenters inherit the first presenter's device, so they take no
   choice of their own.
 
+**Later, not asked yet: rounded and blurred image art (lyr, 2026-10-27).** The
+two differences left between lyr's media card and swaync's; lyr's own backlog
+lists them, and the owner has not asked for either. A corner radius on image and
+texture draws is small in the shader: `ui.slang` already computes a rounded
+rectangle's coverage, and `Image` and `Texture` quads leave the `border` lanes
+free for the centre and half extent, so the coverage applies only when radii are
+set and every unrounded image stays as it is. The API is the choice: a `radii`
+field on `DrawCommand::Image` and `DrawCommand::Texture` breaks every caller
+that builds or matches them (45 places in the workspace, none in lyr-render,
+which only calls `DrawList::image`), while `DrawList::image_rounded` and
+`texture_rounded` over a new variant break only exhaustive matches. A blur
+behind the card is its own offscreen pass, larger.
+
 **Needs a decision: a span of only spaces measures nothing (pikr, low).** A
 line's width leaves out the spaces it ends with, in `TextLayout`'s filler
 (`fill.rs`, `words_end`) and in the tree's own inline layout (`inline.rs`), so a
