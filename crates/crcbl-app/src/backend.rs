@@ -648,7 +648,9 @@ pub fn request_open() -> Result<PendingInstance, GpuError> {
 
 /// The backend an open asked for `backend` tries first: that one when given,
 /// else the one [`BACKEND_ENV_VAR`] names, else the table's first. `None` when
-/// the variable names no backend this build knows.
+/// the variable names no backend this build knows. Native only, as the
+/// display-driver open that asks it is.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn first_tried(backend: Option<GpuBackend>) -> Option<GpuBackend> {
     if backend.is_some() {
         return backend;
