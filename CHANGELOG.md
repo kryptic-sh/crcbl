@@ -20,6 +20,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   program's pick or a Vulkan loader driver variable — whether or not a choice
   was given. A program with nothing saved yet otherwise had to repeat that rule
   itself to avoid saving a one-off pin as its choice.
+- **Win32 windows show the executable's own icon** on their caption and taskbar
+  button, where they had the system default even when the exe embedded one. The
+  window class loads the exe's first icon group in resource-directory order, the
+  icon Explorer shows for the file, at the large and small icon sizes; an exe
+  with no icon keeps the default. Asked for by EW, whose exe embeds its icon as
+  resource 1.
 - **`HeadlessShell::schedule(pumps, script)`** runs a script against the shell
   at a later pump, so a scripted run that a program's own loop consumes can put
   input between frames. Before, everything injected arrived in the first pump,

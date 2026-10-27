@@ -93,6 +93,11 @@ pub type WindowProc = unsafe extern "system" fn(Handle, u32, Wparam, Lparam) -> 
 /// `MONITORENUMPROC`.
 pub type MonitorEnumProc = unsafe extern "system" fn(Handle, Handle, *mut Rect, Lparam) -> Bool32;
 
+/// `ENUMRESNAMEPROCW`: one resource's name, which is an integer id in the low
+/// word when its high bits are zero and a NUL-terminated string otherwise.
+pub type EnumResNameProc =
+    unsafe extern "system" fn(Handle, *const u16, *mut u16, Lparam) -> Bool32;
+
 // ---------------------------------------------------------------------------
 // Structures
 // ---------------------------------------------------------------------------
@@ -1525,6 +1530,21 @@ pub mod value {
     pub const SM_CX_VIRTUAL_SCREEN: i32 = 78;
     /// `SM_CYVIRTUALSCREEN`.
     pub const SM_CY_VIRTUAL_SCREEN: i32 = 79;
+    /// `SM_CXICON` — the side of a large icon, at the system DPI.
+    pub const SM_CX_ICON: i32 = 11;
+    /// `SM_CXSMICON` — the side of a small icon, at the system DPI.
+    pub const SM_CX_SM_ICON: i32 = 49;
+
+    /// `RT_GROUP_ICON`, the resource type of an icon as a whole: one entry per
+    /// icon, naming the images of each size inside it. Passed as an integer
+    /// resource id.
+    pub const RT_GROUP_ICON: usize = 14;
+    /// `IMAGE_ICON`, what `LoadImageW` is asked to load.
+    pub const IMAGE_ICON: u32 = 1;
+    /// `LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE`: a module
+    /// mapped for its resources alone, with none of its code run.
+    #[cfg(test)]
+    pub const LOAD_AS_RESOURCES: u32 = 0x0000_0022;
 
     /// `CF_UNICODETEXT` — UTF-16, NUL-terminated, and the only text format
     /// worth writing.
@@ -1815,6 +1835,17 @@ unsafe extern "system" {
         size: *mut u32,
     ) -> u32;
     pub fn GetSystemMetrics(index: i32) -> i32;
+    // The executable's own icon for the window class; see `window::module_icon`.
+    pub fn LoadImageW(
+        instance: Handle,
+        name: *const u16,
+        kind: u32,
+        width: i32,
+        height: i32,
+        flags: u32,
+    ) -> Handle;
+    #[cfg(test)]
+    pub fn DestroyIcon(icon: Handle) -> Bool32;
     // The clipboard. `OpenClipboard` **fails while another process has it
     // open**, which is routine rather than exceptional, so every one of these
     // is reached through the guard in `win32::clipboard` and never directly.
@@ -1947,6 +1978,19 @@ unsafe extern "system" {
 unsafe extern "system" {
     pub fn GetModuleHandleW(name: *const u16) -> Handle;
     pub fn GetLastError() -> u32;
+    // A module's resources, for the icon the window class takes from the
+    // executable. The callback runs inside the call, once per name, and
+    // returning zero stops the walk.
+    pub fn EnumResourceNamesW(
+        module: Handle,
+        kind: *const u16,
+        callback: EnumResNameProc,
+        param: Lparam,
+    ) -> Bool32;
+    #[cfg(test)]
+    pub fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32) -> Handle;
+    #[cfg(test)]
+    pub fn FreeLibrary(module: Handle) -> Bool32;
     // The clipboard's payloads. A `GMEM_MOVEABLE` block has no address until it
     // is locked, and the lock count has to be balanced exactly as
     // `ShowCursor`'s does — an unbalanced one pins a block the system wants to

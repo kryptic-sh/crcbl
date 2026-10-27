@@ -91,12 +91,12 @@ pub(super) fn register_class(instance: Handle) -> Result<(), ShellError> {
             cb_cls_extra: 0,
             cb_wnd_extra: 0,
             h_instance: instance,
-            h_icon: ptr::null_mut(),
+            h_icon: module_icon(instance, ffi::value::SM_CX_ICON),
             h_cursor: cursor,
             hbr_background: brush,
             lpsz_menu_name: ptr::null(),
             lpsz_class_name: name.as_ptr(),
-            h_icon_sm: ptr::null_mut(),
+            h_icon_sm: module_icon(instance, ffi::value::SM_CX_SM_ICON),
         };
         // SAFETY: `class` is a fully initialised `WNDCLASSEXW` whose `cb_size`
         // is its own size, `name` outlives the call — the system copies the
@@ -128,6 +128,114 @@ pub(super) fn register_class(instance: Handle) -> Result<(), ShellError> {
              window station cannot create windows"
         ),
     })
+}
+
+/// `module`'s icon at the side the system metric `metric` gives, or null
+/// when the module carries none, which leaves the system's default icon.
+///
+/// **The icon Explorer shows for the executable's file**: its first icon group
+/// in resource-directory order (see [`first_icon_group`]), so a program that
+/// embeds an icon gets it on its windows' captions and taskbar buttons without
+/// telling the shell anything. Loaded at the class's registration, which
+/// happens once and is never undone, so the icon lives as long as the process
+/// and is never destroyed.
+fn module_icon(module: Handle, metric: i32) -> Handle {
+    let Some(name) = first_icon_group(module) else {
+        return ptr::null_mut();
+    };
+    // SAFETY: `GetSystemMetrics` takes an index and returns a number.
+    let side = unsafe { ffi::GetSystemMetrics(metric) };
+    // SAFETY: `module` is a loaded module, and `name` is the integer id or the
+    // NUL-terminated string `first_icon_group` read out of its resources, kept
+    // alive for the call. Flags zero: a new icon of exactly that size, picked
+    // from the group's images.
+    let icon =
+        unsafe { ffi::LoadImageW(module, name.as_ptr(), ffi::value::IMAGE_ICON, side, side, 0) };
+    if icon.is_null() {
+        // SAFETY: reads this thread's last error, which the call above set.
+        let error = unsafe { ffi::GetLastError() };
+        crcbl_core::log::debug!(
+            "the executable's icon would not load at {side}px (Win32 error {error}); its \
+             windows keep the default icon"
+        );
+    }
+    icon
+}
+
+/// A resource's name: an integer id or a string, as Win32 names one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ResourceName {
+    Id(u16),
+    /// NUL-terminated UTF-16.
+    Named(Vec<u16>),
+}
+
+impl ResourceName {
+    /// The name as Win32 takes it: an id as `MAKEINTRESOURCEW` spells it, a
+    /// string by address, valid while `self` is.
+    fn as_ptr(&self) -> *const u16 {
+        match self {
+            Self::Id(id) => usize::from(*id) as *const u16,
+            Self::Named(name) => name.as_ptr(),
+        }
+    }
+}
+
+/// The name of `module`'s first icon group, the one Explorer shows for its
+/// file, or `None` when it has none.
+///
+/// First in resource-directory order, which is the order
+/// `EnumResourceNamesW` walks: named groups alphabetically, then numbered
+/// ones by id. Not resource id 1 by assumption: a program may number its icon
+/// otherwise, or name it.
+fn first_icon_group(module: Handle) -> Option<ResourceName> {
+    /// Keeps the first name and stops the walk.
+    ///
+    /// # Safety
+    ///
+    /// `param` is the address of the `Option<ResourceName>` below, and `name`
+    /// is an integer id or a NUL-terminated string valid for this call, as
+    /// `EnumResourceNamesW` documents.
+    unsafe extern "system" fn take_first(
+        _module: Handle,
+        _kind: *const u16,
+        name: *mut u16,
+        param: ffi::Lparam,
+    ) -> ffi::Bool32 {
+        let raw = name as usize;
+        let name = if raw >> 16 == 0 {
+            ResourceName::Id(raw as u16)
+        } else {
+            let mut len = 0;
+            // SAFETY: a string name is NUL-terminated, so every read up to and
+            // including the terminator is inside it.
+            while unsafe { *name.add(len) } != 0 {
+                len += 1;
+            }
+            // SAFETY: the `len + 1` units just walked, terminator included.
+            ResourceName::Named(unsafe { core::slice::from_raw_parts(name, len + 1) }.to_vec())
+        };
+        // SAFETY: `param` is the live `Option` `first_icon_group` passed, and
+        // nothing else touches it while the walk runs.
+        unsafe { *(param as *mut Option<ResourceName>) = Some(name) };
+        0
+    }
+
+    let mut found: Option<ResourceName> = None;
+    // SAFETY: `module` is a loaded module, the type is an integer resource
+    // id, `take_first` has the `ENUMRESNAMEPROCW` signature, and `found`
+    // outlives the call, which runs the callback only before it returns. The
+    // result is not read: the walk stopped by the callback reports failure
+    // too, and a module with no icon group reports it the same way.
+    unsafe {
+        ffi::EnumResourceNamesW(
+            module,
+            ffi::value::RT_GROUP_ICON as *const u16,
+            take_first,
+            core::ptr::from_mut(&mut found) as ffi::Lparam,
+        );
+    }
+    found
 }
 
 /// What [`create_native_window`](Win32Shell::create_native_window) hands back.
@@ -774,5 +882,49 @@ impl Win32Shell {
             scale_factor: window.scale_factor,
             mode: window.effective_mode,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A test binary embeds no icon, so a program without one keeps the
+    /// system's default rather than failing to register its class.
+    #[test]
+    fn an_executable_without_an_icon_leaves_the_class_icon_null() {
+        // SAFETY: a null name asks for the executable's own module.
+        let exe = unsafe { ffi::GetModuleHandleW(ptr::null()) };
+        assert_eq!(first_icon_group(exe), None);
+        assert!(module_icon(exe, ffi::value::SM_CX_ICON).is_null());
+    }
+
+    /// `shell32.dll`, mapped for its resources alone, stands in for an
+    /// executable that embeds icons: its first group is id 1, the icon its
+    /// file shows, and that group loads at both of the class's sizes.
+    #[test]
+    fn a_module_with_icons_gives_its_first_group_at_both_sizes() {
+        let name = ffi::wide("shell32.dll").expect("a literal");
+        // SAFETY: `name` is NUL-terminated and outlives the call, and the
+        // flags map the file for its resources without running any of it.
+        let module = unsafe {
+            ffi::LoadLibraryExW(
+                name.as_ptr(),
+                ptr::null_mut(),
+                ffi::value::LOAD_AS_RESOURCES,
+            )
+        };
+        assert!(!module.is_null(), "shell32.dll maps as a resource file");
+
+        assert_eq!(first_icon_group(module), Some(ResourceName::Id(1)));
+        for metric in [ffi::value::SM_CX_ICON, ffi::value::SM_CX_SM_ICON] {
+            let icon = module_icon(module, metric);
+            assert!(!icon.is_null(), "no icon at metric {metric}");
+            // SAFETY: `icon` was just loaded without `LR_SHARED`, so this
+            // test owns it.
+            unsafe { ffi::DestroyIcon(icon) };
+        }
+        // SAFETY: `module` was loaded above and nothing borrows from it now.
+        unsafe { ffi::FreeLibrary(module) };
     }
 }
