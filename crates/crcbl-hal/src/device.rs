@@ -283,6 +283,47 @@ impl DeviceDesc<'_> {
             compatible_surface: None,
         }
     }
+
+    /// The features a device opened from this request on an adapter with
+    /// `adapter` has: what the adapter has of what was asked for, plus what
+    /// those cannot work without.
+    ///
+    /// **What [`Device::caps`] reports, on every backend that uses it.** A
+    /// feature nobody asked for is not granted even where the adapter has it,
+    /// which is what lets a caller decline one: a renderer opened without
+    /// [`Features::TASK_SHADER`] must not find the task stage on and take it.
+    /// On Vulkan the device could not use it anyway, its extension never
+    /// enabled; on D3D12, which enables nothing, this is the only place the
+    /// request is honoured.
+    ///
+    /// The required features are in the answer even if the adapter lacks them,
+    /// because opening refuses that case first
+    /// ([`HalError::UnsupportedFeatures`]).
+    ///
+    /// # The dependencies
+    ///
+    /// No adapter reports a ray capability without the acceleration structure
+    /// it traverses, nor the task stage without the mesh stage it feeds, so
+    /// every flag added here is one the adapter has. What loses them is the
+    /// intersection with the request: ask for [`Features::RAY_QUERY`] and not
+    /// [`Features::ACCELERATION_STRUCTURE`] and the set carries a dependency it
+    /// cannot stand on. A device reporting `RAY_QUERY` and not
+    /// `ACCELERATION_STRUCTURE` would describe one that cannot exist, and on
+    /// Vulkan enabling `VK_KHR_ray_query` without `VK_KHR_acceleration_structure`
+    /// is invalid usage.
+    #[must_use]
+    pub fn granted(&self, adapter: Features) -> Features {
+        let mut granted = adapter
+            .intersection(self.required_features.union(self.optional_features))
+            .union(self.required_features);
+        if granted.contains(Features::TASK_SHADER) {
+            granted |= Features::MESH_SHADER;
+        }
+        if granted.intersects(Features::RAY_QUERY | Features::RAY_TRACING_PIPELINE) {
+            granted |= Features::ACCELERATION_STRUCTURE;
+        }
+        granted
+    }
 }
 
 /// A backend's entry point: enumerates adapters and opens devices and surfaces.
@@ -1347,6 +1388,76 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A granted capability drags in what it cannot be enabled without.
+    ///
+    /// The case is a caller naming one half of a pair — `RAY_QUERY` without the
+    /// acceleration structure it traverses, `TASK_SHADER` without the mesh
+    /// stage it feeds. The adapter never reports those halves apart, so the
+    /// gap opens at the intersection with the request, and a device created
+    /// from the gapped set would report caps describing one that cannot exist.
+    #[test]
+    fn a_granted_capability_carries_what_it_cannot_be_enabled_without() {
+        // A request for `asked` alone on an adapter with every feature: what
+        // comes back beyond `asked` is a dependency the rule added.
+        let granted_on_everything = |asked: Features| {
+            DeviceDesc {
+                optional_features: asked,
+                required_features: Features::empty(),
+                ..DeviceDesc::for_adapter(AdapterId(0))
+            }
+            .granted(Features::all())
+        };
+        assert_eq!(
+            granted_on_everything(Features::RAY_QUERY),
+            Features::RAY_QUERY | Features::ACCELERATION_STRUCTURE
+        );
+        assert_eq!(
+            granted_on_everything(Features::RAY_TRACING_PIPELINE),
+            Features::RAY_TRACING_PIPELINE | Features::ACCELERATION_STRUCTURE
+        );
+        assert_eq!(
+            granted_on_everything(Features::TASK_SHADER),
+            Features::TASK_SHADER | Features::MESH_SHADER
+        );
+
+        // Nothing is invented in the other direction: an acceleration
+        // structure on its own is a perfectly good thing to ask for, and a
+        // mesh stage does not imply a task stage in front of it.
+        assert_eq!(
+            granted_on_everything(Features::ACCELERATION_STRUCTURE),
+            Features::ACCELERATION_STRUCTURE
+        );
+        assert_eq!(
+            granted_on_everything(Features::MESH_SHADER),
+            Features::MESH_SHADER
+        );
+        // And a set with none of them is returned untouched, which is every
+        // caller that predates this slice.
+        assert_eq!(
+            granted_on_everything(Features::GPU_DRIVEN),
+            Features::GPU_DRIVEN
+        );
+        assert_eq!(granted_on_everything(Features::empty()), Features::empty());
+    }
+
+    /// Only what was asked for: a feature the adapter has and nobody asked for
+    /// is not granted, a required one is, and an asked-for one the adapter
+    /// lacks is not.
+    #[test]
+    fn a_device_is_granted_what_was_asked_of_what_the_adapter_has() {
+        let desc = DeviceDesc {
+            required_features: Features::COMPUTE,
+            optional_features: Features::MESH_SHADER | Features::RAY_QUERY,
+            ..DeviceDesc::for_adapter(AdapterId(0))
+        };
+        let adapter = Features::COMPUTE | Features::MESH_SHADER | Features::TASK_SHADER;
+        assert_eq!(
+            desc.granted(adapter),
+            Features::COMPUTE | Features::MESH_SHADER,
+            "the task stage was not asked for and the ray query is not there"
+        );
+    }
 
     /// The crate's central claim: both traits are usable as trait objects. If
     /// anyone adds a generic method, an `impl Trait` return, or a

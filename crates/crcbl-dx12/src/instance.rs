@@ -1148,7 +1148,9 @@ pub(crate) mod tests {
             label: Some("crcbl-dx12 test device"),
             adapter,
             required_features: Features::empty(),
-            optional_features: Features::empty(),
+            // Every feature, optionally: a device is granted only what it was
+            // asked for, and these tests are about whatever the adapter has.
+            optional_features: Features::all(),
             compatible_surface: None,
         }
     }

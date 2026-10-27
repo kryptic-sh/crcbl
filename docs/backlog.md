@@ -26778,6 +26778,14 @@ for a renderer-side wind pass to exist.
 
 ## DEFERRED — dx12 mesh shading: WARP needs a pixel shader, one AMD driver culls everything
 
+**Metal still reports its adapter's features verbatim (2026-10-27).** D3D12 now
+grants only what a device asked for, through `DeviceDesc::granted` as Vulkan
+does, which is what the draw-gen and task-stage tests needed on the mesh path.
+`MetalDevice::open` keeps `record.caps` whole, so a Metal device opened without
+a feature still reports it. Changing it is `DeviceDesc::granted` there too, plus
+its tests asking for what they use (as `crcbl-dx12`'s `desc` now asks for
+`Features::all()`); not done because only CI runs Metal.
+
 **The investigation is recorded in `docs/notes/backends.md` under this
 heading.** What stays here is what is still owed, and the decision it needs.
 

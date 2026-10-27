@@ -15,6 +15,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A D3D12 device reports only the features it was asked for**, as a Vulkan one
+  does: `Device::caps` is the adapter's features intersected with
+  `required_features` and `optional_features`, plus what those depend on, and
+  the limits narrowed to match. It reported every adapter feature, so a caller
+  that declined one, such as a renderer opened without the task stage, found it
+  on and took it. The rule is `DeviceDesc::granted`, new in `crcbl-hal`, which
+  `crcbl-vk` now uses too. A caller that relied on getting a D3D12 feature it
+  did not ask for has to ask for it.
 - **`white-space: nowrap` text keeps the width of the spaces a line ends with**,
   as CSS's `pre` does; `normal` text still lets them hang, as `pre-wrap` does. A
   `nowrap` span of one plain space was zero wide, so a text field's block caret

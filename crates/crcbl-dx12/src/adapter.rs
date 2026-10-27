@@ -800,7 +800,7 @@ fn features_of(raw: &RawCaps) -> Features {
 ///   [`root::MAX_PUSH_CONSTANT_BYTES`](crate::root::MAX_PUSH_CONSTANT_BYTES)
 ///   now that [`Features::PUSH_CONSTANTS`] is — the whole root signature in
 ///   bytes, for the reason given with the flag above.
-fn limits_of(features: Features) -> Limits {
+pub(crate) fn limits_of(features: Features) -> Limits {
     let floor = Limits::minimum();
     Limits {
         max_image_2d: D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION,

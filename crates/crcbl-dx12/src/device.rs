@@ -1742,14 +1742,21 @@ impl Dx12Device {
             label_object(&queue, label);
         }
 
-        // **D3D12 has no `pEnabledFeatures`.** A `VkDevice` reports only what was
-        // switched on at creation, so `crcbl-vk` intersects the adapter's
-        // features with what the caller asked for. An `ID3D12Device` can do
-        // whatever `CheckFeatureSupport` answered, always, so `caps` is the
-        // adapter's caps verbatim. `required_features` was checked in
-        // `open_device` before this call; `optional_features` is satisfied by
-        // construction, which is exactly what `DeviceDesc::optional_features`
-        // documents ("check `Device::caps` afterwards to find out").
+        // **D3D12 has no `pEnabledFeatures`, and grants only what was asked
+        // all the same.** An `ID3D12Device` can do whatever `CheckFeatureSupport`
+        // answered, always, but a caller that declines a feature has to find it
+        // off: a renderer opened without the task stage takes it wherever the
+        // caps report it. So this device reports what `crcbl-vk`'s does, the
+        // adapter's features intersected with the request
+        // (`DeviceDesc::granted`), with the limits narrowed to match.
+        // `required_features` was checked in `open_device` before this call.
+        let caps = {
+            let features = desc.granted(caps.features);
+            DeviceCaps {
+                features,
+                limits: adapter::limits_of(features),
+            }
+        };
         // **The timestamp clock's rate is a *queue* question**, and
         // `crate::adapter` computes its caps before any device or queue exists.
         // So `Features::TIMESTAMP_QUERY` is reported there, where
@@ -10361,6 +10368,40 @@ pub(crate) mod tests {
             caps.features
         );
         assert_eq!(device.caps().limits, caps.limits);
+    }
+
+    /// A device is granted only what it asked for, though D3D12 enables
+    /// nothing: asked for timestamps alone it reports timestamps alone, with
+    /// the limits of a device that has nothing else, and asked for nothing it
+    /// reports nothing.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_d3d12_device_reports_only_what_it_asked_for() {
+        let instance = open_instance();
+        let adapter = pinned_adapter(&instance);
+        let caps = instance
+            .adapter_caps(adapter)
+            .expect("the pinned adapter opens");
+        assert!(
+            caps.features.contains(Features::DESCRIPTOR_INDEXING),
+            "an adapter with no bindless would make the limits half vacuous: {:?}",
+            caps.features
+        );
+        for asked in [Features::TIMESTAMP_QUERY, Features::empty()] {
+            let device = instance
+                .open_device(&DeviceDesc {
+                    optional_features: asked,
+                    ..device_desc(adapter)
+                })
+                .expect("a D3D12 device opens with no required features");
+            assert_eq!(device.caps().features, asked);
+            assert_eq!(device.caps().limits, adapter::limits_of(asked));
+            assert_ne!(
+                device.caps().limits.max_bindless_descriptors,
+                caps.limits.max_bindless_descriptors,
+                "bindless was not asked for, so its limit is the floor's"
+            );
+        }
     }
 
     /// A buffer of every memory location creates and destroys, and a destroyed
