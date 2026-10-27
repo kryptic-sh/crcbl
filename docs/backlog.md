@@ -4394,8 +4394,21 @@ and every trial it rejected is folded into "Declined" below.
   `specular-lights-fit`), about 0.025 ms of `forward`, the one adapter and API
   where the change costs ordinary lights; kept for now against ANV's 1–2 ms a
   frame, and put to the owner by the office session. ANV still builds the stage
-  at SIMD8 only and still spills; the next share is the area light's LTC branch
-  and the probe grid. Not measured: lavapipe's timing.
+  at SIMD8 only and still spills; the shares measured next, by stubbing on
+  `cd4c41d8` (7,333 instructions, 64:104 spills:fills): the area light's
+  specular LTC call is 574 instructions and 4:10 of the spills (6,759 and 60:94
+  without it), the probe grid 2,324 instructions and 16:40 (5,009 and 48:64
+  without `probe_irradiance`). **Declined, both 2026-10-27, so they are not
+  re-tried:** the diffuse and specular `ltc_irradiance` calls as one `[loop]`
+  body took ANV to 7,744 instructions and 128:209, and was not timed; the
+  clipmap's two `probe_level_irradiance` calls as one `[loop]` body took it to
+  6,644 instructions but 66:153, and timed against `cd4c41d8` as above it made
+  the Intel iGPU 22–56% slower on all four fixtures (`lights-fit` 7.946 → 12.041
+  ms, `specular-lights-fit` 10.891 → 16.947, `area-lights-fit` 18.455 → 22.800,
+  `area-fill-lights-fit` 12.364 → 15.078) and the MX550 0.4–2.7% slower
+  (`lights-fit` 2.576 → 2.645 ms), though no fixture has a probe and the grid
+  never runs in any of them. The loop that helped the sun's two cascades is not
+  a pattern for the rest of this stage. Not measured: lavapipe's timing.
 - **Unmeasured paths.** A populated probe volume pays the empty-probe early
   return's uniform branch, which no fixture has probes to time; water's own pass
   was not timed either. Slang's MSL output allocates the tile-local exposure
