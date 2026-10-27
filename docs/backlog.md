@@ -4310,8 +4310,26 @@ and every trial it rejected is folded into "Declined" below.
   interval is upload evidence. `lights` overflows the froxel lists, so it
   measures the capped fragment loop and the overflow scan rather than shading
   every light; `lights-fit` is the matched control.
-- **Not investigated: D3D12's `cull` row** is 0.12–0.19 ms against Vulkan's 0.01
-  ms on the same grid, alternating between two levels from run to run.
+- **D3D12's upload buffers moved to the GPU upload heap (2026-10-27), and what
+  that left.** D3D12's `cull` row was 0.12–0.18 ms against Vulkan's 0.009 on the
+  same grid: not the barrier (0.008 ms on the cube scene, same passes) and not
+  the survivor atomic (a wave-aggregated append changed nothing), but
+  `HostUpload` on `D3D12_HEAP_TYPE_UPLOAD`, system memory, so the cull and
+  draw-argument passes read the instance ring over PCIe. `conv::heap_type` now
+  picks `GPU_UPLOAD` when `adapter::gpu_upload_heap` says the device has it (the
+  RX 7900 XTX and WARP both do), and `create_buffer` falls back to `UPLOAD` on
+  `E_OUTOFMEMORY`. Timed on the RX 7900 XTX (six mirrored runs per side, D3D12):
+  GPU p50 sum 1.084 → 0.758 ms on `lights-fit`, 0.946 → 0.597 on `instances`,
+  1.650 → 1.400 on `area-lights-fit`. **Not explained:** `forward` on
+  `area-lights-fit` rose 0.968 → 0.997 ms (+3.0%, the runs barely apart) while
+  it fell on the other two fixtures. **Not verified by the debug layer here:**
+  this desktop has no Graphics Tools (`d3d12SDKLayers.dll` is absent, so
+  `run-dx12-e2e.sh` fails every device test with validation on); the suite ran
+  with `CRCBL_DX12_VALIDATION=0` on WARP and on the RX 7900 XTX, passing all but
+  the two tests that need the layer, so CI's WARP run is the only validated one.
+  Installing the optional feature is the owner's call. **Not covered by a
+  test:** the `UPLOAD` fallback, which needs video memory full. Not measured: an
+  adapter without the GPU upload heap, and Intel or NVIDIA on D3D12.
 - **Re-timed on the MX550 (2026-10-24).** NVIDIA GeForce MX550, driver
   615.78.08, Vulkan on Arch Linux, AC power and the performance profile; three
   mirrored pairs per fixture, mean of the per-run `forward` p50s. The fill-light

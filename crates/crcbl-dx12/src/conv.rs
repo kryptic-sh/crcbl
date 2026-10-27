@@ -99,12 +99,12 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_FILTER_MIN_MAG_MIP_POINT,
     D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR, D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT,
     D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR, D3D12_HEAP_TYPE, D3D12_HEAP_TYPE_DEFAULT,
-    D3D12_HEAP_TYPE_READBACK, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_DIMENSION,
-    D3D12_RESOURCE_DIMENSION_TEXTURE1D, D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-    D3D12_RESOURCE_DIMENSION_TEXTURE3D, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
-    D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-    D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_FLAGS, D3D12_RESOURCE_STATE_COMMON,
-    D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE,
+    D3D12_HEAP_TYPE_GPU_UPLOAD, D3D12_HEAP_TYPE_READBACK, D3D12_HEAP_TYPE_UPLOAD,
+    D3D12_RESOURCE_DIMENSION, D3D12_RESOURCE_DIMENSION_TEXTURE1D,
+    D3D12_RESOURCE_DIMENSION_TEXTURE2D, D3D12_RESOURCE_DIMENSION_TEXTURE3D,
+    D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_FLAGS,
+    D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE,
     D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE,
     D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_INDEX_BUFFER,
     D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -307,19 +307,26 @@ pub(crate) const fn copy_footprint_format(
     Some(dxgi_format(format))
 }
 
-/// Which D3D12 heap a resource of this memory location lives on.
+/// Which D3D12 heap a resource of this memory location lives on, where
+/// `gpu_upload` says the device has `D3D12_HEAP_TYPE_GPU_UPLOAD`
+/// ([`adapter::gpu_upload_heap`](crate::adapter::gpu_upload_heap)).
 ///
-/// The three seam locations are D3D12's three standard heaps verbatim, which is
-/// what [`MemoryLocation`]'s own documentation says it was shaped around.
+/// The three seam locations are D3D12's three standard heaps, which is what
+/// [`MemoryLocation`]'s own documentation says it was shaped around, except
+/// that **[`MemoryLocation::HostUpload`] takes the GPU upload heap where there
+/// is one**: video memory the CPU writes through resizable BAR, which is what
+/// `crcbl-vk` prefers for the same location. On the plain upload heap every GPU
+/// read of a buffer the CPU rewrites each frame crosses the PCI bus; on an RX
+/// 7900 XTX that put D3D12's cull pass, which reads the instance ring, at about
+/// twenty times Vulkan's, and its draw-argument pass at about five
+/// (2026-10-27). Both heaps are mapped
+/// and written the same way, and a buffer on either stays in `GENERIC_READ`.
 /// `D3D12_HEAP_TYPE_CUSTOM` is never produced: it exists to name a CPU page
 /// property and memory pool by hand, and the seam has no vocabulary for either.
-/// `D3D12_HEAP_TYPE_GPU_UPLOAD` is likewise absent — it is resizable-BAR upload
-/// memory, an optional capability behind its own `CheckFeatureSupport` query,
-/// and picking it unqueried would fail resource creation on every machine
-/// without it.
-pub(crate) const fn heap_type(memory: MemoryLocation) -> D3D12_HEAP_TYPE {
+pub(crate) const fn heap_type(memory: MemoryLocation, gpu_upload: bool) -> D3D12_HEAP_TYPE {
     match memory {
         MemoryLocation::DeviceLocal => D3D12_HEAP_TYPE_DEFAULT,
+        MemoryLocation::HostUpload if gpu_upload => D3D12_HEAP_TYPE_GPU_UPLOAD,
         MemoryLocation::HostUpload => D3D12_HEAP_TYPE_UPLOAD,
         MemoryLocation::HostReadback => D3D12_HEAP_TYPE_READBACK,
     }
@@ -330,7 +337,9 @@ pub(crate) const fn heap_type(memory: MemoryLocation) -> D3D12_HEAP_TYPE {
 /// **Not a preference — D3D12 rejects the other values.** A resource on the
 /// upload heap must start in `GENERIC_READ` and one on the readback heap must
 /// start in `COPY_DEST`; only the default heap takes a free choice, and
-/// `COMMON` is the state a transition out of costs nothing from.
+/// `COMMON` is the state a transition out of costs nothing from. The GPU
+/// upload heap takes any state, and gets the upload heap's, so a
+/// [`MemoryLocation::HostUpload`] buffer is in the same state on either.
 pub(crate) const fn initial_state(memory: MemoryLocation) -> D3D12_RESOURCE_STATES {
     match memory {
         MemoryLocation::DeviceLocal => D3D12_RESOURCE_STATE_COMMON,
@@ -1292,19 +1301,37 @@ mod tests {
     #[test]
     fn each_heap_gets_the_only_initial_state_d3d12_accepts_for_it() {
         assert!(!LOCATIONS.is_empty(), "nothing to check");
-        let mut heaps: Vec<D3D12_HEAP_TYPE> = Vec::new();
-        for &location in LOCATIONS {
-            let heap = heap_type(location);
-            assert!(
-                !heaps.contains(&heap),
-                "{location:?} shares a heap with an earlier location"
-            );
-            heaps.push(heap);
-            // A mappable location is exactly a non-default heap, which is the
-            // invariant `write_buffer` relies on to reach `Map`.
+        for gpu_upload in [false, true] {
+            let mut heaps: Vec<D3D12_HEAP_TYPE> = Vec::new();
+            for &location in LOCATIONS {
+                let heap = heap_type(location, gpu_upload);
+                assert!(
+                    !heaps.contains(&heap),
+                    "{location:?} shares a heap with an earlier location"
+                );
+                heaps.push(heap);
+                // A mappable location is exactly a non-default heap, which is
+                // the invariant `write_buffer` relies on to reach `Map`.
+                assert_eq!(
+                    location.is_mappable(),
+                    heap != D3D12_HEAP_TYPE_DEFAULT,
+                    "{location:?}"
+                );
+            }
+        }
+        // Only the upload location moves, and only where the heap exists.
+        assert_eq!(
+            heap_type(MemoryLocation::HostUpload, true),
+            D3D12_HEAP_TYPE_GPU_UPLOAD
+        );
+        assert_eq!(
+            heap_type(MemoryLocation::HostUpload, false),
+            D3D12_HEAP_TYPE_UPLOAD
+        );
+        for location in [MemoryLocation::DeviceLocal, MemoryLocation::HostReadback] {
             assert_eq!(
-                location.is_mappable(),
-                heap != D3D12_HEAP_TYPE_DEFAULT,
+                heap_type(location, true),
+                heap_type(location, false),
                 "{location:?}"
             );
         }

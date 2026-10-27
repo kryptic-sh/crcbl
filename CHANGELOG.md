@@ -38,6 +38,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   loop body: 10,221 instructions and 90:260 spills:fills on ANV become 7,333 and
   64:104. `grass.slang` and `water.slang` copy the sun's lookups and take the
   same change.
+- **D3D12 puts `MemoryLocation::HostUpload` buffers in video memory where the
+  device can**: on `D3D12_HEAP_TYPE_GPU_UPLOAD` (resizable BAR) when
+  `D3D12_FEATURE_D3D12_OPTIONS16` reports it, else on the upload heap as before,
+  and on the upload heap again when video memory is full. On the upload heap
+  every GPU read of a buffer the CPU rewrites each frame crossed the PCI bus,
+  which held D3D12's GPU-driven cull at about twenty times Vulkan's cost. On an
+  RX 7900 XTX the sandbox's GPU frame drops 30% on `lights-fit` (1.08 → 0.76
+  ms), 37% on `instances` and 15% on `area-lights-fit`; the cull pass goes from
+  0.12–0.18 ms to 0.009 ms, level with Vulkan. Vulkan already preferred
+  device-local host-visible memory for this location. The device's open log line
+  names the heap it chose.
 
 ### Fixed
 

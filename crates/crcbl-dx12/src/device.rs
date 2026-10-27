@@ -100,7 +100,8 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_COMMAND_SIGNATURE_DESC,
     D3D12_COMPARISON_FUNC_ALWAYS, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
     D3D12_FENCE_FLAG_NONE, D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_HEAP_FLAG_NONE,
-    D3D12_HEAP_PROPERTIES, D3D12_INDIRECT_ARGUMENT_DESC, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
+    D3D12_HEAP_PROPERTIES, D3D12_HEAP_TYPE, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_TYPE_GPU_UPLOAD,
+    D3D12_HEAP_TYPE_UPLOAD, D3D12_INDIRECT_ARGUMENT_DESC, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
     D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW,
     D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, D3D12_MEMORY_POOL_UNKNOWN, D3D12_QUERY_HEAP_DESC,
     D3D12_QUERY_TYPE, D3D12_RANGE, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_DESC,
@@ -115,6 +116,7 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DE
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::{Interface, PCWSTR};
 
+use crate::adapter;
 use crate::binding::{self, BindGroupLayoutRecord, BindGroupRecord, VisibleHeaps};
 use crate::command::Dx12CommandEncoder;
 use crate::debug;
@@ -587,6 +589,10 @@ pub(crate) struct DeviceInner {
     /// that has it, and [`Device::query_results`] spends it turning a read into
     /// the nanoseconds the seam asks for.
     timestamp_frequency: NonZeroU64,
+    /// Whether [`MemoryLocation::HostUpload`] buffers go on the GPU upload heap
+    /// rather than the upload heap; see [`conv::heap_type`]. Asked of this
+    /// device when it opens, through [`adapter::gpu_upload_heap`].
+    pub(crate) gpu_upload_heap: bool,
     /// [`ZERO_SOURCE_BYTES`] of zeroes on the default heap: the source every
     /// `clear_buffer` copies out of.
     ///
@@ -1542,10 +1548,10 @@ fn label_object(object: &ID3D12Object, label: &str) {
     }
 }
 
-/// The heap properties for one of the seam's memory locations.
-fn heap_properties(memory: MemoryLocation) -> D3D12_HEAP_PROPERTIES {
+/// The heap properties for a standard heap, one [`conv::heap_type`] chose.
+fn heap_properties(heap: D3D12_HEAP_TYPE) -> D3D12_HEAP_PROPERTIES {
     D3D12_HEAP_PROPERTIES {
-        Type: conv::heap_type(memory),
+        Type: heap,
         // Both are `UNKNOWN` for every heap type except `CUSTOM`, which this
         // backend never asks for — D3D12 derives them from the heap type and
         // rejects a non-`UNKNOWN` value beside a standard one.
@@ -1586,7 +1592,7 @@ fn zero_source(device: &ID3D12Device) -> Result<ID3D12Resource, HalError> {
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };
-    let properties = heap_properties(MemoryLocation::DeviceLocal);
+    let properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
     let mut resource: Option<ID3D12Resource> = None;
     // SAFETY: both descriptors are live, fully initialised locals borrowed for
     // the duration of the call, and `resource` is a live `Option` the call
@@ -1763,6 +1769,7 @@ impl Dx12Device {
             ))
         })?;
         let timestamp_frequency = query::timestamp_frequency(frequency)?;
+        let gpu_upload_heap = adapter::gpu_upload_heap(&raw);
         let owner = Owner::new(next_owner_id());
         let state = DeviceState {
             buffers: Pool::new(),
@@ -1793,17 +1800,24 @@ impl Dx12Device {
             fence,
             caps,
             timestamp_frequency,
+            gpu_upload_heap,
             zero,
             owner,
             state: Mutex::new(state),
             _teardown: teardown,
         });
         crcbl_core::log::info!(
-            "crcbl-dx12: opened \"{}\" (geometry {:?}, binding {:?}, lighting {:?})",
+            "crcbl-dx12: opened \"{}\" (geometry {:?}, binding {:?}, lighting {:?}, upload \
+             heap {})",
             record.info.name,
             caps.geometry_path(),
             caps.binding_model(),
-            caps.lighting_path()
+            caps.lighting_path(),
+            if gpu_upload_heap {
+                "GPU_UPLOAD"
+            } else {
+                "UPLOAD"
+            }
         );
         Ok(Self { inner })
     }
@@ -2422,32 +2436,49 @@ impl Device for Dx12Device {
             Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
             Flags: conv::buffer_flags(desc.usage, desc.memory),
         };
-        let properties = heap_properties(desc.memory);
-        let mut resource: Option<ID3D12Resource> = None;
-        // SAFETY: both descriptors are live, fully initialised locals borrowed
-        // for the duration of the call, and `resource` is a live `Option` the
-        // call writes through. The initial state is the one D3D12 requires for
-        // this heap type — see `conv::initial_state`, which is the only source
-        // of it — and no optimised clear value is passed, which is legal for a
-        // buffer and required for one.
-        unsafe {
-            self.inner.raw.CreateCommittedResource(
-                &properties,
-                D3D12_HEAP_FLAG_NONE,
-                &resource_desc,
-                conv::initial_state(desc.memory),
-                None,
-                &mut resource,
-            )
-        }
-        .map_err(|error| {
-            creation_error(&self.inner.raw, "CreateCommittedResource (buffer)", &error)
-        })?;
-        let raw = resource.ok_or_else(|| {
-            HalError::Backend(
-                "CreateCommittedResource reported success and wrote no buffer".to_string(),
-            )
-        })?;
+        let create = |heap: D3D12_HEAP_TYPE| -> Result<ID3D12Resource, HalError> {
+            let properties = heap_properties(heap);
+            let mut resource: Option<ID3D12Resource> = None;
+            // SAFETY: both descriptors are live, fully initialised locals
+            // borrowed for the duration of the call, and `resource` is a live
+            // `Option` the call writes through. The initial state is the one
+            // D3D12 requires for this heap type — see `conv::initial_state`,
+            // which is the only source of it — and no optimised clear value is
+            // passed, which is legal for a buffer and required for one.
+            unsafe {
+                self.inner.raw.CreateCommittedResource(
+                    &properties,
+                    D3D12_HEAP_FLAG_NONE,
+                    &resource_desc,
+                    conv::initial_state(desc.memory),
+                    None,
+                    &mut resource,
+                )
+            }
+            .map_err(|error| {
+                creation_error(&self.inner.raw, "CreateCommittedResource (buffer)", &error)
+            })?;
+            resource.ok_or_else(|| {
+                HalError::Backend(
+                    "CreateCommittedResource reported success and wrote no buffer".to_string(),
+                )
+            })
+        };
+        let heap = conv::heap_type(desc.memory, self.inner.gpu_upload_heap);
+        // **Video memory full is not the end of an upload buffer**: the GPU
+        // upload heap is video memory, and the upload heap in system memory
+        // still has room, as `crcbl-vk` falls back from device-local to plain
+        // host-visible memory for the same location.
+        let raw = match create(heap) {
+            Err(HalError::OutOfDeviceMemory) if heap == D3D12_HEAP_TYPE_GPU_UPLOAD => {
+                crcbl_core::log::debug!(
+                    "crcbl-dx12: no room on the GPU upload heap for a {allocation}-byte buffer; \
+                     placing it on the upload heap"
+                );
+                create(D3D12_HEAP_TYPE_UPLOAD)?
+            }
+            created => created?,
+        };
         if let Some(label) = desc.label {
             label_object(&raw, label);
         }
@@ -2831,7 +2862,7 @@ impl Device for Dx12Device {
         // An image is device-local — the default heap — and `ImageDesc` has no
         // field that could say otherwise. D3D12 is the reason: its upload and
         // readback heaps admit `D3D12_RESOURCE_DIMENSION_BUFFER` only.
-        let properties = heap_properties(MemoryLocation::DeviceLocal);
+        let properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
         let mut resource: Option<ID3D12Resource> = None;
         // SAFETY: as `create_buffer` — live descriptors borrowed for the call,
         // a live out-parameter, and the initial state D3D12 requires for the
@@ -10363,6 +10394,54 @@ pub(crate) mod tests {
             .create_buffer(&buffer(0, MemoryLocation::HostUpload))
             .expect_err("a zero-byte buffer is not a buffer");
         assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+    }
+
+    /// A `HostUpload` buffer is on the GPU upload heap exactly where the device
+    /// has one, judged by asking D3D12 for the heap afresh rather than by the
+    /// answer the device kept, and is written and read through the mapping on
+    /// either.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn an_upload_buffer_is_on_the_gpu_upload_heap_where_the_device_has_one() {
+        use windows::Win32::Graphics::Direct3D12::{
+            D3D12_FEATURE_D3D12_OPTIONS16, D3D12_FEATURE_DATA_D3D12_OPTIONS16,
+        };
+
+        let (_instance, device) = open_device();
+        let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS16::default();
+        // SAFETY: `options` is a live local of the payload type D3D12 documents
+        // for this feature id, and the size passed is that type's own.
+        let asked = unsafe {
+            device.inner.raw.CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS16,
+                core::ptr::from_mut(&mut options).cast(),
+                u32::try_from(size_of::<D3D12_FEATURE_DATA_D3D12_OPTIONS16>()).expect("small"),
+            )
+        };
+        let supported = asked.is_ok() && options.GPUUploadHeapSupported.as_bool();
+        eprintln!("GPUUploadHeapSupported: {supported}");
+
+        let upload = device
+            .create_buffer(&buffer(16, MemoryLocation::HostUpload))
+            .expect("an upload buffer");
+        let resource = device.inner.buffer(upload).expect("the buffer").raw;
+        let mut properties = D3D12_HEAP_PROPERTIES::default();
+        // SAFETY: `resource` is a live committed resource this device made, and
+        // `properties` is a live local the call writes through.
+        unsafe { resource.GetHeapProperties(Some(&raw mut properties), None) }
+            .expect("a committed resource has heap properties");
+        let expected = if supported {
+            D3D12_HEAP_TYPE_GPU_UPLOAD
+        } else {
+            D3D12_HEAP_TYPE_UPLOAD
+        };
+        assert_eq!(properties.Type, expected, "supported: {supported}");
+
+        device
+            .write_buffer(upload, 0, &[0x5A; 16])
+            .expect("written through the mapping");
+        assert_eq!(read_back(&device, upload, 16), [0x5A; 16]);
+        device.destroy_buffer(upload);
     }
 
     /// `write_buffer` writes, at the offset it was given, and refuses the
