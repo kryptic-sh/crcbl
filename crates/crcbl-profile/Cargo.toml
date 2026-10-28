@@ -1,0 +1,17 @@
+[package]
+name = "crcbl-profile"
+description = "Crucible profiler captures: the file a profiling run writes and every viewer reads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# `FormatError` is what the reader returns, so it needs `Display` and `Error`.
+# Nothing else: the editor and the CLI read a capture with no engine and no GPU,
+# which is the point of the crate (`docs/plan/60-profiler.md`, decision 2).
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

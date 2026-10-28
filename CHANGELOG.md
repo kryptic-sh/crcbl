@@ -61,6 +61,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   on D3D12 and Metal; it read past what it was handed. So does Vulkan's
   `resolve_query_set`, which copied one of the set's two pools with queries a
   single `u64` apart, each overwriting the last.
+- **`crcbl-profile`: the profiler's capture file.** A new crate holding a
+  `Capture` (an environment of named values, then frames of per-thread CPU span
+  and counter events and GPU passes with their timestamps and statistics) and
+  its `.crcblprof` encoding, with `Capture::encode` and `Capture::decode`. It
+  depends on nothing of the engine's, so a viewer reads a capture without a GPU;
+  the reader refuses another file, a later version, truncation, undefined tags
+  and trailing bytes, and never allocates for a count it has not got the bytes
+  for. Nothing writes one yet.
 - **The pass timers count each pass's work when asked.**
   `CRCBL_PASS_STATISTICS=1`, or `PassTimers::counting` in place of
   `PassTimers::new`, gives every timed pass a statistics query, and `PassTiming`

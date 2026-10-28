@@ -943,6 +943,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-profile"
+version = "0.12.1"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "crcbl-ragdoll"
 version = "0.12.1"
 dependencies = [

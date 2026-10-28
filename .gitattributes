@@ -55,6 +55,10 @@ crates/crcbl-ui/tests/fixtures/taffy/** text eol=lf
 # reason and this block's: git's heuristic does call it binary today, and an
 # artifact whose bytes are a checked invariant should not be relying on one.
 *.dxil binary
+# `crates/crcbl-profile/tests/fixtures/*.crcblprof`: a committed profiler capture
+# whose bytes a test pins, so a change to the format fails there; the same
+# reason as the DXIL above.
+*.crcblprof binary
 # `crates/crcbl-shaders/clusters/*.dag`: a cooked cluster DAG, compared byte for
 # byte by `tools/cook-clusters.rs --check`. Git's own heuristic would call it
 # binary anyway — it is full of NULs — but an artifact whose bytes are part of a

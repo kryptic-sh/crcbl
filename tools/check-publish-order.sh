@@ -23,6 +23,7 @@ set -euo pipefail
 
 ORDER=(
 crcbl-rand
+crcbl-profile
 crcbl-console
 crcbl-jobs
 crcbl-vfx
