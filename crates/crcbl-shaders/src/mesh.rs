@@ -6017,12 +6017,12 @@ mod tests {
             (
                 "mesh.slang",
                 include_str!("../shaders/mesh.slang"),
-                "output.world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);",
+                "precise float3 world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);",
             ),
             (
                 "mesh_cluster.slang",
                 include_str!("../shaders/mesh_cluster.slang"),
-                "output.world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);",
+                "precise float3 world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);",
             ),
         ] {
             assert!(

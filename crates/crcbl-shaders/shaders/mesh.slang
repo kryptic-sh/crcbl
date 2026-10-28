@@ -2309,23 +2309,27 @@ VertexOutput vertexMain(
         : base_vertex;
     float3 previous_position = load_position(index + previous_base);
 
-    float4 world = mul(instance.transform, float4(vertex.position, 1.0));
+    precise float4 world = mul(instance.transform, float4(vertex.position, 1.0));
 
     VertexOutput output;
-    output.position = mul(frame.view_proj, world);
+    precise float4 clip = mul(frame.view_proj, world);
+    output.position = clip;
     output.world_position = world.xyz;
     // **Through the cofactor matrix, not through the 3×3 itself.** The 3×3 is
     // the transform a tangent takes; a normal is the perpendicular to those,
     // and a non-uniform scale moves the two apart. `normal_basis` is the matrix
     // that keeps them together, and it is built here rather than uploaded, so
     // `GpuInstance` grows nothing.
-    output.world_normal = mul(normal_basis((float3x3)instance.transform), vertex.basis.normal);
+    precise float3 world_normal =
+        mul(normal_basis((float3x3)instance.transform), vertex.basis.normal);
+    output.world_normal = world_normal;
     // **And the tangent through the bare 3×3, not the cofactor** — the pair
     // `skinning.slang` argues at length: a tangent lies in the surface and is
     // carried by the transform, a normal is perpendicular to it and is not.
     // The handedness rides beside them as a bit rather than a third vector,
     // because the bitangent is one cross product away from these two.
-    output.world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);
+    precise float3 world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);
+    output.world_tangent = world_tangent;
     output.frame = frame_word(mesh.flags, vertex.basis);
     // **No cluster here, and that is the honest picture.** These two paths
     // select one level per *instance*, so there is neither a per-cluster level

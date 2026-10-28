@@ -1784,7 +1784,7 @@ void emit_cluster(
     // Once for the cluster, not once per vertex: the instance is fixed for the
     // whole meshlet, so the three cross products are amortised over every
     // vertex the loop below writes.
-    float3x3 normals = normal_basis((float3x3)instance.transform);
+    precise float3x3 normals = normal_basis((float3x3)instance.transform);
 
     // **The instance's mesh, which for a DAG is level 0** — this path resolves
     // its row through `instance.mesh` rather than through a bucket, so the
@@ -1799,21 +1799,24 @@ void emit_cluster(
         uint index = cluster_vertices[cluster.vertex_offset + v];
         MeshVertex vertex = load_vertex(index + base_vertex + level_base, uv_range);
 
-        float4 world = mul(instance.transform, float4(vertex.position, 1.0));
+        precise float4 world = mul(instance.transform, float4(vertex.position, 1.0));
 
         VertexOutput output;
-        output.position = mul(frame.view_proj, world);
+        precise float4 clip = mul(frame.view_proj, world);
+        output.position = clip;
         output.world_position = world.xyz;
         // Through the cofactor matrix hoisted above, which is the matrix
         // `mesh.slang`'s vertex stage uses on the same normal — a scaled
         // instance would otherwise light differently on the two paths.
-        output.world_normal = mul(normals, vertex.basis.normal);
+        precise float3 world_normal = mul(normals, vertex.basis.normal);
+        output.world_normal = world_normal;
         // **The tangent through the bare 3x3, not the cofactor** — the pair
         // `mesh.slang`'s vertex stage emits and `skinning.slang` argues: a
         // tangent lies in the surface and is carried by the transform, a normal
         // is perpendicular to it and needs the cofactor. The handedness rides
         // beside them as a bit, so the fragment stage needs no third vector.
-        output.world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);
+        precise float3 world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);
+        output.world_tangent = world_tangent;
         output.frame = frame_word(mesh.flags, vertex.basis);
         // Under either overlay the cluster's colour replaces the vertex's,
         // which is what makes a per-cluster fact — the level a cut spans, or

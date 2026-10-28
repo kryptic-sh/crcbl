@@ -340,12 +340,15 @@ fn vertexMain(@builtin(vertex_index) index_0 : u32, @builtin(instance_index) ins
     var previous_position_0 : vec3<f32> = load_position_0(index_0 + previous_base_0);
     var _S7 : mat4x4<f32> = mat4x4<f32>(instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(0)][i32(0)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(1)][i32(0)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(2)][i32(0)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(3)][i32(0)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(0)][i32(1)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(1)][i32(1)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(2)][i32(1)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(3)][i32(1)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(0)][i32(2)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(1)][i32(2)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(2)][i32(2)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(3)][i32(2)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(0)][i32(3)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(1)][i32(3)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(2)][i32(3)], instances_0[visible_instances_0[source_1.run_0 + instance_id_0]].transform_0.data_0[i32(3)][i32(3)]);
     var world_0 : vec4<f32> = (((vec4<f32>(vertex_1.position_1, 1.0f)) * (_S7)));
+    var clip_0 : vec4<f32> = (((world_0) * (mat4x4<f32>(frame_0.view_proj_0.data_1[i32(0)][i32(0)], frame_0.view_proj_0.data_1[i32(1)][i32(0)], frame_0.view_proj_0.data_1[i32(2)][i32(0)], frame_0.view_proj_0.data_1[i32(3)][i32(0)], frame_0.view_proj_0.data_1[i32(0)][i32(1)], frame_0.view_proj_0.data_1[i32(1)][i32(1)], frame_0.view_proj_0.data_1[i32(2)][i32(1)], frame_0.view_proj_0.data_1[i32(3)][i32(1)], frame_0.view_proj_0.data_1[i32(0)][i32(2)], frame_0.view_proj_0.data_1[i32(1)][i32(2)], frame_0.view_proj_0.data_1[i32(2)][i32(2)], frame_0.view_proj_0.data_1[i32(3)][i32(2)], frame_0.view_proj_0.data_1[i32(0)][i32(3)], frame_0.view_proj_0.data_1[i32(1)][i32(3)], frame_0.view_proj_0.data_1[i32(2)][i32(3)], frame_0.view_proj_0.data_1[i32(3)][i32(3)]))));
     var output_0 : VertexOutput_0;
-    output_0.position_2 = (((world_0) * (mat4x4<f32>(frame_0.view_proj_0.data_1[i32(0)][i32(0)], frame_0.view_proj_0.data_1[i32(1)][i32(0)], frame_0.view_proj_0.data_1[i32(2)][i32(0)], frame_0.view_proj_0.data_1[i32(3)][i32(0)], frame_0.view_proj_0.data_1[i32(0)][i32(1)], frame_0.view_proj_0.data_1[i32(1)][i32(1)], frame_0.view_proj_0.data_1[i32(2)][i32(1)], frame_0.view_proj_0.data_1[i32(3)][i32(1)], frame_0.view_proj_0.data_1[i32(0)][i32(2)], frame_0.view_proj_0.data_1[i32(1)][i32(2)], frame_0.view_proj_0.data_1[i32(2)][i32(2)], frame_0.view_proj_0.data_1[i32(3)][i32(2)], frame_0.view_proj_0.data_1[i32(0)][i32(3)], frame_0.view_proj_0.data_1[i32(1)][i32(3)], frame_0.view_proj_0.data_1[i32(2)][i32(3)], frame_0.view_proj_0.data_1[i32(3)][i32(3)]))));
+    output_0.position_2 = clip_0;
     output_0.world_position_0 = world_0.xyz;
     var _S8 : mat3x3<f32> = mat3x3<f32>(_S7[i32(0)].xyz, _S7[i32(1)].xyz, _S7[i32(2)].xyz);
-    output_0.world_normal_0 = (((vertex_1.basis_1.normal_0) * (normal_basis_0(_S8))));
-    output_0.world_tangent_0 = (((vertex_1.basis_1.tangent_1) * (_S8)));
+    var world_normal_1 : vec3<f32> = (((vertex_1.basis_1.normal_0) * (normal_basis_0(_S8))));
+    output_0.world_normal_0 = world_normal_1;
+    var world_tangent_1 : vec3<f32> = (((vertex_1.basis_1.tangent_1) * (_S8)));
+    output_0.world_tangent_0 = world_tangent_1;
     output_0.frame_1 = frame_word_0(mesh_3.flags_1, vertex_1.basis_1);
     var _S9 : vec4<f32>;
     if((frame_0.ambient_0.w) >= 1.5f)
@@ -1411,8 +1414,8 @@ fn cascade_visibility_0( cascade_1 : u32,  world_position_4 : vec3<f32>,  to_lig
         return 1.0f;
     }
     var texel_world_0 : f32 = 2.0f * frame_0.cascade_far_0[cascade_1] / tile_texels_0(rect_8);
-    var clip_0 : vec4<f32> = (((vec4<f32>(world_position_4 + geometric_normal_1 * vec3<f32>((texel_world_0 * frame_0.shadow_params_0.w * shadow_normal_offset_0(geometric_normal_1, to_light_2))) + to_light_2 * vec3<f32>((texel_world_0 * frame_0.shadow_params_0.z)), 1.0f)) * (mat4x4<f32>(frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(3)]))));
-    var ndc_0 : vec3<f32> = clip_0.xyz / vec3<f32>(clip_0.w);
+    var clip_1 : vec4<f32> = (((vec4<f32>(world_position_4 + geometric_normal_1 * vec3<f32>((texel_world_0 * frame_0.shadow_params_0.w * shadow_normal_offset_0(geometric_normal_1, to_light_2))) + to_light_2 * vec3<f32>((texel_world_0 * frame_0.shadow_params_0.z)), 1.0f)) * (mat4x4<f32>(frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(3)]))));
+    var ndc_0 : vec3<f32> = clip_1.xyz / vec3<f32>(clip_1.w);
     var _S129 : bool;
     if((any(((abs(ndc_0.xy)) > vec2<f32>(1.0f)))))
     {
@@ -1632,13 +1635,13 @@ fn punctual_visibility_0( tile_4 : u32,  world_position_7 : vec3<f32>,  to_light
         return 1.0f;
     }
     var texel_world_1 : f32 = map_world_0 / tile_texels_0(rect_9);
-    var clip_1 : vec4<f32> = (((vec4<f32>(world_position_7 + geometric_normal_3 * vec3<f32>((texel_world_1 * 4.0f * shadow_normal_offset_0(geometric_normal_3, to_light_4))) + to_light_4 * vec3<f32>((texel_world_1 * 2.0f)), 1.0f)) * (mat4x4<f32>(frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(0)][i32(0)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(1)][i32(0)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(2)][i32(0)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(3)][i32(0)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(0)][i32(1)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(1)][i32(1)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(2)][i32(1)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(3)][i32(1)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(0)][i32(2)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(1)][i32(2)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(2)][i32(2)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(3)][i32(2)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(0)][i32(3)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(1)][i32(3)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(2)][i32(3)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(3)][i32(3)]))));
-    var _S136 : f32 = clip_1.w;
+    var clip_2 : vec4<f32> = (((vec4<f32>(world_position_7 + geometric_normal_3 * vec3<f32>((texel_world_1 * 4.0f * shadow_normal_offset_0(geometric_normal_3, to_light_4))) + to_light_4 * vec3<f32>((texel_world_1 * 2.0f)), 1.0f)) * (mat4x4<f32>(frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(0)][i32(0)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(1)][i32(0)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(2)][i32(0)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(3)][i32(0)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(0)][i32(1)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(1)][i32(1)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(2)][i32(1)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(3)][i32(1)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(0)][i32(2)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(1)][i32(2)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(2)][i32(2)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(3)][i32(2)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(0)][i32(3)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(1)][i32(3)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(2)][i32(3)], frame_0.light_view_proj_0.data_3[tile_4].data_1[i32(3)][i32(3)]))));
+    var _S136 : f32 = clip_2.w;
     if(_S136 <= 0.0f)
     {
         return 1.0f;
     }
-    var ndc_1 : vec3<f32> = clip_1.xyz / vec3<f32>(_S136);
+    var ndc_1 : vec3<f32> = clip_2.xyz / vec3<f32>(_S136);
     var _S137 : bool;
     if((any(((abs(ndc_1.xy)) > vec2<f32>(1.0f)))))
     {
@@ -2062,21 +2065,21 @@ struct FragmentOutput_0
 struct pixelInput_0
 {
     @location(0) world_position_15 : vec3<f32>,
-    @location(6) world_normal_1 : vec3<f32>,
+    @location(6) world_normal_2 : vec3<f32>,
     @location(7) color_3 : vec4<f32>,
     @interpolate(flat) @location(8) material_16 : u32,
     @location(1) uv_5 : vec2<f32>,
     @location(2) clip_position_1 : vec4<f32>,
     @location(3) previous_clip_position_1 : vec4<f32>,
-    @location(4) world_tangent_1 : vec3<f32>,
+    @location(4) world_tangent_2 : vec3<f32>,
     @interpolate(flat) @location(5) frame_2 : u32,
 };
 
 @fragment
 fn fragmentMain( _S190 : pixelInput_0, @builtin(front_facing) front_facing_1 : bool, @builtin(position) position_5 : vec4<f32>) -> FragmentOutput_0
 {
-    var _S191 : VertexOutput_0 = VertexOutput_0( position_5, _S190.world_position_15, _S190.world_normal_1, _S190.color_3, _S190.material_16, _S190.uv_5, _S190.clip_position_1, _S190.previous_clip_position_1, _S190.world_tangent_1, _S190.frame_2 );
-    var vertex_normal_0 : vec3<f32> = normalize(_S190.world_normal_1);
+    var _S191 : VertexOutput_0 = VertexOutput_0( position_5, _S190.world_position_15, _S190.world_normal_2, _S190.color_3, _S190.material_16, _S190.uv_5, _S190.clip_position_1, _S190.previous_clip_position_1, _S190.world_tangent_2, _S190.frame_2 );
+    var vertex_normal_0 : vec3<f32> = normalize(_S190.world_normal_2);
     var motion_1 : vec2<f32> = motion_vector_0(_S190.clip_position_1, _S190.previous_clip_position_1);
     if((frame_0.ambient_0.w) >= 5.5f)
     {
@@ -2332,13 +2335,13 @@ fn fragmentMain( _S190 : pixelInput_0, @builtin(front_facing) front_facing_1 : b
 struct pixelInput_1
 {
     @location(0) world_position_16 : vec3<f32>,
-    @location(6) world_normal_2 : vec3<f32>,
+    @location(6) world_normal_3 : vec3<f32>,
     @location(7) color_4 : vec4<f32>,
     @interpolate(flat) @location(8) material_17 : u32,
     @location(1) uv_7 : vec2<f32>,
     @location(2) clip_position_2 : vec4<f32>,
     @location(3) previous_clip_position_2 : vec4<f32>,
-    @location(4) world_tangent_2 : vec3<f32>,
+    @location(4) world_tangent_3 : vec3<f32>,
     @interpolate(flat) @location(5) frame_3 : u32,
 };
 
@@ -2349,7 +2352,7 @@ fn depthMaskedFragmentMain( _S229 : pixelInput_1, @builtin(position) position_6 
     var uv_8 : vec2<f32>;
     if((_S230.tiling_0) == u32(1))
     {
-        uv_8 = physical_tile_uv_0(_S229.world_position_16, normalize(_S229.world_normal_2), _S230.tile_metres_0);
+        uv_8 = physical_tile_uv_0(_S229.world_position_16, normalize(_S229.world_normal_3), _S230.tile_metres_0);
     }
     else
     {
@@ -2374,20 +2377,20 @@ struct RsmOutput_0
 struct pixelInput_2
 {
     @location(0) world_position_17 : vec3<f32>,
-    @location(6) world_normal_3 : vec3<f32>,
+    @location(6) world_normal_4 : vec3<f32>,
     @location(7) color_5 : vec4<f32>,
     @interpolate(flat) @location(8) material_18 : u32,
     @location(1) uv_9 : vec2<f32>,
     @location(2) clip_position_3 : vec4<f32>,
     @location(3) previous_clip_position_3 : vec4<f32>,
-    @location(4) world_tangent_3 : vec3<f32>,
+    @location(4) world_tangent_4 : vec3<f32>,
     @interpolate(flat) @location(5) frame_4 : u32,
 };
 
 @fragment
 fn rsmFragmentMain( _S233 : pixelInput_2, @builtin(front_facing) front_facing_2 : bool, @builtin(position) position_7 : vec4<f32>) -> RsmOutput_0
 {
-    var vertex_normal_1 : vec3<f32> = normalize(_S233.world_normal_3);
+    var vertex_normal_1 : vec3<f32> = normalize(_S233.world_normal_4);
     var _S234 : GpuMaterial_std430_0 = materials_0[_S233.material_18];
     var uv_10 : vec2<f32>;
     if((_S234.tiling_0) == u32(1))
