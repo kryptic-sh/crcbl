@@ -3347,6 +3347,15 @@ snap shipped; what is left was declined:
   thickets keep 60% of speed through a game-local multiplier, and it stays in
   the game until a second caller wants one.
 
+**Surprising, not a bug: glossy near-camera metal reads as see-through under
+SSR.** EW reported (2026-10-28) that its guns looked see-through while aiming.
+The cause was screen-space reflections in glossy gun steel (roughness
+0.36–0.42), not near-plane clipping: a surface that close reflects the screen
+behind it. EW fixed it in its assets by making the steel matte. Not checked in
+the engine: whether `crcbl_render::ssr` should fade out on geometry this near
+the camera, or for a view-model layer, rather than leaving each game to dull its
+materials.
+
 **EW's route following is in `crcbl-nav`, partly adopted by EW**
 (`follow::RouteFollower`, `follow::StallDetector`, `SpanGrid::plan_toward`). On
 0.7.0 (EW `4d310c47`, reported 2026-10-20) EW uses `WAYPOINT_REACH_M`,
