@@ -79,6 +79,7 @@ COMMANDS:
     import        Import a glTF and report what came out of it.
     bench         Run a fixed benchmark scenario and report its distribution.
     sim           Run the determinism harness and print its state hash.
+    profile       Summarise a .crcblprof capture, or export it as a trace.
     settings      Read or write a game's settings.toml.
     save          List, dump or compare a game's save files.
     scene         List, query or edit a scene directory, with undo.
@@ -580,6 +581,8 @@ pub enum Command {
     Bench(BenchArgs),
     /// The determinism harness: N ticks of a seed-generated world, hashed.
     Sim(SimArgs),
+    /// A profiler capture, summarised or exported.
+    Profile(ProfileArgs),
     /// A game's `settings.toml`, read or written.
     Settings(SettingsArgs),
     /// A game's save files, listed, dumped or compared.
@@ -611,6 +614,7 @@ impl Command {
             // The scenario is a field of its own, for the reason above.
             Self::Bench(_) => "bench",
             Self::Sim(_) => "sim",
+            Self::Profile(_) => "profile",
             // The branch is a field of its own, for the reason above.
             Self::Settings(_) => "settings",
             // The branch is a field of its own, for the reason above.
@@ -635,6 +639,7 @@ impl Command {
             Self::Import(args) => args.json,
             Self::Bench(args) => args.json,
             Self::Sim(args) => args.json,
+            Self::Profile(args) => args.json,
             Self::Settings(args) => args.json,
             Self::Save(args) => args.json,
             Self::Scene(args) => args.json,
@@ -723,6 +728,17 @@ pub struct ScreenshotArgs {
     pub scene: crcbl::screenshot::Scene,
     /// Output PNG path.
     pub output: std::path::PathBuf,
+    /// Machine-readable output.
+    pub json: bool,
+}
+
+/// `crcbl profile report`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileArgs {
+    /// Path to the `.crcblprof` capture read.
+    pub file: PathBuf,
+    /// `--chrome <OUT>`: also write the capture as Chrome Trace Event JSON.
+    pub chrome: Option<PathBuf>,
     /// Machine-readable output.
     pub json: bool,
 }
@@ -1147,6 +1163,24 @@ pub struct SettingsArgs {
     pub json: bool,
 }
 
+/// `crcbl profile --help`.
+pub const PROFILE_USAGE: &str = "\
+crcbl profile — read a .crcblprof profiler capture
+
+USAGE:
+    crcbl profile report <FILE> [OPTIONS]
+
+A capture is what a run writes when CRCBL_PROFILE_CAPTURE names a path: the
+last frames of its CPU spans and GPU passes. `report` prints, per outermost CPU
+span and per GPU pass, the p50 and p95 of its cost per frame. The GPU's times
+are on the GPU's own clock; a capture does not yet align the two.
+
+OPTIONS:
+        --chrome <OUT>  Also write the capture as Chrome Trace Event JSON,
+                        for Perfetto or chrome://tracing.
+        --json          Emit one JSON object instead of human output.
+    -h, --help          Print this text.";
+
 /// `crcbl replay --help`.
 pub const REPLAY_USAGE: &str = "\
 crcbl replay — read a .crpl replay file and dump its metadata
@@ -1181,6 +1215,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
         Some("build") => parse_build(args),
         Some("screenshot") => parse_screenshot(args),
         Some("replay") => parse_replay(args),
+        Some("profile") => parse_profile(args),
         Some("crpix") => parse_crpix(args),
         Some("lod") => parse_lod(args),
         Some("import") => parse_import(args),
@@ -1536,6 +1571,52 @@ fn parse_screenshot(mut args: impl Iterator<Item = OsString>) -> Invocation {
         }
     }
     Invocation::Command(Command::Screenshot(parsed))
+}
+
+fn parse_profile(mut args: impl Iterator<Item = OsString>) -> Invocation {
+    match args.next() {
+        Some(verb) if verb == "report" => {}
+        Some(verb) if verb == "-h" || verb == "--help" => return Invocation::Help(PROFILE_USAGE),
+        Some(verb) => {
+            return Invocation::BadUsage(format!(
+                "`profile` has no verb `{}`; the one it has is `report`",
+                verb.to_string_lossy()
+            ));
+        }
+        None => return bad("`profile` needs a verb: `profile report <FILE>`"),
+    }
+    let mut parsed = ProfileArgs {
+        file: PathBuf::new(),
+        chrome: None,
+        json: false,
+    };
+    let mut file = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(PROFILE_USAGE),
+            Some("--json") => parsed.json = true,
+            Some("--chrome") => match args.next() {
+                Some(_) if parsed.chrome.is_some() => return bad("--chrome was given twice"),
+                Some(out) => parsed.chrome = Some(PathBuf::from(out)),
+                None => return bad("--chrome needs an output path"),
+            },
+            Some(other) if other.starts_with('-') => {
+                return Invocation::BadUsage(format!("`profile report` has no option `{other}`"));
+            }
+            Some(_) | None if file.is_none() => file = Some(PathBuf::from(arg)),
+            _ => {
+                return Invocation::BadUsage(format!(
+                    "`profile report` takes one capture; `{}` is a second one",
+                    arg.to_string_lossy()
+                ));
+            }
+        }
+    }
+    let Some(file) = file else {
+        return bad("`profile report` needs a .crcblprof capture path");
+    };
+    parsed.file = file;
+    Invocation::Command(Command::Profile(parsed))
 }
 
 fn parse_replay(mut args: impl Iterator<Item = OsString>) -> Invocation {
@@ -2548,6 +2629,7 @@ mod tests {
             vec!["bench", "--scenario", "jobs", "--json"],
             vec!["bench", "--scenario", "phys", "--json"],
             vec!["sim", "--json"],
+            vec!["profile", "report", "a.crcblprof", "--json"],
             vec!["settings", "--app", "g", "list", "--json"],
             vec!["settings", "--app", "g", "get", "a.b", "--json"],
             vec!["settings", "--app", "g", "set", "a.b", "c", "--json"],
@@ -2556,6 +2638,36 @@ mod tests {
             vec!["save", "diff", "a.crb", "b.crb", "--json"],
         ] {
             assert!(command(&args).json(), "{args:?} should have set --json");
+        }
+    }
+
+    /// `profile` has one verb, `report`, which takes one capture and an
+    /// optional trace path; anything else is a bad invocation that says why.
+    #[test]
+    fn profile_report_takes_a_capture_and_an_optional_trace() {
+        let Command::Profile(args) =
+            command(&["profile", "report", "a.crcblprof", "--chrome", "a.json"])
+        else {
+            panic!("`profile report` is the profile command");
+        };
+        assert_eq!(args.file, Path::new("a.crcblprof"));
+        assert_eq!(args.chrome.as_deref(), Some(Path::new("a.json")));
+        assert!(!args.json);
+
+        for (args, says) in [
+            (vec!["profile"], "needs a verb"),
+            (vec!["profile", "export", "a.crcblprof"], "no verb `export`"),
+            (vec!["profile", "report"], "needs a .crcblprof"),
+            (vec!["profile", "report", "a", "b"], "a second one"),
+            (
+                vec!["profile", "report", "a", "--chrome"],
+                "needs an output path",
+            ),
+        ] {
+            let Invocation::BadUsage(message) = parse_args(&args) else {
+                panic!("{args:?} is not a usable invocation");
+            };
+            assert!(message.contains(says), "{args:?}: {message}");
         }
     }
 

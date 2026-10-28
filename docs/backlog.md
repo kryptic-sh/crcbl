@@ -8488,23 +8488,6 @@ and `push_clip`, and the menu drawn through the UI pass — left these:
   has no menu and shows the same pattern, so it reads as driver drift, but no
   lavapipe run of the pre-rung tree was made to prove it.
 
-## Accept repeated Wayland close events cleanly (2026-09-15)
-
-Quitting EW on Wayland returned a nonzero status after the engine logged
-`window Handle<crcbl_shell::window::Window>(0, gen 1) has no outstanding close request`.
-
-**Fixed at the engine boundary 2026-09-30**: `crcbl::engine::accept_close` now
-replies to an outstanding request, destroys a window with none (the quit stands)
-and treats a window already gone as closed, so a close answered twice, one
-refused and then accepted, or one never asked all quit without an error.
-`Shell::reply_close_request` is unchanged and still refuses a reply to nothing.
-`engine::tests::accepting_a_close_twice_or_unasked_still_closes_the_window`
-holds all three sequences on the headless shell, and went red against the old
-one-line `accept_close`. **Not verified**: the Wayland event sequence that
-produced EW's log was not reproduced (this machine has no Wayland session), and
-no windowed check closes EW and reads its exit status. EW rechecking a quit on
-Wayland after pinning the fix closes the entry.
-
 ## glTF specular and IOR: what the factor slice left (2026-09-30)
 
 EW's `models/range/mossberg-590-placeholder.gltf` declares
@@ -19599,17 +19582,17 @@ desktop counts the task stage.
 - **Not tested**: the null backend's statistics, which checks only that the set
   is live.
 - **P2 (the capture) is under way.** Built: the `.crcblprof` format
-  (`crcbl-profile`) and its first producer, `CRCBL_PROFILE_CAPTURE=<path>`
-  writing the last frames as the run finishes (`crcbl::profile`). Left:
-  `crcbl profile report` and Chrome Trace export in the CLI; a trigger other
-  than the end of the run (a key, `profile.capture <frames>`, a frame over
-  budget); the calibrated CPU/GPU clock pair that puts the two on one timeline
-  (Vulkan already enables `VK_KHR_calibrated_timestamps` for present timing,
-  D3D12 has `GetClockCalibration`); and the capture recording what it enabled
-  and its own cost. Not tested: the loop's own recording and write, which a
-  lantern run checked by hand (120 CPU and 120 GPU frames, decoded back) and no
-  test runs. The D3D12 runs here had the debug layer off (none installed); CI's
-  WARP job is the first validated run of `BeginQuery` on a statistics heap.
+  (`crcbl-profile`), `crcbl profile report` with Chrome Trace export, and the
+  first producer, `CRCBL_PROFILE_CAPTURE=<path>` writing the last frames as the
+  run finishes (`crcbl::profile`). Left: a trigger other than the end of the run
+  (a key, `profile.capture <frames>`, a frame over budget); the calibrated
+  CPU/GPU clock pair that puts the two on one timeline (Vulkan already enables
+  `VK_KHR_calibrated_timestamps` for present timing, D3D12 has
+  `GetClockCalibration`); and the capture recording what it enabled and its own
+  cost. Not tested: the loop's own recording and write, which a lantern run
+  checked by hand (120 CPU and 120 GPU frames, decoded back) and no test runs.
+  The D3D12 runs here had the debug layer off (none installed); CI's WARP job is
+  the first validated run of `BeginQuery` on a statistics heap.
 
 **Surprising, worked around:** AMD's D3D12 driver (RX 7900 XTX on 25.10.36,
 Raphael iGPU on 25.10.42) resolves every statistics query begun after a draw

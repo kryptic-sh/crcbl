@@ -70,6 +70,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the reader refuses another file, a later version, truncation, undefined tags
   and trailing bytes, and never allocates for a count it has not got the bytes
   for.
+- **`crcbl profile report <FILE>` reads a capture.** It prints the environment
+  and, per outermost CPU span and per GPU pass label, the p50 and p95 of its
+  cost per frame (a label drawn twice summed within the frame); `--chrome <OUT>`
+  also writes the capture as Chrome Trace Event JSON for Perfetto and
+  `chrome://tracing`, the CPU and the GPU as two processes on their own clocks.
 - **`CRCBL_PROFILE_CAPTURE=<path>` writes a capture of the run's last frames.**
   The loop turns the CPU trace on, keeps the last 120 frames of CPU spans and
   GPU passes in a `crcbl::profile::Recorder`, and writes them to the path as it

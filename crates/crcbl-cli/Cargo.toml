@@ -68,6 +68,9 @@ workspace = true
 # The importer is already linked below for `lod` and `import`.
 crcbl = { workspace = true, features = ["parsed-font", "scene"] }
 crcbl-golden = { workspace = true }
+# `profile report` reads the capture `crcbl::profile` writes; the format crate
+# is the reader, and depends on nothing a GPU-free tool would not want.
+crcbl-profile = { workspace = true }
 # `load`, not `bake`: `crpix` reads PNGs and writes text, so it needs the
 # decoder and nothing else. `bake` is the other direction — a `.crpix` out to a
 # PNG plus an Aseprite sidecar — and no subcommand asks for it, so enabling it

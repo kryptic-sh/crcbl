@@ -743,6 +743,7 @@ dependencies = [
  "crcbl",
  "crcbl-assets",
  "crcbl-golden",
+ "crcbl-profile",
  "crcbl-scene",
  "crcbl-spawn",
  "crcbl-sprite",

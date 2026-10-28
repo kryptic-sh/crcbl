@@ -38,6 +38,7 @@ mod import_cmd;
 mod json;
 mod lod_cmd;
 mod new;
+mod profile_cmd;
 mod replay_cmd;
 mod report;
 mod save_args;
@@ -83,6 +84,7 @@ fn main() -> ExitCode {
                 Command::Import(args) => import_cmd::run(args),
                 Command::Bench(args) => bench::run(args),
                 Command::Sim(args) => sim_cmd::run(args),
+                Command::Profile(args) => profile_cmd::run(args),
                 Command::Settings(args) => settings_cmd::run(args),
                 // The one verb whose success has more than one exit code.
                 Command::Save(args) => {
