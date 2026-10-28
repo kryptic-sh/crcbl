@@ -35,7 +35,15 @@ did, so every presenter retired frames with `wait_idle`), and
   the instance need no surface, but `Presenter::request_open` takes the window
   and creates the surface first, and on Vulkan the device's present-capable
   queue family is checked against that surface. A split would open the instance
-  early and pick the adapter once the surface exists. Not designed.
+  early and pick the adapter once the surface exists. Not designed, and pikr
+  said on 2026-10-29 that it can wait: its Windows start-up is dominated by
+  AMD's `D3D12CreateDevice` (about 300 ms), which is outside crcbl.
+- **The timeline fix does not move a one-frame app's first paint.** pikr set
+  `TIMELINE_SEMAPHORE` in its own `optional_features` on 0.12.1: the "no
+  timeline semaphores" line went away and first paint stayed level (medians
+  about 31.7 and 32.0 ms over seven interleaved launches). pikr runs one frame
+  in flight, so the per-frame `wait_idle` was never on its start-up path. pikr
+  will re-measure `UiRenderer::new` and first paint on the next release.
 
 ## A key repeat can be stamped after its own release (2026-10-29)
 
