@@ -15,12 +15,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_image::data_url::parse`** reads a `data:` URL into its media type's
+  essence (`image/png`, lower case, parameters dropped) and its bytes, by the
+  Fetch standard's rules with the forgiving base64 decoder, so a caller can
+  decode album art a player sends as `mpris:artUrl` with the decoder its media
+  type names. It needs no cargo feature and refuses, by name, any URL that is
+  not a `data:` URL. The SVG reader's `<image>` uses it, unchanged in what it
+  accepts.
+
 - **`CRCBL_VK_SHADER_STATS=1` logs what the driver compiled every Vulkan
   pipeline into**: per stage, the statistics
   `VK_KHR_pipeline_executable_properties` reports (on AMD, registers, LDS and
   scratch), at info, as each pipeline is created. It enables the extension only
   where the driver lists it and the variable asks for it, so a device opened
   without it is created as before.
+
 - **D3D12 has mesh shading**: a device reports `Features::MESH_SHADER` and
   `Features::TASK_SHADER` where D3D12's mesh shader tier is at least 1 and the
   shader model reaches the committed DXIL's 6.6, so the renderer takes

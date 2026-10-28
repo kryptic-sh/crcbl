@@ -28,10 +28,11 @@
 //! what it does not draw rather than drawing part of it), with `svg-text`
 //! for an icon's text, drawn in the system's fonts found through
 //! `crcbl-font`. The raw conversions, the
-//! resize and the coverage rasteriser need none. The `theme` feature adds the
+//! resize, the coverage rasteriser and the [`data_url`] parser need none. The `theme` feature adds the
 //! freedesktop.org icon-theme lookup, which finds an icon's file by name;
 //! decoding it is the format's.
 
+pub mod data_url;
 pub mod raster;
 pub mod raw;
 pub mod resize;
