@@ -1,11 +1,174 @@
 //! GPU→CPU read-back of a presented image: the staging layout, the copy and
 //! the compaction that drops its row padding.
+//!
+//! `Presenter::submit_present_and_read_back` is the whole of it for a
+//! program: draw a frame as for the window, hand the command buffer to it
+//! instead of to `submit_and_present`, and get the presented image back as an
+//! [`Rgba8Frame`]. On a presenter from `Presenter::open_offscreen` that is an
+//! image test of a program's own draw path with no display at all. Neither
+//! exists on `wasm32`, whose readbacks are a promise.
+
+use std::time::Duration;
 
 use crcbl_hal::{
     Barriers, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage, CommandEncoder, Device,
     Extent3d, Format, HalError, ImageAspect, ImageBarrier, ImageHandle, ImageSubresourceLayers,
     ImageSubresourceRange, MemoryLocation, Offset3d, ResourceState,
 };
+
+use crate::present::{FrameOutcome, PresentError};
+
+/// How long a blocking read-back waits for its copy to land.
+///
+/// A hang detector, not a performance claim: a software rasteriser on a busy
+/// CI runner can take seconds over one frame, and a copy that has not landed
+/// by then is one that never will.
+pub const READBACK_DEADLINE: Duration = Duration::from_secs(30);
+
+/// A presented frame's pixels, four bytes each in R, G, B, A order, row-major
+/// and top row first.
+///
+/// The bytes are the image's own, reordered and nothing else: an sRGB
+/// swapchain format reads back sRGB-encoded, as it was shown, and the alpha is
+/// whatever the frame's passes left — premultiplied where they blended
+/// premultiplied colour over a transparent clear, as `crcbl-frame`'s UI pass
+/// does for a window a compositor blends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rgba8Frame {
+    /// Pixels across.
+    pub width: u32,
+    /// Pixels down.
+    pub height: u32,
+    /// The swapchain format the bytes were read from, which says whether they
+    /// are sRGB-encoded.
+    pub format: Format,
+    /// `width * height * 4` bytes.
+    pub pixels: Vec<u8>,
+}
+
+/// Why a frame could not be read back.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ReadbackError {
+    /// Submitting or presenting the frame failed.
+    Present(PresentError),
+    /// Recording the copy or reading it failed.
+    Hal(HalError),
+    /// The swapchain's format is not four 8-bit channels.
+    UnsupportedFormat(Format),
+    /// The frame's byte count does not fit in host memory.
+    TooLarge {
+        /// Pixels across.
+        width: u32,
+        /// Pixels down.
+        height: u32,
+    },
+    /// The copy had not landed after [`READBACK_DEADLINE`].
+    Timeout(Duration),
+    /// The frame was not presented, so there is no image to read: the
+    /// swapchain went out of date, and has been rebuilt.
+    NotPresented(FrameOutcome),
+}
+
+impl std::fmt::Display for ReadbackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Present(error) => write!(f, "{error}"),
+            Self::Hal(error) => write!(f, "{error}"),
+            Self::UnsupportedFormat(format) => {
+                write!(f, "a {format:?} swapchain cannot be read back as RGBA8")
+            }
+            Self::TooLarge { width, height } => {
+                write!(f, "a {width}x{height} frame does not fit in host memory")
+            }
+            Self::Timeout(after) => write!(f, "the read-back had not landed after {after:?}"),
+            Self::NotPresented(outcome) => {
+                write!(
+                    f,
+                    "the frame was not presented ({outcome:?}), so nothing was read"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReadbackError {}
+
+impl From<PresentError> for ReadbackError {
+    fn from(error: PresentError) -> Self {
+        Self::Present(error)
+    }
+}
+
+impl From<HalError> for ReadbackError {
+    fn from(error: HalError) -> Self {
+        Self::Hal(error)
+    }
+}
+
+/// Reorders `pixels`, read from an image in `format`, to R, G, B, A in place.
+///
+/// # Errors
+///
+/// [`ReadbackError::UnsupportedFormat`] for a format that is not four 8-bit
+/// channels.
+pub fn to_rgba8(format: Format, pixels: &mut [u8]) -> Result<(), ReadbackError> {
+    match format {
+        Format::Rgba8Unorm | Format::Rgba8UnormSrgb => Ok(()),
+        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                pixel.swap(0, 2);
+            }
+            Ok(())
+        }
+        other => Err(ReadbackError::UnsupportedFormat(other)),
+    }
+}
+
+/// Requests a read of `staging`, which a submitted copy is filling, and waits
+/// up to [`READBACK_DEADLINE`] for it, returning the image with its row
+/// padding dropped.
+///
+/// Blocking, so not on `wasm32`, whose readbacks are a promise.
+///
+/// # Errors
+///
+/// [`ReadbackError::Hal`] if the read failed, or [`ReadbackError::Timeout`].
+/// On a timeout the read is left alone, since the GPU may still be writing it,
+/// and goes with the device.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn wait_for_readback(
+    device: &dyn Device,
+    staging: BufferHandle,
+    layout: &ReadbackLayout,
+    label: &str,
+) -> Result<Vec<u8>, ReadbackError> {
+    let readback = device.request_readback(&crcbl_hal::ReadbackDesc {
+        label: Some(label),
+        buffer: staging,
+        offset: 0,
+        size: layout.byte_count,
+        after: None,
+    })?;
+    let mut staged = vec![0u8; layout.staged_capacity];
+    let started = std::time::Instant::now();
+    while !matches!(
+        device.poll_readback(readback, &mut staged)?,
+        crcbl_hal::ReadbackState::Ready
+    ) {
+        if started.elapsed() > READBACK_DEADLINE {
+            return Err(ReadbackError::Timeout(READBACK_DEADLINE));
+        }
+        std::thread::yield_now();
+    }
+    device.destroy_readback(readback);
+    Ok(compact_rows(
+        &staged,
+        layout.staged_pitch,
+        layout.packed_pitch,
+        layout.host_capacity,
+    ))
+}
 
 /// Row-pitch alignment, in bytes, for the readback staging buffer.
 ///
@@ -217,6 +380,22 @@ pub fn compact_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **BGRA is reordered to RGBA and RGBA is left alone**, and a format that
+    /// is not four 8-bit channels is refused rather than misread.
+    #[test]
+    fn to_rgba8_reorders_only_bgra() {
+        let mut bgra = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        to_rgba8(Format::Bgra8UnormSrgb, &mut bgra).expect("BGRA");
+        assert_eq!(bgra, [3, 2, 1, 4, 7, 6, 5, 8]);
+        let mut rgba = vec![1, 2, 3, 4];
+        to_rgba8(Format::Rgba8Unorm, &mut rgba).expect("RGBA");
+        assert_eq!(rgba, [1, 2, 3, 4]);
+        assert!(matches!(
+            to_rgba8(Format::Rgba16Float, &mut []),
+            Err(ReadbackError::UnsupportedFormat(Format::Rgba16Float))
+        ));
+    }
 
     /// The padding is only correct if it is dropped again, and this is the
     /// arithmetic that drops it. A GPU is not needed to check it, so it is

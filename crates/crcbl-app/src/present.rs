@@ -126,6 +126,10 @@ use crcbl_shell::{Shell, ShellError, ShellEvent, WindowId};
 use crate::adapter::{ADAPTER_ENV_VAR, AdapterPick, Choice, PinMiss, PowerPreference};
 use crate::backend::{GpuBackend, PendingInstance};
 use crate::gpu_choice::{ChoiceOutcome, GpuChoice, Ignored};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::readback::{
+    ReadbackError, ReadbackLayout, Rgba8Frame, record_image_readback, to_rgba8, wait_for_readback,
+};
 
 use frame_gate::FrameGate;
 
@@ -2380,6 +2384,91 @@ impl Presenter {
             self.reconfigure()?;
         }
         Ok(FrameOutcome::Presented)
+    }
+
+    /// [`submit_and_present`](Self::submit_and_present), then the presented
+    /// image's pixels, read back.
+    ///
+    /// The copy rides in the frame's own batch, so it reads exactly what the
+    /// frame drew, and the call blocks until it lands (up to
+    /// [`READBACK_DEADLINE`](crate::readback::READBACK_DEADLINE)). On an
+    /// [offscreen](Self::open_offscreen) presenter this is an image test of a
+    /// program's draw path: the same device, format and passes it would
+    /// present to a window. [`Rgba8Frame`] says what the bytes are.
+    ///
+    /// Not on `wasm32`, whose readbacks are a promise.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadbackError::UnsupportedFormat`] for a swapchain format that is not
+    /// four 8-bit channels, checked before anything is submitted;
+    /// [`ReadbackError::NotPresented`] when the swapchain went out of date on
+    /// this frame; and whatever the submit, the present or the read report.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn submit_present_and_read_back(
+        &mut self,
+        acquired: &AcquiredFrame,
+        command_buffer: CommandBufferHandle,
+    ) -> Result<Rgba8Frame, ReadbackError> {
+        let format = self.format();
+        to_rgba8(format, &mut [])?;
+        let (width, height) = acquired.extent;
+        let layout = ReadbackLayout::for_extent(acquired.extent)
+            .ok_or(ReadbackError::TooLarge { width, height })?;
+        let device = self.device.as_ref();
+        let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+            label: Some("presenter read-back"),
+            queue: self.queue,
+        });
+        let staging = record_image_readback(
+            device,
+            encoder.as_mut(),
+            acquired.image,
+            format,
+            acquired.extent,
+            &layout,
+            "presenter read-back",
+        )?;
+        let copy = match encoder.finish() {
+            Ok(copy) => copy,
+            Err(error) => {
+                device.destroy_buffer(staging);
+                return Err(error.into());
+            }
+        };
+
+        let mut pixels = None;
+        let outcome = self.submit_and_present_with(
+            acquired,
+            command_buffer,
+            &[copy],
+            |device, outcome| -> Result<(), ReadbackError> {
+                if outcome == FrameOutcome::Presented {
+                    pixels = Some(wait_for_readback(
+                        device,
+                        staging,
+                        &layout,
+                        "presenter read-back",
+                    )?);
+                }
+                Ok(())
+            },
+        )?;
+        if pixels.is_none() {
+            // Submitted but never waited on: idle the device before the copy's
+            // buffers go.
+            self.drain()?;
+        }
+        self.device.destroy_command_buffer(copy);
+        self.device.destroy_buffer(staging);
+        let mut pixels = pixels.ok_or(ReadbackError::NotPresented(outcome))?;
+        to_rgba8(format, &mut pixels)?;
+        Ok(Rgba8Frame {
+            width,
+            height,
+            format,
+            pixels,
+        })
     }
 
     /// Reads what the display is doing with the frame just presented, settles

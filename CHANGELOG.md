@@ -15,6 +15,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Presenter::submit_present_and_read_back`** submits and presents a frame as
+  `submit_and_present` does, then returns the presented image as an `Rgba8Frame`
+  (R, G, B, A bytes, top row first, in the swapchain's own encoding and alpha).
+  The copy rides in the frame's batch, and the call blocks until it lands. On an
+  `open_offscreen` presenter that makes an image test of a program's own draw
+  path, on the device and format it presents with; CI runs it on lavapipe.
+  `crcbl_app::readback` holds the frame and error types and the staging helpers
+  the `crcbl` screenshot path already used. Not on `wasm32`.
+
 - **`Shell::activation_token(window)`** returns an `xdg-activation-v1` token
   made from the window's surface and the latest input serial, which a
   notification daemon sends as the spec's `ActivationToken` before
