@@ -26823,7 +26823,22 @@ tree changes since. What is left:
   occupancy, so the cost is in how the work is spread (per-cluster workgroups,
   vertices shared between clusters transformed once each, the task stage), not
   in the shaders' size. The task stage reports as a `cs` executable with zero
-  registers, which is the driver's answer and not one to read as free.
+  registers, which is the driver's answer and not one to read as free. **On
+  Vulkan the task stage is the cost; on D3D12 it pays.** Lantern, three rotating
+  rounds, the device asked for the mesh path without `TASK_SHADER` (a local
+  switch, not kept), so the un-amplified `meshMain` drew: Vulkan shadow 0.026
+  (IndirectCount) / 0.048 (with the task stage) / 0.030 ms (without), GPU frame
+  1.299 / 1.360 / 1.310 ms, so nearly all the gap is the task stage; D3D12
+  shadow 0.061 / 0.039 / 0.151 ms, frame 1.423 / 1.423 / 1.580, so there it
+  earns its place. **Tried and declined: 64 task lanes** (`TASK_LANES`, half the
+  task workgroups): Vulkan unchanged (frame 1.363 → 1.363 ms), D3D12 0.9%
+  slower. So the Vulkan cost does not scale with task workgroups; a fixed cost
+  of AMD's task stage per draw is the reading, not measured. Lantern draws no
+  cluster DAG, so dropping the task stage there loses nothing; on a scene that
+  has one, `meshMain` draws every level, so going without it is not a general
+  answer. Options not tried: a profiler (Radeon GPU Profiler, not installed
+  here) to see where the task stage's time goes, and fewer task calls per frame
+  than one per partition per pass.
 - **Metal still reports its adapter's features verbatim.** D3D12 and Vulkan
   grant only what a device asked for; `MetalDevice::open` keeps `record.caps`
   whole, so a Metal device opened without a feature still reports it. Changing
