@@ -427,6 +427,11 @@ pub(crate) struct DeviceInner {
     /// reaching a dispatch with `None` here means a pipeline was bound that
     /// this device never created.
     pub(crate) mesh_shader_ext: Option<ext::mesh_shader::Device>,
+    /// `VK_KHR_pipeline_executable_properties`, loaded only when
+    /// `CRCBL_VK_SHADER_STATS=1` asked for it and the driver offers it; every
+    /// pipeline is then created capturing its statistics and logs them. See
+    /// [`crate::shader_stats`].
+    pub(crate) shader_stats_ext: Option<khr::pipeline_executable_properties::Device>,
     /// Says, once, what the display turned out to be doing.
     ///
     /// The same idiom and the same argument as [`first_present_wait`](Self::first_present_wait):
@@ -846,6 +851,14 @@ impl VkDevice {
         if ray_tracing_pipeline {
             device_extensions.push(khr::ray_tracing_pipeline::NAME.as_ptr());
         }
+        // Not a seam feature: a profiling aid asked for by environment, and only
+        // enabled where the driver lists it, so an ordinary device is created as
+        // it always was.
+        let shader_stats = crate::shader_stats::wanted()
+            && crate::shader_stats::supported(&instance.raw, record.physical);
+        if shader_stats {
+            device_extensions.push(khr::pipeline_executable_properties::NAME.as_ptr());
+        }
         // The extension names alone enable nothing: chaining a `VkPresentIdKHR`
         // onto a present without `presentId` granted here is a validation
         // error, and `vkWaitForPresentKHR` without `presentWait` is undefined.
@@ -903,6 +916,12 @@ impl VkDevice {
         if ray_tracing_pipeline {
             create_info = create_info.push_next(&mut ray_pipeline_features);
         }
+        let mut executable_features =
+            vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR::default()
+                .pipeline_executable_info(true);
+        if shader_stats {
+            create_info = create_info.push_next(&mut executable_features);
+        }
 
         // SAFETY: `record.physical` came from `instance`; every pointer in
         // `create_info` borrows a local that outlives the call; the requested
@@ -932,6 +951,8 @@ impl VkDevice {
         // re-reading `caps`.
         let mesh_shader_ext =
             mesh_shader.then(|| ext::mesh_shader::Device::new(&instance.raw, &raw));
+        let shader_stats_ext = shader_stats
+            .then(|| khr::pipeline_executable_properties::Device::new(&instance.raw, &raw));
         let debug_ext = instance
             .debug_ext
             .as_ref()
@@ -984,6 +1005,7 @@ impl VkDevice {
             present_wait_ext,
             present_timing_ext,
             mesh_shader_ext,
+            shader_stats_ext,
             first_display_timing: Once::new(),
             first_present_wait: Once::new(),
             first_validation_provocation: Once::new(),

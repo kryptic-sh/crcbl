@@ -802,9 +802,12 @@ impl VkDevice {
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(module)
             .name(&name);
-        let info = vk::ComputePipelineCreateInfo::default()
+        let mut info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(layout_raw);
+        if inner.shader_stats_ext.is_some() {
+            info = info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR);
+        }
 
         // SAFETY: as `create_graphics_pipeline_impl`.
         let created = unsafe {
@@ -827,6 +830,9 @@ impl VkDevice {
             }
         };
         inner.set_object_name(raw, desc.label);
+        if let Some(ext) = &inner.shader_stats_ext {
+            crate::shader_stats::log(ext, raw, desc.label);
+        }
 
         Ok(inner.stamp(state.pipelines.insert(PipelineEntry {
             owner: inner.id,
@@ -1126,6 +1132,9 @@ fn create_rendering_pipeline(
     if let Some(depth_stencil) = depth_stencil.as_ref() {
         info = info.depth_stencil_state(depth_stencil);
     }
+    if inner.shader_stats_ext.is_some() {
+        info = info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR);
+    }
 
     // SAFETY: every pointer in `info` borrows a local that outlives the
     // call; the modules and the layout were resolved against this device's
@@ -1154,6 +1163,9 @@ fn create_rendering_pipeline(
         }
     };
     inner.set_object_name(raw, desc.label);
+    if let Some(ext) = &inner.shader_stats_ext {
+        crate::shader_stats::log(ext, raw, desc.label);
+    }
 
     Ok(inner.stamp(state.pipelines.insert(PipelineEntry {
         owner: inner.id,

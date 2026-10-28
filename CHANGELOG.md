@@ -15,6 +15,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`CRCBL_VK_SHADER_STATS=1` logs what the driver compiled every Vulkan
+  pipeline into**: per stage, the statistics
+  `VK_KHR_pipeline_executable_properties` reports (on AMD, registers, LDS and
+  scratch), at info, as each pipeline is created. It enables the extension only
+  where the driver lists it and the variable asks for it, so a device opened
+  without it is created as before.
 - **D3D12 has mesh shading**: a device reports `Features::MESH_SHADER` and
   `Features::TASK_SHADER` where D3D12's mesh shader tier is at least 1 and the
   shader model reaches the committed DXIL's 6.6, so the renderer takes

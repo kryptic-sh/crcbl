@@ -26814,6 +26814,15 @@ tree changes since. What is left:
   1% either way. So the drivers already drop the unused outputs, and the cost is
   not what the mesh stage loads or writes. The diff is not kept; the shape was a
   `ClusterDraw` helper shared with `emit_cluster` and a `DepthVertex` output.
+  **What the driver compiled them into** (`CRCBL_VK_SHADER_STATS=1`, lantern,
+  Vulkan, AMD 25.10.36): the mesh path's depth stage 23 VGPRs, 65 SGPRs and 1.5
+  KB of LDS, the vertex path's depth stage 23 VGPRs and 38 SGPRs; the colour
+  pass's geometry stage 60 VGPRs and 8 KB of LDS on the mesh path against 50
+  VGPRs, and the same 184-VGPR pixel stage on both. Nothing there limits
+  occupancy, so the cost is in how the work is spread (per-cluster workgroups,
+  vertices shared between clusters transformed once each, the task stage), not
+  in the shaders' size. The task stage reports as a `cs` executable with zero
+  registers, which is the driver's answer and not one to read as free.
 - **Metal still reports its adapter's features verbatim.** D3D12 and Vulkan
   grant only what a device asked for; `MetalDevice::open` keeps `record.caps`
   whole, so a Metal device opened without a feature still reports it. Changing
@@ -26822,7 +26831,13 @@ tree changes since. What is left:
   CI runs Metal.
 - **`precise` reaches SPIR-V and DXIL only.** Slang drops it for WGSL and MSL,
   so the two geometry stages could still contract their outputs differently
-  there. Not seen: the cross-path comparisons pass on Metal and WebGPU.
+  there. Not seen: the cross-path comparisons pass on Metal and WebGPU. Its
+  cost, measured as forward p50 against the commit before it (sandbox, release,
+  1920x1080, mirrored pairs): none on the RX 7900 XTX on either API (within
+  0.7%); none on Intel RPL-U's ANV (IndirectCount; `lights-fit` 8.030 → 7.965
+  ms, `area-lights-fit` 18.553 → 18.541, `instances` 4.006 → 4.031) or the
+  NVIDIA MX550 (mesh path; 2.547 → 2.549, 7.227 → 7.235, 1.734 → 1.732), every
+  pair of ranges overlapping (the office session's runs, 2026-10-28).
 - **The seam suite still does not drive a mesh draw.**
   `crates/crcbl/tests/hal_seam_e2e.rs` maps both capabilities to
   `Exercise::Unexercised(NEEDS_MESH_ARTIFACTS)`, so their `Yes` is declared
