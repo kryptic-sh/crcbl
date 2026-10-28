@@ -1036,6 +1036,7 @@ fn a_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     encoder.end_render_pass();
     let commands = encoder.finish().expect("recording succeeded");
@@ -1236,6 +1237,7 @@ fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     encoder.end_render_pass();
     encoder.pipeline_barrier(&Barriers {
@@ -1748,6 +1750,7 @@ impl ComputeProbe {
         encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
             label: Some("compute probe"),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         record(encoder.as_mut());
         encoder.end_compute_pass();
@@ -2444,6 +2447,7 @@ fn a_binds_dynamic_offsets_are_held_to_the_layout_that_declared_them() {
         encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
             label: Some("dynamic offset probe"),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.bind_group(0, group, offsets, pipeline_layout);
         encoder.end_compute_pass();
@@ -4674,6 +4678,7 @@ fn exercise_msaa_resolve(headless: &Headless) -> Exercise {
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(MSAA_RESOLVE_WIDTH, MSAA_RESOLVE_HEIGHT),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     encoder.end_render_pass();
     encoder.pipeline_barrier(&Barriers {
@@ -5644,6 +5649,7 @@ impl Raster {
             }),
             render_area: Rect2d::from_size(RASTER_WIDTH, RASTER_HEIGHT),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.set_viewport(&crcbl::hal::Viewport::from_size(
             RASTER_WIDTH,
@@ -6613,6 +6619,7 @@ fn primed_dispatch(
     encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
         label: Some("push constant probe"),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     record(encoder.as_mut());
     encoder.end_compute_pass();
@@ -7206,6 +7213,7 @@ fn update_bind_group_dispatch(
     encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
         label: Some("update bind group probe"),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     record(encoder.as_mut());
     encoder.end_compute_pass();
@@ -7958,6 +7966,7 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
             beginning_of_pass: 0,
             end_of_pass: 1,
         }),
+        statistics_writes: None,
     });
     encoder.end_render_pass();
 
@@ -7975,6 +7984,7 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
             beginning_of_pass: TIMESTAMP_COMPUTE_FIRST,
             end_of_pass: TIMESTAMP_COMPUTE_FIRST + 1,
         }),
+        statistics_writes: None,
     });
     encoder.end_compute_pass();
 
@@ -8084,6 +8094,7 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
                         beginning_of_pass: 0,
                         end_of_pass: 0,
                     }),
+                    statistics_writes: None,
                 });
                 coincident.end_render_pass();
                 let refusal = coincident.finish();
@@ -8316,20 +8327,19 @@ fn exercise_timestamp_resolve(
 /// `vkCmdBeginQuery`/`vkCmdEndQuery`, D3D12's `BeginQuery`/`EndQuery`, Metal's
 /// `setVisibilityResultMode:offset:` on a render encoder, WebGPU's
 /// `beginOcclusionQuery` inside a render pass with an `occlusionQuerySet`
-/// attached. **[`crcbl::hal::CommandEncoder`] has no such verb** — its query
-/// vocabulary is `reset_query_set`, `resolve_query_set` and the pass
-/// descriptor's `timestamp_writes` —
-/// so no work this suite can record ever reaches these pools, and there is no
-/// number to be plausible about. Asserting on a resolve of them would be
+/// attached. **[`crcbl::hal::CommandEncoder`] has no such verb for a draw** —
+/// its query vocabulary is `reset_query_set`, `resolve_query_set` and the pass
+/// descriptor's `timestamp_writes` and `statistics_writes` — so no work this
+/// exercise records reaches these pools, and there is no number to be
+/// plausible about. Asserting on a resolve of them would be
 /// asserting on queries that were never begun: the value is whatever "not
 /// written" resolves to, which is zero on the backend that has them, and zero
 /// is also what a backend doing nothing produces.
 ///
-/// The missing verb is the whole of it, and it is worth saying that the *work*
-/// is no longer the obstacle: [`Raster`] draws a triangle of a known size, which
-/// is what an occlusion count and `crcbl-vk`'s `VERTEX_SHADER_INVOCATIONS |
-/// FRAGMENT_SHADER_INVOCATIONS | CLIPPING_PRIMITIVES` statistics pool would
-/// count. Neither can be scoped around it from this seam.
+/// For occlusion the missing verb is the whole of it. A statistics query is
+/// scoped by a pass instead, through `statistics_writes`, and its counts are
+/// asserted against draws of known size by `crcbl-vk`'s `a_render_pass_counts_*`
+/// tests, the one backend that fills the verb so far.
 ///
 /// # What it does assert
 ///
@@ -8351,18 +8361,10 @@ fn exercise_timestamp_resolve(
 /// function could both create and read; that kind is refused now, so the pair
 /// moved to [`exercise_timestamp_query`], where the queries were really written.
 ///
-/// [`QueryKind::PipelineStatistics`] never had that read, and the reason is a
-/// seam defect rather than a shortcut. Both of the seam's read paths assume one
-/// `u64` per query — [`Device::query_results`] takes `out.len()` results
-/// starting at `first_query`, and `crcbl-vk` resolves with a `size_of::<u64>()`
-/// stride — while a Vulkan statistics pool holds one `u64` per *enabled
-/// counter*, and `crcbl-vk` enables three. Asking for two queries hands
-/// `vkGetQueryPoolResults` 16 bytes where it needs 32, which the validation
-/// layer catches as `VUID-vkGetQueryPoolResults-dataSize-00817`. There is no
-/// `out` length that both satisfies Vulkan and passes the seam's own
-/// `first_query + out.len() <= count` bound, so a statistics pool cannot be read
-/// through this seam at all: that wants a seam change and is left named here
-/// rather than papered over with a read that only looks like one.
+/// [`QueryKind::PipelineStatistics`] has no [`Device::query_results`] read,
+/// because one of its queries is several counts where that read takes one
+/// `u64`; it has its own, `Device::pipeline_statistics`, driven by the tests
+/// named above.
 /// The descriptor no backend may accept: a set of no queries.
 ///
 /// A named helper because the exercise asks for it twice — once on a device
@@ -8432,10 +8434,8 @@ fn exercise_query_set_creation(headless: &Headless, kind: QueryKind) -> Exercise
             device.destroy_command_buffer(commands);
 
             // No read: one `u64` per query is not a statistics pool's layout
-            // — see the note above on
-            // `VUID-vkGetQueryPoolResults-dataSize-00817` — and the occlusion
-            // kind never reaches here, being refused at `create_query_set` on
-            // every backend.
+            // (see the note above), and the occlusion kind never reaches
+            // here, being refused at `create_query_set` on every backend.
             Exercise::Worked
         }
     };

@@ -41,6 +41,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not a `data:` URL. The SVG reader's `<image>` uses it, unchanged in what it
   accepts.
 
+- **A pass can count its work.** `RenderPassDesc` and `ComputePassDesc` take
+  `statistics_writes: Option<PassStatisticsWrites>`, naming a query in a
+  `QueryKind::PipelineStatistics` set, and `Device::pipeline_statistics` reads
+  it as a `PipelineStatistics`: input-assembly vertices and primitives, vertex,
+  clipper, fragment, compute, task and mesh invocations, and mesh primitives,
+  each `None` where the device or API cannot count that stage. Vulkan fills it;
+  a mesh draw there cannot run under the vertex and clipper counters, so a pass
+  on the mesh path reports those as `None`, and the task and mesh counts need
+  the driver's `meshShaderQueries`, which AMD's Windows driver lacks. D3D12,
+  Metal and WebGPU fail the encoder when given one, and the trait's default read
+  refuses. Every pass descriptor gains the field: set it to `None`.
+  `query_results` on a statistics set now refuses on Vulkan, as it did on D3D12
+  and Metal; it read past what it was handed.
+
 - **`CRCBL_VK_SHADER_STATS=1` logs what the driver compiled every Vulkan
   pipeline into**: per stage, the statistics
   `VK_KHR_pipeline_executable_properties` reports (on AMD, registers, LDS and

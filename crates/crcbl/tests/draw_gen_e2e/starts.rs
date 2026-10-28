@@ -497,6 +497,7 @@ impl StartsProbe {
         encoder.begin_compute_pass(&ComputePassDesc {
             label: Some("starts probe"),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.bind_compute_pipeline(self.entry.pipeline);
         encoder.bind_group(0, group, &[], self.entry.pipeline_layout);

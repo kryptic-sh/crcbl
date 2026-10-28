@@ -57,6 +57,10 @@ pub(crate) struct AdapterRecord {
     /// The DRM nodes this device is, from `VK_EXT_physical_device_drm`;
     /// empty on a driver without it. See [`DrmNodes`].
     pub(crate) drm: DrmNodes,
+    /// `meshShaderQueries`: whether a statistics pool may count the task and
+    /// mesh stages. No seam flag, because it widens
+    /// [`Features::PIPELINE_STATISTICS_QUERY`] rather than adding a capability.
+    pub(crate) mesh_shader_queries: bool,
 }
 
 /// A physical device's DRM primary and render nodes, as `dev_t`s.
@@ -870,6 +874,8 @@ fn describe(
         &ray_query_features,
         &ray_pipeline_features,
     );
+    let mesh_shader_queries =
+        extensions.mesh_shader && mesh_features.mesh_shader_queries == vk::TRUE;
     let features = features_of(
         &core_features,
         &vulkan_1_2,
@@ -933,6 +939,7 @@ fn describe(
         core_1_3,
         timestamp_period_ns: timestamp_period_of(&properties.limits, features),
         drm,
+        mesh_shader_queries,
     }
 }
 

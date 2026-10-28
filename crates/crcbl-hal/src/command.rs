@@ -280,6 +280,25 @@ pub struct PassTimestampWrites {
     pub end_of_pass: u32,
 }
 
+/// The pipeline-statistics query that brackets a pass: what the GPU counted
+/// while the pass ran, read back with
+/// [`Device::pipeline_statistics`](crate::Device::pipeline_statistics).
+///
+/// **Named by the pass, as [`PassTimestampWrites`] is, and for its reason**:
+/// Metal attaches counter sampling to a pass descriptor and to nothing else,
+/// so a pass is the one scope every backend that counts at all can count over.
+/// A backend that cannot count fails the encoder when one is given, rather
+/// than leaving the query holding nothing a reader could tell from zero work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PassStatisticsWrites {
+    /// Set the query is in. Must hold
+    /// [`QueryKind::PipelineStatistics`](crate::QueryKind::PipelineStatistics)
+    /// queries.
+    pub set: QuerySetHandle,
+    /// The query, reset since its last use, that counts this pass.
+    pub query: u32,
+}
+
 /// A render pass, in dynamic-rendering form: attachments are named inline and
 /// there is no `RenderPass` or `Framebuffer` object to keep compatible.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -297,6 +316,9 @@ pub struct RenderPassDesc<'a> {
     /// Timestamps bracketing this pass, if it is being timed. See
     /// [`PassTimestampWrites`].
     pub timestamp_writes: Option<PassTimestampWrites>,
+    /// The statistics query counting this pass, if it is being counted. See
+    /// [`PassStatisticsWrites`].
+    pub statistics_writes: Option<PassStatisticsWrites>,
 }
 
 /// A compute pass.
@@ -311,6 +333,9 @@ pub struct ComputePassDesc<'a> {
     /// Timestamps bracketing this pass; see
     /// [`RenderPassDesc::timestamp_writes`].
     pub timestamp_writes: Option<PassTimestampWrites>,
+    /// The statistics query counting this pass; see
+    /// [`RenderPassDesc::statistics_writes`].
+    pub statistics_writes: Option<PassStatisticsWrites>,
 }
 
 // --- barriers --------------------------------------------------------------

@@ -503,6 +503,7 @@ fn run(headless: &Headless, entry: &EntryPipeline, case: &Case) -> [Vec<u32>; 3]
     encoder.begin_compute_pass(&ComputePassDesc {
         label: Some("routes probe"),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     encoder.bind_compute_pipeline(entry.pipeline);
     encoder.bind_group(0, group, &[], entry.pipeline_layout);

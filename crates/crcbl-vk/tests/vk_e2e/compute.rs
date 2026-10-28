@@ -427,6 +427,7 @@ impl ComputeProbe {
         encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
             label: Some("compute probe"),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.bind_compute_pipeline(self.pipeline);
         // Inside the pass, because the open scope is the only signal the seam
@@ -568,10 +569,12 @@ fn compute_passes_do_not_nest_and_may_not_be_left_open() {
     nested.begin_compute_pass(&crcbl_hal::ComputePassDesc {
         label: None,
         timestamp_writes: None,
+        statistics_writes: None,
     });
     nested.begin_compute_pass(&crcbl_hal::ComputePassDesc {
         label: None,
         timestamp_writes: None,
+        statistics_writes: None,
     });
     let error = nested
         .finish()
@@ -588,6 +591,7 @@ fn compute_passes_do_not_nest_and_may_not_be_left_open() {
     unclosed.begin_compute_pass(&crcbl_hal::ComputePassDesc {
         label: None,
         timestamp_writes: None,
+        statistics_writes: None,
     });
     let error = unclosed
         .finish()
@@ -606,6 +610,7 @@ fn compute_passes_do_not_nest_and_may_not_be_left_open() {
     good.begin_compute_pass(&crcbl_hal::ComputePassDesc {
         label: Some("empty"),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     good.end_compute_pass();
     let commands = good.finish().expect("an empty compute pass records");

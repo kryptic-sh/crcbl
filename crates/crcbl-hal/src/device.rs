@@ -1125,6 +1125,35 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
         out: &mut [u64],
     ) -> Result<(), HalError>;
 
+    /// Reads `out.len()` pipeline-statistics queries starting at
+    /// `first_query`: what the GPU counted over each pass a
+    /// [`PassStatisticsWrites`](crate::PassStatisticsWrites) named.
+    ///
+    /// The statistics kind's own read, because one of its queries is several
+    /// counts and [`query_results`](Self::query_results) reads one `u64` per
+    /// query. It waits as that call does, for every submission that names the
+    /// set.
+    ///
+    /// The default refuses: a backend that counts nothing has nothing to read.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::Unsupported`] where the backend counts nothing,
+    /// [`HalError::InvalidHandle`], or [`HalError::InvalidDescriptor`] for a
+    /// set of another kind or a range past its end.
+    fn pipeline_statistics(
+        &self,
+        set: QuerySetHandle,
+        first_query: u32,
+        out: &mut [crate::PipelineStatistics],
+    ) -> Result<(), HalError> {
+        let _ = (set, first_query, out);
+        Err(HalError::Unsupported {
+            backend: self.backend(),
+            what: crate::NO_PIPELINE_STATISTICS,
+        })
+    }
+
     // --- synchronisation ---
 
     /// Creates a semaphore. See [`crate::sync`] on why timeline is the default.

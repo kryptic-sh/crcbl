@@ -1404,6 +1404,7 @@ fn a_timed_pass_is_distinguishable_from_an_untimed_one_on_both_pass_commands() {
             depth_stencil_attachment: None,
             render_area: crcbl_hal::Rect2d::from_size(4, 4),
             timestamp_writes,
+            statistics_writes: None,
         });
         stream
     };
@@ -1412,6 +1413,7 @@ fn a_timed_pass_is_distinguishable_from_an_untimed_one_on_both_pass_commands() {
         stream.begin_compute_pass(&crcbl_hal::ComputePassDesc {
             label: None,
             timestamp_writes,
+            statistics_writes: None,
         });
         stream
     };

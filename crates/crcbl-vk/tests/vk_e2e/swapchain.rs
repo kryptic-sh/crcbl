@@ -125,6 +125,7 @@ fn reusing_an_offscreen_vulkan_ring_image_is_ordered_against_the_frame_that_had_
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(first.extent.0, first.extent.1),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     encoder.end_render_pass();
     let to_source = image_barrier(
@@ -287,6 +288,7 @@ fn many_frames_of_the_sandboxs_loop_leave_validation_silent() {
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.end_render_pass();
         encoder.pipeline_barrier(&Barriers {

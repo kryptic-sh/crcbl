@@ -46,14 +46,37 @@ use crcbl_hal::{
     Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePassDesc, ComputePipelineHandle, DrawIndirect,
     DrawIndirectCount, GraphicsPipelineHandle, HalError, ImageCopy, IndexFormat,
-    PassTimestampWrites, PipelineLayoutHandle, QueryKind, QuerySetHandle, Rect2d, RenderPassDesc,
-    ResourceState, ShaderStages, Viewport,
+    PassStatisticsWrites, PassTimestampWrites, PipelineLayoutHandle, QueryKind, QuerySetHandle,
+    Rect2d, RenderPassDesc, ResourceState, ShaderStages, Viewport,
 };
 
 use crcbl_core::Handle;
 
 use crate::conv;
 use crate::device::{CommandBufferEntry, DeviceInner, KeptPool};
+
+/// A counted pass's statistics query, which a render pass splits into at
+/// most two segments — see [`crate::statistics`].
+#[derive(Clone, Copy, Debug)]
+struct PassStatistics {
+    raster: vk::QueryPool,
+    mesh: Option<vk::QueryPool>,
+    query: u32,
+    segment: Segment,
+}
+
+/// Which pool a counted pass's query is active in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Segment {
+    /// A render pass before its first draw.
+    NotBegun,
+    /// Active in the raster pool.
+    Raster,
+    /// Active in the mesh pool, until the pass ends.
+    Mesh,
+    /// Nothing active, and nothing more to count.
+    Ended,
+}
 
 /// Records into one command buffer, from one pool it owns.
 pub(crate) struct VkCommandEncoder {
@@ -96,6 +119,9 @@ pub(crate) struct VkCommandEncoder {
     /// belong, and this is what carries the second one from the pass's opening
     /// to its close.
     pass_end_timestamp: Option<(vk::QueryPool, u32)>,
+    /// The statistics query counting the open pass, from
+    /// [`PassStatisticsWrites`].
+    pass_statistics: Option<PassStatistics>,
     /// Raw device objects the recorded commands use; handed to the device at
     /// `finish` so a submission can keep destroyed-but-referenced objects parked
     /// in the deletion queue until it completes.
@@ -127,6 +153,7 @@ impl VkCommandEncoder {
             render_pass_label: false,
             compute_pass_label: false,
             pass_end_timestamp: None,
+            pass_statistics: None,
             references: Vec::new(),
         };
         if let Err(error) = encoder.begin(desc) {
@@ -263,6 +290,161 @@ impl VkCommandEncoder {
             );
         }
         self.pass_end_timestamp = Some((raw, writes.end_of_pass));
+    }
+
+    /// Takes up the statistics query a pass descriptor names. A compute pass
+    /// begins it at once; a render pass begins it at its first draw, when the
+    /// pool to count in is known (see [`crate::statistics`]).
+    fn open_pass_statistics(
+        &mut self,
+        what: &'static str,
+        writes: Option<PassStatisticsWrites>,
+        begin_now: bool,
+    ) {
+        self.pass_statistics = None;
+        let Some(writes) = writes else { return };
+        if !self.ok() {
+            return;
+        }
+        let state = self.device.state();
+        let Ok((raster, mesh, kind, count)) = self.device.query_set_pools(&state, writes.set)
+        else {
+            drop(state);
+            self.fail(HalError::invalid_handle("query set", writes.set));
+            return;
+        };
+        drop(state);
+        if kind != QueryKind::PipelineStatistics {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} names a {kind:?} query set for its statistics; they are counted into \
+                 a QueryKind::PipelineStatistics set"
+            )));
+            return;
+        }
+        if writes.query >= count {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} counts into query {} of a {count}-query set",
+                writes.query
+            )));
+            return;
+        }
+        // The pools count graphics stages, which a query may only do on a
+        // queue that has them.
+        if self.family != self.device.graphics_family() {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} counts statistics on a queue without graphics; record the pass on \
+                 the graphics queue"
+            )));
+            return;
+        }
+        self.use_object(raster.as_raw());
+        if let Some(mesh) = mesh {
+            self.use_object(mesh.as_raw());
+        }
+        self.pass_statistics = Some(PassStatistics {
+            raster,
+            mesh,
+            query: writes.query,
+            segment: Segment::NotBegun,
+        });
+        if begin_now {
+            self.begin_segment(Segment::Raster);
+        }
+    }
+
+    /// Begins the open pass's query in `segment`'s pool.
+    fn begin_segment(&mut self, segment: Segment) {
+        let Some(statistics) = self.pass_statistics.as_mut() else {
+            return;
+        };
+        let pool = match segment {
+            Segment::Raster => statistics.raster,
+            Segment::Mesh => match statistics.mesh {
+                Some(pool) => pool,
+                None => {
+                    statistics.segment = Segment::Ended;
+                    return;
+                }
+            },
+            Segment::NotBegun | Segment::Ended => return,
+        };
+        statistics.segment = segment;
+        let query = statistics.query;
+        // SAFETY: `self.raw` is recording, `pool` is a live statistics pool
+        // this encoder retained in `open_pass_statistics`, whose query was
+        // bounds-checked and reset (the seam requires it); passes do not nest
+        // and a segment is ended before the next begins, so no other
+        // statistics query is active.
+        unsafe {
+            self.device
+                .raw
+                .cmd_begin_query(self.raw, pool, query, vk::QueryControlFlags::empty());
+        }
+    }
+
+    /// Ends the open pass's active segment, if one is.
+    fn end_segment(&mut self) {
+        let Some(statistics) = self.pass_statistics.as_mut() else {
+            return;
+        };
+        let pool = match statistics.segment {
+            Segment::Raster => statistics.raster,
+            Segment::Mesh => statistics.mesh.unwrap_or(statistics.raster),
+            Segment::NotBegun | Segment::Ended => return,
+        };
+        statistics.segment = Segment::Ended;
+        let query = statistics.query;
+        // SAFETY: the segment's query was begun on this command buffer by
+        // `begin_segment` and is still active.
+        unsafe { self.device.raw.cmd_end_query(self.raw, pool, query) };
+    }
+
+    /// Before a vertex-stage draw: the first draw of a counted pass begins
+    /// its raster segment.
+    fn count_vertex_draw(&mut self) {
+        if self.ok()
+            && self
+                .pass_statistics
+                .is_some_and(|statistics| statistics.segment == Segment::NotBegun)
+        {
+            self.begin_segment(Segment::Raster);
+        }
+    }
+
+    /// Before a mesh draw: the raster segment ends, since a mesh draw forbids
+    /// its counters, and the mesh segment runs from here to the pass's end.
+    fn count_mesh_draw(&mut self) {
+        let Some(segment) = self.pass_statistics.map(|statistics| statistics.segment) else {
+            return;
+        };
+        if !self.ok() {
+            return;
+        }
+        match segment {
+            Segment::NotBegun => self.begin_segment(Segment::Mesh),
+            Segment::Raster => {
+                self.end_segment();
+                self.begin_segment(Segment::Mesh);
+            }
+            Segment::Mesh | Segment::Ended => {}
+        }
+    }
+
+    /// Ends the open pass's statistics, inside the rendering scope for a
+    /// render pass since a query begun there must end there. A pass that drew
+    /// nothing still writes its query, as an empty raster segment, so it reads
+    /// as zeros rather than as never counted.
+    fn close_pass_statistics(&mut self) {
+        let Some(statistics) = self.pass_statistics else {
+            return;
+        };
+        if self.ok() {
+            if statistics.segment == Segment::NotBegun {
+                self.begin_segment(Segment::Raster);
+            }
+            self.end_segment();
+        }
+        self.pass_statistics = None;
     }
 
     /// Writes the closing half of [`open_pass_timestamps`](Self::open_pass_timestamps),
@@ -819,6 +1001,7 @@ impl CommandEncoder for VkCommandEncoder {
             self.render_pass_label = true;
         }
         self.open_pass_timestamps("begin_render_pass", desc.timestamp_writes);
+        self.open_pass_statistics("begin_render_pass", desc.statistics_writes, false);
         // SAFETY: `self.raw` is recording outside any pass, every view is live,
         // and the attachments are in the layouts the graph transitioned them to
         // — which the seam makes the caller's responsibility explicitly.
@@ -840,6 +1023,7 @@ impl CommandEncoder for VkCommandEncoder {
         if !self.recording() || !self.in_render_pass {
             return;
         }
+        self.close_pass_statistics();
         // SAFETY: `self.raw` is recording inside a rendering scope.
         unsafe { self.device.raw.cmd_end_rendering(self.raw) };
         self.in_render_pass = false;
@@ -1124,6 +1308,7 @@ impl CommandEncoder for VkCommandEncoder {
         if !self.ok() {
             return;
         }
+        self.count_vertex_draw();
         // SAFETY: `self.raw` is recording inside a render pass with a graphics
         // pipeline bound. The seam makes both the caller's responsibility, and
         // the validation layer is what holds them to it — this layer never
@@ -1143,6 +1328,7 @@ impl CommandEncoder for VkCommandEncoder {
         if !self.ok() {
             return;
         }
+        self.count_vertex_draw();
         // SAFETY: as `draw`.
         unsafe {
             self.device.raw.cmd_draw_indexed(
@@ -1157,18 +1343,22 @@ impl CommandEncoder for VkCommandEncoder {
     }
 
     fn draw_indirect(&mut self, draw: &DrawIndirect) {
+        self.count_vertex_draw();
         self.indirect(draw, false);
     }
 
     fn draw_indexed_indirect(&mut self, draw: &DrawIndirect) {
+        self.count_vertex_draw();
         self.indirect(draw, true);
     }
 
     fn draw_indirect_count(&mut self, draw: &DrawIndirectCount) {
+        self.count_vertex_draw();
         self.indirect_count(draw, false);
     }
 
     fn draw_indexed_indirect_count(&mut self, draw: &DrawIndirectCount) {
+        self.count_vertex_draw();
         self.indirect_count(draw, true);
     }
 
@@ -1176,6 +1366,7 @@ impl CommandEncoder for VkCommandEncoder {
         if !self.ok() {
             return;
         }
+        self.count_mesh_draw();
         let Some(mesh) = self.device.mesh_shader_ext.as_ref() else {
             // Unreachable through the seam — `create_mesh_pipeline` refuses on
             // a device without the extension, so there is no pipeline to have
@@ -1199,6 +1390,7 @@ impl CommandEncoder for VkCommandEncoder {
         if !self.ok() {
             return;
         }
+        self.count_mesh_draw();
         // Cloned rather than borrowed — three function pointers and a device
         // handle — because `use_object` below needs `&mut self` and a borrow of
         // the extension table held across it is a second one.
@@ -1265,6 +1457,7 @@ impl CommandEncoder for VkCommandEncoder {
             self.compute_pass_label = true;
         }
         self.open_pass_timestamps("begin_compute_pass", desc.timestamp_writes);
+        self.open_pass_statistics("begin_compute_pass", desc.statistics_writes, true);
         self.in_compute_pass = true;
     }
 
@@ -1275,6 +1468,7 @@ impl CommandEncoder for VkCommandEncoder {
         // A compute pass has no Vulkan scope to close, only a label and
         // whatever timestamp the descriptor asked for.
         self.in_compute_pass = false;
+        self.close_pass_statistics();
         self.close_pass_timestamps();
         if core::mem::take(&mut self.compute_pass_label) {
             self.end_debug_label();
@@ -1328,7 +1522,7 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         }
         let state = self.device.state();
-        let Ok((raw, _, count)) = self.device.query_set_raw(&state, set) else {
+        let Ok((raw, mesh, _, count)) = self.device.query_set_pools(&state, set) else {
             drop(state);
             self.fail(HalError::invalid_handle("query set", set));
             return;
@@ -1342,13 +1536,21 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         }
         drop(state);
-        self.use_object(raw.as_raw());
-        // SAFETY: `self.raw` is recording outside a pass, `raw` is live, and
-        // the range was bounds-checked against the pool's query count.
-        unsafe {
-            self.device
-                .raw
-                .cmd_reset_query_pool(self.raw, raw, range.start, range.len() as u32);
+        // A statistics set's mesh pool is reset with it, so a query a pass
+        // never wrote there reads as unwritten rather than as an old pass's.
+        for pool in core::iter::once(raw).chain(mesh) {
+            self.use_object(pool.as_raw());
+            // SAFETY: `self.raw` is recording outside a pass, `pool` is live,
+            // and the range was bounds-checked against the set's query count,
+            // which both of its pools hold.
+            unsafe {
+                self.device.raw.cmd_reset_query_pool(
+                    self.raw,
+                    pool,
+                    range.start,
+                    range.len() as u32,
+                );
+            }
         }
     }
 

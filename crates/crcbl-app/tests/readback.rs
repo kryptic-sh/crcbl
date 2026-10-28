@@ -82,6 +82,7 @@ fn draw_and_read(presenter: &mut Presenter) -> Rgba8Frame {
             depth_stencil_attachment: None,
             render_area: area,
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.end_render_pass();
     }

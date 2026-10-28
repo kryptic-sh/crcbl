@@ -108,6 +108,40 @@ impl QueryKind {
     }
 }
 
+/// What the GPU counted over one pass: one
+/// [`QueryKind::PipelineStatistics`] query, read back by
+/// [`Device::pipeline_statistics`](crate::Device::pipeline_statistics).
+///
+/// **Every count is an `Option`, and `None` is not zero.** A device counts the
+/// stages it has and its API exposes: a device with no mesh stage reports no
+/// task or mesh count, and one whose API has no input-assembly counters
+/// reports none for those. `Some(0)` is a stage the device watched that did no
+/// work; `None` is one it cannot speak for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PipelineStatistics {
+    /// Vertices the input assembler read.
+    pub input_vertices: Option<u64>,
+    /// Primitives the input assembler assembled.
+    pub input_primitives: Option<u64>,
+    /// Vertex-stage invocations: at least one per vertex reaching the stage,
+    /// and a device may reuse a transformed vertex rather than count it again.
+    pub vertex_invocations: Option<u64>,
+    /// Primitives that reached the clipper.
+    pub clipper_invocations: Option<u64>,
+    /// Primitives that left the clipper for rasterisation.
+    pub clipper_primitives: Option<u64>,
+    /// Fragment-stage invocations.
+    pub fragment_invocations: Option<u64>,
+    /// Compute-stage invocations: workgroups times the workgroup's size.
+    pub compute_invocations: Option<u64>,
+    /// Task (amplification) stage invocations.
+    pub task_invocations: Option<u64>,
+    /// Mesh-stage invocations.
+    pub mesh_invocations: Option<u64>,
+    /// Primitives the mesh stage emitted.
+    pub mesh_primitives: Option<u64>,
+}
+
 /// Creation parameters for a query set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuerySetDesc<'a> {

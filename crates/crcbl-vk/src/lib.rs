@@ -223,6 +223,7 @@ pub(crate) mod pipeline;
 pub(crate) mod present_timing;
 pub(crate) mod shader_stats;
 pub(crate) mod spirv;
+pub(crate) mod statistics;
 pub(crate) mod swapchain;
 
 pub use debug::{Severity, ValidationMessage, ValidationReport, ValidationSink};

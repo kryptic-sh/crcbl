@@ -1747,6 +1747,7 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             depth_stencil_attachment: *depth_stencil_attachment,
             render_area: *render_area,
             timestamp_writes: *timestamp_writes,
+            statistics_writes: None,
         }),
         Command::BindGraphicsPipeline { pipeline } => stream.bind_graphics_pipeline(*pipeline),
         Command::BindGroup {
@@ -1796,6 +1797,7 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
         } => stream.begin_compute_pass(&ComputePassDesc {
             label: label.as_deref(),
             timestamp_writes: *timestamp_writes,
+            statistics_writes: None,
         }),
         Command::BindComputePipeline { pipeline } => stream.bind_compute_pipeline(*pipeline),
         Command::Dispatch { x, y, z } => stream.dispatch(*x, *y, *z),

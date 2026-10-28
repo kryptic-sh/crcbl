@@ -395,6 +395,7 @@ fn native_mesh_depth_only_and_pass_timestamps() {
                 beginning_of_pass: 0,
                 end_of_pass: 1,
             }),
+            statistics_writes: None,
         });
         encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
         encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));
@@ -992,6 +993,7 @@ struct Payload {{ uint value; }};
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(CANVAS.width, CANVAS.height),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
     encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));

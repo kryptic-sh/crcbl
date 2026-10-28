@@ -791,6 +791,13 @@ pub const WEBGPU_BIND_GROUPS_ARE_IMMUTABLE: &str = "WebGPU bind groups are immut
 /// this seam would have culled the scene with every return value reporting
 /// success. A loud refusal is what this repository does everywhere else with a
 /// promise it cannot keep.
+/// Why a backend's [`Device::pipeline_statistics`](crate::Device::pipeline_statistics)
+/// refuses, and why its encoder refuses a
+/// [`PassStatisticsWrites`](crate::PassStatisticsWrites): it reads no
+/// pipeline-statistics counts from its API yet.
+pub const NO_PIPELINE_STATISTICS: &str = "pipeline statistics: this backend does not count a \
+     pass's work yet";
+
 pub const NO_OCCLUSION_QUERY_VERB: &str = "a QueryKind::Occlusion set. Every API scopes an \
      occlusion count with a begin/end pair around a draw — vkCmdBeginQuery, D3D12 BeginQuery, \
      Metal setVisibilityResultMode:offset:, WebGPU beginOcclusionQuery — and crcbl_hal's \

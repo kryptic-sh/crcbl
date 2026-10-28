@@ -19513,6 +19513,50 @@ fails loudly, because `FileTransport` bypasses the handshake's schema-hash gate.
 Replays are state recordings, not input demos, and playback is just a client
 over `FileTransport`. Move them to the notes when that plan is folded.
 
+### The profiler (topic 60): per-pass statistics on Vulkan, and what P1 left (2026-10-28)
+
+`docs/plan/60-profiler.md` is the plan. Its first rung's seam shipped:
+`PassStatisticsWrites` on both pass descriptors, `PipelineStatistics`, and
+`Device::pipeline_statistics`, filled by `crcbl-vk` (`crcbl_vk::statistics`) and
+proved on the RX 7900 XTX by `a_render_pass_counts_the_triangle_it_draws`
+(exactly 3 vertices, 1 primitive, 3 vertex invocations) and
+`a_render_pass_counts_the_mesh_and_task_stages`, both mutation-proven.
+
+**Still open in P1:**
+
+- **D3D12.** The encoder refuses a `statistics_writes` until it is filled. Its
+  query path sizes every resolve from `crate::query::result_bytes(kind)`, a
+  constant per kind, and `PIPELINE_STATISTICS1` (the task, mesh and
+  mesh-primitive counts) is 14 counters where the plain query is 11 and is gated
+  per device on OPTIONS9 `MeshShaderPipelineStatsSupported`, so the width has to
+  become the set's. This is the route to task and mesh counts on this desktop
+  (next item).
+- **Vulkan cannot count the task and mesh stages on AMD's Windows driver**:
+  `vulkaninfo` reports `meshShaderQueries = false` for 25.10.36, so those fields
+  read `None` there. Not checked on radv, ANV, lavapipe or NVIDIA.
+- **`crcbl_render::timing` does not request statistics yet**, so no engine pass
+  is counted; the plan's P1 ends with that wiring and its first use on the mesh
+  path's depth passes.
+- **Metal** waits for the owner's Mac work (owner, 2026-10-28); its encoder
+  refuses meanwhile. WebGPU has no statistics query and records the refusal.
+- **Not tested**: a compute pass's statistics (the decode is unit-tested, no e2e
+  dispatch counts one), the refusal on a non-graphics queue, and the null
+  backend, which checks only that the set is live. **Not reviewed**:
+  `resolve_query_set` on a Vulkan statistics set copies with an eight-byte
+  stride, which looks wrong for a pool of several counters; it predates this
+  work.
+
+**Surprising, not a bug:** a mesh draw under a Vulkan statistics query counting
+the clipper is rejected by the validation layer as well as the input-assembly
+and vertex counters `VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076` names.
+Hence the two pools per set, and a pass holding a mesh draw reporting those
+stages as `None`.
+
+**Considered and declined:** exact vertex and clipper counts for a pass mixing
+both kinds of draw. The encoder would have to note a vertex draw recorded after
+the first mesh draw and carry that to the read beside the pool; until a profile
+needs the vertex counts of such a pass, `None` is the honest answer.
+
 ### Profiling: five of the eight gaps are still open (2026-08-27)
 
 The profiling plan was deleted on 2026-09-24; its rules and the numbered list of

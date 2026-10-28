@@ -21,8 +21,9 @@ use crate::harness::{Headless, poisoned};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
     CommandEncoderDesc, Device, Extent3d, Features, Format, ImageAspect, ImageSubresourceLayers,
-    ImageSubresourceRange, LoadOp, MemoryLocation, PresentInfo, ReadbackDesc, ReadbackState,
-    Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo,
+    ImageSubresourceRange, LoadOp, MemoryLocation, PassStatisticsWrites, PipelineStatistics,
+    PresentInfo, QueryKind, QuerySetDesc, ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc,
+    ResourceState, StoreOp, SubmitInfo,
 };
 
 /// The size the triangle suite renders at.
@@ -48,7 +49,7 @@ impl Headless {
     pub(crate) fn open_for_triangle() -> Self {
         Self::open_pinning_format(
             "vk e2e triangle",
-            Features::GPU_DRIVEN | Features::DEBUG_MARKERS,
+            Features::GPU_DRIVEN | Features::DEBUG_MARKERS | Features::PIPELINE_STATISTICS_QUERY,
             TRIANGLE_EXTENT,
         )
     }
@@ -217,7 +218,13 @@ impl TriangleResources {
 ///
 /// The whole `crcbl screenshot` path in one function: acquire, barrier, render
 /// pass, draw, barrier to `TransferSrc`, copy to a host-readable buffer, poll.
-fn render_triangle(headless: &Headless, resources: &TriangleResources) -> crcbl_golden::Image {
+///
+/// `statistics`, when given, is reset and counts the render pass.
+fn render_triangle(
+    headless: &Headless,
+    resources: &TriangleResources,
+    statistics: Option<PassStatisticsWrites>,
+) -> crcbl_golden::Image {
     let device = headless.device.as_ref();
     let (width, height) = TRIANGLE_EXTENT;
     let acquired = device
@@ -240,6 +247,9 @@ fn render_triangle(headless: &Headless, resources: &TriangleResources) -> crcbl_
         label: Some("triangle frame"),
         queue: headless.queue,
     });
+    if let Some(writes) = statistics {
+        encoder.reset_query_set(writes.set, writes.query..writes.query + 1);
+    }
     encoder.pipeline_barrier(&Barriers {
         images: &[crcbl_hal::ImageBarrier::new(
             acquired.image,
@@ -261,6 +271,7 @@ fn render_triangle(headless: &Headless, resources: &TriangleResources) -> crcbl_
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(width, height),
         timestamp_writes: None,
+        statistics_writes: statistics,
     });
     encoder.set_viewport(&crcbl_hal::Viewport::from_size(width, height));
     encoder.set_scissor(&Rect2d::from_size(width, height));
@@ -358,7 +369,7 @@ fn render_triangle(headless: &Headless, resources: &TriangleResources) -> crcbl_
 fn a_triangle_pulled_from_a_vulkan_storage_buffer_reaches_memory() {
     let headless = Headless::open_for_triangle();
     let resources = TriangleResources::new(&headless);
-    let image = render_triangle(&headless, &resources);
+    let image = render_triangle(&headless, &resources, None);
 
     let (width, height) = TRIANGLE_EXTENT;
 
@@ -458,7 +469,7 @@ fn a_triangle_pulled_from_a_vulkan_storage_buffer_reaches_memory() {
 fn the_vulkan_triangle_matches_its_golden_image() {
     let headless = Headless::open_for_triangle();
     let resources = TriangleResources::new(&headless);
-    let image = render_triangle(&headless, &resources);
+    let image = render_triangle(&headless, &resources, None);
 
     let reference =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/triangle.png");
@@ -479,5 +490,59 @@ fn the_vulkan_triangle_matches_its_golden_image() {
     eprintln!("vk e2e: golden triangle — {}", comparison.summary());
 
     resources.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// A render pass's statistics count the draw it holds: the triangle is three
+/// vertices and one primitive, which is what the input assembler must report,
+/// and every stage that ran reports something while the compute stage, which
+/// did not, reports zero.
+///
+/// The vertex and clipper counts are bounded below rather than pinned: an
+/// implementation may invoke the vertex stage more than once per vertex, and
+/// may clip one primitive into several.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_render_pass_counts_the_triangle_it_draws() {
+    let headless = Headless::open_for_triangle();
+    let device = headless.device.as_ref();
+    assert!(
+        device
+            .caps()
+            .features
+            .contains(Features::PIPELINE_STATISTICS_QUERY),
+        "every adapter this suite runs on has pipelineStatisticsQuery"
+    );
+    let set = device
+        .create_query_set(&QuerySetDesc {
+            label: Some("triangle statistics"),
+            kind: QueryKind::PipelineStatistics,
+            count: 1,
+        })
+        .expect("a statistics set");
+    let resources = TriangleResources::new(&headless);
+    render_triangle(
+        &headless,
+        &resources,
+        Some(PassStatisticsWrites { set, query: 0 }),
+    );
+    device.wait_idle().expect("idle");
+
+    let mut read = [PipelineStatistics::default()];
+    device
+        .pipeline_statistics(set, 0, &mut read)
+        .expect("the statistics read back");
+    let [statistics] = read;
+    eprintln!("vk e2e: triangle pass statistics {statistics:?}");
+    assert_eq!(statistics.input_vertices, Some(3), "{statistics:?}");
+    assert_eq!(statistics.input_primitives, Some(1), "{statistics:?}");
+    assert!(statistics.vertex_invocations >= Some(3), "{statistics:?}");
+    assert!(statistics.clipper_invocations >= Some(1), "{statistics:?}");
+    assert!(statistics.clipper_primitives >= Some(1), "{statistics:?}");
+    assert!(statistics.fragment_invocations > Some(0), "{statistics:?}");
+    assert_eq!(statistics.compute_invocations, Some(0), "{statistics:?}");
+
+    resources.destroy(device);
+    device.destroy_query_set(set);
     headless.finish();
 }

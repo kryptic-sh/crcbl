@@ -87,6 +87,7 @@ fn timestamps_either_work_or_are_refused_cleanly() {
             beginning_of_pass: 0,
             end_of_pass: 1,
         }),
+        statistics_writes: None,
     });
     encoder.end_compute_pass();
     let commands = encoder.finish().expect("recording succeeded");
@@ -170,6 +171,7 @@ fn record_timed_pass(
             beginning_of_pass: 0,
             end_of_pass: 1,
         }),
+        statistics_writes: None,
     });
     encoder.end_compute_pass();
     encoder.finish().expect("recording succeeded")

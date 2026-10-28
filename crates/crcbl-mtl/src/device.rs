@@ -148,8 +148,9 @@ const NO_STATISTIC_COUNTER_SET: &str = "this device advertises no MTLCommonCount
 /// matches what the resolve wrote. Returning the first counter would be
 /// answering a different question in the shape of this one, so this refuses and
 /// says so. `crcbl-dx12` meets the identical wall with
-/// `D3D12_QUERY_DATA_PIPELINE_STATISTICS` and refuses in the same words; the fix
-/// is a seam that carries a result width, and it is not this slice's.
+/// `D3D12_QUERY_DATA_PIPELINE_STATISTICS` and refuses in the same words. The
+/// kind's own read is [`Device::pipeline_statistics`], which this backend does
+/// not fill yet.
 const STATISTICS_ARE_WIDER_THAN_A_U64: &str = "query_results reads one u64 per query and Metal \
      resolves a whole MTLCounterResultStatistic per pipeline-statistics query; use \
      resolve_query_set with a destination sized for that";
@@ -3863,6 +3864,7 @@ pub(crate) mod tests {
                 depth_stencil_attachment: None,
                 render_area: Rect2d::from_size(TARGET.width, TARGET.height),
                 timestamp_writes: None,
+                statistics_writes: None,
             });
             encoder.end_render_pass();
         }
@@ -4621,6 +4623,7 @@ pub(crate) mod tests {
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(TARGET.width, TARGET.height),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.bind_graphics_pipeline(bound_pipeline);
         encoder.bind_group(0, group, &[], bound_layout);
@@ -6198,6 +6201,7 @@ using namespace metal;\n\
         empty.begin_compute_pass(&crcbl_hal::ComputePassDesc {
             label: Some("empty compute pass"),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         empty.end_compute_pass();
         let commands = empty.finish().expect("an empty compute pass records");
@@ -6222,6 +6226,7 @@ using namespace metal;\n\
                     encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
                         label: None,
                         timestamp_writes: None,
+                        statistics_writes: None,
                     });
                     encoder.dispatch(1, 1, 1);
                     encoder.end_compute_pass();
@@ -6234,6 +6239,7 @@ using namespace metal;\n\
                     encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
                         label: None,
                         timestamp_writes: None,
+                        statistics_writes: None,
                     });
                     encoder.dispatch_indirect(Handle::from_bits(1 << 32).expect("generation 1"), 0);
                     encoder.end_compute_pass();
@@ -6275,6 +6281,7 @@ using namespace metal;\n\
         copying.begin_compute_pass(&crcbl_hal::ComputePassDesc {
             label: None,
             timestamp_writes: None,
+            statistics_writes: None,
         });
         copying.clear_buffer(scratch, 0, 4);
         copying.end_compute_pass();
@@ -6291,6 +6298,7 @@ using namespace metal;\n\
         stale.begin_compute_pass(&crcbl_hal::ComputePassDesc {
             label: None,
             timestamp_writes: None,
+            statistics_writes: None,
         });
         stale.bind_compute_pipeline(unissued);
         stale.end_compute_pass();
@@ -6375,6 +6383,7 @@ using namespace metal;\n\
                 depth_stencil_attachment: None,
                 render_area: Rect2d::from_size(TARGET.width, TARGET.height),
                 timestamp_writes: None,
+                statistics_writes: None,
             });
             encoder.bind_graphics_pipeline(pipeline);
             paint(encoder.as_mut());
@@ -7660,6 +7669,7 @@ struct EncodeTarget {
             }),
             render_area: Rect2d::from_size(CANVAS.width, CANVAS.height),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
         encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));

@@ -1946,6 +1946,13 @@ impl CommandEncoder for MetalCommandEncoder {
             ));
             return;
         }
+        if desc.statistics_writes.is_some() {
+            self.fail(HalError::Unsupported {
+                backend: crcbl_hal::BackendKind::Metal,
+                what: crcbl_hal::NO_PIPELINE_STATISTICS,
+            });
+            return;
+        }
         let Ok(samples) = self.pass_timestamps("begin_render_pass", desc.timestamp_writes) else {
             return;
         };
@@ -2620,6 +2627,13 @@ impl CommandEncoder for MetalCommandEncoder {
             self.fail(HalError::InvalidDescriptor(
                 "begin_compute_pass inside a pass; passes do not nest".to_string(),
             ));
+            return;
+        }
+        if desc.statistics_writes.is_some() {
+            self.fail(HalError::Unsupported {
+                backend: crcbl_hal::BackendKind::Metal,
+                what: crcbl_hal::NO_PIPELINE_STATISTICS,
+            });
             return;
         }
         let Ok(samples) = self.pass_timestamps("begin_compute_pass", desc.timestamp_writes) else {

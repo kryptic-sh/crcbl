@@ -1942,6 +1942,13 @@ impl CommandEncoder for Dx12CommandEncoder {
             ));
             return;
         }
+        if desc.statistics_writes.is_some() {
+            self.fail(HalError::Unsupported {
+                backend: BackendKind::Dx12,
+                what: crcbl_hal::NO_PIPELINE_STATISTICS,
+            });
+            return;
+        }
         if desc.color_attachments.is_empty() && desc.depth_stencil_attachment.is_none() {
             self.fail(HalError::InvalidDescriptor(
                 "a render pass with no colour and no depth/stencil attachment renders nowhere"
@@ -2626,6 +2633,13 @@ impl CommandEncoder for Dx12CommandEncoder {
             self.fail(HalError::InvalidDescriptor(
                 "begin_compute_pass inside a pass; passes do not nest".to_string(),
             ));
+            return;
+        }
+        if desc.statistics_writes.is_some() {
+            self.fail(HalError::Unsupported {
+                backend: BackendKind::Dx12,
+                what: crcbl_hal::NO_PIPELINE_STATISTICS,
+            });
             return;
         }
         if let Some(label) = desc.label {

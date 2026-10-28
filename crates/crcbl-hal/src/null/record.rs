@@ -203,6 +203,8 @@ pub enum Command {
         render_area: Rect2d,
         /// Timestamps bracketing the pass, if the caller asked for them.
         timestamp_writes: Option<crate::PassTimestampWrites>,
+        /// The statistics query counting the pass, if the caller asked for one.
+        statistics_writes: Option<crate::PassStatisticsWrites>,
     },
     /// [`end_render_pass`](crate::CommandEncoder::end_render_pass).
     EndRenderPass,
@@ -286,6 +288,8 @@ pub enum Command {
         label: Option<String>,
         /// Timestamps bracketing the pass, if the caller asked for them.
         timestamp_writes: Option<crate::PassTimestampWrites>,
+        /// The statistics query counting the pass, if the caller asked for one.
+        statistics_writes: Option<crate::PassStatisticsWrites>,
     },
     /// [`end_compute_pass`](crate::CommandEncoder::end_compute_pass).
     EndComputePass,
@@ -1632,6 +1636,7 @@ mod tests {
             command: Command::BeginComputePass {
                 label: None,
                 timestamp_writes: None,
+                statistics_writes: None,
             },
         });
         state.events.push(Event::Command {
@@ -1642,6 +1647,7 @@ mod tests {
                 depth_stencil_attachment: None,
                 render_area: Rect2d::from_size(1, 1),
                 timestamp_writes: None,
+                statistics_writes: None,
             },
         });
         let recorder = Recorder {
@@ -1774,6 +1780,7 @@ mod tests {
                 depth_stencil_attachment: None,
                 render_area: Rect2d::from_size(1, 1),
                 timestamp_writes: None,
+                statistics_writes: None,
             },
             Command::EndRenderPass,
             Command::SetViewport(Viewport::default()),
@@ -1817,6 +1824,7 @@ mod tests {
                     beginning_of_pass: 0,
                     end_of_pass: 1,
                 }),
+                statistics_writes: None,
             },
             Command::EndComputePass,
             Command::BindComputePipeline(handle()),

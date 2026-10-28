@@ -66,6 +66,8 @@ pub(super) const NO_COUNT_BUFFER_DRAW: &str =
 /// same reason.
 pub(super) const NO_MESH_STAGE: &str = "WebGPU has no mesh stage";
 
+pub(super) const NO_PIPELINE_STATISTICS: &str = "WebGPU has no pipeline-statistics query";
+
 impl WebGpuCommandEncoder {
     /// A fresh encoder. Encodes `create_command_encoder`, whose replayer builds
     /// the implicit-current encoder every recording method then targets.
@@ -156,6 +158,9 @@ impl CommandEncoder for WebGpuCommandEncoder {
     // --- render scope ---
 
     fn begin_render_pass(&mut self, desc: &RenderPassDesc<'_>) {
+        if desc.statistics_writes.is_some() {
+            self.record_unsupported(NO_PIPELINE_STATISTICS);
+        }
         self.channel
             .with(|c| c.encode(|stream| stream.begin_render_pass(desc)));
     }
@@ -326,6 +331,9 @@ impl CommandEncoder for WebGpuCommandEncoder {
     // --- compute scope ---
 
     fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) {
+        if desc.statistics_writes.is_some() {
+            self.record_unsupported(NO_PIPELINE_STATISTICS);
+        }
         self.channel
             .with(|c| c.encode(|stream| stream.begin_compute_pass(desc)));
     }

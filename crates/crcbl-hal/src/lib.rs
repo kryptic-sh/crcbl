@@ -224,8 +224,8 @@ pub mod threading;
 
 pub use capability::{
     Capability, DIVERGENCES, Divergence, DivergenceKind, METAL_NO_DRAW_INDIRECT_COUNT,
-    NO_OCCLUSION_QUERY_VERB, ParityVerdict, Support, WEBGPU_BIND_GROUPS_ARE_IMMUTABLE, divergence,
-    parity_blockers, parity_verdict,
+    NO_OCCLUSION_QUERY_VERB, NO_PIPELINE_STATISTICS, ParityVerdict, Support,
+    WEBGPU_BIND_GROUPS_ARE_IMMUTABLE, divergence, parity_blockers, parity_verdict,
 };
 pub use caps::{
     AdapterId, AdapterInfo, BackendKind, BindingModel, DeviceCaps, DeviceType, Downgrade,
@@ -235,7 +235,8 @@ pub use command::{
     Barriers, BufferBarrier, BufferCopy, BufferImageCopy, ClearValue, ColorAttachment,
     CommandBuffer, CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePassDesc,
     DepthStencilAttachment, DrawIndirect, DrawIndirectCount, ImageBarrier, ImageCopy, LoadOp,
-    PassTimestampWrites, QueueTransfer, RenderPassDesc, ResourceState, StoreOp, depth, stencil,
+    PassStatisticsWrites, PassTimestampWrites, QueueTransfer, RenderPassDesc, ResourceState,
+    StoreOp, depth, stencil,
 };
 pub use device::{
     Device, DeviceDesc, DeviceRequestState, Instance, PendingDevice, Queue, QueueHandle, QueueKind,
@@ -258,7 +259,7 @@ pub use pipeline::{
     PushConstantRange, SampleType, StencilFaceState, StencilOp, StencilState, Viewport,
     check_binding_offset_alignment, check_dynamic_offsets, check_portable_storage_buffers,
 };
-pub use query::{QueryKind, QuerySet, QuerySetDesc, QuerySetHandle};
+pub use query::{PipelineStatistics, QueryKind, QuerySet, QuerySetDesc, QuerySetHandle};
 pub use readback::{Readback, ReadbackDesc, ReadbackHandle, ReadbackState};
 pub use resource::{
     Buffer, BufferDesc, BufferHandle, BufferUsage, Extent3d, FilterMode, Image, ImageAspect,

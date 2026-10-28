@@ -1690,6 +1690,7 @@ fn run_passes(
             beginning_of_pass: 0,
             end_of_pass: 1,
         }),
+        statistics_writes: None,
     });
     encoder.set_viewport(&viewport);
     encoder.set_scissor(&area);
@@ -1737,6 +1738,7 @@ fn run_passes(
                 beginning_of_pass: first,
                 end_of_pass: first + 1,
             }),
+            statistics_writes: None,
         });
         encoder.set_viewport(&viewport);
         encoder.set_scissor(&area);
@@ -1787,6 +1789,7 @@ fn run_passes(
                 beginning_of_pass: first,
                 end_of_pass: first + 1,
             }),
+            statistics_writes: None,
         });
         encoder.set_viewport(&Viewport::from_size(width, height));
         encoder.set_scissor(&scene);

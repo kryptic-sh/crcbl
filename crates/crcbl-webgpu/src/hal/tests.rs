@@ -2267,6 +2267,7 @@ fn dispatch_indirect_encodes_rather_than_refusing_at_finish() {
     encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
         label: None,
         timestamp_writes: None,
+        statistics_writes: None,
     });
     encoder.dispatch_indirect(args, 256);
     encoder.end_compute_pass();

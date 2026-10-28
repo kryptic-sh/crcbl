@@ -1413,6 +1413,7 @@ impl<'a> CompiledGraph<'a> {
                         depth_stencil_attachment: depth_stencil,
                         render_area: pass.render_area,
                         timestamp_writes,
+                        statistics_writes: None,
                     });
                     // Dynamic state, set by the graph rather than by every pass
                     // body: a pipeline that baked a viewport in would have to be
@@ -1429,6 +1430,7 @@ impl<'a> CompiledGraph<'a> {
                     encoder.begin_compute_pass(&ComputePassDesc {
                         label: Some(&pass.label),
                         timestamp_writes,
+                        statistics_writes: None,
                     });
                 }
                 // Nothing is opened: a copy is only legal outside every scope.

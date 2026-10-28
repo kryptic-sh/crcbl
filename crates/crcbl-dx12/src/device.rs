@@ -3782,9 +3782,8 @@ impl Device for Dx12Device {
     /// `out.len()` that both names a legal query range and matches what the
     /// resolve wrote. Returning the first counter would be answering a different
     /// question in the shape of this one, so this refuses and says so.
-    /// `crcbl-vk` meets the same wall from the other side, where the mismatch is
-    /// `VUID-vkGetQueryPoolResults-dataSize-00817`; the fix is a seam that
-    /// carries a result width, and it is not this slice's.
+    /// `crcbl-vk` refuses the same way. The kind's own read is
+    /// [`Device::pipeline_statistics`], which this backend does not fill yet.
     fn query_results(
         &self,
         set: QuerySetHandle,
@@ -5077,6 +5076,7 @@ pub(crate) mod tests {
                 depth_stencil_attachment: None,
                 render_area: self.area,
                 timestamp_writes: None,
+                statistics_writes: None,
             }
         }
     }
@@ -5739,6 +5739,7 @@ pub(crate) mod tests {
                 depth_stencil_attachment: Some(self.attachment()),
                 render_area: Rect2d::from_size(SQUARE.width, SQUARE.height),
                 timestamp_writes: None,
+                statistics_writes: None,
             }
         }
 
@@ -6229,6 +6230,7 @@ pub(crate) mod tests {
                 depth_stencil_attachment: depth.map(DepthProbe::attachment),
                 render_area: Rect2d::from_size(SQUARE.width, SQUARE.height),
                 timestamp_writes: None,
+                statistics_writes: None,
             };
             // The colour target's transition, and the depth attachment's beside
             // it when there is one — which is why `DepthProbe::acquire` hands a
@@ -10021,6 +10023,7 @@ pub(crate) mod tests {
         encoder.begin_compute_pass(&ComputePassDesc {
             label: Some("crcbl-dx12 empty compute"),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         assert_eq!(encoder.label_depth(), 2);
         encoder.end_compute_pass();
@@ -10152,6 +10155,7 @@ pub(crate) mod tests {
         encoder.begin_compute_pass(&ComputePassDesc {
             label: None,
             timestamp_writes: None,
+            statistics_writes: None,
         });
         for _ in 0..BINDS {
             encoder.bind_group(0, group, &[], pipeline_layout);
@@ -11903,6 +11907,7 @@ pub(crate) mod tests {
                 encoder.begin_compute_pass(&ComputePassDesc {
                     label: None,
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 encoder.bind_compute_pipeline(unissued());
             }),
@@ -11910,6 +11915,7 @@ pub(crate) mod tests {
                 encoder.begin_compute_pass(&ComputePassDesc {
                     label: None,
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 encoder.dispatch(1, 1, 1);
             }),
@@ -11917,6 +11923,7 @@ pub(crate) mod tests {
                 encoder.begin_compute_pass(&ComputePassDesc {
                     label: None,
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 encoder.dispatch_indirect(unissued(), 0);
             }),
@@ -11935,6 +11942,7 @@ pub(crate) mod tests {
                         beginning_of_pass: 0,
                         end_of_pass: 1,
                     }),
+                    statistics_writes: None,
                 });
                 encoder.end_compute_pass();
             }),
@@ -12560,6 +12568,7 @@ pub(crate) mod tests {
                     beginning_of_pass: 0,
                     end_of_pass: 1,
                 }),
+                statistics_writes: None,
             });
             encoder.end_compute_pass();
         });
@@ -12683,6 +12692,7 @@ pub(crate) mod tests {
                 beginning_of_pass: 0,
                 end_of_pass: 1,
             }),
+            statistics_writes: None,
         });
         encoder.end_compute_pass();
         let buffer = encoder.finish().expect("an empty timed pass records");
@@ -12879,6 +12889,7 @@ pub(crate) mod tests {
                 beginning_of_pass: 0,
                 end_of_pass: 1,
             }),
+            statistics_writes: None,
         });
         encoder.end_compute_pass();
         let Err(error) = encoder.finish() else {
@@ -13326,6 +13337,7 @@ pub(crate) mod tests {
                 encoder.begin_compute_pass(&ComputePassDesc {
                     label: Some("compute probe"),
                     timestamp_writes: timestamps,
+                    statistics_writes: None,
                 });
                 encoder.bind_compute_pipeline(self.pipeline);
                 // Inside the pass, because the open scope is the only signal the
@@ -13991,6 +14003,7 @@ pub(crate) mod tests {
         encoder.begin_compute_pass(&ComputePassDesc {
             label: None,
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.bind_compute_pipeline(probe.pipeline);
         encoder.dispatch_indirect(short, 0);
@@ -14128,6 +14141,7 @@ pub(crate) mod tests {
                 encoder.begin_compute_pass(&ComputePassDesc {
                     label: None,
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 encoder.dispatch(1, 1, 1);
             }),
@@ -14138,6 +14152,7 @@ pub(crate) mod tests {
                     encoder.begin_compute_pass(&ComputePassDesc {
                         label: None,
                         timestamp_writes: None,
+                        statistics_writes: None,
                     });
                     encoder.dispatch_indirect(unissued(), 0);
                 },
@@ -14146,16 +14161,19 @@ pub(crate) mod tests {
                 encoder.begin_compute_pass(&ComputePassDesc {
                     label: None,
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 encoder.begin_compute_pass(&ComputePassDesc {
                     label: None,
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
             }),
             ("compute pass still open", "an unclosed pass", |encoder| {
                 encoder.begin_compute_pass(&ComputePassDesc {
                     label: None,
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
             }),
         ];
@@ -14182,6 +14200,7 @@ pub(crate) mod tests {
         good.begin_compute_pass(&ComputePassDesc {
             label: Some("empty"),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         good.end_compute_pass();
         let commands = good.finish().expect("an empty compute pass records");

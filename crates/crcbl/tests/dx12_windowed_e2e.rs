@@ -309,6 +309,7 @@ impl Windowed {
                 depth_stencil_attachment: None,
                 render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
                 timestamp_writes: None,
+                statistics_writes: None,
             });
             encoder.end_render_pass();
             encoder.pipeline_barrier(&Barriers {

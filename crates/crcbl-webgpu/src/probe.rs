@@ -5070,6 +5070,7 @@ pub const fn probe_timestamp_pass_desc() -> ComputePassDesc<'static> {
     ComputePassDesc {
         label: Some("crcbl-webgpu timed pass"),
         timestamp_writes: Some(probe_timestamp_writes()),
+        statistics_writes: None,
     }
 }
 
@@ -10329,6 +10330,7 @@ impl Probe {
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_readback_copy());
@@ -10466,6 +10468,7 @@ impl Probe {
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_DRAW_PIPELINE);
                 stream.draw(0..3, 0..1);
@@ -10601,6 +10604,7 @@ impl Probe {
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_present_copy());
@@ -10742,6 +10746,7 @@ impl Probe {
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_reconfigure_copy());
@@ -10908,6 +10913,7 @@ impl Probe {
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_INDIRECT_PIPELINE);
                 stream.bind_index_buffer(PROBE_INDIRECT_INDEX_BUFFER, 0, IndexFormat::Uint16);
@@ -11024,6 +11030,7 @@ impl Probe {
                     depth_stencil_attachment: Some(probe_depth_attachment()),
                     render_area: Rect2d::from_size(PROBE_DEPTH_SIZE, PROBE_DEPTH_SIZE),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_depth_copy());
@@ -11147,6 +11154,7 @@ impl Probe {
                     depth_stencil_attachment: Some(probe_stencil_attachment()),
                     render_area: Rect2d::from_size(PROBE_STENCIL_SIZE, PROBE_STENCIL_SIZE),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 // The first reference is set **before** the bind, which is the
                 // seam's other claim about it: a pipeline bind does not disturb
@@ -11301,6 +11309,7 @@ impl Probe {
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_MSAA_WIDTH, PROBE_MSAA_HEIGHT),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_msaa_copy());
@@ -11709,6 +11718,7 @@ impl Probe {
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_CLAMP_SIZE, PROBE_CLAMP_SIZE),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_CLAMP_CLAMPED_PIPELINE);
                 stream.draw(0..3, 0..1);
@@ -11720,6 +11730,7 @@ impl Probe {
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_CLAMP_SIZE, PROBE_CLAMP_SIZE),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_CLAMP_CLIPPED_PIPELINE);
                 stream.draw(0..3, 0..1);
@@ -11920,6 +11931,7 @@ impl Probe {
                         PROBE_FIRST_INSTANCE_SIZE,
                     ),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_FIRST_INSTANCE_PIPELINE);
                 stream.bind_index_buffer(PROBE_FIRST_INSTANCE_INDEX_BUFFER, 0, IndexFormat::Uint16);
@@ -11942,6 +11954,7 @@ impl Probe {
                         PROBE_FIRST_INSTANCE_SIZE,
                     ),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_FIRST_INSTANCE_PIPELINE);
                 stream.bind_index_buffer(PROBE_FIRST_INSTANCE_INDEX_BUFFER, 0, IndexFormat::Uint16);
@@ -12130,6 +12143,7 @@ impl Probe {
                         PROBE_TEXTURE_SAMPLE_SIZE,
                     ),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_TEXTURE_SAMPLE_PIPELINE);
                 stream.bind_group(
@@ -12330,6 +12344,7 @@ impl Probe {
                         PROBE_TEXTURE_SAMPLE_SIZE,
                     ),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_BC_SAMPLE_PIPELINE);
                 stream.bind_group(
@@ -12508,6 +12523,7 @@ impl Probe {
                                     beginning_of_pass: opening,
                                     end_of_pass: opening + 1,
                                 }),
+                                statistics_writes: None,
                             });
                             if busy {
                                 stream.bind_compute_pipeline(PROBE_PASS_SPAN_PIPELINE);
@@ -12769,6 +12785,7 @@ impl Probe {
                 stream.begin_compute_pass(&ComputePassDesc {
                     label: Some("crcbl-webgpu dispatch pass"),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_compute_pipeline(PROBE_DISPATCH_PIPELINE);
                 stream.bind_group(
@@ -12929,6 +12946,7 @@ impl Probe {
                 stream.begin_compute_pass(&ComputePassDesc {
                     label: Some("crcbl-webgpu indirect dispatch pass"),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_compute_pipeline(PROBE_DISPATCH_INDIRECT_PIPELINE);
                 stream.bind_group(
@@ -13078,6 +13096,7 @@ impl Probe {
                 stream.begin_compute_pass(&ComputePassDesc {
                     label: Some("crcbl-webgpu copychain pass"),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_compute_pipeline(PROBE_COPYCHAIN_PIPELINE);
                 stream.bind_group(
@@ -13216,6 +13235,7 @@ impl Probe {
                 stream.begin_compute_pass(&ComputePassDesc {
                     label: Some("crcbl-webgpu fill pass"),
                     timestamp_writes: None,
+                    statistics_writes: None,
                 });
                 stream.bind_compute_pipeline(PROBE_FILL_PIPELINE);
                 stream.bind_group(0, PROBE_FILL_BIND_GROUP, &[], PROBE_FILL_PIPELINE_LAYOUT);

@@ -664,6 +664,7 @@ impl SkinProbe {
         encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
             label: Some("skinning probe"),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.bind_compute_pipeline(self.pipeline);
         encoder.bind_group(0, self.bind_group, &[], self.pipeline_layout);

@@ -1153,6 +1153,7 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(16, 16),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     // The same `bind_graphics_pipeline` a raster pipeline uses: the seam gives
     // both kinds one handle type, so there is no second bind to get wrong.
@@ -2509,6 +2510,7 @@ fn scope_violations_are_recorded() {
     encoder.begin_compute_pass(&ComputePassDesc {
         label: Some("cull"),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     // A copy inside a pass.
     encoder.clear_buffer(
@@ -2587,10 +2589,12 @@ fn nested_passes_are_rejected() {
     encoder.begin_compute_pass(&ComputePassDesc {
         label: Some("outer"),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     encoder.begin_compute_pass(&ComputePassDesc {
         label: Some("inner"),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     encoder.end_compute_pass();
     let _ = encoder.finish().expect("finish");
@@ -2815,6 +2819,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
             beginning_of_pass: 0,
             end_of_pass: 1,
         }),
+        statistics_writes: None,
     });
     encoder.bind_compute_pipeline(cull);
     encoder.bind_group(0, bind_group, &[], pipeline_layout);
@@ -2867,6 +2872,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
             beginning_of_pass: 2,
             end_of_pass: 3,
         }),
+        statistics_writes: None,
     });
     encoder.set_viewport(&Viewport::from_size(1920, 1080));
     encoder.set_scissor(&Rect2d::from_size(1920, 1080));
@@ -3012,6 +3018,7 @@ fn a_passs_timestamp_pair_is_checked_against_the_set_it_names() {
             beginning_of_pass: 2,
             end_of_pass: 2,
         }),
+        statistics_writes: None,
     });
     encoder.end_compute_pass();
     // And one past the end of the set.
@@ -3022,6 +3029,7 @@ fn a_passs_timestamp_pair_is_checked_against_the_set_it_names() {
             beginning_of_pass: 0,
             end_of_pass: 4,
         }),
+        statistics_writes: None,
     });
     encoder.end_compute_pass();
     // A legal pair records nothing, or the two above would pass against a
@@ -3033,6 +3041,7 @@ fn a_passs_timestamp_pair_is_checked_against_the_set_it_names() {
             beginning_of_pass: 0,
             end_of_pass: 1,
         }),
+        statistics_writes: None,
     });
     encoder.end_compute_pass();
     encoder.finish().expect("a rule violation is not a failure");
@@ -4846,6 +4855,7 @@ fn a_mesh_dispatch_is_held_to_the_seams_argument_rules() {
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(16, 16),
         timestamp_writes: None,
+        statistics_writes: None,
     };
     let record = |draw: DrawIndirect| {
         let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
@@ -4952,6 +4962,7 @@ fn an_indirect_draw_is_held_to_the_seams_argument_rules() {
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(16, 16),
         timestamp_writes: None,
+        statistics_writes: None,
     };
 
     recorder.clear();
@@ -5126,6 +5137,7 @@ fn a_count_limited_draw_is_held_to_the_seams_argument_rules() {
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(16, 16),
         timestamp_writes: None,
+        statistics_writes: None,
     };
 
     recorder.clear();
@@ -5455,6 +5467,7 @@ fn a_binds_dynamic_offsets_are_held_to_the_layouts_slots() {
     let pass = ComputePassDesc {
         label: Some("dynamic"),
         timestamp_writes: None,
+        statistics_writes: None,
     };
 
     recorder.clear();

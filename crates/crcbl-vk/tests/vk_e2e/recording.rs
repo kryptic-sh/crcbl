@@ -90,6 +90,7 @@ fn out_of_range_query_commands_fail_recording_not_the_driver() {
             beginning_of_pass: 3,
             end_of_pass: 4,
         }),
+        statistics_writes: None,
     });
     timestamp.end_compute_pass();
     let error = timestamp
@@ -117,6 +118,7 @@ fn out_of_range_query_commands_fail_recording_not_the_driver() {
                 beginning_of_pass: pair * 2,
                 end_of_pass: pair * 2 + 1,
             }),
+            statistics_writes: None,
         });
         encoder.end_compute_pass();
     }
@@ -168,6 +170,7 @@ fn a_failed_recording_finishes_with_an_error_rather_than_hanging() {
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
         timestamp_writes: None,
+        statistics_writes: None,
     });
     // Leave the pass deliberately open so `finish` returns the error
     // rather than a command buffer.

@@ -717,6 +717,7 @@ impl WindProbe {
         encoder.begin_compute_pass(&ComputePassDesc {
             label: Some("wind probe"),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.bind_compute_pipeline(self.pipeline);
         encoder.bind_group(0, self.groups[0], &[], self.pipeline_layout);

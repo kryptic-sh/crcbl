@@ -3062,12 +3062,20 @@ impl CommandEncoder for NullEncoder {
             );
         }
         self.need_timestamps("BeginRenderPass", desc.timestamp_writes);
+        if let Some(writes) = desc.statistics_writes {
+            self.need_live(
+                "BeginRenderPass",
+                ObjectKind::QuerySet,
+                writes.set.to_bits(),
+            );
+        }
         self.record(Command::BeginRenderPass {
             label: desc.label.map(ToOwned::to_owned),
             color_attachments: desc.color_attachments.to_vec(),
             depth_stencil_attachment: desc.depth_stencil_attachment,
             render_area: desc.render_area,
             timestamp_writes: desc.timestamp_writes,
+            statistics_writes: desc.statistics_writes,
         });
     }
 
@@ -3230,9 +3238,17 @@ impl CommandEncoder for NullEncoder {
 
     fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) {
         self.need_timestamps("BeginComputePass", desc.timestamp_writes);
+        if let Some(writes) = desc.statistics_writes {
+            self.need_live(
+                "BeginComputePass",
+                ObjectKind::QuerySet,
+                writes.set.to_bits(),
+            );
+        }
         self.record(Command::BeginComputePass {
             label: desc.label.map(ToOwned::to_owned),
             timestamp_writes: desc.timestamp_writes,
+            statistics_writes: desc.statistics_writes,
         });
     }
 

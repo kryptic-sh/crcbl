@@ -1222,6 +1222,7 @@ fn encode(device: &dyn Device, queue: QueueHandle, plan: &Recording<'_>) -> Resu
         encoder.begin_compute_pass(&ComputePassDesc {
             label: Some("probe octahedral"),
             timestamp_writes: None,
+            statistics_writes: None,
         });
         encoder.bind_compute_pipeline(plan.resolve.pipeline);
         encoder.bind_group(
@@ -1284,6 +1285,7 @@ fn draw_cubes(encoder: &mut Box<dyn CommandEncoder>, plan: &Recording<'_>, base:
             height: plan.layout.atlas_height,
         },
         timestamp_writes: None,
+        statistics_writes: None,
     });
     encoder.bind_graphics_pipeline(plan.raster.pipeline);
     for tile in 0..count * FACES {

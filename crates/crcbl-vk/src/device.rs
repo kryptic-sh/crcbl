@@ -203,6 +203,13 @@ pub(crate) struct QuerySetEntry {
     pub(crate) raw: vk::QueryPool,
     pub(crate) count: u32,
     pub(crate) kind: QueryKind,
+    /// The counters a statistics pool enables, which are also the layout of
+    /// its results (see [`crate::statistics`]); empty for the other kinds.
+    pub(crate) statistics: vk::QueryPipelineStatisticFlags,
+    /// A statistics set's second pool and its counters, on a device with mesh
+    /// shading: what a pass counts from its first mesh draw on. See
+    /// [`crate::statistics`] for why a set is two pools.
+    pub(crate) mesh: Option<(vk::QueryPool, vk::QueryPipelineStatisticFlags)>,
     /// The retire-timeline value of the latest submission whose command
     /// buffers name this pool, or zero before any has. What
     /// [`Device::query_results`] waits for — see there for why.
@@ -432,6 +439,9 @@ pub(crate) struct DeviceInner {
     /// pipeline is then created capturing its statistics and logs them. See
     /// [`crate::shader_stats`].
     pub(crate) shader_stats_ext: Option<khr::pipeline_executable_properties::Device>,
+    /// Whether the device was opened with `meshShaderQueries`, so a statistics
+    /// pool counts the task and mesh stages too.
+    pub(crate) mesh_queries: bool,
     /// Says, once, what the display turned out to be doing.
     ///
     /// The same idiom and the same argument as [`first_present_wait`](Self::first_present_wait):
@@ -645,6 +655,54 @@ impl VkDevice {
     /// gone and the entry dropped, so the driver object leaked — and a foreign
     /// handle that happened to resolve destroyed this device's own unrelated
     /// object. One place to get the order right is one place to keep it right.
+    /// Reads `count` queries of one statistics pool with their availability:
+    /// `None` for a query no submission has written since its reset.
+    fn read_statistics(
+        &self,
+        pool: vk::QueryPool,
+        flags: vk::QueryPipelineStatisticFlags,
+        first_query: u32,
+        count: usize,
+    ) -> Result<Vec<Option<crcbl_hal::PipelineStatistics>>, HalError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        // The counters, then the availability word `WITH_AVAILABILITY` appends.
+        let stride = crate::statistics::width(flags) + 1;
+        let mut values = vec![0_u64; stride * count];
+        // ash's typed wrapper takes its stride from the element type, and a
+        // statistics query is as wide as its pool's counters, so the entry
+        // point is called with that stride directly.
+        #[allow(clippy::cast_possible_truncation)]
+        // SAFETY: the caller bounds-checked the range against the set, both of
+        // whose pools hold its query count, and `values` holds exactly `count`
+        // queries of `stride` words, which is the stride passed.
+        let result = unsafe {
+            (self.inner.raw.fp_v1_0().get_query_pool_results)(
+                self.inner.raw.handle(),
+                pool,
+                first_query,
+                count as u32,
+                size_of_val(values.as_slice()),
+                values.as_mut_ptr().cast(),
+                (stride * size_of::<u64>()) as vk::DeviceSize,
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WITH_AVAILABILITY,
+            )
+        };
+        // `NOT_READY` says some query is unavailable, and each one's own
+        // availability word says which.
+        if result != vk::Result::SUCCESS && result != vk::Result::NOT_READY {
+            return Err(conv::hal_error("vkGetQueryPoolResults", result));
+        }
+        Ok(values
+            .chunks_exact(stride)
+            .map(|query| {
+                let (counters, available) = query.split_at(stride - 1);
+                (available[0] != 0).then(|| crate::statistics::decode(flags, counters))
+            })
+            .collect())
+    }
+
     fn retire_from<E: Owned, M>(
         &self,
         pool: impl FnOnce(&mut DeviceState) -> &mut Pool<E>,
@@ -817,6 +875,10 @@ impl VkDevice {
         // decides it; `DeviceDesc::granted` has already put that flag
         // beside a lone `TASK_SHADER`.
         let mesh_shader = granted.contains(Features::MESH_SHADER);
+        // Asked for only where a statistics pool could use it.
+        let mesh_queries = mesh_shader
+            && record.mesh_shader_queries
+            && granted.contains(Features::PIPELINE_STATISTICS_QUERY);
         // `VK_KHR_acceleration_structure` depends on
         // `VK_KHR_deferred_host_operations`, which is not a seam capability at
         // all — it is the end of a chain, exactly like present timing's
@@ -879,7 +941,8 @@ impl VkDevice {
         // only the mesh stage gets only the mesh stage.
         let mut mesh_shader_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
             .mesh_shader(true)
-            .task_shader(granted.contains(Features::TASK_SHADER));
+            .task_shader(granted.contains(Features::TASK_SHADER))
+            .mesh_shader_queries(mesh_queries);
         let mut acceleration_features =
             vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
                 .acceleration_structure(true);
@@ -1006,6 +1069,7 @@ impl VkDevice {
             present_timing_ext,
             mesh_shader_ext,
             shader_stats_ext,
+            mesh_queries,
             first_display_timing: Once::new(),
             first_present_wait: Once::new(),
             first_validation_provocation: Once::new(),
@@ -1069,6 +1133,43 @@ impl VkDevice {
 }
 
 impl DeviceInner {
+    /// Waits for every submission that names `set` to finish, so a read of
+    /// it is that work's answer. Both query reads start here.
+    pub(crate) fn wait_for_query_set(&self, set: QuerySetHandle) -> Result<(), HalError> {
+        // **The read is ordered after every submission that named the pool**,
+        // as `crcbl-dx12`'s is — its read is a resolve it runs on the queue and
+        // waits for. `vkGetQueryPoolResults` is a host read with no queue
+        // position, and the specification says what that costs: a query
+        // stays available, holding its previous use's value, until a
+        // submitted `vkCmdResetQueryPool` actually executes. So a caller
+        // running ahead of the GPU — `PassTimers` reading a ring slot whose
+        // frame is submitted and not yet executed, which nothing throttles on
+        // an offscreen ring — was handed the values of the slot's previous
+        // frame, or a mix of those and reset ones when the read raced the
+        // reset.
+        // Measured on an RX 7900 XTX: a read answered `VK_SUCCESS` and the next
+        // one, microseconds later, `VK_NOT_READY`, and the per-pass timings
+        // built from such reads came out bimodal, half of them two
+        // microseconds long.
+        //
+        // The wait is taken without the state lock, so other threads keep
+        // recording and submitting, and the handle is resolved again after it:
+        // a set destroyed meanwhile fails lookup rather than being read.
+        let pending = lookup(&self.state().query_sets, "query set", set, self)?.last_submission;
+        let semaphores = [self.retire_timeline];
+        let values = [pending];
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(&semaphores)
+            .values(&values);
+        // SAFETY: `retire_timeline` is this device's own timeline semaphore,
+        // alive for as long as the device, and `pending` is a value a submission
+        // already in flight will signal — zero for a pool none has named,
+        // which the timeline has reached from creation.
+        unsafe { self.raw.wait_semaphores(&wait, u64::MAX) }
+            .map_err(|error| conv::hal_error("vkWaitSemaphores", error))?;
+        Ok(())
+    }
+
     pub(crate) fn state(&self) -> MutexGuard<'_, DeviceState> {
         self.state
             .lock()
@@ -1129,6 +1230,14 @@ impl DeviceInner {
     /// command pool and for queue-ownership transfers.
     pub(crate) fn queue_family(&self, queue: QueueHandle) -> Result<u32, HalError> {
         self.queue_slot(queue).map(|slot| slot.family)
+    }
+
+    /// The graphics queue's family; every device has that queue.
+    pub(crate) fn graphics_family(&self) -> u32 {
+        self.queues[0]
+            .as_ref()
+            .expect("every device opens a graphics queue")
+            .family
     }
 
     /// Resolves a buffer handle for the command encoder.
@@ -1192,6 +1301,23 @@ impl DeviceInner {
     /// Resolves a query-set handle, returning its pool, kind and query count —
     /// the encoder bounds-checks caller-supplied ranges against the count before
     /// handing them to the driver.
+    /// A query set's pools for the encoder: the set's own, and a statistics
+    /// set's mesh pool where it has one.
+    pub(crate) fn query_set_pools(
+        &self,
+        state: &DeviceState,
+        handle: QuerySetHandle,
+    ) -> Result<(vk::QueryPool, Option<vk::QueryPool>, QueryKind, u32), HalError> {
+        lookup(&state.query_sets, "query set", handle, self).map(|entry| {
+            (
+                entry.raw,
+                entry.mesh.map(|(pool, _)| pool),
+                entry.kind,
+                entry.count,
+            )
+        })
+    }
+
     pub(crate) fn query_set_raw(
         &self,
         state: &DeviceState,
@@ -2506,9 +2632,7 @@ impl Device for VkDevice {
                 }
                 (
                     vk::QueryType::PIPELINE_STATISTICS,
-                    vk::QueryPipelineStatisticFlags::VERTEX_SHADER_INVOCATIONS
-                        | vk::QueryPipelineStatisticFlags::FRAGMENT_SHADER_INVOCATIONS
-                        | vk::QueryPipelineStatisticFlags::CLIPPING_PRIMITIVES,
+                    crate::statistics::raster_flags(),
                 )
             }
         };
@@ -2525,6 +2649,26 @@ impl Device for VkDevice {
         let raw = unsafe { self.inner.raw.create_query_pool(&info, None) }
             .map_err(|error| conv::hal_error("vkCreateQueryPool", error))?;
         self.inner.set_object_name(raw, desc.label);
+        let mesh =
+            if desc.kind == QueryKind::PipelineStatistics && self.inner.mesh_shader_ext.is_some() {
+                let flags = crate::statistics::mesh_flags(self.inner.mesh_queries);
+                let info = info.pipeline_statistics(flags);
+                // SAFETY: as above; the flags name only what a mesh draw allows,
+                // and the mesh stages only with `meshShaderQueries` enabled.
+                match unsafe { self.inner.raw.create_query_pool(&info, None) } {
+                    Ok(pool) => {
+                        self.inner.set_object_name(pool, desc.label);
+                        Some((pool, flags))
+                    }
+                    Err(error) => {
+                        // SAFETY: `raw` was created above and nothing has used it.
+                        unsafe { self.inner.raw.destroy_query_pool(raw, None) };
+                        return Err(conv::hal_error("vkCreateQueryPool", error));
+                    }
+                }
+            } else {
+                None
+            };
         Ok(self
             .inner
             .stamp(self.inner.state().query_sets.insert(QuerySetEntry {
@@ -2532,16 +2676,21 @@ impl Device for VkDevice {
                 raw,
                 count: desc.count,
                 kind: desc.kind,
+                statistics,
+                mesh,
                 last_submission: 0,
             })))
     }
 
     fn destroy_query_set(&self, set: QuerySetHandle) {
-        self.retire_from(
-            |state| &mut state.query_sets,
-            set,
-            |entry| Trash::QueryPool(entry.raw),
-        );
+        let mut state = self.inner.state();
+        let Some(entry) = take_owned(&mut state.query_sets, set, &self.inner) else {
+            return;
+        };
+        self.inner.park(&mut state, Trash::QueryPool(entry.raw));
+        if let Some((pool, _)) = entry.mesh {
+            self.inner.park(&mut state, Trash::QueryPool(pool));
+        }
     }
 
     fn query_results(
@@ -2550,43 +2699,7 @@ impl Device for VkDevice {
         first_query: u32,
         out: &mut [u64],
     ) -> Result<(), HalError> {
-        // **The read is ordered after every submission that named the pool**,
-        // as `crcbl-dx12`'s is — its read is a resolve it runs on the queue and
-        // waits for. `vkGetQueryPoolResults` is a host read with no queue
-        // position, and the specification says what that costs: a query
-        // stays available, holding its previous use's value, until a
-        // submitted `vkCmdResetQueryPool` actually executes. So a caller
-        // running ahead of the GPU — `PassTimers` reading a ring slot whose
-        // frame is submitted and not yet executed, which nothing throttles on
-        // an offscreen ring — was handed the values of the slot's previous
-        // frame, or a mix of those and reset ones when the read raced the
-        // reset.
-        // Measured on an RX 7900 XTX: a read answered `VK_SUCCESS` and the next
-        // one, microseconds later, `VK_NOT_READY`, and the per-pass timings
-        // built from such reads came out bimodal, half of them two
-        // microseconds long.
-        //
-        // The wait is taken without the state lock, so other threads keep
-        // recording and submitting, and the handle is resolved again after it:
-        // a set destroyed meanwhile fails lookup rather than being read.
-        let pending = lookup(
-            &self.inner.state().query_sets,
-            "query set",
-            set,
-            &self.inner,
-        )?
-        .last_submission;
-        let semaphores = [self.inner.retire_timeline];
-        let values = [pending];
-        let wait = vk::SemaphoreWaitInfo::default()
-            .semaphores(&semaphores)
-            .values(&values);
-        // SAFETY: `retire_timeline` is this device's own timeline semaphore,
-        // alive for as long as `self`, and `pending` is a value a submission
-        // already in flight will signal — zero for a pool none has named,
-        // which the timeline has reached from creation.
-        unsafe { self.inner.raw.wait_semaphores(&wait, u64::MAX) }
-            .map_err(|error| conv::hal_error("vkWaitSemaphores", error))?;
+        self.inner.wait_for_query_set(set)?;
 
         let state = self.inner.state();
         // The wait above is on the retire timeline, which a lost device has
@@ -2594,6 +2707,15 @@ impl Device for VkDevice {
         // about the pool; the bound does.
         self.inner.retired(&state)?;
         let entry = lookup(&state.query_sets, "query set", set, &self.inner)?;
+        // One `u64` per query is this read's shape, and a statistics query is
+        // one per counter: `pipeline_statistics` is that kind's read.
+        if entry.kind == QueryKind::PipelineStatistics {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Vulkan,
+                what: "query_results on a QueryKind::PipelineStatistics set: each of its \
+                       queries is several counts, read with Device::pipeline_statistics",
+            });
+        }
         let end = first_query as u64 + out.len() as u64;
         if end > u64::from(entry.count) {
             return Err(HalError::InvalidDescriptor(format!(
@@ -2639,6 +2761,43 @@ impl Device for VkDevice {
             }
             Err(error) => Err(conv::hal_error("vkGetQueryPoolResults", error)),
         }
+    }
+
+    fn pipeline_statistics(
+        &self,
+        set: QuerySetHandle,
+        first_query: u32,
+        out: &mut [crcbl_hal::PipelineStatistics],
+    ) -> Result<(), HalError> {
+        // Ordered after the submissions that wrote the set, as `query_results`
+        // is and for its reasons.
+        self.inner.wait_for_query_set(set)?;
+        let state = self.inner.state();
+        self.inner.retired(&state)?;
+        let entry = lookup(&state.query_sets, "query set", set, &self.inner)?;
+        if entry.kind != QueryKind::PipelineStatistics {
+            return Err(HalError::InvalidDescriptor(format!(
+                "pipeline_statistics on a {:?} query set",
+                entry.kind
+            )));
+        }
+        let end = first_query as u64 + out.len() as u64;
+        if end > u64::from(entry.count) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "query range {first_query}..{end} exceeds the set's {} queries",
+                entry.count
+            )));
+        }
+        let raster = self.read_statistics(entry.raw, entry.statistics, first_query, out.len())?;
+        let mesh = match entry.mesh {
+            Some((pool, flags)) => self.read_statistics(pool, flags, first_query, out.len())?,
+            None => vec![None; out.len()],
+        };
+        let mesh_pool = entry.mesh.map(|(_, flags)| flags);
+        for ((statistics, raster), mesh) in out.iter_mut().zip(raster).zip(mesh) {
+            *statistics = crate::statistics::merge(raster, mesh, mesh_pool);
+        }
+        Ok(())
     }
 
     // --- synchronisation ---
@@ -3000,7 +3159,8 @@ impl Device for VkDevice {
             // `query_results` to order its read after. Matched by raw handle,
             // as the deletion queue's extension above is.
             for (_, set) in tables.query_sets.iter_mut() {
-                if entry.references.contains(&set.raw.as_raw()) {
+                let named = |pool: vk::QueryPool| entry.references.contains(&pool.as_raw());
+                if named(set.raw) || set.mesh.is_some_and(|(pool, _)| named(pool)) {
                     set.last_submission = value;
                 }
             }
@@ -4274,6 +4434,10 @@ impl Drop for DeviceInner {
         for (_, entry) in state.query_sets.iter() {
             // SAFETY: the device is idle.
             unsafe { self.raw.destroy_query_pool(entry.raw, None) };
+            if let Some((pool, _)) = entry.mesh {
+                // SAFETY: as above.
+                unsafe { self.raw.destroy_query_pool(pool, None) };
+            }
         }
         state.query_sets.clear();
         state.readbacks.clear();

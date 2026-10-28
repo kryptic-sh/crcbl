@@ -26,8 +26,9 @@ use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
     CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format, HalError,
     ImageAspect, ImageSubresourceLayers, ImageSubresourceRange, Instance, LoadOp, MemoryLocation,
-    MeshPipelineDesc, PresentInfo, PresentMode, Rect2d, RenderPassDesc, ResourceState, ShaderEntry,
-    StoreOp, SubmitInfo, SwapchainDesc,
+    MeshPipelineDesc, PassStatisticsWrites, PipelineStatistics, PresentInfo, PresentMode,
+    QueryKind, QuerySetDesc, Rect2d, RenderPassDesc, ResourceState, ShaderEntry, StoreOp,
+    SubmitInfo, SwapchainDesc,
 };
 
 /// The size this suite renders at — the same 256×192 as the triangle and mesh
@@ -61,7 +62,8 @@ impl Headless {
                 required_features: Features::empty(),
                 optional_features: Features::MESH_SHADER
                     | Features::TASK_SHADER
-                    | Features::DEBUG_MARKERS,
+                    | Features::DEBUG_MARKERS
+                    | Features::PIPELINE_STATISTICS_QUERY,
                 compatible_surface: Some(surface),
             })
             .expect("a device opens");
@@ -346,10 +348,13 @@ impl MeshShaderResources {
 /// The same acquire → render pass → barrier → copy → poll shape as the triangle
 /// suite's, with `draw_mesh_tasks` where its `draw` is — which is the whole
 /// difference between the two geometry paths at this level.
+///
+/// `statistics`, when given, is reset and counts the render pass.
 fn render_mesh_shader(
     headless: &Headless,
     resources: &MeshShaderResources,
     pipeline: crcbl_hal::GraphicsPipelineHandle,
+    statistics: Option<PassStatisticsWrites>,
 ) -> crcbl_golden::Image {
     let device = headless.device.as_ref();
     let (width, height) = MESH_SHADER_EXTENT;
@@ -373,6 +378,9 @@ fn render_mesh_shader(
         label: Some("mesh shader frame"),
         queue: headless.queue,
     });
+    if let Some(writes) = statistics {
+        encoder.reset_query_set(writes.set, writes.query..writes.query + 1);
+    }
     encoder.pipeline_barrier(&Barriers {
         images: &[crcbl_hal::ImageBarrier::new(
             acquired.image,
@@ -394,6 +402,7 @@ fn render_mesh_shader(
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(width, height),
         timestamp_writes: None,
+        statistics_writes: statistics,
     });
     encoder.set_viewport(&crcbl_hal::Viewport::from_size(width, height));
     encoder.set_scissor(&Rect2d::from_size(width, height));
@@ -503,7 +512,7 @@ fn frame_corners() -> [(u32, u32); 4] {
 fn a_mesh_shader_emits_a_triangle_that_reaches_memory() {
     let headless = Headless::open_for_mesh_shader();
     let resources = MeshShaderResources::new(&headless);
-    let image = render_mesh_shader(&headless, &resources, resources.mesh_only);
+    let image = render_mesh_shader(&headless, &resources, resources.mesh_only, None);
 
     let names = ["apex (red)", "top left (green)", "top right (blue)"];
     for (index, name) in names.iter().enumerate() {
@@ -573,7 +582,7 @@ fn an_amplification_stage_delivers_its_payload_to_the_mesh_stage() {
         headless.finish();
         return;
     };
-    let image = render_mesh_shader(&headless, &resources, amplified);
+    let image = render_mesh_shader(&headless, &resources, amplified, None);
 
     let tint = crcbl_shaders::mesh_shader::AMPLIFICATION_TINT;
     assert_eq!(tint[0], 0.0, "the tint under test kills red");
@@ -629,7 +638,7 @@ fn an_amplification_stage_delivers_its_payload_to_the_mesh_stage() {
 fn the_mesh_shader_triangle_matches_its_golden_image() {
     let headless = Headless::open_for_mesh_shader();
     let resources = MeshShaderResources::new(&headless);
-    let image = render_mesh_shader(&headless, &resources, resources.mesh_only);
+    let image = render_mesh_shader(&headless, &resources, resources.mesh_only, None);
 
     let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden/mesh_shader_triangle.png");
@@ -721,5 +730,88 @@ fn a_mesh_pipeline_naming_a_fragment_entry_point_as_its_mesh_stage_is_refused() 
 
     device.destroy_shader_module(module);
     device.destroy_pipeline_layout(layout);
+    headless.finish();
+}
+
+/// A render pass's statistics count the mesh and task stages: one mesh
+/// workgroup of the shader's three invocations, launched directly or by one
+/// task invocation, with the fragments they shaded.
+///
+/// And it is what proves a counted pass may hold a mesh draw at all: Vulkan
+/// forbids one under a query counting the vertex stage, which the validation
+/// layer reports, so this test is red if the encoder ever counts a mesh draw
+/// in the raster pool.
+///
+/// The stage counts are what the mesh path's profiling reads, so they are
+/// pinned exactly; a device without `meshShaderQueries` reports them as
+/// `None`, which this test says rather than passes over.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_render_pass_counts_the_mesh_and_task_stages() {
+    /// Invocations per workgroup, from `mesh_shader.slang`'s `numthreads`.
+    const MESH_INVOCATIONS: u64 = 3;
+    const TASK_INVOCATIONS: u64 = 1;
+
+    let headless = Headless::open_for_mesh_shader();
+    let device = headless.device.as_ref();
+    let resources = MeshShaderResources::new(&headless);
+    let set = device
+        .create_query_set(&QuerySetDesc {
+            label: Some("mesh statistics"),
+            kind: QueryKind::PipelineStatistics,
+            count: 2,
+        })
+        .expect("a statistics set");
+    let count = |pipeline, query| {
+        render_mesh_shader(
+            &headless,
+            &resources,
+            pipeline,
+            Some(PassStatisticsWrites { set, query }),
+        );
+        device.wait_idle().expect("idle");
+        let mut read = [PipelineStatistics::default()];
+        device
+            .pipeline_statistics(set, query, &mut read)
+            .expect("the statistics read back");
+        read[0]
+    };
+
+    let direct = count(resources.mesh_only, 0);
+    eprintln!("vk e2e: mesh pass statistics {direct:?}");
+    if direct.mesh_invocations.is_none() {
+        eprintln!("vk e2e: no meshShaderQueries on this device; the stage counts cannot run");
+    } else {
+        assert_eq!(
+            direct.mesh_invocations,
+            Some(MESH_INVOCATIONS),
+            "{direct:?}"
+        );
+        assert_eq!(direct.task_invocations, Some(0), "{direct:?}");
+    }
+    // A pass whose first draw is a mesh draw is counted in the mesh pool
+    // alone, which cannot count the vertex stage.
+    assert_eq!(direct.vertex_invocations, None, "{direct:?}");
+    assert!(direct.fragment_invocations > Some(0), "{direct:?}");
+
+    if let Some(amplified) = resources.amplified {
+        let launched = count(amplified, 1);
+        eprintln!("vk e2e: amplified mesh pass statistics {launched:?}");
+        if launched.mesh_invocations.is_some() {
+            assert_eq!(
+                launched.task_invocations,
+                Some(TASK_INVOCATIONS),
+                "{launched:?}"
+            );
+            assert_eq!(
+                launched.mesh_invocations,
+                Some(MESH_INVOCATIONS),
+                "{launched:?}"
+            );
+        }
+    }
+
+    resources.destroy(device);
+    device.destroy_query_set(set);
     headless.finish();
 }
