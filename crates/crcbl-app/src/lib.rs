@@ -65,6 +65,8 @@ pub mod gpu_choice;
 
 pub mod present;
 
+pub mod readback;
+
 pub mod text_input;
 
 pub mod window;
