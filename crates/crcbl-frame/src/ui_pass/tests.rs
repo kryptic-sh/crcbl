@@ -91,31 +91,6 @@ fn ui_renderer_builds_and_leaks_nothing() {
     recorder.assert_valid();
 }
 
-/// **Every start-up texture goes up in one submission.** A submit and its
-/// wait cost more on Mesa's ANV than the copies of an empty page, and the
-/// renderer builds several pages before its first frame.
-#[test]
-fn ui_renderer_submits_its_textures_once() {
-    use crcbl_hal::null::Event;
-
-    let (recorder, device, queue) = open_recorded();
-    let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
-        .expect("the null backend accepts everything");
-    let submitted: Vec<_> = recorder
-        .events()
-        .into_iter()
-        .filter_map(|event| match event {
-            Event::Submitted {
-                command_buffers, ..
-            } => Some(command_buffers),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(submitted.len(), 1, "one submission: {submitted:?}");
-    assert_eq!(submitted[0].len(), 1, "of one command buffer");
-    renderer.destroy(device.as_ref());
-}
-
 /// The glyph atlas upload moved to [`crate::texture`] and must not have
 /// changed on the way: one byte per texel, the atlas's own extent, and
 /// `Undefined → TransferDst → ShaderRead` around the copy.

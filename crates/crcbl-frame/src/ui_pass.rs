@@ -34,9 +34,8 @@
 //! [`ImageAtlas`] this renderer owns, `Rgba8UnormSrgb` and sampled through a
 //! linear sampler, which is what [`DrawList::image`] and
 //! [`DrawList::nine_slice`] draw from. The page is built with the renderer,
-//! like the glyphs, as [`upload_cleared_texture`](crate::upload_cleared_texture)
-//! builds one, in the one submission that uploads every start-up texture:
-//! zeroed on the GPU, with only the rectangle of the pictures registered before it
+//! like the glyphs, through [`upload_cleared_texture`]: zeroed on the GPU, with
+//! only the rectangle of the pictures registered before it
 //! ([`with_images`](UiRenderer::with_images)) staged from the host. An image
 //! registered after that — through
 //! [`images_mut`](UiRenderer::images_mut) — marks a rectangle of the page
@@ -183,7 +182,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::counters::FrameCounters;
 use crate::graph::{ImageId, ImportedImage, InitialClaim, RenderGraph};
 use crate::texture::{
-    ClearedTextureDesc, TexturePatch, UploadBatch, UploadedTexture, stage_region,
+    ClearedTextureDesc, TexturePatch, UploadedTexture, stage_region, upload_cleared_texture,
+    upload_texture,
 };
 use crate::transient::TransientImageDesc;
 
@@ -472,17 +472,15 @@ impl UiRenderer {
         let atlas = FontAtlas::built_in();
         let (atlas_w, atlas_h, atlas_pixels) = atlas.glyph_bitmap();
 
-        // Every texture below is recorded into one batch and submitted with
-        // one wait, once the last of them is.
-        let mut uploads = UploadBatch::new(device, queue, "ui textures");
-
         // Upload glyph atlas texture via staging.
-        let atlas = uploads.texture(
+        let atlas = upload_texture(
+            device,
+            queue,
             "ui glyph atlas",
             Format::R8Unorm,
-            (atlas_w, atlas_h),
-            &[&[&atlas_pixels]],
-            ImageViewType::D2,
+            atlas_w,
+            atlas_h,
+            &atlas_pixels,
         )?;
         rollback.textures.push(atlas);
 
@@ -514,15 +512,19 @@ impl UiRenderer {
                 pixels,
             })
             .collect();
-        let image_page = uploads.cleared_texture(&ClearedTextureDesc {
-            label: "ui image atlas",
-            format: IMAGE_FORMAT,
-            width: PAGE_SIZE,
-            height: PAGE_SIZE,
-            layers: 1,
-            view_type: ImageViewType::D2,
-            patches: &patches,
-        })?;
+        let image_page = upload_cleared_texture(
+            device,
+            queue,
+            &ClearedTextureDesc {
+                label: "ui image atlas",
+                format: IMAGE_FORMAT,
+                width: PAGE_SIZE,
+                height: PAGE_SIZE,
+                layers: 1,
+                view_type: ImageViewType::D2,
+                patches: &patches,
+            },
+        )?;
         rollback.textures.push(image_page);
         // Linear, for the shader's sharp-bilinear bend — see `ui.slang`.
         let image_sampler = device.create_sampler(&SamplerDesc {
@@ -539,15 +541,19 @@ impl UiRenderer {
         // the GPU rather than sent from the host. What the atlas rasterises later
         // is copied inside a frame; see the module docs.
         let glyphs = GlyphAtlas::new(GLYPH_PAGE_SIZE, GLYPH_MAX_PAGES, GLYPH_RASTER_BUDGET);
-        let glyph_pages = uploads.cleared_texture(&ClearedTextureDesc {
-            label: "ui glyph pages",
-            format: Format::R8Unorm,
-            width: GLYPH_PAGE_SIZE,
-            height: GLYPH_PAGE_SIZE,
-            layers: GLYPH_MAX_PAGES as u32,
-            view_type: ImageViewType::D2Array,
-            patches: &[],
-        })?;
+        let glyph_pages = upload_cleared_texture(
+            device,
+            queue,
+            &ClearedTextureDesc {
+                label: "ui glyph pages",
+                format: Format::R8Unorm,
+                width: GLYPH_PAGE_SIZE,
+                height: GLYPH_PAGE_SIZE,
+                layers: GLYPH_MAX_PAGES as u32,
+                view_type: ImageViewType::D2Array,
+                patches: &[],
+            },
+        )?;
         rollback.textures.push(glyph_pages);
 
         // Bind group layout: atlas texture, sampler, vertex storage buffer, the
@@ -644,17 +650,20 @@ impl UiRenderer {
             }],
         })?;
         rollback.bind_group_layouts.push(texture_layout);
-        let blank = uploads.cleared_texture(&ClearedTextureDesc {
-            label: "ui blank texture",
-            format: Format::Rgba8Unorm,
-            width: 1,
-            height: 1,
-            layers: 1,
-            view_type: ImageViewType::D2,
-            patches: &[],
-        })?;
+        let blank = upload_cleared_texture(
+            device,
+            queue,
+            &ClearedTextureDesc {
+                label: "ui blank texture",
+                format: Format::Rgba8Unorm,
+                width: 1,
+                height: 1,
+                layers: 1,
+                view_type: ImageViewType::D2,
+                patches: &[],
+            },
+        )?;
         rollback.textures.push(blank);
-        uploads.submit()?;
         let blank_group = device.create_bind_group(&BindGroupDesc {
             label: Some("ui blank texture"),
             layout: texture_layout,

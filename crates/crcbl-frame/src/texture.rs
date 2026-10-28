@@ -56,10 +56,10 @@
 //! **bytes** and converted back to texels exactly once, at the copy.
 
 use crcbl_hal::{
-    BufferDesc, BufferImageCopy, BufferUsage, CommandEncoder, CommandEncoderDesc, Device, Extent3d,
-    Format, HalError, ImageAspect, ImageDesc, ImageHandle, ImageSubresourceLayers,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
-    MemoryLocation, Offset3d, QueueHandle, ResourceState, SubmitInfo,
+    BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Device, Extent3d, Format,
+    HalError, ImageAspect, ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange,
+    ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, MemoryLocation, Offset3d,
+    QueueHandle, ResourceState, SubmitInfo,
 };
 
 use crate::mip::level_extent;
@@ -288,18 +288,6 @@ pub fn upload_cleared_texture(
     queue: QueueHandle,
     desc: &ClearedTextureDesc<'_>,
 ) -> Result<UploadedTexture, HalError> {
-    let mut batch = UploadBatch::new(device, queue, desc.label);
-    let texture = batch.cleared_texture(desc)?;
-    batch.submit_one(texture)
-}
-
-/// [`upload_cleared_texture`]'s validation and staging, recorded into
-/// `batch`.
-fn stage_cleared_texture(
-    batch: &mut UploadBatch<'_>,
-    desc: &ClearedTextureDesc<'_>,
-) -> Result<UploadedTexture, HalError> {
-    let device = batch.device;
     let label = desc.label;
     let texel = image_texel(label, desc.format, (desc.width, desc.height))?;
     if desc.layers == 0 {
@@ -422,13 +410,16 @@ fn stage_cleared_texture(
         usage: BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
         memory: MemoryLocation::DeviceLocal,
     })?;
-    batch.buffers.push(zero);
     let staging = if patched.is_empty() {
         None
     } else {
-        let staging = create_staging(device, label, &patched)?;
-        batch.buffers.push(staging);
-        Some(staging)
+        match create_staging(device, label, &patched) {
+            Ok(staging) => Some(staging),
+            Err(error) => {
+                device.destroy_buffer(zero);
+                return Err(error);
+            }
+        }
     };
     let zero_source = CopySource {
         buffer: zero,
@@ -440,17 +431,26 @@ fn stage_cleared_texture(
             regions: &patch_regions,
         }))
         .collect();
-    batch.record(&UploadArgs {
-        label,
-        format: desc.format,
-        width: desc.width,
-        height: desc.height,
-        layer_count: desc.layers,
-        mip_levels: 1,
-        view_type: desc.view_type,
-        cleared: Some((zero, cleared)),
-        sources: &sources,
-    })
+    let outcome = upload_image(
+        device,
+        queue,
+        &UploadArgs {
+            label,
+            format: desc.format,
+            width: desc.width,
+            height: desc.height,
+            layer_count: desc.layers,
+            mip_levels: 1,
+            view_type: desc.view_type,
+            cleared: Some((zero, cleared)),
+            sources: &sources,
+        },
+    );
+    if let Some(staging) = staging {
+        device.destroy_buffer(staging);
+    }
+    device.destroy_buffer(zero);
+    outcome
 }
 
 /// Whether two patches share a texel.
@@ -494,7 +494,8 @@ fn uncovered(width: u32, height: u32, covered: &[&TexturePatch<'_>]) -> Vec<(u32
 /// on the backends that fill `u32`s, and so the unit its size is rounded to.
 const CLEAR_WORD_BYTES: u64 = 4;
 
-/// The body the public uploads share, as a batch of one.
+/// The body the public uploads share: validate, stage every level of every
+/// layer into one buffer, then hand over to [`upload_image`].
 ///
 /// `extent` is `(width, height)` as one argument rather than two, which is what
 /// keeps this inside the argument count the public wrappers already sit at.
@@ -507,22 +508,6 @@ fn upload(
     layers: &[&[&[u8]]],
     view_type: ImageViewType,
 ) -> Result<UploadedTexture, HalError> {
-    let mut batch = UploadBatch::new(device, queue, label);
-    let texture = batch.texture(label, format, extent, layers, view_type)?;
-    batch.submit_one(texture)
-}
-
-/// Validates `layers`, stages every level of every layer into one buffer, and
-/// records the copies into `batch`.
-fn stage_texture(
-    batch: &mut UploadBatch<'_>,
-    label: &str,
-    format: Format,
-    extent: (u32, u32),
-    layers: &[&[&[u8]]],
-    view_type: ImageViewType,
-) -> Result<UploadedTexture, HalError> {
-    let device = batch.device;
     let (width, height) = extent;
     let texel = image_texel(label, format, extent)?;
     let layer_count = u32::try_from(layers.len()).unwrap_or(u32::MAX);
@@ -601,21 +586,26 @@ fn stage_texture(
     }
 
     let staging = create_staging(device, label, &padded)?;
-    batch.buffers.push(staging);
-    batch.record(&UploadArgs {
-        label,
-        format,
-        width,
-        height,
-        layer_count,
-        mip_levels,
-        view_type,
-        cleared: None,
-        sources: &[CopySource {
-            buffer: staging,
-            regions: &regions,
-        }],
-    })
+    let outcome = upload_image(
+        device,
+        queue,
+        &UploadArgs {
+            label,
+            format,
+            width,
+            height,
+            layer_count,
+            mip_levels,
+            view_type,
+            cleared: None,
+            sources: &[CopySource {
+                buffer: staging,
+                regions: &regions,
+            }],
+        },
+    );
+    device.destroy_buffer(staging);
+    outcome
 }
 
 /// The bytes one texel of `format` occupies, once `format` and `extent` are
@@ -800,8 +790,8 @@ struct CopySource<'a> {
     regions: &'a [StagedRegion],
 }
 
-/// Everything [`UploadBatch::record`] needs that is not the device, the queue
-/// or the bytes — one struct rather than seven positional arguments, which is what
+/// Everything [`upload_image`] needs that is not the device, the queue or the
+/// bytes — one struct rather than seven positional arguments, which is what
 /// `clippy::too_many_arguments` is objecting to and also what makes the two
 /// `u32`s impossible to swap at the call site.
 struct UploadArgs<'a> {
@@ -824,154 +814,54 @@ struct UploadArgs<'a> {
     sources: &'a [CopySource<'a>],
 }
 
-/// Startup uploads recorded into one command buffer and submitted with one
-/// wait.
-///
-/// Each texture added is created at once, and its copies are recorded behind
-/// the ones before it; nothing reaches the device until
-/// [`submit`](Self::submit). One submission rather than one per texture is the
-/// point: on Mesa's ANV a submit and its [`Device::wait_idle`] cost more than
-/// the copies of an empty page, and [`crate::ui_pass`]'s renderer uploads
-/// several pages before its first frame.
-///
-/// The textures are the caller's from the moment they are returned, and must
-/// not be sampled until `submit` has returned `Ok`. The staging and zero
-/// buffers are the batch's, released when it drops: after the wait if it was
-/// submitted, and before any submission if an add or the caller failed first.
-pub(crate) struct UploadBatch<'a> {
-    device: &'a dyn Device,
+/// The half of [`upload_texture`] that owns the image and the view, so the
+/// caller can destroy the staging buffer on every path out of it.
+fn upload_image(
+    device: &dyn Device,
     queue: QueueHandle,
-    encoder: Option<Box<dyn CommandEncoder>>,
-    buffers: Vec<crcbl_hal::BufferHandle>,
-}
+    args: &UploadArgs<'_>,
+) -> Result<UploadedTexture, HalError> {
+    let image = device.create_image(&ImageDesc {
+        label: Some(args.label),
+        image_type: ImageType::D2,
+        format: args.format,
+        extent: Extent3d {
+            width: args.width,
+            height: args.height,
+            // A `D2` image's `depth_or_layers` is its array length, which the
+            // seam says on the field itself.
+            depth_or_layers: args.layer_count,
+        },
+        mip_levels: args.mip_levels,
+        samples: 1,
+        // `TRANSFER_SRC` as well as the copy's `TRANSFER_DST`, so a test or a
+        // capture can copy a level back out — `tests/forward_e2e/page.rs` reads
+        // the page's chain that way. Free on every backend: a sampled image
+        // that is also a copy source costs no layout, no memory and no
+        // decompression it would not already pay.
+        usage: ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+    })?;
 
-impl<'a> UploadBatch<'a> {
-    /// An empty batch; `label` is the stem of its encoder's name.
-    pub(crate) fn new(device: &'a dyn Device, queue: QueueHandle, label: &str) -> Self {
-        let encoder_label = format!("{label} upload");
-        let encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some(&encoder_label),
-            queue,
-        });
-        Self {
-            device,
-            queue,
-            encoder: Some(encoder),
-            buffers: Vec::new(),
+    let view = match device.create_image_view(&ImageViewDesc {
+        label: Some(args.label),
+        image,
+        view_type: args.view_type,
+        format: args.format,
+        range: color_range(args.mip_levels, args.layer_count),
+    }) {
+        Ok(view) => view,
+        Err(error) => {
+            device.destroy_image(image);
+            return Err(error);
         }
-    }
+    };
 
-    /// [`upload_texture_mip_layers`], recorded into this batch.
-    ///
-    /// # Errors
-    ///
-    /// As [`upload_texture_mip_layers`], before anything is recorded.
-    pub(crate) fn texture(
-        &mut self,
-        label: &str,
-        format: Format,
-        extent: (u32, u32),
-        layers: &[&[&[u8]]],
-        view_type: ImageViewType,
-    ) -> Result<UploadedTexture, HalError> {
-        stage_texture(self, label, format, extent, layers, view_type)
-    }
-
-    /// [`upload_cleared_texture`], recorded into this batch.
-    ///
-    /// # Errors
-    ///
-    /// As [`upload_cleared_texture`], before anything is recorded.
-    pub(crate) fn cleared_texture(
-        &mut self,
-        desc: &ClearedTextureDesc<'_>,
-    ) -> Result<UploadedTexture, HalError> {
-        stage_cleared_texture(self, desc)
-    }
-
-    /// Submits every recorded copy and waits for the device, leaving every
-    /// texture in [`ResourceState::ShaderRead`].
-    ///
-    /// # Errors
-    ///
-    /// [`HalError`] from finishing, submitting or waiting. The textures stay
-    /// the caller's to destroy.
-    pub(crate) fn submit(mut self) -> Result<(), HalError> {
-        let Some(encoder) = self.encoder.take() else {
-            return Ok(());
-        };
-        let commands = encoder.finish()?;
-        let submitted = self
-            .device
-            .submit(self.queue, &SubmitInfo::new(&[commands]))
-            .and_then(|()| self.device.wait_idle());
-        self.device.destroy_command_buffer(commands);
-        submitted
-    }
-
-    /// [`submit`](Self::submit) for a batch of the one `texture`, which is
-    /// destroyed if the submission fails.
-    fn submit_one(self, texture: UploadedTexture) -> Result<UploadedTexture, HalError> {
-        let device = self.device;
-        match self.submit() {
-            Ok(()) => Ok(texture),
-            Err(error) => {
-                texture.destroy(device);
-                Err(error)
-            }
-        }
-    }
-
-    /// Creates the image and the view `args` describe and records its copies,
-    /// leaving it in [`ResourceState::ShaderRead`] once submitted.
-    fn record(&mut self, args: &UploadArgs<'_>) -> Result<UploadedTexture, HalError> {
-        let device = self.device;
-        let image = device.create_image(&ImageDesc {
-            label: Some(args.label),
-            image_type: ImageType::D2,
-            format: args.format,
-            extent: Extent3d {
-                width: args.width,
-                height: args.height,
-                // A `D2` image's `depth_or_layers` is its array length, which
-                // the seam says on the field itself.
-                depth_or_layers: args.layer_count,
-            },
-            mip_levels: args.mip_levels,
-            samples: 1,
-            // `TRANSFER_SRC` as well as the copy's `TRANSFER_DST`, so a test or
-            // a capture can copy a level back out — `tests/forward_e2e/page.rs`
-            // reads the page's chain that way. Free on every backend: a sampled
-            // image that is also a copy source costs no layout, no memory and
-            // no decompression it would not already pay.
-            usage: ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
-        })?;
-        let view = match device.create_image_view(&ImageViewDesc {
-            label: Some(args.label),
-            image,
-            view_type: args.view_type,
-            format: args.format,
-            range: color_range(args.mip_levels, args.layer_count),
-        }) {
-            Ok(view) => view,
-            Err(error) => {
-                device.destroy_image(image);
-                return Err(error);
-            }
-        };
-        let encoder = self
-            .encoder
-            .as_deref_mut()
-            .expect("a batch records until it is submitted, which consumes it");
-        record_copies(encoder, args, image);
-        Ok(UploadedTexture { image, view })
-    }
-}
-
-impl Drop for UploadBatch<'_> {
-    fn drop(&mut self) {
-        for buffer in self.buffers.drain(..) {
-            self.device.destroy_buffer(buffer);
+    let uploaded = UploadedTexture { image, view };
+    match record_upload(device, queue, args, image) {
+        Ok(()) => Ok(uploaded),
+        Err(error) => {
+            uploaded.destroy(device);
+            Err(error)
         }
     }
 }
@@ -987,10 +877,20 @@ const fn color_range(mips: u32, layers: u32) -> ImageSubresourceRange {
     }
 }
 
-/// Records `image`'s barriers and copies, leaving it in
-/// [`ResourceState::ShaderRead`]. Its barriers name only `image` and its own
-/// zero buffer, so a batch's uploads do not wait on one another.
-fn record_copies(encoder: &mut dyn CommandEncoder, args: &UploadArgs<'_>, image: ImageHandle) {
+/// Records, submits and drains the staging copy, leaving the image in
+/// [`ResourceState::ShaderRead`].
+fn record_upload(
+    device: &dyn Device,
+    queue: QueueHandle,
+    args: &UploadArgs<'_>,
+    image: ImageHandle,
+) -> Result<(), HalError> {
+    let encoder_label = format!("{} upload", args.label);
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some(&encoder_label),
+        queue,
+    });
+
     let range = color_range(args.mip_levels, args.layer_count);
     // Undefined → TransferDst: the image has never held anything, so its old
     // contents are explicitly discarded rather than transitioned. The range
@@ -1059,6 +959,13 @@ fn record_copies(encoder: &mut dyn CommandEncoder, args: &UploadArgs<'_>, image:
         )],
         ..Default::default()
     });
+
+    let commands = encoder.finish()?;
+    let submitted = device
+        .submit(queue, &SubmitInfo::new(&[commands]))
+        .and_then(|()| device.wait_idle());
+    device.destroy_command_buffer(commands);
+    submitted
 }
 
 // `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
