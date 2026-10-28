@@ -152,9 +152,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   whole. Now each face it passes costs its `cmap`, and a face is read whole only
   when its `cmap` maps the char. On an Arch laptop whose fontconfig sans-serif
   list holds 18 faces in 73 MB of files, asking it for a Nerd Font icon read 6
-  faces whole (the 19 MB Noto CJK collection among them) in 242 ms, and now
-  reads 1, the face that maps it, in 3.1 ms. A face whose `cmap` cannot be read
-  is read whole, as before.
+  faces whole (the 19 MB Noto CJK collection among them), and now reads 1, the
+  face that maps it. A face whose `cmap` cannot be read is read whole, as
+  before.
 
 - **`crcbl_frame::UiRenderer` uploads its start-up textures in one submission.**
   The built-in glyph atlas, the image page, the glyph pages and the blank
@@ -162,7 +162,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   each submit and `wait_idle` cost more than the copies. They are now recorded
   into one command buffer and waited for once. On an Intel RPL-U iGPU the warm
   `UiRenderer::new` went from a median of 11.70 ms to 8.96 ms in an interleaved
-  debug-build comparison. `upload_texture` and its siblings behave as before.
+  debug-build comparison, taken at a load average of about 8 rather than on a
+  quiet machine. `upload_texture` and its siblings behave as before.
 
 ### Fixed
 
