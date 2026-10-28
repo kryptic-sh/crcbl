@@ -912,6 +912,29 @@ pub trait Shell: core::fmt::Debug {
         self.caps().contains(ShellCaps::CLIPBOARD) && self.window_state(window).is_ok()
     }
 
+    /// A token another program can raise its own window with, made from
+    /// `window` and the latest input this program received.
+    ///
+    /// What a notification daemon sends as the notification spec's
+    /// `ActivationToken` before `ActionInvoked`, and what a launcher puts in a
+    /// child's `XDG_ACTIVATION_TOKEN`: the receiver hands it back to its window
+    /// system, which raises the window if it accepts the token. Ask for it in
+    /// answer to the click that warrants it, since the window system judges a
+    /// token by the input it was made from.
+    ///
+    /// `Ok(None)` where the window system has no such thing: Wayland without
+    /// `xdg-activation-v1`, and every other backend, whose default this is.
+    /// Wayland waits for the compositor's answer, a round trip or more.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle, or
+    /// [`ShellError::Backend`] where the window system has the mechanism but
+    /// gave no token.
+    fn activation_token(&mut self, window: WindowId) -> Result<Option<String>, ShellError> {
+        self.window_state(window).map(|_| None)
+    }
+
     /// Tells the input method where text is being entered, so it can put its
     /// composition window and candidate list there instead of at a corner of the
     /// screen.

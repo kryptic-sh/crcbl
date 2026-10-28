@@ -168,6 +168,7 @@
 //! keyboard, and on a keymap change; and a run that falls more than four
 //! intervals behind resynchronises instead of emitting the backlog.
 
+mod activation;
 mod cursor_shape;
 mod data;
 mod data_device;
@@ -229,6 +230,7 @@ use protocol::wayland::{
     wl_callback, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer,
     wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
 };
+use protocol::xdg_activation::{xdg_activation_token_v1, xdg_activation_v1};
 use protocol::xdg_decoration::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1};
 use protocol::xdg_output::{zxdg_output_manager_v1, zxdg_output_v1};
 use protocol::xdg_shell::{xdg_popup, xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -429,6 +431,8 @@ enum ObjectKind {
     DataDevice,
     DataOffer,
     DataSource,
+    /// An `xdg_activation_token_v1`; see [`activation`].
+    ActivationToken,
     /// A proxy whose events we deliberately do not read.
     ///
     /// Attaching a do-nothing dispatcher rather than leaving the proxy bare:
@@ -699,6 +703,12 @@ enum RawEvent {
     /// Another client took the selection, so our source is dead.
     SourceCancelled {
         source: usize,
+    },
+    /// The compositor's answer to an activation token's `commit`, which
+    /// [`activation`] takes out of the queue itself.
+    ActivationDone {
+        token: usize,
+        value: String,
     },
 }
 
@@ -1129,6 +1139,17 @@ unsafe extern "C" fn dispatch(
                 sink.events.extend(raw);
             }
         }
+        ObjectKind::ActivationToken => {
+            // SAFETY: see the note above the `match`.
+            if let Some(xdg_activation_token_v1::Event::Done { token }) =
+                unsafe { xdg_activation_token_v1::decode_event(opcode, args) }
+            {
+                sink.events.push(RawEvent::ActivationDone {
+                    token: proxy,
+                    value: token.to_string_lossy().into_owned(),
+                });
+            }
+        }
         ObjectKind::RelativePointer => {
             // SAFETY: see the note above the `match`.
             if let Some(zwp_relative_pointer_v1::Event::RelativeMotion {
@@ -1369,6 +1390,7 @@ struct Conn {
     layer_shell: *mut WlProxy,
     text_input_manager: *mut WlProxy,
     cursor_shape_manager: *mut WlProxy,
+    activation: *mut WlProxy,
     dmabuf: *mut WlProxy,
     /// Owned by the connection, reached only as a raw pointer; see [`Sink`].
     sink: *mut Sink,
@@ -1398,6 +1420,7 @@ enum Singleton {
     LayerShell,
     TextInputManager,
     CursorShapeManager,
+    Activation,
     Dmabuf,
 }
 
@@ -1417,6 +1440,7 @@ impl Singleton {
             Self::LayerShell => &mut conn.layer_shell,
             Self::TextInputManager => &mut conn.text_input_manager,
             Self::CursorShapeManager => &mut conn.cursor_shape_manager,
+            Self::Activation => &mut conn.activation,
             Self::Dmabuf => &mut conn.dmabuf,
         }
     }
@@ -1437,6 +1461,7 @@ impl Singleton {
             Self::LayerShell => zwlr_layer_shell_v1::NAME,
             Self::TextInputManager => zwp_text_input_manager_v3::NAME,
             Self::CursorShapeManager => wp_cursor_shape_manager_v1::NAME,
+            Self::Activation => xdg_activation_v1::NAME,
             Self::Dmabuf => zwp_linux_dmabuf_v1::NAME,
         }
     }
@@ -1542,9 +1567,11 @@ impl Conn {
     /// A blocking round trip: send everything, then wait for the server to
     /// answer a `wl_display.sync`.
     ///
-    /// Used only during [`WaylandShell::open`], where blocking is correct —
-    /// there is no frame loop yet, and the alternative is a shell that reports
-    /// no monitors for the first few frames.
+    /// Used during [`WaylandShell::open`], where blocking is correct — there
+    /// is no frame loop yet, and the alternative is a shell that reports no
+    /// monitors for the first few frames — and by
+    /// [`activation_token`](WaylandShell::activation_token), whose answer
+    /// comes only as an event.
     fn roundtrip(&self) -> Result<(), ShellError> {
         // SAFETY: the display is live.
         if unsafe { (self.lib.display_roundtrip)(self.display.as_ptr()) } < 0 {
@@ -2198,6 +2225,7 @@ impl WaylandShell {
             layer_shell: ptr::null_mut(),
             text_input_manager: ptr::null_mut(),
             cursor_shape_manager: ptr::null_mut(),
+            activation: ptr::null_mut(),
             dmabuf: ptr::null_mut(),
             sink: Sink::boxed(lib),
         };
@@ -2519,6 +2547,10 @@ impl WaylandShell {
                     Singleton::CursorShapeManager
                 );
             }
+            // Version 1 is the only one there is.
+            "xdg_activation_v1" => {
+                bind!(activation, xdg_activation_v1, 1, Singleton::Activation);
+            }
             "wl_output" => {
                 // SAFETY: `registry` is live; see the macro above.
                 let proxy = unsafe {
@@ -2693,6 +2725,9 @@ impl WaylandShell {
             Singleton::CursorShapeManager => unsafe {
                 self.conn
                     .release(proxy, wp_cursor_shape_manager_v1::destroy);
+            },
+            Singleton::Activation => unsafe {
+                self.conn.release(proxy, xdg_activation_v1::destroy);
             },
             // The feedback first: it was made from the manager, and the
             // device it named goes with it.
@@ -3029,6 +3064,10 @@ impl WaylandShell {
                 RawEvent::TextInput { text_input, event } => {
                     self.text_input_event(text_input, event);
                 }
+                // `activation_token` takes its token's answer out of the queue
+                // before returning, and destroys the token, so one here
+                // belongs to no request.
+                RawEvent::ActivationDone { .. } => {}
                 other => self.process_input(other),
             }
         }
@@ -3782,6 +3821,7 @@ impl Drop for WaylandShell {
         self.remove_dmabuf_feedback();
         let globals = [
             self.conn.dmabuf,
+            self.conn.activation,
             self.conn.cursor_shape_manager,
             self.conn.layer_shell,
             self.conn.data_device_manager,
@@ -4701,6 +4741,10 @@ impl Shell for WaylandShell {
                     .as_ref()
                     .is_some_and(|device| device.selection_seen)
             })
+    }
+
+    fn activation_token(&mut self, window: WindowId) -> Result<Option<String>, ShellError> {
+        WaylandShell::activation_token(self, window)
     }
 
     fn align_event_clock(&mut self, elapsed: Duration) {

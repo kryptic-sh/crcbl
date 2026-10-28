@@ -2246,6 +2246,21 @@ mod tests {
         Ok(size)
     }
 
+    // ------------------------------------------------------------- activation
+
+    /// A backend with no activation tokens answers `None` for a live window
+    /// and refuses a stale one, which is the trait's default.
+    #[test]
+    fn a_backend_without_activation_answers_none() {
+        let (mut shell, window) = shell_with_window();
+        assert_eq!(shell.activation_token(window).expect("a live window"), None);
+        shell.destroy_window(window).expect("destroy");
+        assert!(matches!(
+            shell.activation_token(window),
+            Err(ShellError::InvalidWindow { .. })
+        ));
+    }
+
     // ------------------------------------------------------------ accessibility
 
     /// A tree reaches the pretend reader only while it reads, and each start

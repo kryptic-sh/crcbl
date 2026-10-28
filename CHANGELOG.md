@@ -15,6 +15,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Shell::activation_token(window)`** returns an `xdg-activation-v1` token
+  made from the window's surface and the latest input serial, which a
+  notification daemon sends as the spec's `ActivationToken` before
+  `ActionInvoked`, or a launcher passes as `XDG_ACTIVATION_TOKEN`, so the
+  receiving program can raise its window. Wayland waits a round trip or more for
+  the compositor's answer; it and every other backend answer `None` where there
+  is no such mechanism. A provided method, so other `Shell` implementations
+  build unchanged.
+
 - **`crcbl_image::data_url::parse`** reads a `data:` URL into its media type's
   essence (`image/png`, lower case, parameters dropped) and its bytes, by the
   Fetch standard's rules with the forgiving base64 decoder, so a caller can

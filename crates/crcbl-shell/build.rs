@@ -67,6 +67,7 @@ const PROTOCOLS: &[(&str, &str)] = &[
     ("text_input", "wayland-protocols/text-input-unstable-v3.xml"),
     ("cursor_shape", "wayland-protocols/cursor-shape-v1.xml"),
     ("linux_dmabuf", "wayland-protocols/linux-dmabuf-v1.xml"),
+    ("xdg_activation", "wayland-protocols/xdg-activation-v1.xml"),
     // Nothing here uses a tablet; `cursor-shape-v1`'s type table names
     // `zwp_tablet_tool_v2`, and a reference has to resolve to be generated.
     ("tablet", "wayland-protocols/tablet-v2.xml"),

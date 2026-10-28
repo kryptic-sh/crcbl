@@ -4696,6 +4696,72 @@ fn a_grabbing_popup_takes_the_keyboard_from_its_exclusive_panel() {
     session.shell.destroy_window(bar).expect("destroy");
 }
 
+/// A click on a panel — a notification's toast — gives an activation token,
+/// which a daemon hands the program whose window the click should raise. The
+/// compositor makes a fresh one for every request.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_click_on_a_panel_gives_an_activation_token() {
+    let mut session = Session::open();
+    let toast = session.create(&panel(
+        "crcbl e2e toast",
+        LogicalSize::new(0.0, 30.0),
+        PanelDesc {
+            anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+            layer: PanelLayer::Top,
+            ..PanelDesc::default()
+        },
+    ));
+    session.pump_until("the toast's first configure", |session| {
+        session.size(toast).is_some()
+    });
+    session.map(toast);
+    let input = VirtualInput::attach(&*session.shell, toast).expect("virtual devices");
+    input.move_to(OUTPUT_SIZE.width / 2, 15, LAYOUT_SIZE);
+    // sway drops a button pressed before the pointer has entered the surface.
+    session.pump_until("the pointer on the toast", |session| {
+        session.events.iter().any(|event| {
+            matches!(
+                event,
+                ShellEvent::PointerFocus { window, entered: true, .. } if *window == toast
+            )
+        })
+    });
+    input.button(evdev::BTN_LEFT, true);
+    input.button(evdev::BTN_LEFT, false);
+    session.pump_until("the click on the toast", |session| {
+        session.events.iter().any(|event| {
+            matches!(
+                event,
+                ShellEvent::Button {
+                    window,
+                    state: ButtonState::Released,
+                    ..
+                } if *window == toast
+            )
+        })
+    });
+
+    let first = session
+        .shell
+        .activation_token(toast)
+        .expect("a token")
+        .expect("the compositor has xdg-activation-v1");
+    let second = session
+        .shell
+        .activation_token(toast)
+        .expect("a token")
+        .expect("the compositor has xdg-activation-v1");
+    assert!(!first.is_empty());
+    assert_ne!(first, second, "each request gets its own token");
+
+    session.shell.destroy_window(toast).expect("destroy");
+    assert!(matches!(
+        session.shell.activation_token(toast),
+        Err(ShellError::InvalidWindow { .. })
+    ));
+}
+
 /// S14 on Wayland: a window's tree read and acted on over AT-SPI, the way Orca
 /// would; see [`atspi`] for the reader and why it needs a private bus.
 #[cfg(feature = "accesskit")]

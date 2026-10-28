@@ -37,6 +37,7 @@ capability nobody asked for.
 | `cursor-shape-v1.xml`                 | `wayland-protocols`, `staging/cursor-shape/cursor-shape-v1.xml` (bound at v1)                                               | 1.49    | `bb57d91e53a79dad` |
 | `tablet-v2.xml`                       | `wayland-protocols`, `stable/tablet/tablet-v2.xml` — only so `cursor-shape-v1`'s `zwp_tablet_tool_v2` resolves              | 1.49    | `ac1128b26c779cf9` |
 | `linux-dmabuf-v1.xml`                 | `wayland-protocols`, `stable/linux-dmabuf/linux-dmabuf-v1.xml` (bound at v4, only for the default feedback's `main_device`) | 1.49    | `2735bb4589cbb364` |
+| `xdg-activation-v1.xml`               | `wayland-protocols`, `staging/xdg-activation/xdg-activation-v1.xml`                                                         | 1.49    | `d8418be2d5738d50` |
 
 All are MIT-licensed except `wlr-layer-shell-unstable-v1.xml`, which carries a
 Historical Permission Notice and Disclaimer (HPND), as permissive as MIT; the
