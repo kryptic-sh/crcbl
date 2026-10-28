@@ -6,8 +6,8 @@ better than per-pass timestamps, hand-written mirrored-run scripts and guesses
 (`docs/backlog.md`, _D3D12 mesh shading (shipped 2026-10-28)_). The owner's
 constraints: **crcbl's own profiler, no external tool** — it talks to the GPU
 through the driver itself, the way vendor profilers do — and it is built so the
-editor ([08-editor.md](08-editor.md)) can host it later. Nothing in this
-document past _Where this is_ is built.
+editor ([08-editor.md](08-editor.md)) can host it later. P1 is built on Vulkan
+and D3D12 (see _Where this is_); nothing else past that section is.
 
 ## Where this is
 
@@ -32,27 +32,26 @@ decisions taken 2026-08-13_):
 - **Names on the GPU's own record**: `Features::DEBUG_MARKERS` labels every pass
   through `VK_EXT_debug_utils`, D3D12's `BeginEvent` and Metal's debug groups.
 - **Crash breadcrumbs**: D3D12's DRED is always on (`crcbl_dx12::dred`).
+- **Per-pass pipeline statistics** (P1, 2026-10-28): `PassStatisticsWrites` and
+  `Device::pipeline_statistics`, filled by `crcbl-vk` and `crcbl-dx12` and
+  proved against fixtures with known counts; `CRCBL_PASS_STATISTICS=1` or
+  `PassTimers::counting` puts each pass's counts in the frame and run reports.
+  Metal refuses until the Mac work. What AMD's drivers got wrong on the way and
+  how it is worked around is in `docs/backlog.md`, _The profiler (topic 60)_.
 
 What is missing, each a gap this session hit:
 
-1. **No way to count work per pass.** `QueryKind::PipelineStatistics` exists and
-   nothing can fill one: `CommandEncoder` has no verb that records into it, and
-   `Device::query_results` reads one `u64` per query where a statistics query is
-   eleven (D3D12), up to fourteen with the mesh stages
-   (`D3D12_QUERY_DATA_PIPELINE_STATISTICS1`) or eight (Metal). The
-   `PipelineStatisticsQuery` divergence rows say so. Task and mesh invocation
-   counts per pass would have answered in one run what took five experiments.
-2. **No hardware counters.** Nothing reads how busy a shader stage, a cache or
+1. **No hardware counters.** Nothing reads how busy a shader stage, a cache or
    the memory bus was. Which counters exist is per vendor and per API (below).
-3. **No sub-pass timing.** A pass is one span; which draw inside it costs is
+2. **No sub-pass timing.** A pass is one span; which draw inside it costs is
    invisible.
-4. **No capture, no export, no viewer.** Spans go to a text summary
+3. **No capture, no export, no viewer.** Spans go to a text summary
    (`Snapshot::report`); nothing writes a trace a viewer opens (topic 40's piece
    4), and there is no recorded capture to look at after the run.
-5. **A/B by hand.** Every comparison today is a scratch shell script running
+4. **A/B by hand.** Every comparison today is a scratch shell script running
    mirrored pairs and a Python fold of the logs. The method is settled (mirrored
    order, per-run p50s, ranges, "within spread" as a verdict); the tool is not.
-6. **No memory accounting** (topic 40's piece 5): how much of the GPU's memory
+5. **No memory accounting** (topic 40's piece 5): how much of the GPU's memory
    each category holds, against the budget the driver reports.
 
 ### What the drivers here expose, measured 2026-10-28

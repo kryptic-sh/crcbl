@@ -1005,24 +1005,19 @@ pub const DIVERGENCES: &[Divergence] = &[
               resolve_query_set reaches it through the blit encoder's \
               resolveCounters:inRange:destinationBuffer:destinationOffset: at the \
               MTLCounterResultStatistic width crcbl_mtl::query derives — but no device has ever \
-              run them, and two of the seam's read paths cannot be written at all. **Nothing can \
-              sample one**: PassTimestampWrites names timestamps and crcbl_hal::CommandEncoder has \
-              no other query verb, so no work a caller records will ever write into this set — \
-              which is exactly what Capability::OcclusionQuery means on every backend, and why \
-              crcbl_mtl::device's supports claims the create, the resolve and the destroy and \
-              nothing more. **And query_results refuses it**: an MTLCounterResultStatistic is \
-              eight u64s while that call reads one u64 per query, so there is nowhere for the \
-              other seven to go, and returning the first would answer a different question in the \
-              shape of this one; crcbl-dx12 refuses the identical read of an eleven-field \
-              D3D12_QUERY_DATA_PIPELINE_STATISTICS in the same words, and the fix is a seam that \
-              carries a result width. crcbl_mtl::adapter reports \
-              Features::PIPELINE_STATISTICS_QUERY for a device advertising \
-              MTLCommonCounterSetStatistic, and gates it on that alone rather than on \
-              supportsCounterSampling:, because nothing samples this kind and a gate on an answer \
-              no line reads decides nothing. The Mac in CI advertises counterSets=0, so it reports \
-              the flag clear; that is a device fact reported per device, not what leaves the row \
-              open. Retiring this row takes a Mac that reports the flag creating and resolving a \
-              set, as the occlusion kind's absence from this list took",
+              run them, and the seam's way to fill one is not written for Metal yet. **Nothing \
+              samples one**: the seam names a pass's statistics with PassStatisticsWrites, and \
+              crcbl_mtl::command refuses that with NO_PIPELINE_STATISTICS, so no work a caller \
+              records writes into this set; that waits for the Mac work (owner, 2026-10-28). \
+              **Nor is it read**: crcbl_mtl keeps the trait's refusing Device::pipeline_statistics, \
+              and query_results refuses the kind because an MTLCounterResultStatistic is eight \
+              u64s where that call reads one, as crcbl-vk and crcbl-dx12 refuse it. \
+              crcbl_mtl::adapter reports Features::PIPELINE_STATISTICS_QUERY for a device \
+              advertising MTLCommonCounterSetStatistic, and gates it on that alone rather than on \
+              supportsCounterSampling:. The Mac in CI advertises counterSets=0, so it reports the \
+              flag clear; that is a device fact reported per device, not what leaves the row open. \
+              Retiring this row takes a Mac that reports the flag counting a pass and reading it \
+              back",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
