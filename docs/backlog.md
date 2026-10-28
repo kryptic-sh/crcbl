@@ -26806,7 +26806,14 @@ tree changes since. What is left:
   sandbox's stress grids on D3D12, four mirrored runs: GPU frame +7.3% on
   `lights-fit` (shadow +57%, depth prepass +55%, forward +10.6%), +7.5% on
   `area-lights-fit`, +5.7% on `instances`. The depth-only passes are the common
-  cost. Being worked on.
+  cost. Being worked on. **Tried and declined (2026-10-28): position-only depth
+  twins** (`depthMeshMain`/`amplifiedDepthMeshMain`, loading positions alone and
+  writing only `SV_Position`, as the vertex path's `depthVertexMain` does).
+  Sandbox, four mirrored pairs, against the same tree without them: Vulkan depth
+  prepass +13–16% and shadow +7–9% slower, D3D12 1–6% faster, the frame within
+  1% either way. So the drivers already drop the unused outputs, and the cost is
+  not what the mesh stage loads or writes. The diff is not kept; the shape was a
+  `ClusterDraw` helper shared with `emit_cluster` and a `DepthVertex` output.
 - **Metal still reports its adapter's features verbatim.** D3D12 and Vulkan
   grant only what a device asked for; `MetalDevice::open` keeps `record.caps`
   whole, so a Metal device opened without a feature still reports it. Changing
