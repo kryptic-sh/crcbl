@@ -19,16 +19,17 @@ did, so every presenter retired frames with `wait_idle`), and
   its buffers to whoever owns a timeline (the `Presenter`, or the caller), which
   `crcbl-frame` does not have today. Not started.
 - **ANV's first submission is the bulk of what remains.** Measured with a
-  throwaway test on the iGPU (debug build): the first upload on a fresh device
-  took 7–10 ms, later identical ones about 0.5 ms. That is a per-device driver
-  warm-up, so batching cannot remove it, only an earlier or overlapped first
-  submit can.
+  throwaway test on the iGPU (debug build, at a load average of about 8 to 9
+  from a parallel build, not in a quiet window): the first upload on a fresh
+  device took 7–10 ms, later identical ones about 0.5 ms. That is a per-device
+  driver warm-up, so batching cannot remove it, only an earlier or overlapped
+  first submit can.
 - **A cleared page is a fresh device-local zero buffer plus a copy.**
   `upload_cleared_texture` zeroes a buffer the size of a layer and copies it in,
   which is the wasm-heap argument in its docs. A render-pass clear of the image
   would need no buffer but adds `ImageUsage` the page does not otherwise have.
-  The 1024² image page measured 2.3–2.6 ms warm on the iGPU. Not measured: how
-  much of that is the zero buffer.
+  The 1024² image page measured 2.3–2.6 ms warm on the iGPU, under the same
+  load. Not measured: how much of that is the zero buffer.
 - **Open the instance and device before the window's first configure.** pikr's
   timeline: shell open at 1.9 ms, sized at 5.4 ms, Vulkan backend opened at 13.0
   ms, adapter at 13.8 ms, swapchain at 17.7 ms. Loading the driver and creating
