@@ -376,6 +376,18 @@ impl ComputeProbe {
         destination: crcbl_hal::BufferHandle,
         record: impl FnOnce(&mut dyn crcbl_hal::CommandEncoder),
     ) -> Vec<u32> {
+        self.run_counted(headless, destination, None, record)
+    }
+
+    /// [`run_into`](Self::run_into), with the compute pass counted into
+    /// `statistics`.
+    fn run_counted(
+        &self,
+        headless: &Headless,
+        destination: crcbl_hal::BufferHandle,
+        statistics: Option<crcbl_hal::PassStatisticsWrites>,
+        record: impl FnOnce(&mut dyn crcbl_hal::CommandEncoder),
+    ) -> Vec<u32> {
         let device = headless.device.as_ref();
         let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
             label: Some("compute probe dispatch"),
@@ -427,7 +439,7 @@ impl ComputeProbe {
         encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
             label: Some("compute probe"),
             timestamp_writes: None,
-            statistics_writes: None,
+            statistics_writes: statistics,
         });
         encoder.bind_compute_pipeline(self.pipeline);
         // Inside the pass, because the open scope is the only signal the seam
@@ -795,6 +807,69 @@ fn update_bind_group_moves_a_dispatch_onto_a_different_buffer() {
     lesser.finish();
 
     device.destroy_buffer(second);
+    probe.destroy(device);
+    headless.finish();
+}
+
+/// A compute pass's statistics count its dispatch: every invocation of every
+/// workgroup, and no graphics stage.
+///
+/// The count is exact, `PROBE_GROUPS` workgroups of the probe's
+/// `WORKGROUP_SIZE`, and the readback proves the dispatch ran. The graphics
+/// counters are present and zero: a compute pass is counted in the raster pool,
+/// which counts them too.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_compute_pass_counts_every_invocation_it_dispatches() {
+    let headless = Headless::open_for_triangle();
+    let device = headless.device.as_ref();
+    let probe = ComputeProbe::new(&headless, crcbl_hal::BindingFlags::empty());
+    let set = device
+        .create_query_set(&crcbl_hal::QuerySetDesc {
+            label: Some("compute statistics"),
+            kind: crcbl_hal::QueryKind::PipelineStatistics,
+            count: 1,
+        })
+        .expect("a statistics set");
+    let mut reset = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("compute statistics reset"),
+        queue: headless.queue,
+    });
+    reset.reset_query_set(set, 0..1);
+    let commands = reset.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+
+    let written = probe.run_counted(
+        &headless,
+        probe.destination,
+        Some(crcbl_hal::PassStatisticsWrites { set, query: 0 }),
+        |encoder| encoder.dispatch(PROBE_GROUPS, 1, 1),
+    );
+    assert_probe(
+        &written,
+        &probe_expected(PROBE_ELEMENTS),
+        "the counted dispatch",
+    );
+
+    let mut read = [crcbl_hal::PipelineStatistics::default()];
+    device
+        .pipeline_statistics(set, 0, &mut read)
+        .expect("the statistics read back");
+    let [counted] = read;
+    eprintln!("vk e2e: compute pass statistics {counted:?}");
+    assert_eq!(
+        counted.compute_invocations,
+        Some(u64::from(PROBE_ELEMENTS)),
+        "{counted:?}"
+    );
+    assert_eq!(counted.vertex_invocations, Some(0), "{counted:?}");
+    assert_eq!(counted.fragment_invocations, Some(0), "{counted:?}");
+
+    device.destroy_query_set(set);
     probe.destroy(device);
     headless.finish();
 }

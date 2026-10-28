@@ -12881,6 +12881,7 @@ pub(crate) mod tests {
                 beginning_of_pass: 0,
                 end_of_pass: 1,
             }),
+            None,
             |encoder| encoder.dispatch(PROBE_GROUPS, 1, 1),
         );
         assert_probe(
@@ -13783,10 +13784,13 @@ pub(crate) mod tests {
         /// by the pass descriptor, and this method owns the descriptor. The
         /// reset the seam requires of every caller goes in beside it, outside
         /// the pass where the seam puts it.
+        ///
+        /// `statistics` counts the same pass, for the same reason.
         fn run(
             &self,
             device: &Dx12Device,
             timestamps: Option<crcbl_hal::PassTimestampWrites>,
+            statistics: Option<crcbl_hal::PassStatisticsWrites>,
             record: impl FnOnce(&mut dyn CommandEncoder),
         ) -> Vec<u32> {
             run(device, |encoder| {
@@ -13825,7 +13829,7 @@ pub(crate) mod tests {
                 encoder.begin_compute_pass(&ComputePassDesc {
                     label: Some("compute probe"),
                     timestamp_writes: timestamps,
-                    statistics_writes: None,
+                    statistics_writes: statistics,
                 });
                 encoder.bind_compute_pipeline(self.pipeline);
                 // Inside the pass, because the open scope is the only signal the
@@ -13967,7 +13971,7 @@ pub(crate) mod tests {
 
         // Offset zero: the first block, which says every element.
         probe.dynamic_offsets = vec![0];
-        let whole = probe.run(&device, None, |encoder| {
+        let whole = probe.run(&device, None, None, |encoder| {
             encoder.dispatch(PROBE_GROUPS, 1, 1);
         });
         assert_probe(&whole, &probe_expected(PROBE_ELEMENTS), "at offset 0");
@@ -13975,7 +13979,7 @@ pub(crate) mod tests {
         // The same everything, one number apart: the second block, which says
         // half the elements and one more.
         probe.dynamic_offsets = vec![PROBE_PARAMS_STRIDE];
-        let half = probe.run(&device, None, |encoder| {
+        let half = probe.run(&device, None, None, |encoder| {
             encoder.dispatch(PROBE_GROUPS, 1, 1);
         });
         assert_probe(
@@ -13994,6 +13998,52 @@ pub(crate) mod tests {
         );
 
         probe.destroy(&device);
+    }
+
+    /// A compute pass's statistics count its dispatch: every invocation of
+    /// every workgroup, and no graphics stage.
+    ///
+    /// The count is exact, [`PROBE_GROUPS`] workgroups of the probe's
+    /// workgroup size, and the readback proves the dispatch ran. D3D12 counts
+    /// a pass in one query, so the graphics counters are present and zero.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_compute_pass_counts_every_invocation_it_dispatches() {
+        let (_instance, device) = open_device();
+        let set = device
+            .create_query_set(&QuerySetDesc {
+                label: Some("crcbl-dx12 compute statistics"),
+                kind: QueryKind::PipelineStatistics,
+                count: 1,
+            })
+            .expect("a statistics set");
+        let probe = ComputeProbe::new(&device);
+        let values = probe.run(
+            &device,
+            None,
+            Some(crcbl_hal::PassStatisticsWrites { set, query: 0 }),
+            |encoder| encoder.dispatch(PROBE_GROUPS, 1, 1),
+        );
+        assert_probe(
+            &values,
+            &probe_expected(PROBE_ELEMENTS),
+            "the counted pass really dispatched",
+        );
+        let mut read = [crcbl_hal::PipelineStatistics::default()];
+        device
+            .pipeline_statistics(set, 0, &mut read)
+            .expect("the statistics read back");
+        let [counted] = read;
+        eprintln!("crcbl-dx12: compute pass statistics {counted:?}");
+        assert_eq!(
+            counted.compute_invocations,
+            Some(u64::from(PROBE_ELEMENTS)),
+            "{counted:?}"
+        );
+        assert_eq!(counted.vertex_invocations, Some(0), "{counted:?}");
+        assert_eq!(counted.fragment_invocations, Some(0), "{counted:?}");
+        probe.destroy(&device);
+        device.destroy_query_set(set);
     }
 
     /// **A pipeline layout that does not fit D3D12's root budget is refused
