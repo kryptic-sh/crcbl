@@ -3347,14 +3347,49 @@ snap shipped; what is left was declined:
   thickets keep 60% of speed through a game-local multiplier, and it stays in
   the game until a second caller wants one.
 
-**Surprising, not a bug: glossy near-camera metal reads as see-through under
-SSR.** EW reported (2026-10-28) that its guns looked see-through while aiming.
-The cause was screen-space reflections in glossy gun steel (roughness
-0.36–0.42), not near-plane clipping: a surface that close reflects the screen
-behind it. EW fixed it in its assets by making the steel matte. Not checked in
-the engine: whether `crcbl_render::ssr` should fade out on geometry this near
-the camera, or for a view-model layer, rather than leaving each game to dull its
-materials.
+**EW's held weapon reads as glass under reflections (2026-10-29), and wants a
+way out.** EW's first-person MP5 looked see-through while aiming. EW's pixel
+samples settle the cause: only `reflections=false` makes it a uniform matte. Two
+parts of the reflections pass were at work, by roughness:
+
+- At roughness 0.36–0.42, below `crcbl_shaders::ssr::ROUGHNESS_CUTOFF`, the
+  screen-space march painted the table and floor behind the gun onto its
+  receiver. That was the see-through look.
+- At 0.65, above the cutoff, no ray is marched, but `ssr.slang` still writes the
+  environment term (`probe_environment` plus `sky_environment`, times the
+  split-sum BRDF). The sky term has **no occlusion**, so indoor metal reflects
+  open sky; a downward-tilted gun reflects upward, pale blue-grey, (81,100,128)
+  against the matte (66,81,104) on a 960×720 frame.
+
+EW also reports the held gun lit lighter and bluer than the same steel on the
+table even with reflections off; probably the probes and sky sampled at the held
+position, not verified.
+
+**Decision for the owner: how a game keeps held or first-person instances out of
+reflections.** The options:
+
+- **A per-instance flag** (say `InstanceDesc` or
+  `ForwardRenderer::set_instance_reflects`). Exact, but it is one more bit in
+  the instance record and in the reflectivity attachment the pass reads, and a
+  game has to set it.
+- **A near-distance fade** in `ssr.slang`, by view depth. No API, catches every
+  near surface, but it is a heuristic, and it would also fade a mirror held
+  close.
+- **A view-model layer** drawn after the reflections, as many engines do. The
+  largest change: a second depth range and a pass of its own.
+
+Separately, **the sky light has no occlusion, in the specular and the diffuse
+term alike**: an indoor scene's surfaces are lit and reflect as if the open sky
+were above them. EW measured it on the held MP5 (ADS, roughness 0.65, base
+colour about 0.22, the receiver pixel at (480,420)): metallic 0.62 reads
+(81,100,128), (66,81,104) with reflections off; metallic 0.35 reads
+(107,126,154) and (99,117,144); metallic 0.2 reads (119,138,165) and
+(114,132,159). Lowering metallic brightens it, because the diffuse term takes in
+more of the same light, so no material setting is a clean stopgap and EW stays
+at metallic 0.62, roughness 0.65 until the engine changes. Fixing it needs a
+sky-visibility term for both terms, from the probes' visibility or an AO-style
+bent cone. Not started. EW asked to be told when this or the reflection opt-out
+lands.
 
 **EW's route following is in `crcbl-nav`, partly adopted by EW**
 (`follow::RouteFollower`, `follow::StallDetector`, `SpanGrid::plan_toward`). On
