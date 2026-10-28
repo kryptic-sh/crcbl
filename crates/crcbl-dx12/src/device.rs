@@ -2257,17 +2257,6 @@ impl Device for Dx12Device {
         let gated = |feature: Features, why: &'static str| -> Support {
             Support::granted(has, feature, why)
         };
-        // One sentence for both mesh rows, shared for the reason
-        // `METAL_NO_DRAW_INDIRECT_COUNT` is — the declaration a caller reads and
-        // the parity record a reviewer reads drifted apart last time they were
-        // written twice. The two valued fills used to share one the same way,
-        // and both rows are gone: the amplification
-        // stage is not separately missing, it is behind the same unreported flag.
-        const NO_MESH_FLAG: &str = "the mesh and amplification stages are built — crcbl_dx12::pipeline packs the \
-             D3D12_PIPELINE_STATE_STREAM_DESC and the encoder records DispatchMesh — but this \
-             backend does not yet report Features::MESH_SHADER, because doing so moves every \
-             adapter onto GeometryPath::MeshShader and re-keys every golden image (the DX12 mesh \
-             reporting slice)";
         match capability {
             // A CopyBufferRegion in a loop; see crate::command's clear_buffer
             // and DeviceInner::zero.
@@ -2302,21 +2291,16 @@ impl Device for Dx12Device {
             // An `ID3D12CommandSignature` is built per stride, so a padded one
             // is described rather than assumed away.
             Capability::IndirectArgumentPaddedStride => Support::Yes,
-            // **The calls are written; the flag is not reported.** `pipeline`'s
-            // `mesh` packs the subobject stream, `CommandEncoder`'s
-            // `draw_mesh_tasks` records `DispatchMesh` and its indirect twin
-            // executes a `DISPATCH_MESH` command signature. What is missing is
-            // `adapter`'s `features_of` reading
-            // `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` and reporting
-            // `Features::MESH_SHADER` — which flips
-            // `GeometryPath::from_features` to `MeshShader` for every adapter
-            // and re-keys every golden image, so it is its own change.
-            //
-            // Until then this stays `No`: a `granted` here would answer
-            // `NotOnThisDevice` on a device that never withheld anything, and
-            // `parity_verdict` calls that `FalseDeviceGate` — which is the loud
-            // failure, and rightly.
-            Capability::MeshShading | Capability::TaskShaderStage => Support::No(NO_MESH_FLAG),
+            // `pipeline::mesh` packs the subobject stream and the encoder records
+            // `DispatchMesh` and its indirect twin; `adapter::features_of`
+            // reports both stages where the mesh tier and the shader model are
+            // there.
+            Capability::MeshShading => {
+                gated(Features::MESH_SHADER, "this device reports no MESH_SHADER")
+            }
+            Capability::TaskShaderStage => {
+                gated(Features::TASK_SHADER, "this device reports no TASK_SHADER")
+            }
             Capability::UpdateBindGroup => Support::Yes,
             // `create_pipeline_layout` builds a
             // `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` parameter at the `b`
@@ -3536,19 +3520,13 @@ impl Device for Dx12Device {
     /// `CreateGraphicsPipelineState` — see [`crate::pipeline`]'s `mesh` for why
     /// there is no other call, and [`crate::stream`] for the packing.
     ///
-    /// **This backend still reports no
-    /// [`Features::MESH_SHADER`](crcbl_hal::Features::MESH_SHADER)**, so a bind
-    /// group layout naming [`ShaderStages::MESH`](crcbl_hal::ShaderStages::MESH)
-    /// or `TASK` is still refused by
-    /// [`ShaderStages::check_supported`](crcbl_hal::ShaderStages::check_supported)
-    /// — a mesh pipeline built here reads its resources through sets declared
-    /// `ShaderStages::ALL`, which D3D12 maps to
-    /// `D3D12_SHADER_VISIBILITY_ALL` and which does reach both stages. Reporting
-    /// the flag flips
-    /// [`GeometryPath::from_features`](crcbl_hal::GeometryPath::from_features)
-    /// to [`MeshShader`](crcbl_hal::GeometryPath::MeshShader) for every adapter,
-    /// which re-keys every golden image `crcbl-render` holds; that is a separate
-    /// change with a re-bless in it, and `docs/backlog.md` carries it.
+    /// A device granted [`Features::MESH_SHADER`](crcbl_hal::Features::MESH_SHADER)
+    /// takes bind group layouts naming
+    /// [`ShaderStages::MESH`](crcbl_hal::ShaderStages::MESH) or `TASK`; one
+    /// without it is refused them by
+    /// [`ShaderStages::check_supported`](crcbl_hal::ShaderStages::check_supported).
+    /// A set declared `ShaderStages::ALL` reaches both stages either way,
+    /// through `D3D12_SHADER_VISIBILITY_ALL`.
     fn create_mesh_pipeline(
         &self,
         desc: &crcbl_hal::MeshPipelineDesc<'_>,
@@ -8039,10 +8017,10 @@ pub(crate) mod tests {
 
         // Transcribed from `crcbl_render::ForwardRenderer::mesh_layout` — see
         // the doc comment on which rows are absent and why. `ShaderStages::ALL`
-        // rather than `MESH | TASK` for [`MeshProbe`]'s reason: this backend
-        // reports no `Features::MESH_SHADER`, so the seam refuses a layout
-        // naming those bits, and `ALL` is `D3D12_SHADER_VISIBILITY_ALL`, which
-        // does reach both stages.
+        // rather than `MESH | TASK` for [`MeshProbe`]'s reason: a device that
+        // was not granted `Features::MESH_SHADER` refuses a layout naming those
+        // bits, and `ALL` is `D3D12_SHADER_VISIBILITY_ALL`, which reaches both
+        // stages on any device.
         // Each storage binding carries its element's stride, which this backend
         // now holds to the containers: `mesh_cluster.slang`'s declarations for
         // the geometry stages and `mesh.slang`'s for the fragment rows.
@@ -9039,11 +9017,14 @@ pub(crate) mod tests {
             "ExecuteIndirect takes a count buffer on every D3D12 device; adapter caps report {:?}",
             caps.features
         );
-        assert_eq!(
-            caps.geometry_path(),
-            crcbl_hal::GeometryPath::IndirectCount,
-            "DRAW_INDIRECT_COUNT is what selects this path, and it is reported"
-        );
+        // Mesh stages outrank it; without them `DRAW_INDIRECT_COUNT` is what
+        // selects the path. The draw below is the indirect-count call either way.
+        let expected = if caps.features.contains(Features::MESH_SHADER) {
+            crcbl_hal::GeometryPath::MeshShader
+        } else {
+            crcbl_hal::GeometryPath::IndirectCount
+        };
+        assert_eq!(caps.geometry_path(), expected, "{:?}", caps.features);
         assert!(
             caps.limits.max_draw_indirect_count > 1,
             "a reported DRAW_INDIRECT_COUNT with a ceiling of one draw is not the feature"

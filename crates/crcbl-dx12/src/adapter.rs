@@ -53,17 +53,19 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION, D3D12_CS_THREAD_GROUP_MAX_THREADS_PER_GROUP,
     D3D12_CS_THREAD_GROUP_MAX_X, D3D12_CS_THREAD_GROUP_MAX_Y, D3D12_CS_THREAD_GROUP_MAX_Z,
     D3D12_FEATURE, D3D12_FEATURE_ARCHITECTURE1, D3D12_FEATURE_D3D12_OPTIONS,
-    D3D12_FEATURE_D3D12_OPTIONS5, D3D12_FEATURE_D3D12_OPTIONS16, D3D12_FEATURE_DATA_ARCHITECTURE1,
-    D3D12_FEATURE_DATA_D3D12_OPTIONS, D3D12_FEATURE_DATA_D3D12_OPTIONS5,
+    D3D12_FEATURE_D3D12_OPTIONS5, D3D12_FEATURE_D3D12_OPTIONS7, D3D12_FEATURE_D3D12_OPTIONS16,
+    D3D12_FEATURE_DATA_ARCHITECTURE1, D3D12_FEATURE_DATA_D3D12_OPTIONS,
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5, D3D12_FEATURE_DATA_D3D12_OPTIONS7,
     D3D12_FEATURE_DATA_D3D12_OPTIONS16, D3D12_FEATURE_DATA_FORMAT_SUPPORT,
     D3D12_FEATURE_DATA_SHADER_MODEL, D3D12_FEATURE_FORMAT_SUPPORT, D3D12_FEATURE_SHADER_MODEL,
-    D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE, D3D12_FORMAT_SUPPORT1_TEXTURE2D,
-    D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT, D3D12_RAYTRACING_TIER, D3D12_RAYTRACING_TIER_1_0,
-    D3D12_RAYTRACING_TIER_1_1, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT, D3D12_REQ_MAXANISOTROPY,
-    D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION, D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION,
-    D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION, D3D12_RESOURCE_BINDING_TIER,
-    D3D12_RESOURCE_BINDING_TIER_3, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT,
-    D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12CreateDevice, ID3D12Device,
+    D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE, D3D12_FORMAT_SUPPORT1_TEXTURE2D, D3D12_MESH_SHADER_TIER,
+    D3D12_MESH_SHADER_TIER_1, D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT, D3D12_RAYTRACING_TIER,
+    D3D12_RAYTRACING_TIER_1_0, D3D12_RAYTRACING_TIER_1_1, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT,
+    D3D12_REQ_MAXANISOTROPY, D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION,
+    D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION,
+    D3D12_RESOURCE_BINDING_TIER, D3D12_RESOURCE_BINDING_TIER_3,
+    D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT,
+    D3D12CreateDevice, ID3D12Device,
 };
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,
@@ -151,6 +153,9 @@ pub(crate) struct RawCaps {
     /// `D3D12_FEATURE_DATA_D3D12_OPTIONS5::RaytracingTier` — DXR, and whether
     /// its inline form is there too.
     pub(crate) raytracing_tier: D3D12_RAYTRACING_TIER,
+    /// `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` — the mesh and
+    /// amplification stages.
+    pub(crate) mesh_shader_tier: D3D12_MESH_SHADER_TIER,
 }
 
 impl RawCaps {
@@ -162,6 +167,11 @@ impl RawCaps {
     /// the tier is what the driver can do and the shader model is what the
     /// runtime will compile a ray-tracing stage for, and a driver can report the
     /// one without the other.
+    pub(crate) fn mesh_shading(self) -> bool {
+        self.mesh_shader_tier.0 >= D3D12_MESH_SHADER_TIER_1.0
+            && self.shader_model.0 >= D3D_SHADER_MODEL_6_6.0
+    }
+
     pub(crate) fn raytracing(self) -> bool {
         self.raytracing_tier.0 >= D3D12_RAYTRACING_TIER_1_0.0
             && self.shader_model.0 >= D3D_SHADER_MODEL_6_3.0
@@ -231,6 +241,10 @@ impl FeatureQuery for D3D12_FEATURE_DATA_FORMAT_SUPPORT {
 
 impl FeatureQuery for D3D12_FEATURE_DATA_D3D12_OPTIONS5 {
     const FEATURE: D3D12_FEATURE = D3D12_FEATURE_D3D12_OPTIONS5;
+}
+
+impl FeatureQuery for D3D12_FEATURE_DATA_D3D12_OPTIONS7 {
+    const FEATURE: D3D12_FEATURE = D3D12_FEATURE_D3D12_OPTIONS7;
 }
 
 impl FeatureQuery for D3D12_FEATURE_DATA_D3D12_OPTIONS16 {
@@ -690,6 +704,11 @@ fn features_of(raw: &RawCaps) -> Features {
     if raw.ray_query() {
         out |= Features::RAY_QUERY;
     }
+    // Both stages from one answer: D3D12's amplification stage comes with its
+    // mesh tier, and one subobject stream builds both.
+    if raw.mesh_shading() {
+        out |= Features::MESH_SHADER | Features::TASK_SHADER;
+    }
     // No query for any of these: a GPU virtual address is not optional in
     // D3D12, anisotropic sampling is an architectural constant, compute is what
     // a DIRECT queue accepts by definition, the three indirect flags are
@@ -968,6 +987,11 @@ pub(crate) fn probe(
         raytracing_tier: check_feature(&device, D3D12_FEATURE_DATA_D3D12_OPTIONS5::default())
             .unwrap_or_default()
             .RaytracingTier,
+        // A refused query leaves `MeshShaderTier` at `NOT_SUPPORTED`, which is
+        // "no", for `options`' reason.
+        mesh_shader_tier: check_feature(&device, D3D12_FEATURE_DATA_D3D12_OPTIONS7::default())
+            .unwrap_or_default()
+            .MeshShaderTier,
     };
     let features = features_of(&raw);
     let caps = DeviceCaps {
@@ -1031,12 +1055,11 @@ mod tests {
     /// the mesh probe's, and named where that test says what each answer
     /// settles.
     use windows::Win32::Graphics::Direct3D12::{
-        D3D12_FEATURE_D3D12_OPTIONS3, D3D12_FEATURE_D3D12_OPTIONS7,
-        D3D12_FEATURE_DATA_D3D12_OPTIONS3, D3D12_FEATURE_DATA_D3D12_OPTIONS7,
-        D3D12_MESH_SHADER_TIER, D3D12_MESH_SHADER_TIER_1, D3D12_MESH_SHADER_TIER_NOT_SUPPORTED,
-        D3D12_RAYTRACING_TIER_NOT_SUPPORTED, D3D12_RESOURCE_BINDING_TIER_2,
-        D3D12_SAMPLER_FEEDBACK_TIER, D3D12_SAMPLER_FEEDBACK_TIER_0_9,
-        D3D12_SAMPLER_FEEDBACK_TIER_1_0, D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED,
+        D3D12_FEATURE_D3D12_OPTIONS3, D3D12_FEATURE_DATA_D3D12_OPTIONS3,
+        D3D12_MESH_SHADER_TIER_NOT_SUPPORTED, D3D12_RAYTRACING_TIER_NOT_SUPPORTED,
+        D3D12_RESOURCE_BINDING_TIER_2, D3D12_SAMPLER_FEEDBACK_TIER,
+        D3D12_SAMPLER_FEEDBACK_TIER_0_9, D3D12_SAMPLER_FEEDBACK_TIER_1_0,
+        D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED,
     };
 
     use crate::device::tests::open_device;
@@ -1100,6 +1123,7 @@ mod tests {
             unified_memory: false,
             block_compression: true,
             raytracing_tier: D3D12_RAYTRACING_TIER_NOT_SUPPORTED,
+            mesh_shader_tier: D3D12_MESH_SHADER_TIER_NOT_SUPPORTED,
         };
         assert!(base.dynamic_resources(), "tier 3 with SM6.6 is the answer");
 
@@ -1131,6 +1155,53 @@ mod tests {
         assert!(newer.dynamic_resources(), "{newer:?}");
     }
 
+    /// Both mesh stages follow the mesh tier and the shader model together: a
+    /// tier with a model below the committed DXIL's 6.6 is no mesh shading, a
+    /// model with no tier is none either, and a tier newer than the one named
+    /// still counts.
+    #[test]
+    fn the_mesh_stages_need_the_mesh_tier_and_the_shader_model_together() {
+        use crcbl_hal::GeometryPath;
+
+        let base = RawCaps {
+            binding_tier: D3D12_RESOURCE_BINDING_TIER_3,
+            shader_model: D3D_SHADER_MODEL_6_6,
+            unified_memory: false,
+            block_compression: true,
+            raytracing_tier: D3D12_RAYTRACING_TIER_NOT_SUPPORTED,
+            mesh_shader_tier: D3D12_MESH_SHADER_TIER_1,
+        };
+        let stages = Features::MESH_SHADER | Features::TASK_SHADER;
+        let cases = [
+            (D3D12_MESH_SHADER_TIER_1, D3D_SHADER_MODEL_6_6, stages),
+            (
+                D3D12_MESH_SHADER_TIER_1,
+                D3D_SHADER_MODEL_6_5,
+                Features::empty(),
+            ),
+            (
+                D3D12_MESH_SHADER_TIER_NOT_SUPPORTED,
+                D3D_SHADER_MODEL_6_8,
+                Features::empty(),
+            ),
+            (D3D12_MESH_SHADER_TIER(11), D3D_SHADER_MODEL_6_9, stages),
+        ];
+        for (tier, model, expected) in cases {
+            let raw = RawCaps {
+                mesh_shader_tier: tier,
+                shader_model: model,
+                ..base
+            };
+            let features = features_of(&raw);
+            assert_eq!(features & stages, expected, "{raw:?}");
+            assert_eq!(
+                GeometryPath::from_features(features) == GeometryPath::MeshShader,
+                expected.contains(Features::MESH_SHADER),
+                "{raw:?}"
+            );
+        }
+    }
+
     /// The ray flags follow the DXR tier and the shader model together, and a
     /// ray query is never reported without the acceleration structure it
     /// traverses.
@@ -1153,6 +1224,7 @@ mod tests {
             unified_memory: false,
             block_compression: true,
             raytracing_tier: D3D12_RAYTRACING_TIER_NOT_SUPPORTED,
+            mesh_shader_tier: D3D12_MESH_SHADER_TIER_NOT_SUPPORTED,
         };
         let cases = [
             (
@@ -1223,6 +1295,7 @@ mod tests {
                 unified_memory: false,
                 block_compression: true,
                 raytracing_tier: D3D12_RAYTRACING_TIER_NOT_SUPPORTED,
+                mesh_shader_tier: D3D12_MESH_SHADER_TIER_NOT_SUPPORTED,
             };
             let features = features_of(&raw);
             let limits = limits_of(features);
@@ -1271,6 +1344,7 @@ mod tests {
             unified_memory: false,
             block_compression: true,
             raytracing_tier: D3D12_RAYTRACING_TIER_1_1,
+            mesh_shader_tier: D3D12_MESH_SHADER_TIER_1,
         };
         let features = features_of(&raw);
         assert!(features.contains(Features::MULTI_DRAW_INDIRECT));
@@ -1397,10 +1471,6 @@ mod tests {
     // rather than a hand-written feature id at the call site for the reason
     // `FeatureQuery` exists at all — `CheckFeatureSupport` takes a void pointer,
     // and a mismatched pair is a struct filled in with another feature's fields.
-    impl FeatureQuery for D3D12_FEATURE_DATA_D3D12_OPTIONS7 {
-        const FEATURE: D3D12_FEATURE = D3D12_FEATURE_D3D12_OPTIONS7;
-    }
-
     impl FeatureQuery for D3D12_FEATURE_DATA_D3D12_OPTIONS3 {
         const FEATURE: D3D12_FEATURE = D3D12_FEATURE_D3D12_OPTIONS3;
     }
@@ -1443,25 +1513,15 @@ mod tests {
     /// `crcbl_hal::DIVERGENCES` records for [`BackendKind::Dx12`] as
     /// [`DivergenceKind::Unwritten`](crcbl_hal::DivergenceKind::Unwritten).
     ///
-    /// # Why the rows are not what they look like
+    /// # What it checks
     ///
-    /// `Unwritten` reads as "somebody types the mesh pipeline and the rows go
-    /// away", and for this backend that is not established. **This crate has
-    /// never asked D3D12 whether it has a mesh shader tier**: [`features_of`]
-    /// reports neither [`Features::MESH_SHADER`] nor
-    /// [`Features::TASK_SHADER`], and nothing in this crate names
-    /// [`D3D12_FEATURE_D3D12_OPTIONS7`] outside this test. So "no mesh shading
-    /// on D3D12" is true **by construction rather than by measurement**, and
-    /// nobody knows what this crate's CI adapter would answer.
+    /// Those rows are gone since 2026-10-27: [`features_of`] reports both
+    /// stages from `MeshShaderTier` and the shader model. This probe asks
+    /// D3D12 the same questions afresh and holds the adapter's reported flags
+    /// to the answer, so a rule that drifted from the measurement fails here.
     ///
-    /// That matters because both capabilities are gated —
-    /// `Capability::gating_feature` maps them onto those two flags — and a gated
-    /// capability whose flag is clear is *skipped* by the parity report rather
-    /// than checked. A slice that implemented the pipelines and deleted the rows
-    /// could therefore leave a green report standing over evidence nobody has.
-    ///
-    /// It creates nothing, submits nothing and asserts one thing: that the
-    /// queries ran. It **prints**, and the CI log is the artifact — the same
+    /// It creates nothing and submits nothing. It asserts that the queries ran
+    /// and that the flags match them. It **prints**, and the CI log is the artifact — the same
     /// shape as `crcbl-mtl`'s
     /// `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`,
     /// which puts that backend's two unsettled rows' answers into its own log.
@@ -1617,17 +1677,29 @@ mod tests {
             answer.MeshShaderTier
         });
         let model = negotiated.map_or(D3D_SHADER_MODEL_NONE, |answer| answer.HighestShaderModel);
+        let meshes = tier.0 >= D3D12_MESH_SHADER_TIER_1.0 && model.0 >= D3D_SHADER_MODEL_6_6.0;
         let verdict = if tier.0 < D3D12_MESH_SHADER_TIER_1.0 {
-            "no mesh tier here — MeshShading and TaskShaderStage can be implemented on this \
-             backend and never proved on this device"
+            "no mesh tier here — no mesh stages on this device"
         } else if model.0 < D3D_SHADER_MODEL_6_6.0 {
             "a mesh tier with no shader model to load the committed DXIL — crcbl-shaders ships \
-             dxil-model = 6_6, so this device could not run it whatever its hardware can do"
+             dxil-model = 6_6, so this device reports no mesh stages whatever its hardware can do"
         } else {
-            "MeshShading and TaskShaderStage are ordinary Unwritten work and are provable on \
-             this device"
+            "a mesh tier and the shader model the committed DXIL needs — both mesh stages"
         };
         println!("{MESH_PROBE}: verdict — {verdict}");
+        let reported = crcbl_hal::Instance::adapter_caps(&*instance, adapter)
+            .expect("the pinned adapter opened above")
+            .features;
+        assert_eq!(
+            reported.contains(Features::MESH_SHADER | Features::TASK_SHADER),
+            meshes,
+            "the adapter's flags {reported:?} disagree with what D3D12 answered: {verdict}",
+        );
+        assert_eq!(
+            reported.contains(Features::MESH_SHADER),
+            reported.contains(Features::TASK_SHADER),
+            "one mesh stage reported without the other: {reported:?}",
+        );
 
         assert!(
             refused.is_empty(),

@@ -13,7 +13,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
-### Changed
+### Added
+
+- **D3D12 has mesh shading**: a device reports `Features::MESH_SHADER` and
+  `Features::TASK_SHADER` where D3D12's mesh shader tier is at least 1 and the
+  shader model reaches the committed DXIL's 6.6, so the renderer takes
+  `GeometryPath::MeshShader` there as it does on Vulkan, and
+  `Capability::MeshShading` and `TaskShaderStage` answer `Yes`. WARP has it too:
+  a mesh pipeline with no pixel stage draws there through a do-nothing pixel
+  shader, where a null one removed WARP's device. On an RX 7900 XTX the mesh
+  path is slower than IndirectCount, on Vulkan as well as D3D12; a caller can
+  still ask for the other paths. The vertex outputs the mesh and vertex stages
+  share are `precise`, so the two paths draw the same frame on D3D12 hardware,
+  where differently contracted arithmetic had them a level apart.
 
 - **A D3D12 device reports only the features it was asked for**, as a Vulkan one
   does: `Device::caps` is the adapter's features intersected with

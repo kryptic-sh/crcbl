@@ -4346,11 +4346,10 @@ migrates every caller and deletes its own copy in the same change.
 
 The 56-commit campaign of 2026-09-22/23 (the MX550 laptop, never pushed) was
 ported to `main` on 2026-10-24, one slice at a time and re-measured on the RX
-7900 XTX. The original is on **`archive/perf-campaign-2026-09`** (forked from
-`e5b5a5b4`); its last unported commit, the half-resolution SSR march, shipped on
-2026-10-26 as the `ssr_resolution` setting, so the branch can be deleted once
-the user confirms. Its own `docs/backlog.md` holds the September measurements,
-and every trial it rejected is folded into "Declined" below.
+7900 XTX. Its last unported commit, the half-resolution SSR march, shipped on
+2026-10-26 as the `ssr_resolution` setting, and the branch it lived on,
+`archive/perf-campaign-2026-09` (last at `e3a58b2d`), was deleted on 2026-10-28
+with the user's OK. Every trial it rejected is folded into "Declined" below.
 
 - **How the sandbox measures.**
   `CRCBL_LOG=info sandbox --headless --wall-clock --backend vk --stress NAME --pacing off --fps 0 --frames 900 --size 1920x1080 --debug-overlay`
@@ -10481,10 +10480,9 @@ dynamic-offset, froxel, exposure and cross-path groups it listed all pass on the
   read back correctly on the 7900 XTX and on WARP, so no hazard has been
   observed. If another GPU ever fails it, the fix is a barrier there.
 - `crcbl-dx12`'s own device tests (`--run-ignored only`, pin unset so the
-  discrete GPU is used) pass on hardware but for the two debug-layer self-tests,
-  which need the layer this desktop does not have (2026-10-27, 97 of 99 with
-  `CRCBL_DX12_VALIDATION=0`). On WARP the two in `known-red.txt` still fail, for
-  the mesh-shading `DEFERRED` entry's null-pixel-shader reason.
+  discrete GPU is used) pass on hardware and on WARP but for the two debug-layer
+  self-tests, which need the layer this desktop does not have (2026-10-28, with
+  `CRCBL_DX12_VALIDATION=0`); `known-red.txt` is empty.
 - No CI job runs D3D12 on hardware (`windows-latest` has no GPU), so these
   results live only in this entry.
 
@@ -26776,180 +26774,40 @@ device. Its container is still held to its SPIR-V's bindings by `dxil`'s
 a device means moving that layout somewhere both crates can reach, which waits
 for a renderer-side wind pass to exist.
 
-## DEFERRED — dx12 mesh shading: WARP needs a pixel shader, one AMD driver culls everything
+## D3D12 mesh shading (shipped 2026-10-28), and older backend records
 
-**Metal still reports its adapter's features verbatim (2026-10-27).** D3D12 now
-grants only what a device asked for, through `DeviceDesc::granted` as Vulkan
-does, which is what the draw-gen and task-stage tests needed on the mesh path.
-`MetalDevice::open` keeps `record.caps` whole, so a Metal device opened without
-a feature still reports it. Changing it is `DeviceDesc::granted` there too, plus
-its tests asking for what they use (as `crcbl-dx12`'s `desc` now asks for
-`Features::all()`); not done because only CI runs Metal.
+D3D12 reports `MESH_SHADER` and `TASK_SHADER` where `MeshShaderTier` is at least
+1 and the shader model 6.6 (`RawCaps::mesh_shading`), on hardware and WARP, and
+the `MeshShading`/`TaskShaderStage` divergence rows are gone. What it took:
+devices granting only what they asked for (`DeviceDesc::granted`),
+`null_pixel.slang` standing in for a mesh pipeline's null pixel shader on WARP,
+and `precise` on the vertex outputs both geometry stages compute. The September
+investigation is in `docs/notes/backends.md` under _DEFERRED — dx12 mesh
+shading_; the frustum fault it recorded on the RX 7900 XTX did not survive the
+tree changes since. What is left:
 
-**The investigation is recorded in `docs/notes/backends.md` under this
-heading.** What stays here is what is still owed, and the decision it needs.
-
-**`Features::MESH_SHADER` and `TASK_SHADER` are still not reported by
-`crcbl-dx12`, on any adapter.** Reporting them was implemented and measured on
-2026-09-22 and taken back out of the working tree before it was committed,
-because two separate defects make the mesh path draw wrongly on both D3D12
-adapters available here. Each is below with its evidence.
-
-### WARP: a mesh pipeline with no pixel shader removes the device
-
-**Settled 2026-09-22, on this machine's OS WARP (`D3D12 UMD 10.0.26100.9278`,
-`MeshShaderTier = TIER_1`, SM6.8).** The entry's "cheap probe" was run, plus
-three more, by editing the existing probes locally and reverting:
-
-- `fragment: None` with **one colour target nothing writes**, plus the depth
-  attachment: **removes the device**. So zero render targets is not the trigger.
-- A fragment stage (`mesh_shader.slang`'s `fragmentMain`) with **zero** render
-  targets and the depth attachment: **draws**, and
-  `a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device` passes.
-- `fragment: None` with **no amplification stage** (`meshMain`, indirect
-  `[1, 1, 1]`): **removes the device**.
-- `the_cluster_shaders_dag_descent_draws_the_cut_it_chose` with `mesh.slang`'s
-  `depthMaskedFragmentMain` added as its pixel shader: **passes on WARP, every
-  assertion** — the depth texel, the `cull_stats` words (one survivor, one
-  frustum rejection, one cone rejection) and `cluster_selection` of
-  `[1, 1, 1, 0, 0]`.
-
-So the trigger is **a mesh pipeline with a null pixel shader**, whether the
-subobject is omitted or present and empty (the older result). The same shape on
-a vertex pipeline draws
-(`a_depth_only_raster_pipeline_draws_the_triangle_into_depth`), so it is WARP's
-mesh path specifically. `crcbl-render`'s `depth_pipeline` builds exactly this
-for the depth prepass and every shadow cascade on the mesh path.
-
-**The fix is a pixel shader, which is a shader change.** Nothing in
-`crate::pipeline`'s stream can supply one: the committed DXIL is the only
-bytecode this backend has. The two ways out, both needing the owner:
-
-- A no-op fragment entry point taking `mesh.slang`'s `VertexOutput`, paired with
-  every depth-only mesh pipeline — on WARP only, or everywhere. It needs a
-  `.slang` edit and DXIL regenerated through CI's `regenerated-shaders` artifact
-  (see the register entry above).
-- `depthMaskedFragmentMain`, which exists and is what made the cluster probe
-  pass above. **Not a fix as it stands**: it samples the base-colour page and
-  discards on the material's cutoff, which is a cost and a behaviour change on
-  every opaque depth draw.
-
-Or withhold the flags on a software adapter, which is what the reverted slice
-did: `RawCaps::software` gated them out, so CI's only D3D12 adapter stays on
-`IndirectCount`. **CI then covers no D3D12 mesh path at all.**
-
-### RX 7900 XTX: the amplification stage rejects every cluster by the frustum
-
-**Measured 2026-09-22 on an RX 7900 XTX, driver 32.0.21036.18, debug layer off
-because this machine has none.** Reporting the flags on hardware put the
-renderer on `GeometryPath::MeshShader`, and the dx12 hardware GPU suite went
-from 311/311 to **171 passed, 140 failed**.
-`the_cube_scene_draws_the_same_frame_on_every_geometry_path` failed with "a cube
-frame with 1 distinct colour(s) … is not evidence": the mesh-path frame is
-empty. The other `…_draws_the_same_frame_on_every_geometry_path` tests and the
-golden tests failed the same way. Two failures were different — "the forward
-renderer builds: OutOfDeviceMemory" — and were not investigated.
-
-`the_cluster_shaders_dag_descent_draws_the_cut_it_chose` reproduces it without a
-renderer, and **its data is not the problem**: the same test passes on WARP once
-it has a pixel shader (above). On the 7900 XTX, with or without that pixel
-shader, the words read back are 0 survivors, **3 frustum rejections** and 0 cone
-rejections, and the cut is right (`[1, 1, 1, 0, 0]`). Local edits that did
-**not** change the answer:
-
-- every plane `(0, 0, 0, 1)`, which rejects nothing;
-- the whole `CullParams` buffer filled with `(0, 0, 0, 1)` or `(0, 0, 1, 1)`
-  rows, and the whole `FrameUniforms` buffer too;
-- a zero instance transform, which makes the sphere a point at the origin;
-- binding 36 declared as a dynamic uniform, so `cull` is a root CBV rather than
-  a table entry;
-- the stats sentinel changed from `0xDEADBEEF` to `1.0`, ruling out the stats
-  buffer being read as the planes.
-
-Setting `GpuInstance::BASE_VERTEX_OVERRIDE`, which skips `cluster_survives`,
-**draws the triangle** and counts three survivors — so the mesh stage, the
-bindings, the descent and the depth readback all work on this device. The `PSV0`
-tables of the committed task container put `cull` at `b36`, `frame` at `b0` and
-`draw` at `b3`, matching the layout. What is left is `taskMain`'s frustum test
-answering "rejected" whatever it reads, on this driver and not on WARP. The
-likeliest reading is an AMD D3D12 shader-compiler defect; that is an inference,
-not a measurement. The RX 9060 XT on driver 32.0.31041.1004 passed this test on
-2026-09-15, with the DXIL of that date, which is consistent with a driver fix
-but was not re-run.
-
-The same card draws the renderer's mesh path correctly through `crcbl-vk`, so
-the hardware can run it; the fault is on the D3D12 side.
-
-### What is owed, and the decision
-
-**Decided 2026-09-25: (a), withhold everywhere.** It is the only option that
-regresses nothing that draws today, and (c) needs measurements that do not exist
-yet. Revisit when either a newer AMD driver on the 7900 XTX or non-AMD D3D12
-hardware passes `the_cluster_shaders_dag_descent_draws_the_cut_it_chose` with
-the reporting re-applied.
-
-**Re-checked 2026-10-27: the frustum fault is gone on the same driver, so it was
-not the driver's.** On `7016cd00`, with the RX 7900 XTX still on 32.0.21036.18,
-`the_cluster_shaders_dag_descent_draws_the_cut_it_chose` passes on hardware (it
-stays in `known-red.txt` for WARP's null-pixel-shader removal). The likeliest
-reason is a tree change since 2026-09-22 (`3bb2372d` took registers from binding
-numbers; `cf525442` took DXIL from CI's pinned dxc), not confirmed by bisecting.
-With the reporting re-applied in a scratch worktree (both flags on hardware at
-`MeshShaderTier` 1 and SM 6.6, never committed), the D3D12 hardware suites ran
-on `GeometryPath::MeshShader`: forward 53/53, hal-seam 32/32, tiling, glTF and
-sprite all passing, render 104/105, mesh 114/120, draw-gen 17/19, against 140
-failures in September. The nine: three `OutOfDeviceMemory` building the
-renderer, which was the shader-visible view heap running out (4093 of 4096
-taken; these frames peak at 6156), fixed the same day by
-`binding::VIEW_DESCRIPTORS` going to 65,536, after which all three pass; three
-tests that assume this backend has no mesh path (draw-gen's two two-bucket tests
-expect the uniform-cut path, and the flat-task and task-chunk arms find the
-device granting the task stage they dropped); grass's shell-cost shape (0.0002
-ms at 32 shells against 0.054 ms at 4); and
-`the_specular_aa_scene_draws_the_same_frame_on_every_geometry_path`, two
-channels off by 1 where the scene allows none. **The decision is the owner's
-again**: the trigger's premise, a driver defect, is gone, and what is left is
-the six others above. **The owner chose (2026-10-27) to implement it on WARP and
-hardware.** Done so far: a D3D12 device grants only what it asked for
-(`DeviceDesc::granted`), which the four draw-gen and task-stage failures needed,
-and WARP draws a mesh pipeline with no pixel stage, through `null_pixel.slang`'s
-do-nothing pixel shader in `pipeline::mesh`, so `known-red.txt` is empty. Left:
-reporting the flags, grass's shell-cost shape and the `specular_aa` difference.
-The options were:
-
-- (a) Withhold everywhere until the 7900 XTX draws. Honest, and what the tree
-  does. Costs nothing that works today.
-- (b) Report on hardware, withhold on software, and accept that this card and
-  driver draw empty frames. Not taken: it regresses a machine that renders
-  correctly on `IndirectCount` today.
-- (c) Report on hardware except a driver range known to be bad. Needs a
-  measurement on a newer AMD driver on this card and one on non-AMD hardware
-  first; a vendor or driver gate written on one data point is a guess.
-
-**The reverted implementation, for whoever picks it up**, is small and was
-tested before it came out: `FeatureQuery` for
-`D3D12_FEATURE_DATA_D3D12_OPTIONS7` moved out of `adapter.rs`'s `mod tests`;
-`RawCaps::mesh_shader_tier` read in `describe`; `RawCaps::mesh_shading` as
-`TIER_1` and SM6.6 and not software; `features_of` reporting both flags from it;
-`instance.rs`'s `every_reported_flag_has_a_call_behind_it_and_the_path_follows`
-asserting `MeshShader` exactly where the flag is reported and never on a
-software adapter; and a constructed-`RawCaps` unit test. Both guards were shown
-red (software gate removed; reporting line disabled) and then green. The older
-revert, `6fe2d41`, carries the same shape.
-
-**Retiring the `MeshShading` and `TaskShaderStage` dx12 rows is a `crcbl-hal`
-edit and belongs with the reporting.** A `Support::Yes` on hardware with the
-`crcbl_hal::DIVERGENCES` rows standing is what
-`the_parity_report_matches_the_reviewed_divergence_list` reports as stale, so
-`Dx12Device::supports` has to keep answering `No` until the rows go. Those rows'
-reasons, and `NO_MESH_FLAG` in `crate::device`, still say reporting "re-keys
-every golden image"; no golden is keyed on a geometry path (checked 2026-09-06),
-so that clause is wrong and should go with them.
-
-**The seam suite still does not drive a mesh draw.**
-`crates/crcbl/tests/hal_seam_e2e.rs` maps both capabilities to
-`Exercise::Unexercised(NEEDS_MESH_ARTIFACTS)`, so a `Yes` would be declared
-rather than proved until it grows a mesh exercise.
+- **The mesh path is slower than IndirectCount on the RX 7900 XTX, on both APIs
+  (measured 2026-10-28).** Lantern at 1920x1080, three mirrored runs per side,
+  `--force-geometry`: Vulkan's GPU frame 1.300 ms on IndirectCount against 1.363
+  on the mesh path (+4.8%; depth prepass +45%, shadow +85%, forward +2.4%);
+  D3D12 level (1.423 against 1.415; depth prepass +60%, shadow 36% faster). The
+  sandbox's stress grids on D3D12, four mirrored runs: GPU frame +7.3% on
+  `lights-fit` (shadow +57%, depth prepass +55%, forward +10.6%), +7.5% on
+  `area-lights-fit`, +5.7% on `instances`. The depth-only passes are the common
+  cost. Being worked on.
+- **Metal still reports its adapter's features verbatim.** D3D12 and Vulkan
+  grant only what a device asked for; `MetalDevice::open` keeps `record.caps`
+  whole, so a Metal device opened without a feature still reports it. Changing
+  it is `DeviceDesc::granted` there too, plus its tests asking for what they use
+  (as `crcbl-dx12`'s `desc` asks for `Features::all()`); not done because only
+  CI runs Metal.
+- **`precise` reaches SPIR-V and DXIL only.** Slang drops it for WGSL and MSL,
+  so the two geometry stages could still contract their outputs differently
+  there. Not seen: the cross-path comparisons pass on Metal and WebGPU.
+- **The seam suite still does not drive a mesh draw.**
+  `crates/crcbl/tests/hal_seam_e2e.rs` maps both capabilities to
+  `Exercise::Unexercised(NEEDS_MESH_ARTIFACTS)`, so their `Yes` is declared
+  there and proved by the render, mesh and `crcbl-dx12` device suites instead.
 
 ### quarry (S4C): what is left is the skinned case and two reviews
 
@@ -29345,31 +29203,16 @@ through a vertex frame or a screen-space one. What they left:
   with a `normalTexture` at all (grep of that file, 2026-09-05), so no e2e reads
   a normal map through the importer.
 
-## D3D12 and Metal: the hardware-proof rows stay parked (2026-08-30)
+## Metal: the hardware-proof rows stay parked (2026-08-30)
 
-**The constraint, stated by the user:** no Windows machine and no Apple machine
-are available right now, so every `owed` cell of the capabilities plan's feature
-matrix that needs a real device to prove — D3D12 mesh shading, Metal mesh
-shading, and the ray-query rows on both — is parked on the same ground. (Metal
-timestamp query was on this list and has since landed; the matrix's live form is
-`crcbl_hal::Capability` and its `DIVERGENCES` rows. Vulkan's ray-query cell is
-owed for another reason: the adapter reports the flags, but `crcbl-hal` has no
-acceleration-structure API to build through.) CI's software adapters (WARP, the
-macOS paravirtual device) remain the only verdict those backends get, and a
-capability that a software adapter cannot exercise is not owed until hardware
-is. Reviewed with the user and left parked. `crcbl-dx12` has the DXIL, the mesh
-PSO and `DispatchMesh`; what it lacks is the `OPTIONS7` tier query behind
-`features_of` and a gate that proves the path on D3D12 (the capability rule: no
-flag without a proof). The cost is a proving slice — the flag from the tier, the
-meshlet gates on WARP, the two `DIVERGENCES` rows — and the gap is performance
-on Windows, where the vertex path draws everything. If it is ever picked up, do
-it after foundation (a)'s vertex re-bless so the proof is not run twice. Since
-2026-09-22 the workstation is a Windows machine with an RX 7900 XTX (see _D3D12
-on hardware: fixed on an RX 7900 XTX, and what is left_), so the D3D12 rows no
-longer wait on a machine: D3D12 mesh shading is parked for its own reasons
-(`docs/notes/backends.md`, _DEFERRED — dx12 mesh shading_) and D3D12 ray query
-for the missing acceleration-structure API. Only the Metal rows still wait on
-hardware.
+**The constraint, stated by the user:** no Apple machine is available, so every
+`owed` cell of the capabilities plan's feature matrix that needs a real Metal
+device to prove (Metal mesh shading and its ray-query row) is parked. CI's macOS
+paravirtual device is the only verdict that backend gets, and a capability a
+software device cannot exercise is not owed until hardware is. D3D12 mesh
+shading left this section on 2026-10-28, proved on WARP and an RX 7900 XTX (see
+_D3D12 mesh shading (shipped 2026-10-28)_). D3D12's and Vulkan's ray-query rows
+wait on `crcbl-hal`'s missing acceleration-structure API, not on a machine.
 
 ## The frame pacer: what was accepted rather than fixed (2026-08-30)
 

@@ -746,9 +746,8 @@ pub(crate) const fn descriptor_range_type(
 /// could reach it: `crcbl_dx12::binding`'s `plan_layout` runs
 /// [`ShaderStages::check_supported`](crcbl_hal::ShaderStages::check_supported)
 /// first, and that refuses either bit on a device reporting no
-/// `Features::MESH_SHADER` — which this backend's adapters do not. A mesh
-/// pipeline built here now names those stages, so the arms are written rather
-/// than argued away.
+/// `Features::MESH_SHADER`. A device granted it names those stages, so the arms
+/// are written rather than argued away.
 pub(crate) const fn shader_visibility(stages: ShaderStages) -> D3D12_SHADER_VISIBILITY {
     if stages.bits() == ShaderStages::VERTEX.bits() {
         D3D12_SHADER_VISIBILITY_VERTEX

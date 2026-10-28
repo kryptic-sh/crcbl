@@ -471,7 +471,7 @@ impl VisibleHeaps {
 /// Every rule the seam states is checked first, by
 /// [`BindGroupLayoutDesc::check_entries`] — including the visibility check,
 /// which is what refuses a mesh- or task-visible entry on a device reporting no
-/// `Features::MESH_SHADER`, as every adapter this backend enumerates does. It is
+/// `Features::MESH_SHADER`, one that did not ask for it or has no mesh tier. It is
 /// called here rather than by `create_bind_group_layout` so that the refusal is
 /// reachable from this module's own tests, which have no D3D12 device to open.
 ///
@@ -1194,7 +1194,7 @@ mod tests {
     use crcbl_hal::{BindingResource, ImageViewType, SampleType};
 
     /// A device with the resource-binding tier this backend targets: bindless,
-    /// and no mesh stage — which is what `crcbl-dx12`'s adapter reports.
+    /// and no mesh stage, as a device that did not ask for one has.
     fn caps() -> DeviceCaps {
         DeviceCaps {
             features: crcbl_hal::Features::GPU_DRIVEN,
@@ -1487,12 +1487,12 @@ mod tests {
         }
 
         // A mesh-visible binding, which is `Unsupported` rather than
-        // `InvalidDescriptor` — this backend reports no mesh stage.
+        // `InvalidDescriptor` — this device has no mesh stage.
         let mesh = [BindGroupLayoutEntry {
             visibility: ShaderStages::MESH,
             ..entry(0, image)
         }];
-        let error = plan(&mesh).expect_err("this backend reports no MESH_SHADER");
+        let error = plan(&mesh).expect_err("this device reports no MESH_SHADER");
         assert!(
             matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
             "{error:?}"

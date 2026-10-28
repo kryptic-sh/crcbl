@@ -1656,9 +1656,24 @@ pub(crate) mod tests {
                 missing.difference(Features::DESCRIPTOR_INDEXING).is_empty(),
                 "a GPU-driven flag with a call behind it went missing: {missing:?} on {line}"
             );
+            // Mesh shading exactly where the adapter's tier and shader model say,
+            // and the path on it; `IndirectCount` everywhere else.
+            let caps = record.described().caps;
+            let meshes = record.described().raw.mesh_shading();
             assert_eq!(
-                record.described().caps.geometry_path(),
-                GeometryPath::IndirectCount,
+                caps.features
+                    .contains(Features::MESH_SHADER | Features::TASK_SHADER),
+                meshes,
+                "the mesh stages and the adapter's mesh tier disagree: {line}"
+            );
+            let path = if meshes {
+                GeometryPath::MeshShader
+            } else {
+                GeometryPath::IndirectCount
+            };
+            assert_eq!(
+                caps.geometry_path(),
+                path,
                 "the derived geometry path moved; the crate docs say what selects it: {line}"
             );
             // The ceiling has to move with the flag, or a caller reading it

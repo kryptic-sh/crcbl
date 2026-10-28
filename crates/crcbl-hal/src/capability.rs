@@ -129,10 +129,10 @@
 //! assert_eq!(permanent.kind, DivergenceKind::ApiAbsence);
 //! assert!(!permanent.kind.blocks_parity());
 //!
-//! // D3D12's mesh reporting is owed rather than absent, so it is one of the rows
-//! // standing between crcbl and its end state.
+//! // D3D12's occlusion query is owed rather than absent, so it is one of the
+//! // rows standing between crcbl and its end state.
 //! assert!(parity_blockers().any(|entry| {
-//!     entry.capability == Capability::MeshShading && entry.backend == BackendKind::Dx12
+//!     entry.capability == Capability::OcclusionQuery && entry.backend == BackendKind::Dx12
 //! }));
 //!
 //! // And Metal's GPU-side draw count is not, because that work landed — the
@@ -870,30 +870,11 @@ pub const DIVERGENCES: &[Divergence] = &[
     // unsupported Metal devices use the shared hardware/OS capability gate.
     Divergence {
         capability: Capability::MeshShading,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "the calls exist — crcbl_dx12::pipeline packs the D3D12_PIPELINE_STATE_STREAM_DESC an \
-              amplification and mesh stage need, and the encoder records DispatchMesh and an \
-              ExecuteIndirect of DISPATCH_MESH — but crcbl_dx12::adapter does not report \
-              Features::MESH_SHADER, so the capability cannot answer Yes. Reporting it moves every \
-              D3D12 adapter onto GeometryPath::MeshShader and re-keys every golden image, which is \
-              its own change (the DX12 mesh reporting slice)",
-    },
-    Divergence {
-        capability: Capability::MeshShading,
         backend: BackendKind::WebGpu,
         kind: DivergenceKind::ApiAbsence,
         why: "WebGPU has no mesh stage: GPUDevice creates render and compute pipelines only and \
               GPURenderPassEncoder has no draw for one. No proposal for it has reached the \
               specification, so this is the API rather than the slice",
-    },
-    Divergence {
-        capability: Capability::TaskShaderStage,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "MeshPipelineDesc::task reaches D3D12's amplification stage through the same \
-              subobject stream the mesh one does, and it is behind the same unreported flag; see \
-              the MeshShading entry",
     },
     Divergence {
         capability: Capability::TaskShaderStage,
@@ -1691,22 +1672,10 @@ mod tests {
             BackendKind::Dx12,
             DivergenceKind::Unwritten,
         ),
-        // `crcbl-dx12`'s own rows are the two below: D3D12 expresses every
-        // capability here, so every row of its below is `Unwritten` rather than
-        // an `ApiAbsence` — mesh shading and the task stage are shader-model
-        // features nobody has written against, not ones the API lacks.
-        // `BufferFillZero` was another and left the way a row is meant to: the
-        // backend fills to zero now, by copying out of a zeroed resource.
-        (
-            Capability::MeshShading,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::TaskShaderStage,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
-        ),
+        // `crcbl-dx12`'s mesh shading and task stage rows left on 2026-10-27,
+        // the way a row is meant to: the backend reports both where the device
+        // has a mesh tier. `BufferFillZero` left before them, by a copy out of
+        // a zeroed resource.
         // Metal: the byte-wide fill is the API and is not here. The occlusion
         // query is, and it arrived from the seam rather than from this backend —
         // `crcbl-mtl` builds the visibility buffer and nothing can count into
