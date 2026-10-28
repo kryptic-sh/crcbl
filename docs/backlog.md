@@ -3741,15 +3741,16 @@ on shard on 2026-09-27.
 
 - **Win32 windows take the executable's icon (2026-10-27, EW's request).**
   `window::register_class` loads the exe's first `RT_GROUP_ICON` (Explorer's
-  pick, `first_icon_group`) at `SM_CXICON` and `SM_CXSMICON`. **Not checked on
-  screen:** no test exe embeds an icon, so the tests read the lookup from
-  `shell32.dll` mapped as a resource file and the null case from the test
-  binary; nothing reads a registered class's icon back with one present. EW's
-  own run is the on-screen check. **Not done:** icons per monitor DPI. The class
-  takes system-DPI sizes once, so on a monitor at another scale the system
-  rescales them; `WM_SETICON` per window at `GetSystemMetricsForDpi` sizes would
-  fix that. A `WindowDesc` icon field was the other option EW offered, not
-  needed while the exe's resource is enough.
+  pick, `first_icon_group`) at `SM_CXICON` and `SM_CXSMICON`. **Seen on screen
+  once, by EW (2026-10-28, crcbl 0.12.1):** a release build's taskbar button
+  shows EW's embedded icon; the title bar's small icon was not in that capture,
+  so it is unseen. No test reads a registered class's icon back with one
+  present: the tests read the lookup from `shell32.dll` mapped as a resource
+  file and the null case from the test binary. **Not done:** icons per monitor
+  DPI. The class takes system-DPI sizes once, so on a monitor at another scale
+  the system rescales them; `WM_SETICON` per window at `GetSystemMetricsForDpi`
+  sizes would fix that. A `WindowDesc` icon field was the other option EW
+  offered, not needed while the exe's resource is enough.
 
 - **Pad chord routing constraints retained after EW migration.** **Decision.**
   The routing is a per-action mark, not a per-binding one. Overrides replace an
