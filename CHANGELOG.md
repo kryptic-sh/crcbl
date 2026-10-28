@@ -156,6 +156,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   face that maps it. A face whose `cmap` cannot be read is read whole, as
   before.
 
+- **`crcbl_frame::UiRenderer` uploads its start-up textures in one submission.**
+  The built-in glyph atlas, the image page, the glyph pages and the blank
+  texture used to be submitted and waited for one at a time, and on Mesa's ANV
+  each submit and `wait_idle` cost more than the copies. They are now recorded
+  into one command buffer and waited for once. On an Intel RPL-U iGPU the warm
+  `UiRenderer::new` went from a median of 11.70 ms to 8.96 ms in an interleaved
+  debug-build comparison, taken at a load average of about 8 rather than on a
+  quiet machine. `upload_texture` and its siblings behave as before.
+
 ### Fixed
 
 - **A Metal timeline reads as reached only once the command buffer that
