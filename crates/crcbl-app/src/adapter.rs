@@ -229,8 +229,8 @@ fn the_one<'a>(
     if let Some(second) = matching.next() {
         return Err(PinMiss(format!(
             "{who} is ambiguous here: adapters {} and {} are both {what}, and picking one would \
-             be picking it silently. Name one adapter, or name none to let the program rank \
-             them.\n{}",
+             be picking it silently. Unset it to let the program rank them, or offer the \
+             backend fewer drivers (on Vulkan, the loader's VK_DRIVER_FILES).\n{}",
             chosen.id.0,
             second.id.0,
             listing(adapters)

@@ -96,6 +96,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `OutOfDeviceMemory`; those frames peak at about 6,200. The heap costs 2 MiB on
   an RX 7900 XTX (4 MiB on WARP), allocated once per device.
 
+### Fixed
+
+- **A GPU the Vulkan loader offers twice is listed once.** On a machine where
+  AMD's Windows driver is registered twice, every GPU appeared twice, as
+  identical adapters, so `CRCBL_ADAPTER=integrated` or `discrete` was refused as
+  ambiguous and Vulkan could not be pinned at all. Adapters with the same
+  `driverUUID` and `deviceUUID` are now one adapter, which is logged at info;
+  two different drivers for one GPU are still both listed. The ambiguity message
+  no longer tells you to name an adapter, which the pin cannot do; it says to
+  unset the pin or offer fewer drivers.
+
 ## [0.12.1] - 2026-10-27
 
 ### Added

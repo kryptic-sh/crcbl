@@ -61,6 +61,10 @@ pub(crate) struct AdapterRecord {
     /// mesh stages. No seam flag, because it widens
     /// [`Features::PIPELINE_STATISTICS_QUERY`] rather than adding a capability.
     pub(crate) mesh_shader_queries: bool,
+    /// `driverUUID` and `deviceUUID`: which driver this is, on which device.
+    /// Two records with the same pair are one driver enumerated twice — see
+    /// [`first_of_each`].
+    pub(crate) identity: ([u8; vk::UUID_SIZE], [u8; vk::UUID_SIZE]),
 }
 
 /// A physical device's DRM primary and render nodes, as `dev_t`s.
@@ -675,10 +679,28 @@ pub(crate) fn enumerate(
         }
     };
 
-    let mut records: Vec<AdapterRecord> = physicals
+    let described: Vec<AdapterRecord> = physicals
         .into_iter()
         .map(|physical| describe(instance, physical, debug_utils, surface_caps2))
         .collect();
+    // **One driver on one device is one adapter, however often the loader
+    // offers it.** AMD's Windows driver is registered twice on some machines
+    // (measured 2026-10-28 on an RX 7900 XTX and a Raphael iGPU: every GPU
+    // listed twice, each pair identical down to its LUID and UUIDs), and a
+    // second copy made every device-class pin ambiguous with no adapter left
+    // to name. Two *different* drivers for one GPU differ in `driverUUID` and
+    // both stay: choosing between them is a real choice.
+    let mut records = first_of_each(
+        described,
+        |record| record.identity,
+        |record| {
+            crcbl_core::log::info!(
+                "crcbl-vk: {:?} ({}) is enumerated twice by the same driver; listing it once",
+                record.info.name,
+                record.info.driver
+            );
+        },
+    );
 
     // **Openability first, speed second.** Selection walks this order and
     // stops at the first adapter that serves the surface, so an adapter this
@@ -707,6 +729,24 @@ pub(crate) fn enumerate(
         }
     }
     records
+}
+
+/// `items` with every item after the first of its `key` dropped and handed
+/// to `dropped`, order otherwise kept.
+fn first_of_each<T, K: PartialEq>(
+    items: Vec<T>,
+    key: impl Fn(&T) -> K,
+    mut dropped: impl FnMut(&T),
+) -> Vec<T> {
+    let mut kept: Vec<T> = Vec::with_capacity(items.len());
+    for item in items {
+        if kept.iter().any(|earlier| key(earlier) == key(&item)) {
+            dropped(&item);
+        } else {
+            kept.push(item);
+        }
+    }
+    kept
 }
 
 fn describe(
@@ -940,12 +980,27 @@ fn describe(
         timestamp_period_ns: timestamp_period_of(&properties.limits, features),
         drm,
         mesh_shader_queries,
+        identity: (id_props.driver_uuid, id_props.device_uuid),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Repeats of a key are dropped and everything else keeps its order: a
+    /// list with no repeat comes back unchanged.
+    #[test]
+    fn a_driver_enumerated_twice_is_one_adapter() {
+        let pairs = vec![(1, 'a'), (2, 'b'), (1, 'c'), (3, 'd'), (2, 'e')];
+        let mut dropped = Vec::new();
+        assert_eq!(
+            first_of_each(pairs, |&(key, _)| key, |&(_, name)| dropped.push(name)),
+            [(1, 'a'), (2, 'b'), (3, 'd')]
+        );
+        assert_eq!(dropped, ['c', 'e']);
+        assert_eq!(first_of_each(vec![3, 1, 2], |&key| key, |_| {}), [3, 1, 2]);
+    }
 
     /// Values printed by glibc's own `makedev` from `<sys/sysmacros.h>`; the
     /// first is a DRM render node's, `226:128`.
