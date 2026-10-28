@@ -1895,15 +1895,18 @@ jobs:
 
       # `Presenter::submit_present_and_read_back` on an offscreen presenter:
       # the pixels a program's image test compares, read on the rasteriser
-      # such a test runs on. The loader is pointed at lavapipe directly, since
-      # nothing in this test sources `vulkan-icd.sh`.
+      # such a test runs on. `vulkan-icd.sh` resolves the manifest's name,
+      # which is not the same on every distribution.
       - name: Read a presented frame back on lavapipe
         env:
-          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_VALIDATION: '1'
           CRCBL_VK_SYNC_VALIDATION: '1'
           CRCBL_VK_VALIDATION_FATAL: '1'
-        run: cargo test --locked -p crcbl-app --test readback -- --ignored
+        run: |
+          source crates/crcbl-vk/tests/vulkan-icd.sh
+          crcbl_pin_vk_icd "crcbl-app read-back"
+          cargo test --locked -p crcbl-app --test readback -- --ignored --nocapture
 
       # The draw-generation buffers, read back and compared against the CPU
       # oracle. This is the Vulkan arm of the suite `vk_e2e`'s `cull.rs`,

@@ -5,8 +5,10 @@
 //! rasteriser, so that test is ignored here and run by CI's lavapipe job:
 //!
 //! ```text
-//! VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-//!     cargo test -p crcbl-app --test readback -- --ignored
+//! export CRCBL_VK_ICD=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+//! source crates/crcbl-vk/tests/vulkan-icd.sh
+//! crcbl_pin_vk_icd "crcbl-app read-back"
+//! cargo test -p crcbl-app --test readback -- --ignored
 //! ```
 //!
 //! `CRCBL_ADAPTER` pins the adapter, as it does for a program.
