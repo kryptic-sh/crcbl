@@ -159,6 +159,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 57    | [57-grass.md](57-grass.md)                                                                  | Grass and vegetation wind: cards, blades, shells, swaying trees            |
 | 58    | [58-hair.md](58-hair.md)                                                                    | Hair and fur: shells, cards on simulated chains, strands                   |
 | 59    | [59-tessellation.md](59-tessellation.md)                                                    | Tessellation: displacement baked into clusters, patterns diced at run time |
+| 60    | [60-profiler.md](60-profiler.md)                                                            | The profiler: CPU, GPU and driver counters, captures, comparison, viewers  |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
