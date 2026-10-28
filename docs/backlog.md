@@ -3485,9 +3485,10 @@ until each ships in a release):
    newer `libasound`, and an `objdump -T` gate of max GLIBC ≤ 2.31 (EW:
    GLIBC_2.30, runs on Debian 11 and Ubuntu 22.04). No code until crcbl packages
    games.
-5. **Asked again: the query layers** (walker barriers, concealment, wading,
-   solids, sight) **and the ground speed multiplier**, declined 2026-10-18
-   above. A decision for the owner, not re-decided here.
+5. **The query layers and the ground speed multiplier stay in EW** (the owner's
+   decision, relayed by EW 2026-10-29): the mechanism is `QueryFilter::within`,
+   and what remains is game meaning used by generated maps alone. Revisit when a
+   second game wants terrain slowdown.
 
 **EW's route following is in `crcbl-nav`, partly adopted by EW**
 (`follow::RouteFollower`, `follow::StallDetector`, `SpanGrid::plan_toward`). On
