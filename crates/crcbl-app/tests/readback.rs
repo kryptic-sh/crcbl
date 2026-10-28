@@ -18,8 +18,8 @@ use crcbl_app::backend::GpuBackend;
 use crcbl_app::present::{Presenter, PresenterDesc};
 use crcbl_app::readback::Rgba8Frame;
 use crcbl_hal::{
-    Barriers, ClearValue, ColorAttachment, CommandEncoderDesc, ImageBarrier, ImageSubresourceRange,
-    LoadOp, Rect2d, RenderPassDesc, ResourceState, StoreOp,
+    Barriers, ClearValue, ColorAttachment, CommandEncoderDesc, Features, ImageBarrier,
+    ImageSubresourceRange, LoadOp, Rect2d, RenderPassDesc, ResourceState, StoreOp,
 };
 
 /// The frame size: wide enough that a row is not already a multiple of the
@@ -123,7 +123,7 @@ fn a_null_read_back_is_the_frame_size_and_leaves_nothing_alive() {
 }
 
 /// **The pixels are the frame's, in R, G, B, A order, top row first**, and
-/// the same on a second frame.
+/// the same on a second frame, on a device with its timeline.
 #[test]
 #[ignore = "needs Vulkan; CI runs it on lavapipe"]
 fn a_vulkan_read_back_is_the_frame_in_rgba_order() {
@@ -142,6 +142,17 @@ fn a_vulkan_read_back_is_the_frame_in_rgba_order() {
         "read-back on {:?}, {:?}",
         presenter.adapter().map(|adapter| adapter.name),
         presenter.format()
+    );
+    // Vulkan 1.3, which crcbl-vk requires, has timeline semaphores in core,
+    // so a presenter that reads frames back without one waits on the whole
+    // device for each.
+    assert!(
+        presenter
+            .device()
+            .caps()
+            .features
+            .contains(Features::TIMELINE_SEMAPHORE),
+        "a Vulkan presenter retires its frames on a timeline"
     );
     let first = draw_and_read(&mut presenter);
     let (width, height) = EXTENT;

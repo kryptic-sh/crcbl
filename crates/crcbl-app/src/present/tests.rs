@@ -364,6 +364,27 @@ fn open_null_context(
     (shell, gpu)
 }
 
+/// **A presenter retires frames on a timeline without being asked to.** A
+/// device grants only requested features, so a caller that left
+/// `TIMELINE_SEMAPHORE` out of its optional features used to get no timeline
+/// and a `wait_idle` per frame, on a device that had one.
+#[test]
+fn a_presenter_asks_for_the_timeline_it_retires_frames_on() {
+    use crcbl_hal::null::NullInstance;
+
+    let asked = PresenterDesc::default().optional_features;
+    assert!(!asked.contains(Features::TIMELINE_SEMAPHORE));
+    let (_shell, gpu) = open_null_context(NullInstance::gpu_driven(), asked, Pacing::Off);
+    assert!(
+        gpu.device
+            .caps()
+            .features
+            .contains(Features::TIMELINE_SEMAPHORE),
+        "the device was opened without the timeline"
+    );
+    assert!(gpu.timeline.is_some(), "frames retire with wait_idle");
+}
+
 /// **The downgrade line is an assertion target, not decoration.**
 ///
 /// Topic 39 makes it the engine's only evidence that a

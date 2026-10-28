@@ -1723,7 +1723,11 @@ impl Presenter {
             label: Some(label),
             adapter: adapter.id,
             required_features: open.required_features,
-            optional_features: open.optional_features,
+            // Asked for on every open, whatever the caller asked: retiring
+            // frames in flight is the presenter's own job, and a device grants
+            // only what was requested, so unasked it reports none and every
+            // frame falls back to `wait_idle`.
+            optional_features: open.optional_features | Features::TIMELINE_SEMAPHORE,
             compatible_surface: Some(surface),
         })?;
 

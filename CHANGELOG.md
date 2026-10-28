@@ -136,6 +136,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A `Presenter` retires frames on a timeline semaphore again.** A device
+  reports only the features it was asked for, and the presenter never asked for
+  `Features::TIMELINE_SEMAPHORE`, so every presenter whose caller left it out of
+  `PresenterDesc::optional_features` (the default) logged "no timeline
+  semaphores" and waited for the whole device with `wait_idle` before reusing
+  each command buffer, on devices that had one. The presenter now always asks
+  for it.
+
 - **A GPU the Vulkan loader offers twice is listed once.** On a machine where
   AMD's Windows driver is registered twice, every GPU appeared twice, as
   identical adapters, so `CRCBL_ADAPTER=integrated` or `discrete` was refused as
