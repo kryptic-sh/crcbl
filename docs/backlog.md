@@ -4486,7 +4486,19 @@ with the user's OK. Every trial it rejected is folded into "Declined" below.
   `area-fill-lights-fit` 12.364 → 15.078) and the MX550 0.4–2.7% slower
   (`lights-fit` 2.576 → 2.645 ms), though no fixture has a probe and the grid
   never runs in any of them. The loop that helped the sun's two cascades is not
-  a pattern for the rest of this stage. Not measured: lavapipe's timing.
+  a pattern for the rest of this stage. Not measured: lavapipe's timing. **A
+  forward variant without the probe grid, measured first (2026-10-28): not worth
+  building as it stands.** Stubbing `probe_irradiance` to return zero (so the
+  compiler drops the grid, as a no-probe variant would) and timing it against
+  `e264f3d2` on the Intel iGPU, three mirrored pairs per fixture, mean `forward`
+  p50 with the runs' range: `lights-fit` 8.056 [7.854–8.636] → 7.542
+  [7.498–7.610] ms (−6.4%), `specular-lights-fit` 11.047 [10.960–11.318] →
+  10.379 [10.368–10.404] ms (−6.0%), but `area-lights-fit` 18.519
+  [18.482–18.555] → 22.695 [22.674–22.708] ms (+22.5%). Removing code made area
+  lights slower, so the grid's size is not what decides this stage on ANV. Not
+  measured: the MX550 and the RX 7900 XTX, ANV's shader statistics for the stub,
+  and why the area path regressed. Re-propose only with `INTEL_DEBUG=fs`
+  evidence of what changed in the area variant.
 - **Unmeasured paths.** A populated probe volume pays the empty-probe early
   return's uniform branch, which no fixture has probes to time; water's own pass
   was not timed either. Slang's MSL output allocates the tile-local exposure
