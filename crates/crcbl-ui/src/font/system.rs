@@ -81,10 +81,16 @@ impl Font {
     /// What a list of system fallback faces is for, which a launcher would
     /// otherwise read whole before its first frame; see [`Font::lazy`] for
     /// what a face that fails to read answers. Its warning names the file.
+    ///
+    /// **Asked whether it maps a char, it reads only its `cmap`**
+    /// ([`FontMatch::read_cmap`]), and reads the whole face only for a char
+    /// the `cmap` maps: a fallback list that a char misses throughout costs
+    /// each face's `cmap`, not its file.
     #[must_use]
     pub fn from_system_lazy(face: FontMatch) -> Self {
         let what = format!("the font face {} (#{})", face.path.display(), face.index);
-        Self::lazy_called(what, move || face.read())
+        let cmap = face.clone();
+        Self::lazy_with_cmap(what, move || face.read(), move || cmap.read_cmap())
     }
 }
 
@@ -179,6 +185,36 @@ mod tests {
         });
         assert!(gone.source.what.contains("no such font file.ttf"));
         assert_eq!(gone.glyph_id('a'), crate::font::GlyphId::NOTDEF);
+    }
+
+    /// **A char the face's `cmap` does not map is answered without reading
+    /// the face**, as a fallback face missed by a whole run of text is: in
+    /// Latin-1 and past it, and for a char it does map the face is read and
+    /// answers as itself.
+    #[test]
+    fn a_lazy_system_face_misses_from_its_cmap_alone() {
+        let font = Font::from_system_lazy(committed(0));
+        let compiled = Font::parse(crate::font::SANS_TTF).expect("parses");
+        for missing in ['\u{1}', '\u{4E00}', '\u{F0001}'] {
+            assert_eq!(compiled.glyph_id(missing), crate::font::GlyphId::NOTDEF);
+            assert_eq!(font.glyph_id(missing), crate::font::GlyphId::NOTDEF);
+        }
+        assert!(!font.is_loaded(), "a miss read the whole face");
+        assert_ne!(compiled.glyph_id('\u{2014}'), crate::font::GlyphId::NOTDEF);
+        assert_eq!(font.glyph_id('\u{2014}'), compiled.glyph_id('\u{2014}'));
+        assert!(font.is_loaded());
+
+        // A face whose `cmap` cannot be read is read whole to answer.
+        let unreadable = Font::lazy_with_cmap(
+            "a face with an unreadable cmap".to_owned(),
+            || Ok::<_, String>(crate::font::SANS_TTF),
+            || Err("no cmap".to_owned()),
+        );
+        assert_eq!(
+            unreadable.glyph_id('\u{4E00}'),
+            crate::font::GlyphId::NOTDEF
+        );
+        assert!(unreadable.is_loaded());
     }
 
     #[test]

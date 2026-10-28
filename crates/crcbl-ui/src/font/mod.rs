@@ -424,11 +424,36 @@ struct Source {
     /// its file, for one [`Font::from_system_lazy`] made.
     #[cfg(feature = "parsed-font")]
     what: String,
+    /// What a [`Font::lazy`] face not yet read answers "do you map this
+    /// char?" from, when it can say without being read.
+    #[cfg(feature = "parsed-font")]
+    coverage: Mutex<Coverage>,
+}
+
+/// How a [`Font::lazy`] face not yet read says which chars it maps.
+#[cfg(feature = "parsed-font")]
+enum Coverage {
+    /// It cannot: reading the face is the only answer.
+    Unknown,
+    /// Its `cmap`'s loader, not yet run.
+    Pending(Loader),
+    /// Its `cmap`, as a font file holding only that table.
+    Read(FontData),
 }
 
 /// What [`Font::lazy`] keeps to read its face: its bytes, or why not.
 #[cfg(feature = "parsed-font")]
 type Loader = Box<dyn FnOnce() -> Result<FontData, String> + Send>;
+
+/// `load` as a [`Loader`].
+#[cfg(feature = "parsed-font")]
+fn loader<D, E>(load: impl FnOnce() -> Result<D, E> + Send + 'static) -> Loader
+where
+    D: Into<FontData>,
+    E: fmt::Display,
+{
+    Box::new(move || load().map(Into::into).map_err(|error| error.to_string()))
+}
 
 /// What one parse read.
 struct Parsed {
@@ -548,6 +573,7 @@ impl Font {
             parsed: OnceLock::from(Parsed::read(data.into())?),
             load: Mutex::new(None),
             what: String::new(),
+            coverage: Mutex::new(Coverage::Unknown),
         }))
     }
 
@@ -585,14 +611,38 @@ impl Font {
         D: Into<FontData>,
         E: fmt::Display,
     {
-        let load: Loader =
-            Box::new(move || load().map(Into::into).map_err(|error| error.to_string()));
         Self::of(Source {
             ids: next_ids(),
             parsed: OnceLock::new(),
-            load: Mutex::new(Some(load)),
+            load: Mutex::new(Some(loader(load))),
             what,
+            coverage: Mutex::new(Coverage::Unknown),
         })
+    }
+
+    /// [`Font::lazy_called`], answering which chars it maps from `cmap`'s
+    /// bytes until something needs more than that: a font file holding the
+    /// face's `cmap`, read the first time a char is asked about. A char it
+    /// maps reads the face; a char it does not is answered without reading
+    /// it. A `cmap` that cannot be read or parsed answers nothing, and the
+    /// face is read to answer instead.
+    #[cfg(feature = "parsed-font")]
+    pub(crate) fn lazy_with_cmap<D, E>(
+        what: String,
+        load: impl FnOnce() -> Result<D, E> + Send + 'static,
+        cmap: impl FnOnce() -> Result<D, E> + Send + 'static,
+    ) -> Self
+    where
+        D: Into<FontData>,
+        E: fmt::Display,
+    {
+        let font = Self::lazy_called(what, load);
+        *font
+            .source
+            .coverage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Coverage::Pending(loader(cmap));
+        font
     }
 
     /// Whether this face has been read: always for one [`Font::parse`]
@@ -609,6 +659,33 @@ impl Font {
             source: Arc::new(source),
             synthesis: Synthesis::NONE,
             fallback: no_fallback(),
+        }
+    }
+
+    /// Whether this face, not yet read, is known to map no glyph to `c`
+    /// without reading it; see [`Font::lazy_with_cmap`]. `false` for a face
+    /// that has been read, or that cannot say.
+    #[cfg(feature = "parsed-font")]
+    fn known_to_miss(&self, c: char) -> bool {
+        if self.is_loaded() {
+            return false;
+        }
+        let mut coverage = self
+            .source
+            .coverage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if matches!(*coverage, Coverage::Pending(_))
+            && let Coverage::Pending(load) = core::mem::replace(&mut *coverage, Coverage::Unknown)
+            && let Ok(cmap) = load()
+        {
+            *coverage = Coverage::Read(cmap);
+        }
+        match &*coverage {
+            Coverage::Read(cmap) => {
+                FontRef::new(cmap.as_bytes()).is_ok_and(|font| font.charmap().map(c).is_none())
+            }
+            Coverage::Unknown | Coverage::Pending(_) => false,
         }
     }
 
@@ -716,6 +793,8 @@ impl Source {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        // Read whole, the face answers from its own `cmap`; the copy goes.
+        *self.coverage.lock().unwrap_or_else(PoisonError::into_inner) = Coverage::Unknown;
         // `parsed` runs this at most once, so a face made without a loader —
         // one `Font::parse` made — has its parse set and never gets here.
         let read = load
@@ -866,6 +945,10 @@ impl Font {
     /// the font maps it to nothing.
     #[must_use]
     pub fn glyph_id(&self, c: char) -> GlyphId {
+        #[cfg(feature = "parsed-font")]
+        if self.known_to_miss(c) {
+            return GlyphId::NOTDEF;
+        }
         let codepoint = c as u32;
         if codepoint < LATIN1_END {
             return GlyphId(self.parsed().latin1[codepoint as usize]);
@@ -926,6 +1009,7 @@ impl Font {
             }),
             load: Mutex::new(None),
             what: String::new(),
+            coverage: Mutex::new(Coverage::Unknown),
         })))
     }
 }

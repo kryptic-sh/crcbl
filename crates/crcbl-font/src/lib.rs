@@ -207,6 +207,22 @@ impl FontMatch {
     pub fn read(&self) -> io::Result<Vec<u8>> {
         sfnt::standalone(std::fs::read(&self.path)?, self.index)
     }
+
+    /// The face's `cmap` alone, as a font file holding only that table: what
+    /// says which chars the face maps. Read by seeking to the face's table
+    /// directory and to the table, not by reading the file, so asking a
+    /// fallback face whether it maps a char costs its `cmap` and not the
+    /// tens of megabytes a CJK collection holds.
+    ///
+    /// A face with no `cmap` comes back as a font file with no tables, which
+    /// maps no char.
+    ///
+    /// # Errors
+    ///
+    /// As [`FontMatch::read`].
+    pub fn read_cmap(&self) -> io::Result<Vec<u8>> {
+        sfnt::face_cmap(&mut std::fs::File::open(&self.path)?, self.index)
+    }
 }
 
 /// Where a [`SystemFonts`] finds its faces.

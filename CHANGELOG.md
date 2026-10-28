@@ -15,6 +15,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_font::FontMatch::read_cmap`** reads one face's `cmap` table alone, as
+  a font file holding only that table, by seeking to the face's table directory
+  and the table rather than reading the file. It is what says which chars a face
+  maps, at the cost of the table rather than of a CJK collection's tens of
+  megabytes.
+
 - **`Presenter::submit_present_and_read_back`** submits and presents a frame as
   `submit_and_present` does, then returns the presented image as an `Rgba8Frame`
   (R, G, B, A bytes, top row first, in the swapchain's own encoding and alpha).
@@ -135,6 +141,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   an RX 7900 XTX (4 MiB on WARP), allocated once per device.
 
 ### Changed
+
+- **A fallback face from `Font::from_system_lazy` reads only its `cmap` to say
+  it lacks a char.** Text whose chars miss a fallback face, such as Nerd Font
+  icons in the Private Use Area, used to read and parse every face it passed,
+  whole. Now each face it passes costs its `cmap`, and a face is read whole only
+  when its `cmap` maps the char. On an Arch laptop whose fontconfig sans-serif
+  list holds 18 faces in 73 MB of files, asking it for a Nerd Font icon read 6
+  faces whole (the 19 MB Noto CJK collection among them) in 242 ms, and now
+  reads 1, the face that maps it, in 3.1 ms. A face whose `cmap` cannot be read
+  is read whole, as before.
 
 - **`crcbl_frame::UiRenderer` uploads its start-up textures in one submission.**
   The built-in glyph atlas, the image page, the glyph pages and the blank

@@ -2,10 +2,11 @@
 //! collection header, each face's table directory, and writing a directory
 //! back out around a set of tables.
 //!
-//! Two jobs share it. [`describe_tables`] reads, from a file on disk, only
+//! Three jobs share it. [`describe_tables`] reads, from a file on disk, only
 //! the few tables a face is matched by, seeking to each rather than reading
 //! the file: a CJK collection is tens of megabytes, and its name table a few
-//! kilobytes of that. [`standalone`] cuts one face out of a collection as a
+//! kilobytes of that. [`face_cmap`] reads one face's `cmap` the same way,
+//! which is all that answers whether the face maps a char. [`standalone`] cuts one face out of a collection as a
 //! font file of its own, which is what a parser that reads one font per file
 //! — `crcbl-ui`'s `Font::parse` — takes.
 //!
@@ -29,6 +30,9 @@ const SFNT_VERSIONS: [[u8; 4]; 3] = [[0, 1, 0, 0], *b"OTTO", *b"true"];
 /// The tables [`crate::face::describe`] reads: the family names, and the
 /// three `skrifa`'s attributes come from.
 const DESCRIBE_TABLES: [[u8; 4]; 4] = [*b"OS/2", *b"head", *b"name", *b"post"];
+
+/// The table [`face_cmap`] reads.
+const CMAP_TABLE: [u8; 4] = *b"cmap";
 
 /// The offset table: the version, the table count and the three search
 /// fields.
@@ -57,6 +61,30 @@ struct Record {
 /// table, or its face count runs past its end: it is not a font file.
 pub(crate) fn describe_tables<R: Read + Seek>(file: &mut R) -> io::Result<Vec<Option<Vec<u8>>>> {
     let len = file.seek(SeekFrom::End(0))?;
+    Ok(directories(file, len)?
+        .into_iter()
+        .map(|offset| face_tables(file, offset, len, &DESCRIBE_TABLES).ok())
+        .collect())
+}
+
+/// The face at `index` of the font file in `file`, as a font file of its own
+/// holding only its `cmap`, or no table at all when it has none.
+///
+/// # Errors
+///
+/// [`describe_tables`]'s, and [`io::ErrorKind::InvalidData`] when the file
+/// has no face at `index` or the face's directory or `cmap` runs past its
+/// end.
+pub(crate) fn face_cmap<R: Read + Seek>(file: &mut R, index: u32) -> io::Result<Vec<u8>> {
+    let len = file.seek(SeekFrom::End(0))?;
+    let offset = *directories(file, len)?
+        .get(usize::try_from(index).map_err(invalid)?)
+        .ok_or_else(|| invalid(format!("the file has no face {index}")))?;
+    face_tables(file, offset, len, &[CMAP_TABLE])
+}
+
+/// Where each face's table directory starts, in the file's face order.
+fn directories<R: Read + Seek>(file: &mut R, len: u64) -> io::Result<Vec<u32>> {
     let header: [u8; 12] = read_at(file, 0, len)?;
     let directories = if header[..4] == COLLECTION_TAG {
         let count = be_u32(&header[8..]);
@@ -72,15 +100,17 @@ pub(crate) fn describe_tables<R: Read + Seek>(file: &mut R) -> io::Result<Vec<Op
     } else {
         return Err(invalid("neither a font nor a collection"));
     };
-    Ok(directories
-        .into_iter()
-        .map(|offset| face_tables(file, offset, len).ok())
-        .collect())
+    Ok(directories)
 }
 
-/// The face whose table directory is at `offset`, rebuilt with only
-/// [`DESCRIBE_TABLES`].
-fn face_tables<R: Read + Seek>(file: &mut R, offset: u32, len: u64) -> io::Result<Vec<u8>> {
+/// The face whose table directory is at `offset`, rebuilt with only the
+/// tables `wanted` names that it has.
+fn face_tables<R: Read + Seek>(
+    file: &mut R,
+    offset: u32,
+    len: u64,
+    wanted: &[[u8; 4]],
+) -> io::Result<Vec<u8>> {
     let header: [u8; 12] = read_at(file, u64::from(offset), len)?;
     let version = [header[0], header[1], header[2], header[3]];
     if !SFNT_VERSIONS.contains(&version) {
@@ -100,7 +130,7 @@ fn face_tables<R: Read + Seek>(file: &mut R, offset: u32, len: u64) -> io::Resul
         .iter()
         .map(parse_record)
     {
-        if DESCRIBE_TABLES.contains(&record.tag) {
+        if wanted.contains(&record.tag) {
             let data = read_vec(
                 file,
                 u64::from(record.offset),
@@ -255,7 +285,7 @@ fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Er
 pub(crate) mod tests {
     use std::io::Cursor;
 
-    use skrifa::FontRef;
+    use skrifa::{FontRef, MetadataProvider, Tag};
 
     use super::*;
 
@@ -372,6 +402,61 @@ pub(crate) mod tests {
         }
         let single = describe_tables(&mut Cursor::new(SANS)).unwrap();
         assert_eq!(single.len(), 1);
+    }
+
+    /// A reader that counts the bytes read through it.
+    struct Counting<R> {
+        inner: R,
+        read: u64,
+    }
+
+    impl<R: Read> Read for Counting<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let read = self.inner.read(buf)?;
+            self.read += read as u64;
+            Ok(read)
+        }
+    }
+
+    impl<R: Seek> Seek for Counting<R> {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    /// **A face's `cmap` comes out alone and whole, read past the rest of
+    /// the file**: each face of a collection maps exactly the chars its
+    /// original does, and the bytes read are its `cmap` and the directories
+    /// that lead to it.
+    #[test]
+    fn face_cmap_reads_only_the_faces_cmap() {
+        let ttc = collection(&[SANS, EMOJI_TEXT]);
+        for (index, original) in [SANS, EMOJI_TEXT].into_iter().enumerate() {
+            let mut file = Counting {
+                inner: Cursor::new(&ttc),
+                read: 0,
+            };
+            let cmap = face_cmap(&mut file, index as u32).unwrap();
+            let original = FontRef::new(original).unwrap();
+            let cmap_len = original.table_data(Tag::new(&CMAP_TABLE)).unwrap().len() as u64;
+            let directories = 12
+                + 4 * 2
+                + u64::from(OFFSET_TABLE_LEN)
+                + u64::from(RECORD_LEN) * u64::from(original.table_directory().num_tables());
+            assert_eq!(file.read, directories + cmap_len);
+            let cut = FontRef::new(&cmap).expect("a cmap-only face parses");
+            let kept: Vec<_> = tables(&cut).into_iter().map(|(tag, _)| tag).collect();
+            assert_eq!(kept, [CMAP_TABLE]);
+            let (cut, original) = (cut.charmap(), original.charmap());
+            for c in (0..0x3_0000).filter_map(char::from_u32) {
+                assert_eq!(cut.map(c), original.map(c), "{c:?} on face {index}");
+            }
+        }
+        let error = face_cmap(&mut Cursor::new(&ttc), 2).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let single = face_cmap(&mut Cursor::new(SANS), 0).unwrap();
+        assert!(FontRef::new(&single).unwrap().charmap().map('a').is_some());
+        assert!(face_cmap(&mut Cursor::new(SANS), 1).is_err());
     }
 
     #[test]
