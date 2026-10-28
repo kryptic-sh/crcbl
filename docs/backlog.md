@@ -19536,9 +19536,26 @@ desktop counts the task stage.
 - **Vulkan cannot count the task and mesh stages on AMD's Windows driver**:
   `vulkaninfo` reports `meshShaderQueries = false` for 25.10.36, so those fields
   read `None` there. Not checked on radv, ANV, lavapipe or NVIDIA.
-- **`crcbl_render::timing` does not request statistics yet**, so no engine pass
-  is counted; the plan's P1 ends with that wiring and its first use on the mesh
-  path's depth passes.
+- **AMD's D3D12 driver counts nothing after a mesh draw in the same command
+  list.** Lantern under `CRCBL_PASS_STATISTICS=1` on the RX 7900 XTX and on the
+  Raphael iGPU: every pass up to and including the mesh-path `shadow` pass is
+  counted, and every statistics query after it in the list reads all zeros — the
+  forward pass's 689 723 fragments read 0. Leaving `shadow` uncounted does not
+  help (so it is the mesh draws, not that query),
+  `--force-geometry indirect-count` counts every pass, and WARP counts every
+  pass on the mesh path. Those zeros pass as "no work", which
+  `PipelineStatistics` promises never to do. **Next slice:** the dx12 encoder
+  notes a pass opened after a mesh draw on an AMD hardware adapter, and
+  `pipeline_statistics` reads its query as all `None`. Not checked on NVIDIA or
+  Intel, nor whether a direct `DispatchMesh` triggers it as the renderer's
+  `ExecuteIndirect` does.
+- **First use on the mesh path**, lantern, 2026-10-28: on D3D12 the two `shadow`
+  passes ran 1 344 task invocations, 3 136 mesh invocations and 746 mesh
+  primitives a frame in 0.036 ms; the same pass on Vulkan took 0.052 ms with the
+  same shaders and so the same work, which its driver cannot count. That much
+  task work is too little to account for Vulkan's extra time, which supports the
+  reading in the mesh-path cost entry below (a fixed cost of AMD's Vulkan task
+  stage per draw) rather than measuring it.
 - **Metal** waits for the owner's Mac work (owner, 2026-10-28); its encoder
   refuses meanwhile. WebGPU has no statistics query and records the refusal.
 - **Not tested**: a compute pass's statistics on either backend (the decodes are
@@ -19549,6 +19566,15 @@ desktop counts the task stage.
   `resolve_query_set` on a Vulkan statistics set copies with an eight-byte
   stride, which looks wrong for a pool of several counters; it predates this
   work.
+
+**Surprising, worked around:** on AMD's Windows Vulkan driver (25.10.36 on the
+RX 7900 XTX, 25.10.42 on the iGPU), a statistics pool reset in the same command
+buffer as the passes it counts loses counts — the first passes' queries read as
+never written: 7 of lantern's 90 on the discrete GPU, 21 to 27 on the iGPU,
+unchanged by waiting for the device before the read and by a full barrier after
+the reset, gone when the reset was skipped. The spec makes the reset an
+execution dependency for later query commands, so this is the driver's.
+`crcbl_frame::timing` resets each slot's statistics a frame ahead instead.
 
 **Surprising, not a bug:** a mesh draw under a Vulkan statistics query counting
 the clipper is rejected by the validation layer as well as the input-assembly

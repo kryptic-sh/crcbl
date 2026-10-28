@@ -10,9 +10,10 @@
 //! # The report is frames latent, on purpose
 //!
 //! Reading a timestamp the GPU has not written yet is either a stall or a lie.
-//! So the timers keep a ring of query sets — one more than the frames the loop
-//! keeps in flight — and resolve a slot only when it comes back round, by which
-//! point the submission that wrote it has certainly completed. The report is
+//! So the timers keep a ring of query sets — two more than the frames the loop
+//! keeps in flight — and resolve a slot only when it is about to come back
+//! round, by which point the submission that wrote it has certainly completed.
+//! The second spare slot is for [the statistics' reset](#a-statistics-set-is-reset-a-frame-ahead). The report is
 //! therefore about a frame a few frames ago, which is exactly what a profiler
 //! HUD wants and exactly the shape topic 03 §3.6
 //! calls for ("N frames latent").
@@ -60,11 +61,34 @@
 //! all, and the report is empty. The seam says the same thing about
 //! [`PassTimestampWrites`] — accepted and dropped — because topic 10's browsers
 //! are where this actually happens.
+//!
+//! # What a pass did, when asked
+//!
+//! [`STATISTICS_VAR`] set to `1` makes the timers count each timed pass's work
+//! as well: one [`PassStatisticsWrites`] query per pass, in a statistics set
+//! beside each slot's timestamps, read back with them into
+//! [`PassTiming::statistics`]. Off by default, because a count is a question
+//! for a profiling run, not for every frame. A device without
+//! [`Features::PIPELINE_STATISTICS_QUERY`] reports none, and the timings carry
+//! on without them.
+//!
+//! # A statistics set is reset a frame ahead
+//!
+//! Each frame reads the slot the *next* frame will write, and resets its
+//! statistics set in this frame's command buffer, so a slot's counts are reset
+//! a whole submission before any pass is counted into them. Resetting in the
+//! same command buffer as the passes is what the seam allows, and on AMD's
+//! Windows Vulkan driver (25.10.36 on the RX 7900 XTX, 25.10.42 on the Raphael
+//! iGPU, measured 2026-10-28) it loses counts: the reset lands after some of the
+//! first passes' queries, which then read as never written — up to 27 of
+//! lantern's 90 passes on the iGPU, and none once the reset moved a frame ahead.
+//! The timestamps' reset stays where it was, since no driver here loses them.
 
 use core::fmt::Write as _;
 
 use crcbl_hal::{
-    CommandEncoder, Device, Features, PassTimestampWrites, QueryKind, QuerySetDesc, QuerySetHandle,
+    CommandEncoder, Device, Features, PassStatisticsWrites, PassTimestampWrites,
+    PipelineStatistics, QueryKind, QuerySetDesc, QuerySetHandle,
 };
 use crcbl_ui::debug::{DebugModule, DebugSection};
 
@@ -78,6 +102,49 @@ pub struct PassTiming {
     /// Nanoseconds between pass boundaries, including inter-stage scheduling
     /// gaps. These intervals can overlap on a pipelined GPU.
     pub gpu_nanos: u64,
+    /// What the GPU counted over the pass, when [`STATISTICS_VAR`] asked for
+    /// it and the device can count.
+    pub statistics: Option<PipelineStatistics>,
+}
+
+/// The variable that makes [`PassTimers`] count each pass's work, with `1`.
+pub const STATISTICS_VAR: &str = "CRCBL_PASS_STATISTICS";
+
+/// Whether [`STATISTICS_VAR`] asks for the counts: `1` and nothing else, as
+/// `CRCBL_VK_SHADER_STATS` reads.
+fn statistics_wanted(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("1")
+}
+
+/// A pass's counts as report columns: each stage the device counted, by a
+/// short name, and nothing for a stage it could not.
+///
+/// What [`FrameTimings::report`] and `crcbl_render::PassStats`' report both
+/// print after a pass's time.
+#[must_use]
+pub fn statistics_columns(statistics: &PipelineStatistics) -> String {
+    let columns = [
+        ("ia-vtx", statistics.input_vertices),
+        ("ia-prim", statistics.input_primitives),
+        ("vs", statistics.vertex_invocations),
+        ("clip", statistics.clipper_invocations),
+        ("clip-out", statistics.clipper_primitives),
+        ("fs", statistics.fragment_invocations),
+        ("cs", statistics.compute_invocations),
+        ("task", statistics.task_invocations),
+        ("mesh", statistics.mesh_invocations),
+        ("mesh-prim", statistics.mesh_primitives),
+    ];
+    let mut out = String::new();
+    for (name, count) in columns {
+        if let Some(count) = count {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            let _ = write!(out, "{name} {count}");
+        }
+    }
+    out
 }
 
 /// A whole frame's per-pass costs.
@@ -143,13 +210,17 @@ impl FrameTimings {
             } else {
                 pass.gpu_nanos as f64 * 100.0 / total as f64
             };
-            let _ = writeln!(
+            let _ = write!(
                 out,
                 "  {:<24} {:>9.3} ms  {:>5.1}%",
                 pass.label,
                 pass.gpu_nanos as f64 / 1.0e6,
                 share
             );
+            if let Some(statistics) = &pass.statistics {
+                let _ = write!(out, "  {}", statistics_columns(statistics));
+            }
+            out.push('\n');
         }
         out
     }
@@ -198,13 +269,17 @@ impl DebugModule for FrameTimings {
 #[derive(Debug)]
 struct Slot {
     set: QuerySetHandle,
+    /// One statistics query per timed pass, when [`STATISTICS_VAR`] asked for
+    /// them; see the module docs.
+    statistics: Option<QuerySetHandle>,
     /// The labels recorded into this slot, or empty if it has never been used.
     labels: Vec<String>,
     /// Which frame number was recorded into it.
     frame: u64,
 }
 
-/// A ring of timestamp query sets, one per frame in flight plus one.
+/// A ring of timestamp query sets, one per frame in flight plus two; see the
+/// module docs.
 #[derive(Debug)]
 pub struct PassTimers {
     slots: Vec<Slot>,
@@ -234,8 +309,31 @@ impl PassTimers {
     /// rather than break, and the caller's answer is to pass `None` to
     /// [`CompiledGraph::execute`](crate::graph::CompiledGraph::execute) and get
     /// an empty report.
+    ///
+    /// The passes are counted as well when [`STATISTICS_VAR`] is `1`; see
+    /// [`PassTimers::counting`].
     #[must_use]
     pub fn new(device: &dyn Device, frames_in_flight: usize, max_passes: u32) -> Option<Self> {
+        let counted = statistics_wanted(std::env::var(STATISTICS_VAR).ok().as_deref());
+        Self::create(device, frames_in_flight, max_passes, counted)
+    }
+
+    /// [`PassTimers::new`], counting each timed pass's work whatever
+    /// [`STATISTICS_VAR`] says: what a profiler that asks for the counts
+    /// itself creates. On a device without
+    /// [`Features::PIPELINE_STATISTICS_QUERY`] the passes are timed and not
+    /// counted, as under the variable.
+    #[must_use]
+    pub fn counting(device: &dyn Device, frames_in_flight: usize, max_passes: u32) -> Option<Self> {
+        Self::create(device, frames_in_flight, max_passes, true)
+    }
+
+    fn create(
+        device: &dyn Device,
+        frames_in_flight: usize,
+        max_passes: u32,
+        counted: bool,
+    ) -> Option<Self> {
         if !device.caps().features.contains(Features::TIMESTAMP_QUERY) {
             crcbl_core::log::debug!(
                 "graph: no TIMESTAMP_QUERY on this device; per-pass timing is off"
@@ -253,32 +351,68 @@ impl PassTimers {
             );
             return None;
         };
-        // One more than the frames in flight, so the slot about to be reused is
-        // always one whose submission has completed.
-        let count = frames_in_flight + 1;
-        let mut slots = Vec::with_capacity(count);
+        let counted = counted && {
+            let able = device
+                .caps()
+                .features
+                .contains(Features::PIPELINE_STATISTICS_QUERY);
+            if !able {
+                crcbl_core::log::info!(
+                    "graph: passes were to be counted and this device has no \
+                     PIPELINE_STATISTICS_QUERY; they are timed, not counted"
+                );
+            }
+            able
+        };
+        // Two more than the frames in flight, so the slot after the one being
+        // written is always one whose submission has completed: it is read,
+        // and its statistics reset, a frame before it is reused.
+        let count = frames_in_flight + 2;
+        let mut slots: Vec<Slot> = Vec::with_capacity(count);
+        let refused = |slots: &[Slot], what: &str, index: usize, error: crcbl_hal::HalError| {
+            crcbl_core::log::debug!("graph: {what} set {index} refused ({error}); timing is off");
+            for slot in slots {
+                device.destroy_query_set(slot.set);
+                if let Some(statistics) = slot.statistics {
+                    device.destroy_query_set(statistics);
+                }
+            }
+        };
         for index in 0..count {
-            match device.create_query_set(&QuerySetDesc {
+            let set = match device.create_query_set(&QuerySetDesc {
                 label: Some("graph pass timers"),
                 kind: QueryKind::Timestamp,
                 // Two per pass: one before its barriers, one after it closes.
                 count: query_count,
             }) {
-                Ok(set) => slots.push(Slot {
-                    set,
-                    labels: Vec::new(),
-                    frame: 0,
-                }),
+                Ok(set) => set,
                 Err(error) => {
-                    crcbl_core::log::debug!(
-                        "graph: timestamp set {index} refused ({error}); timing is off"
-                    );
-                    for slot in &slots {
-                        device.destroy_query_set(slot.set);
-                    }
+                    refused(&slots, "timestamp", index, error);
                     return None;
                 }
-            }
+            };
+            let statistics = if counted {
+                match device.create_query_set(&QuerySetDesc {
+                    label: Some("graph pass statistics"),
+                    kind: QueryKind::PipelineStatistics,
+                    count: max_passes,
+                }) {
+                    Ok(statistics) => Some(statistics),
+                    Err(error) => {
+                        device.destroy_query_set(set);
+                        refused(&slots, "statistics", index, error);
+                        return None;
+                    }
+                }
+            } else {
+                None
+            };
+            slots.push(Slot {
+                set,
+                statistics,
+                labels: Vec::new(),
+                frame: 0,
+            });
         }
         Some(Self {
             slots,
@@ -305,7 +439,8 @@ impl PassTimers {
         self.capacity
     }
 
-    /// Starts a frame: resolves the slot about to be reused, then resets it.
+    /// Starts a frame: resolves the slot the next frame reuses, and resets the
+    /// timestamps of the one this frame writes and the statistics of the next.
     ///
     /// Called by the graph; a caller never has to.
     pub(crate) fn begin_frame(
@@ -316,10 +451,12 @@ impl PassTimers {
     ) {
         self.frames += 1;
         self.current = (self.current + 1) % self.slots.len();
+        let next = (self.current + 1) % self.slots.len();
 
-        // The slot has come round: whatever was recorded into it belongs to a
-        // frame that has completed, so reading it neither stalls nor lies.
-        self.resolve(device);
+        // The next slot is about to come round: whatever was recorded into it
+        // belongs to a frame that has completed, so reading it neither stalls
+        // nor lies. The current slot was read when it was the next.
+        self.resolve(device, next);
 
         // A copy pass opens no scope, so it has no boundary a backend could
         // sample at and gets no query pair. Everything below counts *timed*
@@ -357,6 +494,15 @@ impl PassTimers {
         // Vulkan requires a reset before every write; the seam makes callers
         // always do it so the Vulkan path is never the special case.
         encoder.reset_query_set(slot.set, 0..self.capacity.saturating_mul(2));
+        // A slot's statistics are reset by the frame before it, see the module
+        // docs; the first frame has no frame before it.
+        let ahead = self.slots[next].statistics;
+        let behind = self.slots[self.current]
+            .statistics
+            .filter(|_| self.frames == 1);
+        for statistics in behind.into_iter().chain(ahead) {
+            encoder.reset_query_set(statistics, 0..self.capacity);
+        }
     }
 
     /// The two queries pass `index` of this frame is bracketed by, or `None`
@@ -373,8 +519,19 @@ impl PassTimers {
         })
     }
 
-    fn resolve(&mut self, device: &dyn Device) {
-        let slot = &self.slots[self.current];
+    /// The statistics query pass `index` of this frame is counted into, or
+    /// `None` when passes are not counted or this one is not timed.
+    ///
+    /// The pass's timestamp pair has the same index, so a pass is counted
+    /// exactly when it is timed.
+    pub(crate) fn pass_statistics(&self, index: usize) -> Option<PassStatisticsWrites> {
+        let pair = (*self.pairs.get(index)?)?;
+        let set = self.slots[self.current].statistics?;
+        Some(PassStatisticsWrites { set, query: pair })
+    }
+
+    fn resolve(&mut self, device: &dyn Device, index: usize) {
+        let slot = &self.slots[index];
         if slot.labels.is_empty() {
             return;
         }
@@ -387,6 +544,21 @@ impl PassTimers {
             );
             return;
         }
+        // The counts are extra, so a failed read drops them and keeps the
+        // times.
+        let counts = slot.statistics.and_then(|set| {
+            let mut counts = vec![PipelineStatistics::default(); slot.labels.len()];
+            match device.pipeline_statistics(set, 0, &mut counts) {
+                Ok(()) => Some(counts),
+                Err(error) => {
+                    crcbl_core::log::debug!(
+                        "graph: statistics read failed ({error}); this frame is timed, not \
+                         counted"
+                    );
+                    None
+                }
+            }
+        });
         let passes = slot
             .labels
             .iter()
@@ -398,6 +570,7 @@ impl PassTimers {
                 PassTiming {
                     label: label.clone(),
                     gpu_nanos: nanos[index * 2 + 1].saturating_sub(nanos[index * 2]),
+                    statistics: counts.as_ref().map(|counts| counts[index]),
                 }
             })
             .collect();
@@ -412,6 +585,9 @@ impl PassTimers {
     pub fn destroy(&mut self, device: &dyn Device) {
         for slot in &self.slots {
             device.destroy_query_set(slot.set);
+            if let Some(statistics) = slot.statistics {
+                device.destroy_query_set(statistics);
+            }
         }
         self.slots.clear();
     }
@@ -478,10 +654,12 @@ mod tests {
                 PassTiming {
                     label: "forward".to_string(),
                     gpu_nanos: 3_000_000,
+                    statistics: None,
                 },
                 PassTiming {
                     label: "tonemap".to_string(),
                     gpu_nanos: 1_000_000,
+                    statistics: None,
                 },
             ],
         };
@@ -498,6 +676,64 @@ mod tests {
         assert!(report.contains("25.0%"), "{report}");
     }
 
+    /// **The counts follow the time, stage by stage, and a stage the device
+    /// could not count is left out** rather than printed as a zero a reader
+    /// would take for no work.
+    #[test]
+    fn a_counted_pass_reports_the_stages_it_counted() {
+        let statistics = PipelineStatistics {
+            vertex_invocations: Some(3),
+            fragment_invocations: Some(788),
+            task_invocations: Some(0),
+            mesh_invocations: None,
+            ..PipelineStatistics::default()
+        };
+        assert_eq!(statistics_columns(&statistics), "vs 3 fs 788 task 0");
+        assert_eq!(statistics_columns(&PipelineStatistics::default()), "");
+
+        let timings = FrameTimings {
+            elapsed_nanos: None,
+            frame: 3,
+            passes: vec![
+                PassTiming {
+                    label: "depth".to_string(),
+                    gpu_nanos: 1_000_000,
+                    statistics: Some(statistics),
+                },
+                PassTiming {
+                    label: "tonemap".to_string(),
+                    gpu_nanos: 1_000_000,
+                    statistics: None,
+                },
+            ],
+        };
+        let report = timings.report();
+        let depth = report
+            .lines()
+            .find(|line| line.contains("depth"))
+            .expect("a depth row");
+        assert!(depth.ends_with("  vs 3 fs 788 task 0"), "{report}");
+        let tonemap = report
+            .lines()
+            .find(|line| line.contains("tonemap"))
+            .expect("a tonemap row");
+        assert!(
+            tonemap.ends_with('%'),
+            "an uncounted pass has no columns: {report}"
+        );
+    }
+
+    /// `1` turns the counts on and nothing else does, as
+    /// `CRCBL_VK_SHADER_STATS` reads.
+    #[test]
+    fn only_a_one_asks_for_the_counts() {
+        assert!(statistics_wanted(Some("1")));
+        assert!(statistics_wanted(Some(" 1 ")));
+        for value in [None, Some(""), Some("0"), Some("true"), Some("yes")] {
+            assert!(!statistics_wanted(value), "{value:?}");
+        }
+    }
+
     /// A frame in which every pass measured zero must not divide by zero.
     #[test]
     fn a_zero_length_frame_reports_zero_shares_rather_than_nan() {
@@ -507,6 +743,7 @@ mod tests {
             passes: vec![PassTiming {
                 label: "clear".to_string(),
                 gpu_nanos: 0,
+                statistics: None,
             }],
         };
         let report = timings.report();
@@ -532,10 +769,12 @@ mod tests {
                 PassTiming {
                     label: "sprites".to_string(),
                     gpu_nanos: 2_500_000,
+                    statistics: None,
                 },
                 PassTiming {
                     label: "ui".to_string(),
                     gpu_nanos: 250_000,
+                    statistics: None,
                 },
             ],
         };

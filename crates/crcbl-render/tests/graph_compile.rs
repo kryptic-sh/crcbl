@@ -25,7 +25,8 @@
 use crcbl_hal::null::{Command, NullInstance, ObjectKind, Recorder};
 use crcbl_hal::{
     BufferHandle, CommandEncoderDesc, Device, DeviceDesc, Format, ImageAspect,
-    ImageSubresourceRange, ImageUsage, Instance, QueueHandle, QueueKind, ResourceState,
+    ImageSubresourceRange, ImageUsage, Instance, QuerySetHandle, QueueHandle, QueueKind,
+    ResourceState,
 };
 use crcbl_render::graph::{
     GraphBarriers, GraphError, ImageId, ImportField, ImportedBuffer, ImportedImage, InitialClaim,
@@ -54,7 +55,9 @@ impl Harness {
                 // `TIMESTAMP_QUERY` is deliberately *not* in `GPU_DRIVEN` — topic
                 // 10's browsers may lack it — so a device that wants per-pass
                 // timers has to ask, and `DeviceDesc::for_adapter` does not.
-                optional_features: crcbl_hal::Features::TIMESTAMP_QUERY,
+                // The same for the counts timers take when asked.
+                optional_features: crcbl_hal::Features::TIMESTAMP_QUERY
+                    | crcbl_hal::Features::PIPELINE_STATISTICS_QUERY,
                 compatible_surface: None,
             })
             .expect("the null backend always opens");
@@ -2024,6 +2027,103 @@ fn timers_name_their_two_queries_in_each_passs_descriptor() {
         "each pass gets its own consecutive pair, in the order the graph runs them"
     );
     // Which the null backend agrees with, or it would have recorded a violation.
+    harness.recorder.assert_valid();
+
+    timers.destroy(harness.device.as_ref());
+    pool.destroy(harness.device.as_ref());
+}
+
+/// Counting timers also name a statistics query in each pass's descriptor —
+/// the pass's own index, in a set of their own — and reset that set a frame
+/// ahead, in the frame before the one that counts into it.
+///
+/// Read off the second frame's recorded stream, so a graph that gave every
+/// pass the same query, counted into the timestamp set, or reset the set it is
+/// counting into in the same frame (which loses counts on AMD's Vulkan driver;
+/// see `crcbl_frame::timing`) is red here.
+#[test]
+fn counting_timers_name_one_statistics_query_per_pass() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let mut timers = crcbl_render::PassTimers::counting(harness.device.as_ref(), 2, 8)
+        .expect("the tier A null adapter has timestamp queries");
+
+    for _ in 0..2 {
+        harness.recorder.clear();
+        let mut graph = harness.graph();
+        let color = graph.create_image("scene", scene_color());
+        graph
+            .add_render_pass("forward")
+            .clear_color(color, [0.0; 4])
+            .execute(|_| {});
+        graph
+            .add_compute_pass("post")
+            .use_image(color, ResourceState::ShaderReadWrite)
+            .execute(|_| {});
+        let compiled = graph.compile(&pool).expect("a legal frame");
+        harness.record(|encoder| {
+            compiled
+                .execute(
+                    harness.device.as_ref(),
+                    &mut pool,
+                    encoder,
+                    Some(&mut timers),
+                )
+                .expect("executed");
+        });
+    }
+
+    let commands = harness.recorder.commands();
+    let resets: Vec<QuerySetHandle> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::ResetQuerySet { set, .. } => Some(*set),
+            _ => None,
+        })
+        .collect();
+    let writes: Vec<_> = commands
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::BeginRenderPass {
+                timestamp_writes,
+                statistics_writes,
+                ..
+            }
+            | Command::BeginComputePass {
+                timestamp_writes,
+                statistics_writes,
+                ..
+            } => Some((
+                timestamp_writes.expect("every pass is timed"),
+                statistics_writes.expect("every timed pass is counted"),
+            )),
+            _ => None,
+        })
+        .collect();
+    let queries: Vec<u32> = writes.iter().map(|(_, counted)| counted.query).collect();
+    assert_eq!(queries, [0, 1], "each pass is counted into its own query");
+    let (timed, counted) = (writes[0].0.set, writes[0].1.set);
+    for (timestamps, statistics) in &writes {
+        assert_eq!(
+            (timestamps.set, statistics.set),
+            (timed, counted),
+            "one set of each per frame"
+        );
+    }
+    assert_ne!(timed, counted, "the counts have a set of their own");
+    assert_eq!(
+        resets.len(),
+        2,
+        "a frame resets its timestamps and the next frame's statistics: {resets:?}"
+    );
+    assert_eq!(
+        resets[0], timed,
+        "the timestamps are reset where they are written"
+    );
+    assert!(
+        resets[1] != counted && resets[1] != timed,
+        "the statistics reset is the next slot's, a frame ahead: {resets:?}"
+    );
     harness.recorder.assert_valid();
 
     timers.destroy(harness.device.as_ref());

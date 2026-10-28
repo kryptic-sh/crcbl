@@ -55,6 +55,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `MeshShaderPipelineStatsSupported` (the RX 7900 XTX and WARP both have it).
   Metal and WebGPU fail the encoder when given one, and the trait's default read
   refuses. Every pass descriptor gains the field: set it to `None`.
+- **The pass timers count each pass's work when asked.**
+  `CRCBL_PASS_STATISTICS=1`, or `PassTimers::counting` in place of
+  `PassTimers::new`, gives every timed pass a statistics query, and `PassTiming`
+  gains `statistics: Option<PipelineStatistics>` (a struct literal of it must
+  now name the field). The frame report and the end-of-run `PassStats` report
+  print each pass's counts after its time, the latter the newest frame's, summed
+  over a label's passes. The engine asks for
+  `Features::PIPELINE_STATISTICS_QUERY` optionally so the timers can count. The
+  timer ring is one slot longer: each frame resets the next slot's statistics,
+  since AMD's Vulkan driver loses counts reset in the same command buffer.
   `query_results` on a statistics set now refuses on Vulkan, as it did on D3D12
   and Metal; it read past what it was handed.
 

@@ -1403,6 +1403,9 @@ impl<'a> CompiledGraph<'a> {
             let timestamp_writes = timers
                 .as_deref()
                 .and_then(|timers| timers.pass_writes(index));
+            let statistics_writes = timers
+                .as_deref()
+                .and_then(|timers| timers.pass_statistics(index));
 
             match pass.kind {
                 PassKind::Render => {
@@ -1413,7 +1416,7 @@ impl<'a> CompiledGraph<'a> {
                         depth_stencil_attachment: depth_stencil,
                         render_area: pass.render_area,
                         timestamp_writes,
-                        statistics_writes: None,
+                        statistics_writes,
                     });
                     // Dynamic state, set by the graph rather than by every pass
                     // body: a pipeline that baked a viewport in would have to be
@@ -1430,7 +1433,7 @@ impl<'a> CompiledGraph<'a> {
                     encoder.begin_compute_pass(&ComputePassDesc {
                         label: Some(&pass.label),
                         timestamp_writes,
-                        statistics_writes: None,
+                        statistics_writes,
                     });
                 }
                 // Nothing is opened: a copy is only legal outside every scope.

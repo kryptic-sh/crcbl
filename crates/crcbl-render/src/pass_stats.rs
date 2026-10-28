@@ -29,6 +29,14 @@
 //! question a budget asks. The occurrence count is on the row so a reader can
 //! see it is more than one.
 //!
+//! # Counts are the newest frame's
+//!
+//! When the timers count each pass's work too (`CRCBL_PASS_STATISTICS=1`, see
+//! [`crate::timing`]), a row also carries what its passes counted, summed over
+//! the label's occurrences like the time. Those are the newest frame's counts,
+//! not a distribution: a scene that does not move counts the same every frame,
+//! and one that does is a sample a reader has to take as one.
+//!
 //! # What it still does not do
 //!
 //! Fail. Nothing here compares against a recorded baseline, so a rung that
@@ -38,9 +46,10 @@
 use std::fmt::Write as _;
 
 use crcbl_core::stats::{MIN_PERCENTILE_SAMPLES, Window};
+use crcbl_hal::PipelineStatistics;
 use crcbl_ui::DEFAULT_FRAME_WINDOW;
 
-use crate::timing::FrameTimings;
+use crate::timing::{FrameTimings, statistics_columns};
 
 /// One pass label's rolling window.
 #[derive(Clone, Debug)]
@@ -49,6 +58,28 @@ struct Pass {
     window: Window<DEFAULT_FRAME_WINDOW>,
     /// How many times the label appeared in the most recent frame recorded.
     occurrences: usize,
+    /// What the label's passes counted in the most recent frame that counted
+    /// them, summed; see the module docs.
+    statistics: Option<PipelineStatistics>,
+}
+
+/// Two passes' counts as one: each stage summed where both counted it, and
+/// `None` where either could not, since a sum missing a part is not the
+/// label's count.
+fn sum(a: PipelineStatistics, b: PipelineStatistics) -> PipelineStatistics {
+    let add = |a: Option<u64>, b: Option<u64>| Some(a?.saturating_add(b?));
+    PipelineStatistics {
+        input_vertices: add(a.input_vertices, b.input_vertices),
+        input_primitives: add(a.input_primitives, b.input_primitives),
+        vertex_invocations: add(a.vertex_invocations, b.vertex_invocations),
+        clipper_invocations: add(a.clipper_invocations, b.clipper_invocations),
+        clipper_primitives: add(a.clipper_primitives, b.clipper_primitives),
+        fragment_invocations: add(a.fragment_invocations, b.fragment_invocations),
+        compute_invocations: add(a.compute_invocations, b.compute_invocations),
+        task_invocations: add(a.task_invocations, b.task_invocations),
+        mesh_invocations: add(a.mesh_invocations, b.mesh_invocations),
+        mesh_primitives: add(a.mesh_primitives, b.mesh_primitives),
+    }
 }
 
 /// Per-pass GPU cost over a rolling window of frames.
@@ -104,6 +135,7 @@ impl PassStats {
                     label: timed.label.clone(),
                     window: Window::new(),
                     occurrences: 1,
+                    statistics: None,
                 }),
             }
         }
@@ -122,6 +154,18 @@ impl PassStats {
                 .map(|timed| timed.gpu_nanos)
                 .sum();
             pass.window.record(nanos);
+            // A frame that counted nothing keeps the last counts rather than
+            // erasing them; one that counted some occurrences and not others
+            // has no whole to report.
+            let counts: Option<Vec<PipelineStatistics>> = timings
+                .passes
+                .iter()
+                .filter(|timed| timed.label == pass.label)
+                .map(|timed| timed.statistics)
+                .collect();
+            if let Some(counts) = counts {
+                pass.statistics = counts.into_iter().reduce(sum);
+            }
         }
         true
     }
@@ -218,7 +262,7 @@ impl PassStats {
             } else {
                 p50 as f64 * 100.0 / total as f64
             };
-            let _ = writeln!(
+            let _ = write!(
                 out,
                 "  {:<22} {:>2}x  {:>8.3} / {:>8.3} ms  {:>5.1}%",
                 pass.label,
@@ -227,6 +271,10 @@ impl PassStats {
                 p95 as f64 / 1.0e6,
                 share,
             );
+            if let Some(statistics) = &pass.statistics {
+                let _ = write!(out, "  {}", statistics_columns(statistics));
+            }
+            out.push('\n');
         }
         out
     }
@@ -245,6 +293,7 @@ mod tests {
                 .map(|(label, gpu_nanos)| PassTiming {
                     label: (*label).to_string(),
                     gpu_nanos: *gpu_nanos,
+                    statistics: None,
                 })
                 .collect(),
             frame: number,
@@ -389,5 +438,61 @@ mod tests {
             report.contains("ssr                     1x  filling 1/20"),
             "{report}"
         );
+    }
+
+    /// **A label's counts are its passes' sum, from the newest frame that
+    /// counted them all.** A frame whose passes were not counted keeps the
+    /// counts already held, and a stage one occurrence could not count is
+    /// `None` in the sum rather than a part passed off as the whole.
+    #[test]
+    fn a_labels_counts_sum_its_passes_and_survive_an_uncounted_frame() {
+        use crcbl_hal::PipelineStatistics;
+
+        let counted = |vertices: u64, task: Option<u64>| PipelineStatistics {
+            vertex_invocations: Some(vertices),
+            task_invocations: task,
+            ..PipelineStatistics::default()
+        };
+        let pass = |statistics| PassTiming {
+            label: "shadow".to_string(),
+            gpu_nanos: 1_000,
+            statistics,
+        };
+        let mut stats = PassStats::new();
+        stats.record(&FrameTimings {
+            elapsed_nanos: None,
+            frame: 1,
+            passes: vec![
+                pass(Some(counted(3, Some(1)))),
+                pass(Some(counted(4, None))),
+            ],
+        });
+        assert_eq!(
+            stats.passes[0].statistics,
+            Some(PipelineStatistics {
+                vertex_invocations: Some(7),
+                task_invocations: None,
+                ..PipelineStatistics::default()
+            })
+        );
+        stats.record(&FrameTimings {
+            elapsed_nanos: None,
+            frame: 2,
+            passes: vec![pass(None), pass(None)],
+        });
+        assert_eq!(
+            stats.passes[0]
+                .statistics
+                .and_then(|s| s.vertex_invocations),
+            Some(7),
+            "an uncounted frame keeps the counts"
+        );
+        fill(
+            &mut stats,
+            MIN_PERCENTILE_SAMPLES as u64 + 3,
+            &[("shadow", 1_000)],
+        );
+        let report = stats.report();
+        assert!(report.contains("vs 7"), "{report}");
     }
 }

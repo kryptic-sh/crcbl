@@ -603,6 +603,10 @@ impl Default for GpuContextDesc<'_> {
             optional_features: Features::GPU_DRIVEN
                 | Features::MESH_SHADER
                 | Features::TIMESTAMP_QUERY
+                // What `PassTimers` counts each pass's work with when
+                // `CRCBL_PASS_STATISTICS=1` asks; a device without it times
+                // passes and counts nothing.
+                | Features::PIPELINE_STATISTICS_QUERY
                 | Features::DEBUG_MARKERS
                 | Features::PRESENT_FEEDBACK
                 | Features::PRESENT_TIMING
@@ -12516,6 +12520,7 @@ mod tests {
             passes: vec![crcbl_render::PassTiming {
                 label: "forward".to_string(),
                 gpu_nanos: nanos,
+                statistics: None,
             }],
         };
 
@@ -12554,10 +12559,12 @@ mod tests {
                     crcbl_render::PassTiming {
                         label: "a".into(),
                         gpu_nanos: 2_000_000,
+                        statistics: None,
                     },
                     crcbl_render::PassTiming {
                         label: "b".into(),
                         gpu_nanos: 2_000_000,
+                        statistics: None,
                     },
                 ],
             });
@@ -12590,6 +12597,7 @@ mod tests {
             passes: vec![crcbl_render::PassTiming {
                 label: "forward".to_string(),
                 gpu_nanos: nanos,
+                statistics: None,
             }],
         };
 
