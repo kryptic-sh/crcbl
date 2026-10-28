@@ -19562,7 +19562,18 @@ desktop counts the task stage.
 - **Metal** waits for the owner's Mac work (owner, 2026-10-28); its encoder
   refuses meanwhile. WebGPU has no statistics query and records the refusal.
 - **Not tested**: the null backend's statistics, which checks only that the set
-  is live. The D3D12 runs here had the debug layer off (none installed); CI's
+  is live.
+- **P2 (the capture) is under way.** Built: the `.crcblprof` format
+  (`crcbl-profile`) and its first producer, `CRCBL_PROFILE_CAPTURE=<path>`
+  writing the last frames as the run finishes (`crcbl::profile`). Left:
+  `crcbl profile report` and Chrome Trace export in the CLI; a trigger other
+  than the end of the run (a key, `profile.capture <frames>`, a frame over
+  budget); the calibrated CPU/GPU clock pair that puts the two on one timeline
+  (Vulkan already enables `VK_KHR_calibrated_timestamps` for present timing,
+  D3D12 has `GetClockCalibration`); and the capture recording what it enabled
+  and its own cost. Not tested: the loop's own recording and write, which a
+  lantern run checked by hand (120 CPU and 120 GPU frames, decoded back) and no
+  test runs. The D3D12 runs here had the debug layer off (none installed); CI's
   WARP job is the first validated run of `BeginQuery` on a statistics heap.
 
 **Surprising, worked around:** AMD's D3D12 driver (RX 7900 XTX on 25.10.36,

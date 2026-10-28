@@ -8,9 +8,11 @@
 //! magic:        b"CRCBLPRF"
 //! version:      u16
 //! environment:  u32 count, then count × (string name, string value)
-//! frames:       u32 count, then count × Frame
+//! cpu:          u32 count, then count × CpuFrame
+//! gpu:          u32 count, then count × GpuFrame
 //!
-//! Frame:   u64 number, u32 thread count, Thread × count, u32 pass count, Pass × count
+//! CpuFrame: u64 number, u32 thread count, Thread × count
+//! GpuFrame: u64 number, u32 pass count, Pass × count
 //! Thread:  u32 track, optional string name, u64 dropped, u32 event count, Event × count
 //! Event:   string name, u8 kind (0 begin, 1 end, 2 counter then u64 value),
 //!          u16 depth, u64 nanos
@@ -28,11 +30,11 @@
 //! Anything that is not exactly a capture this build can read: another file's
 //! magic, a later version, a file ending inside a field, a tag or mask bit the
 //! layout does not define, text that is not UTF-8, and bytes after the last
-//! frame. A count is never trusted with an allocation: elements are read one
+//! GPU frame. A count is never trusted with an allocation: elements are read one
 //! at a time, so a count larger than the file runs out of bytes and says so
 //! rather than reserving memory for it.
 
-use crate::{Capture, Environment, Event, EventKind, Frame, Pass, Statistics, Thread};
+use crate::{Capture, CpuFrame, Environment, Event, EventKind, GpuFrame, Pass, Statistics, Thread};
 
 /// The first eight bytes of every capture.
 pub const MAGIC: &[u8; 8] = b"CRCBLPRF";
@@ -73,7 +75,7 @@ pub enum FormatError {
     /// Text that is not UTF-8.
     #[error("capture text in {0} is not UTF-8")]
     NotUtf8(&'static str),
-    /// Bytes after the last frame.
+    /// Bytes after the last GPU frame.
     #[error("capture has {0} bytes after its last frame")]
     TrailingBytes(usize),
     /// A count or a string too long for its `u32` length field.
@@ -97,9 +99,13 @@ impl Capture {
             out.text(name, "an environment name")?;
             out.text(value, "an environment value")?;
         }
-        out.count(self.frames.len(), "the frames")?;
-        for frame in &self.frames {
-            out.frame(frame)?;
+        out.count(self.cpu.len(), "the CPU frames")?;
+        for frame in &self.cpu {
+            out.cpu_frame(frame)?;
+        }
+        out.count(self.gpu.len(), "the GPU frames")?;
+        for frame in &self.gpu {
+            out.gpu_frame(frame)?;
         }
         Ok(out.0)
     }
@@ -127,16 +133,21 @@ impl Capture {
             let value = reader.text("an environment value")?;
             environment.entries.push((name, value));
         }
-        let mut frames = Vec::new();
-        for _ in 0..reader.u32("the frame count")? {
-            frames.push(reader.frame()?);
+        let mut cpu = Vec::new();
+        for _ in 0..reader.u32("the CPU frame count")? {
+            cpu.push(reader.cpu_frame()?);
+        }
+        let mut gpu = Vec::new();
+        for _ in 0..reader.u32("the GPU frame count")? {
+            gpu.push(reader.gpu_frame()?);
         }
         if !reader.bytes.is_empty() {
             return Err(FormatError::TrailingBytes(reader.bytes.len()));
         }
         Ok(Self {
             environment,
-            frames,
+            cpu,
+            gpu,
         })
     }
 }
@@ -172,7 +183,7 @@ impl Writer {
         Ok(())
     }
 
-    fn frame(&mut self, frame: &Frame) -> Result<(), FormatError> {
+    fn cpu_frame(&mut self, frame: &CpuFrame) -> Result<(), FormatError> {
         self.u64(frame.number);
         self.count(frame.threads.len(), "a frame's threads")?;
         for thread in &frame.threads {
@@ -200,6 +211,11 @@ impl Writer {
                 self.u64(event.nanos);
             }
         }
+        Ok(())
+    }
+
+    fn gpu_frame(&mut self, frame: &GpuFrame) -> Result<(), FormatError> {
+        self.u64(frame.number);
         self.count(frame.passes.len(), "a frame's passes")?;
         for pass in &frame.passes {
             self.text(&pass.label, "a pass label")?;
@@ -284,8 +300,8 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn frame(&mut self) -> Result<Frame, FormatError> {
-        let number = self.u64("a frame number")?;
+    fn cpu_frame(&mut self) -> Result<CpuFrame, FormatError> {
+        let number = self.u64("a CPU frame number")?;
         let mut threads = Vec::new();
         for _ in 0..self.u32("a frame's thread count")? {
             let track = self.u32("a thread track")?;
@@ -325,6 +341,11 @@ impl<'a> Reader<'a> {
                 dropped,
             });
         }
+        Ok(CpuFrame { number, threads })
+    }
+
+    fn gpu_frame(&mut self) -> Result<GpuFrame, FormatError> {
+        let number = self.u64("a GPU frame number")?;
         let mut passes = Vec::new();
         for _ in 0..self.u32("a frame's pass count")? {
             let label = self.text("a pass label")?;
@@ -355,11 +376,7 @@ impl<'a> Reader<'a> {
                 statistics,
             });
         }
-        Ok(Frame {
-            number,
-            threads,
-            passes,
-        })
+        Ok(GpuFrame { number, passes })
     }
 }
 
@@ -369,7 +386,8 @@ mod tests {
 
     /// A capture that uses every part of the layout: two environment entries,
     /// a named and an unnamed thread, all three event kinds, a pass with
-    /// statistics (some counters absent) and one without, and a second frame.
+    /// statistics (some counters absent) and one without, and a second frame of
+    /// each kind.
     fn every_field() -> Capture {
         Capture {
             environment: Environment {
@@ -378,8 +396,8 @@ mod tests {
                     ("backend".to_string(), "vulkan".to_string()),
                 ],
             },
-            frames: vec![
-                Frame {
+            cpu: vec![
+                CpuFrame {
                     number: 41,
                     threads: vec![
                         Thread {
@@ -414,6 +432,15 @@ mod tests {
                             dropped: 7,
                         },
                     ],
+                },
+                CpuFrame {
+                    number: 42,
+                    threads: Vec::new(),
+                },
+            ],
+            gpu: vec![
+                GpuFrame {
+                    number: 38,
                     passes: vec![
                         Pass {
                             label: "shadow".to_string(),
@@ -436,9 +463,8 @@ mod tests {
                         },
                     ],
                 },
-                Frame {
-                    number: 42,
-                    threads: Vec::new(),
+                GpuFrame {
+                    number: 39,
                     passes: Vec::new(),
                 },
             ],
@@ -492,7 +518,7 @@ mod tests {
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(
             Capture::decode(&bytes),
-            Err(FormatError::Truncated("a frame number"))
+            Err(FormatError::Truncated("a CPU frame number"))
         );
     }
 
@@ -522,8 +548,8 @@ mod tests {
         );
 
         // The first thread's name tag: after the magic, the version, the
-        // environment and the frame count, the frame number, the thread count
-        // and the track.
+        // environment and the CPU frame count, the frame number, the thread
+        // count and the track.
         let environment: usize = every_field()
             .environment
             .entries
@@ -549,14 +575,14 @@ mod tests {
     #[test]
     fn an_undefined_statistics_bit_is_refused() {
         let capture = Capture {
-            frames: vec![Frame {
+            gpu: vec![GpuFrame {
+                number: 0,
                 passes: vec![Pass {
                     label: String::new(),
                     begin_nanos: 0,
                     end_nanos: 0,
                     statistics: Some(Statistics::default()),
                 }],
-                ..Frame::default()
             }],
             ..Capture::default()
         };

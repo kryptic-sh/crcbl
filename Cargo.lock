@@ -662,6 +662,7 @@ dependencies = [
  "crcbl-nav",
  "crcbl-net",
  "crcbl-phys",
+ "crcbl-profile",
  "crcbl-ragdoll",
  "crcbl-reflect",
  "crcbl-render",

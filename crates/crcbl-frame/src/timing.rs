@@ -99,6 +99,10 @@ use crate::graph::{CompiledPass, PassKind};
 pub struct PassTiming {
     /// The pass's label, as it appears in the graph dump and in captures.
     pub label: String,
+    /// When the pass began, in nanoseconds on the GPU's timestamp clock: where
+    /// a timeline puts it, comparable with every other pass's but not with a
+    /// CPU time.
+    pub begin_nanos: u64,
     /// Nanoseconds between pass boundaries, including inter-stage scheduling
     /// gaps. These intervals can overlap on a pipelined GPU.
     pub gpu_nanos: u64,
@@ -569,6 +573,7 @@ impl PassTimers {
                 // pass is a more useful report than a panic in a profiler.
                 PassTiming {
                     label: label.clone(),
+                    begin_nanos: nanos[index * 2],
                     gpu_nanos: nanos[index * 2 + 1].saturating_sub(nanos[index * 2]),
                     statistics: counts.as_ref().map(|counts| counts[index]),
                 }
@@ -653,11 +658,13 @@ mod tests {
             passes: vec![
                 PassTiming {
                     label: "forward".to_string(),
+                    begin_nanos: 0,
                     gpu_nanos: 3_000_000,
                     statistics: None,
                 },
                 PassTiming {
                     label: "tonemap".to_string(),
+                    begin_nanos: 0,
                     gpu_nanos: 1_000_000,
                     statistics: None,
                 },
@@ -697,11 +704,13 @@ mod tests {
             passes: vec![
                 PassTiming {
                     label: "depth".to_string(),
+                    begin_nanos: 0,
                     gpu_nanos: 1_000_000,
                     statistics: Some(statistics),
                 },
                 PassTiming {
                     label: "tonemap".to_string(),
+                    begin_nanos: 0,
                     gpu_nanos: 1_000_000,
                     statistics: None,
                 },
@@ -742,6 +751,7 @@ mod tests {
             frame: 1,
             passes: vec![PassTiming {
                 label: "clear".to_string(),
+                begin_nanos: 0,
                 gpu_nanos: 0,
                 statistics: None,
             }],
@@ -768,11 +778,13 @@ mod tests {
             passes: vec![
                 PassTiming {
                     label: "sprites".to_string(),
+                    begin_nanos: 0,
                     gpu_nanos: 2_500_000,
                     statistics: None,
                 },
                 PassTiming {
                     label: "ui".to_string(),
+                    begin_nanos: 0,
                     gpu_nanos: 250_000,
                     statistics: None,
                 },

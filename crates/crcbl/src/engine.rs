@@ -5958,6 +5958,10 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// section from the renderer's side. Fed from [`Self::record_frame_cost`]
     /// and read by [`Self::finish`].
     passes: crcbl_render::PassStats,
+    /// The capture `CRCBL_PROFILE_CAPTURE` asked for, recorded each frame in
+    /// [`Self::record_frame_cost`] and written by [`Self::finish`]. See
+    /// [`crate::profile`].
+    profile: Option<crate::profile::Requested>,
     /// Whether the simulation is stopped. **The loop owns this, not the game.**
     /// Pause is not something a simulation does — it is the loop declining to
     /// advance it — and a `Paused` state inside the game would put a value in
@@ -6170,6 +6174,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             ui_scale: 1.0,
             debug_view: None,
             passes: crcbl_render::PassStats::new(),
+            profile: crate::profile::Requested::from_env(),
             paused: false,
             held_keys: Vec::new(),
             held_buttons: Vec::new(),
@@ -7086,6 +7091,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             if let Some(cpu) = crate::perf::frame_cpu_time(&snapshot) {
                 self.debug.budget.record_cpu(cpu);
             }
+            if let Some(profile) = self.profile.as_mut() {
+                profile.recorder.record_cpu(&snapshot);
+            }
         }
         if let Some(timings) = self.gpu.timings()
             && !timings.is_empty()
@@ -7096,6 +7104,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                     .record_gpu(timings.frame, Duration::from_nanos(elapsed));
             }
             self.passes.record(timings);
+            if let Some(profile) = self.profile.as_mut() {
+                profile.recorder.record_gpu(timings);
+            }
         }
     }
 
@@ -7621,6 +7632,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             for line in self.passes.report().trim_end().lines() {
                 log::info!("{line}");
             }
+        }
+        if let Some(profile) = self.profile.take() {
+            let adapter = self
+                .gpu
+                .presenting_context()
+                .and_then(|context| context.adapter());
+            profile.write(adapter.as_ref());
         }
         // **The CPU half of the same report.** `FrameTimings` above is GPU
         // timestamps; this is the monotonic clock the loop was actually driven
@@ -12519,6 +12537,7 @@ mod tests {
             frame,
             passes: vec![crcbl_render::PassTiming {
                 label: "forward".to_string(),
+                begin_nanos: 0,
                 gpu_nanos: nanos,
                 statistics: None,
             }],
@@ -12558,11 +12577,13 @@ mod tests {
                 passes: vec![
                     crcbl_render::PassTiming {
                         label: "a".into(),
+                        begin_nanos: 0,
                         gpu_nanos: 2_000_000,
                         statistics: None,
                     },
                     crcbl_render::PassTiming {
                         label: "b".into(),
+                        begin_nanos: 0,
                         gpu_nanos: 2_000_000,
                         statistics: None,
                     },
@@ -12596,6 +12617,7 @@ mod tests {
             frame,
             passes: vec![crcbl_render::PassTiming {
                 label: "forward".to_string(),
+                begin_nanos: 0,
                 gpu_nanos: nanos,
                 statistics: None,
             }],

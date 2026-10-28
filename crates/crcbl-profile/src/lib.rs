@@ -9,16 +9,19 @@
 //!
 //! # What a capture holds
 //!
-//! An [`Environment`] saying what it was taken on, and a run of [`Frame`]s,
-//! each with the CPU's span and counter events per thread and the GPU's passes.
-//! The CPU half is `crcbl_core::trace`'s record stream, copied rather than
-//! referenced so this crate does not depend on that one; the GPU half is the
-//! render graph's per-pass timestamps and, where the run counted them, its
-//! pipeline statistics.
+//! An [`Environment`] saying what it was taken on, then two runs of frames: the
+//! CPU's ([`CpuFrame`], span and counter events per thread) and the GPU's
+//! ([`GpuFrame`], the render graph's passes with their timestamps and, where
+//! the run counted them, their pipeline statistics). The CPU half is
+//! `crcbl_core::trace`'s record stream, copied rather than referenced so this
+//! crate does not depend on that one.
 //!
-//! **Each clock stays in its own units.** CPU events are nanoseconds since the
-//! trace epoch, GPU passes nanoseconds on the GPU's timestamp clock, and
-//! nothing here pretends the two share an origin. Putting them on one timeline
+//! **Two runs, not one, because the two are numbered and timed apart.** The GPU
+//! timers number the frames they bracket themselves, and report each one frames
+//! after the CPU finished it, so a CPU frame and a GPU frame with the same
+//! number need not be the same frame; and CPU events are nanoseconds since the
+//! trace epoch where GPU passes are nanoseconds on the GPU's timestamp clock.
+//! Nothing here pretends either pair agrees. Putting the two on one timeline
 //! takes a calibrated clock pair, which a capture will carry when the producer
 //! can measure one.
 //!
@@ -36,8 +39,10 @@ pub use format::{FORMAT_VERSION, FormatError, MAGIC};
 pub struct Capture {
     /// What the run was taken on.
     pub environment: Environment,
-    /// The frames captured, oldest first.
-    pub frames: Vec<Frame>,
+    /// The CPU's frames, oldest first.
+    pub cpu: Vec<CpuFrame>,
+    /// The GPU's frames, oldest first.
+    pub gpu: Vec<GpuFrame>,
 }
 
 /// What a capture was taken on: the adapter, the driver, the backend, the build,
@@ -65,14 +70,21 @@ impl Environment {
     }
 }
 
-/// One frame of a capture.
+/// One frame of the CPU's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Frame {
-    /// The frame's number, as the producer counted it.
+pub struct CpuFrame {
+    /// The frame's number, as the loop counted it.
     pub number: u64,
-    /// The CPU's events, one entry per thread that recorded any.
+    /// The events, one entry per thread that recorded any.
     pub threads: Vec<Thread>,
-    /// The GPU's passes, in the order the graph ran them.
+}
+
+/// One frame of the GPU's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GpuFrame {
+    /// The frame's number, as the GPU timers counted it.
+    pub number: u64,
+    /// The passes, in the order the graph ran them.
     pub passes: Vec<Pass>,
 }
 

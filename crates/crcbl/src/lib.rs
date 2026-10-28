@@ -414,6 +414,8 @@ pub mod occlusion;
 
 pub mod perf;
 
+pub mod profile;
+
 pub mod rebind;
 
 // Native only: it writes through `std::fs`, and the hosts it records are the

@@ -62,13 +62,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `resolve_query_set`, which copied one of the set's two pools with queries a
   single `u64` apart, each overwriting the last.
 - **`crcbl-profile`: the profiler's capture file.** A new crate holding a
-  `Capture` (an environment of named values, then frames of per-thread CPU span
-  and counter events and GPU passes with their timestamps and statistics) and
+  `Capture` (an environment of named values, then the CPU's frames of per-thread
+  span and counter events and, kept apart because they are numbered and timed
+  apart, the GPU's frames of passes with their timestamps and statistics) and
   its `.crcblprof` encoding, with `Capture::encode` and `Capture::decode`. It
   depends on nothing of the engine's, so a viewer reads a capture without a GPU;
   the reader refuses another file, a later version, truncation, undefined tags
   and trailing bytes, and never allocates for a count it has not got the bytes
-  for. Nothing writes one yet.
+  for.
+- **`CRCBL_PROFILE_CAPTURE=<path>` writes a capture of the run's last frames.**
+  The loop turns the CPU trace on, keeps the last 120 frames of CPU spans and
+  GPU passes in a `crcbl::profile::Recorder`, and writes them to the path as it
+  finishes, with the adapter, driver and build in the environment. `PassTiming`
+  gains `begin_nanos`, the pass's start on the GPU clock.
 - **The pass timers count each pass's work when asked.**
   `CRCBL_PASS_STATISTICS=1`, or `PassTimers::counting` in place of
   `PassTimers::new`, gives every timed pass a statistics query, and `PassTiming`

@@ -32,6 +32,9 @@ crcbl-app = { workspace = true }
 # compilation unit of `core`/`std` and nothing else on any target.
 crcbl-console = { workspace = true }
 crcbl-hal = { workspace = true }
+# The capture `crate::profile` writes. GPU-free and depending on nothing but
+# `thiserror`, so the arrow adds the format and nothing else.
+crcbl-profile = { workspace = true }
 crcbl-render = { workspace = true }
 crcbl-shaders = { workspace = true }
 crcbl-shell = { workspace = true }

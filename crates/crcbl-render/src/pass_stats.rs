@@ -312,6 +312,7 @@ mod tests {
                 .iter()
                 .map(|(label, gpu_nanos)| PassTiming {
                     label: (*label).to_string(),
+                    begin_nanos: 0,
                     gpu_nanos: *gpu_nanos,
                     statistics: None,
                 })
@@ -475,6 +476,7 @@ mod tests {
         };
         let pass = |statistics| PassTiming {
             label: "shadow".to_string(),
+            begin_nanos: 0,
             gpu_nanos: 1_000,
             statistics,
         };
@@ -524,6 +526,7 @@ mod tests {
 
         let pass = |statistics| PassTiming {
             label: "forward".to_string(),
+            begin_nanos: 0,
             gpu_nanos: 1_000,
             statistics: Some(statistics),
         };
