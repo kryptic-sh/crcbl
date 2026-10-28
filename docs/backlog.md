@@ -575,28 +575,6 @@ performance on an iGPU-driven display still loads every driver, by design.
   - Behaviour, not a bug: the rectangles are the caller's layout in device
     pixels, so a window whose scale changes keeps its old region (scaled once,
     at the call) until the caller sends it again, as the trait docs say.
-- **Win32 popup leave (lyr): the cause was the wait, fixed; verified on CI's
-  desktop only.** lyr's trace on 0.8.1 (2026-10-22, `RUST_LOG=crcbl_shell=trace`
-  with a probe logging every event its bar received): the leave was recorded 8
-  ms after the warp (`WM_MOUSELEAVE for … (reported)`) and reached lyr 2.3 s
-  later, at an unrelated wake; the tooltip never took a movement. The posted
-  `WM_MOUSELEAVE` arrived just after a pump, `Win32Shell::wait`'s drain before
-  sleeping dispatched it, and the wait then slept with the event recorded and
-  undelivered. `wait` now returns `Wake::Recorded` at once when its drain
-  recorded anything (`an_event_the_waits_own_drain_records_ends_the_wait`, a
-  desktop test). The `Shared::enter` change made while looking (an arrival
-  queues the last window's leave) is a real defect too, but was not lyr's. Not
-  yet re-run in lyr's bar with the fix; lyr re-checks on the release that
-  carries it.
-  - **The desktop test flaked on CI twice (2026-10-24, 10-26) and was the test's
-    race, not the wait's; rewritten 2026-10-27.** It entered with a hand-sent
-    move, which arms `TrackMouseEvent`, and with the runner's cursor elsewhere
-    the system then posts its own `WM_MOUSELEAVE`. When that landed in the pump
-    before the test posted its leave, the test's was stale, the drain recorded
-    nothing, and the wait woke on the next message (`Wake::Message` after 136 µs
-    and 48.9 µs). The test now posts `WM_CLOSE`, which is always recorded and
-    which nothing else posts. **Mechanism inferred from the code, not observed
-    in a trace.**
 - **AppKit input method: mutants not run.** The `appkit_session` additions went
   red on CI for removing the pre-edit gate in `record_preedit` and the
   end-of-pre-edit block in `insert_text`. Cancelled unrun: the
