@@ -3441,31 +3441,23 @@ lands.
 **EW's port proposal of 2026-10-29, queued in this order** (EW keeps its copies
 until each ships in a release):
 
-1. **Route-follower arrival tie (an engine bug).**
-   `crcbl_nav::follow::FollowDistances::reach_for` returns `last_stop_m` for the
-   last waypoint and `Steer::stop_distance_m` is the same number, so a walker
-   braking to stop there can rest a rounding error outside the reach and never
-   arrive; EW saw an AI freeze 0.25 m from cover, Linux only, and works around
-   it with `COVER_STOP_M = COVER_ARRIVAL_M / 2`. Shape: separate `last_reach_m`
-   and `last_stop_m`, `last_stop < last_reach`, as `waypoint_reach` and `stop`
-   already are.
-2. **Unclean-exit marker** (EW `src/crash_report.rs`): a run writes a marker as
+1. **Unclean-exit marker** (EW `src/crash_report.rs`): a run writes a marker as
    it starts, deletes it on a clean exit, records an error or panic into it, and
    the next run reports "the last run did not close normally" naming the rotated
    `.1.log`. EW verified with `taskkill /F` and `kill -9`. Shape:
    `crcbl_store::run_marker::{begin, finish, take}` beside `enable_log_file`.
-3. **Starting quality tier by GPU type** (EW `starting_quality`, Discrete→High,
+2. **Starting quality tier by GPU type** (EW `starting_quality`, Discrete→High,
    Integrated→Low, Cpu→Potato, else Medium, chosen once on the first windowed
    launch). EW measured the Raphael iGPU at 45 fps at 720p on the default and
    105 on the low tier. Shape: `settings::presets::{starting_tier, choose_once}`
    with its own marker key.
-4. **Linux release packaging, as knowledge**:
+3. **Linux release packaging, as knowledge**:
    `cargo zigbuild --target x86_64-unknown-linux-gnu.2.31`,
    `-C link-arg=-Wl,--allow-shlib-undefined` because `alsa-sys` links the host's
    newer `libasound`, and an `objdump -T` gate of max GLIBC ≤ 2.31 (EW:
    GLIBC_2.30, runs on Debian 11 and Ubuntu 22.04). No code until crcbl packages
    games.
-5. **The query layers and the ground speed multiplier stay in EW** (the owner's
+4. **The query layers and the ground speed multiplier stay in EW** (the owner's
    decision, relayed by EW 2026-10-29): the mechanism is `QueryFilter::within`,
    and what remains is game meaning used by generated maps alone. Revisit when a
    second game wants terrain slowdown.
