@@ -909,9 +909,16 @@ run_sandbox_soak() {
     at_two="$(grep -c "$reconfigure 1280x720" "$log" || true)"
     swaymsg output HEADLESS-1 scale 2 >/dev/null
     wait_for_count "the swapchain at scale 2" "$log" "$reconfigure 1280x720" $((at_two + 1))
+    # A frame at each scale before the next change, as every step above waits
+    # for one: the scale back races this one's commit otherwise.
+    wait_for_frame_at "$log" 1280x720 $((at_two + 1))
     before="$(grep -c "$reconfigure 640x360" "$log" || true)"
     swaymsg output HEADLESS-1 scale 1 >/dev/null
     wait_for_count "the swapchain back at scale 1" "$log" "$reconfigure 640x360" $((before + 1))
+    # And before the close: the summary reports the extent last presented, and
+    # a close answered in the pump that reconfigured left it at 1280x720 — the
+    # race `run_sandbox_resize` waits out the same way (CI, 2026-10-29).
+    wait_for_frame_at "$log" 640x360 $((before + 1))
 
     swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" kill >/dev/null
     local status=0
