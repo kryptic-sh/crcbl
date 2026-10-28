@@ -509,7 +509,7 @@ impl WaylandShell {
             .keymap
             .as_ref()
             .map_or(Keysym::NONE, |keymap| keymap.keysym(key));
-        let event_time = self.time.event_time(time);
+        let event_time = seat.repeat.not_before(self.time.event_time(time));
         let event = ShellEvent::Key {
             window,
             device: seat.device,
@@ -615,6 +615,7 @@ impl WaylandShell {
                 }
                 key.next_nanos = key.next_nanos.saturating_add(key.interval_nanos);
                 emitted += 1;
+                self.seats[index].repeat.last_emitted = Some(time);
             }
             self.seats[index].repeat.key = Some(key);
         }

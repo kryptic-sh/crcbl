@@ -167,6 +167,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A Wayland key release is never stamped before the repeat it ended.**
+  Synthesised repeats carry the nanosecond they came due and a compositor's key
+  event whole milliseconds, truncated, so the last repeat of a held key could be
+  stamped after its release and a seat's events went backwards in time. A key
+  event is now stamped no earlier than the last repeat delivered.
 - **A `Presenter` retires frames on a timeline semaphore again.** A device
   reports only the features it was asked for, and the presenter never asked for
   `Features::TIMELINE_SEMAPHORE`, so every presenter whose caller left it out of

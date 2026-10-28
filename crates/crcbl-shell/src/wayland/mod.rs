@@ -1911,6 +1911,9 @@ struct Repeat {
     /// Milliseconds before the first repeat.
     delay: i32,
     key: Option<RepeatKey>,
+    /// The time the last repeat was stamped with: what a key event from the
+    /// compositor may not be stamped before. See [`Repeat::not_before`].
+    last_emitted: Option<EventTime>,
 }
 
 /// The one key a seat is repeating.
@@ -1955,6 +1958,21 @@ impl Repeat {
     /// `CLOCK_MONOTONIC` nanoseconds at which the next repeat is due.
     fn due_at(&self) -> Option<u64> {
         self.key.map(|key| key.next_nanos)
+    }
+
+    /// A compositor key event's time, moved no earlier than the last repeat.
+    ///
+    /// **The two clocks round differently.** A repeat is stamped at the
+    /// nanosecond it came due; the compositor's `wl_keyboard.key` carries
+    /// whole milliseconds, truncated. A repeat that came due in the
+    /// millisecond a key was released, and was emitted before the release was
+    /// dispatched, is stamped after the release's truncated time, and the
+    /// seat's events would go back in time: by 26.5 µs on Linux, where
+    /// `a_held_key_repeats_and_the_repeats_are_flagged` caught it (2026-10-29).
+    /// The release did happen after that repeat, so its time is the repeat's
+    /// at the least; this moves it by less than the millisecond it lost.
+    fn not_before(&self, time: EventTime) -> EventTime {
+        self.last_emitted.map_or(time, |last| time.max(last))
     }
 }
 
@@ -5027,6 +5045,7 @@ mod tests {
             rate: 25,
             delay: 600,
             key: None,
+            last_emitted: None,
         };
         let now = 1_000_000_000;
         repeat.start(
@@ -5054,6 +5073,22 @@ mod tests {
         assert!(repeat.key.is_none());
     }
 
+    /// **A key event is never stamped before a repeat already delivered**, and
+    /// one already later keeps its own time: the release that truncated to a
+    /// millisecond before the last repeat moves to the repeat's time and no
+    /// further.
+    #[test]
+    fn a_compositor_key_time_is_never_before_the_last_repeat() {
+        let mut repeat = Repeat::default();
+        let truncated = EventTime::from_duration(Duration::from_millis(1_511));
+        assert_eq!(repeat.not_before(truncated), truncated, "no repeat yet");
+        let last = EventTime::from_duration(Duration::from_nanos(1_511_026_517));
+        repeat.last_emitted = Some(last);
+        assert_eq!(repeat.not_before(truncated), last);
+        let later = EventTime::from_duration(Duration::from_millis(1_600));
+        assert_eq!(repeat.not_before(later), later);
+    }
+
     #[test]
     fn a_zero_rate_disables_repeat_entirely() {
         // `wl_keyboard.repeat_info` defines rate 0 as "no repeat", and a user
@@ -5063,6 +5098,7 @@ mod tests {
             rate: 0,
             delay: 300,
             key: None,
+            last_emitted: None,
         };
         repeat.start(
             0,
