@@ -1900,6 +1900,17 @@ impl PointerFrame {
     }
 }
 
+/// How many intervals a repeat may fall behind before the schedule restarts at
+/// now rather than catching up.
+///
+/// A stall — a long frame, a breakpoint, a suspended laptop — must not release a
+/// backlog of presses into the action layer; past this many intervals, catching
+/// up stops being catching up and starts being a burst.
+const REPEAT_STALL_INTERVALS: u64 = 4;
+
+/// The most repeats one pump emits for one seat, however far behind it is.
+const MAX_REPEATS_PER_PUMP: usize = 8;
+
 /// Key-repeat parameters and the key currently repeating.
 ///
 /// See the [module docs](self) for why this lives in the backend at all.
@@ -1958,6 +1969,36 @@ impl Repeat {
     /// `CLOCK_MONOTONIC` nanoseconds at which the next repeat is due.
     fn due_at(&self) -> Option<u64> {
         self.key.map(|key| key.next_nanos)
+    }
+
+    /// The repeats due by `now_nanos`, each stamped by `stamp` at the instant
+    /// it was due, with the schedule moved past them and the last one's time
+    /// kept for [`not_before`](Self::not_before).
+    ///
+    /// At most [`MAX_REPEATS_PER_PUMP`], and after a stall of more than
+    /// [`REPEAT_STALL_INTERVALS`] the schedule restarts at now. The instant a
+    /// repeat was *due*, not the one it was emitted at, so a slow frame does
+    /// not smear the interval.
+    fn take_due(&mut self, now_nanos: u64, stamp: impl Fn(u64) -> EventTime) -> Vec<EventTime> {
+        let Some(key) = self.key.as_mut() else {
+            return Vec::new();
+        };
+        if key.next_nanos > now_nanos {
+            return Vec::new();
+        }
+        let behind = now_nanos.saturating_sub(key.next_nanos);
+        if behind > key.interval_nanos.saturating_mul(REPEAT_STALL_INTERVALS) {
+            key.next_nanos = now_nanos;
+        }
+        let mut due = Vec::new();
+        while key.next_nanos <= now_nanos && due.len() < MAX_REPEATS_PER_PUMP {
+            due.push(stamp(key.next_nanos));
+            key.next_nanos = key.next_nanos.saturating_add(key.interval_nanos);
+        }
+        if let Some(&last) = due.last() {
+            self.last_emitted = Some(last);
+        }
+        due
     }
 
     /// A compositor key event's time, moved no earlier than the last repeat.
@@ -5073,20 +5114,77 @@ mod tests {
         assert!(repeat.key.is_none());
     }
 
-    /// **A key event is never stamped before a repeat already delivered**, and
-    /// one already later keeps its own time: the release that truncated to a
-    /// millisecond before the last repeat moves to the repeat's time and no
-    /// further.
+    /// A `RepeatKeyRequest` for the tests below.
+    fn repeat_key() -> RepeatKeyRequest {
+        RepeatKeyRequest {
+            window: window_id(),
+            scancode: 30,
+            key_code: Some(KeyCode::KeyA),
+            keysym: Keysym::from_char('a'),
+        }
+    }
+
+    /// Nanoseconds as an event time, the stamp the tests below take.
+    fn at(nanos: u64) -> EventTime {
+        EventTime::from_duration(Duration::from_nanos(nanos))
+    }
+
+    /// **A key event after a delivered repeat is never stamped before it.**
+    /// The race CI's Linux run caught: a repeat due in the millisecond a key
+    /// was released, emitted before the release was dispatched, stamped at its
+    /// nanosecond, and then the release at the compositor's truncated
+    /// millisecond, 26.5 µs earlier.
+    ///
+    /// Through [`Repeat::take_due`], which is what delivers a repeat, so it
+    /// goes red if delivering stops remembering the time as surely as if the
+    /// clamp stops applying it.
     #[test]
-    fn a_compositor_key_time_is_never_before_the_last_repeat() {
-        let mut repeat = Repeat::default();
-        let truncated = EventTime::from_duration(Duration::from_millis(1_511));
-        assert_eq!(repeat.not_before(truncated), truncated, "no repeat yet");
-        let last = EventTime::from_duration(Duration::from_nanos(1_511_026_517));
-        repeat.last_emitted = Some(last);
-        assert_eq!(repeat.not_before(truncated), last);
-        let later = EventTime::from_duration(Duration::from_millis(1_600));
-        assert_eq!(repeat.not_before(later), later);
+    fn a_key_event_after_a_delivered_repeat_is_never_stamped_before_it() {
+        let mut repeat = Repeat {
+            rate: 25,
+            delay: 600,
+            ..Repeat::default()
+        };
+        repeat.start(911_026_517, repeat_key());
+        assert!(repeat.take_due(1_511_000_000, at).is_empty(), "not yet due");
+        let due = repeat.take_due(1_511_100_000, at);
+        assert_eq!(due, [at(1_511_026_517)], "the first repeat, at the delay");
+
+        let release = at(1_511_000_000);
+        assert!(release < due[0], "the truncated millisecond is the earlier");
+        assert_eq!(repeat.not_before(release), due[0]);
+        let later = at(1_600_000_000);
+        assert_eq!(
+            repeat.not_before(later),
+            later,
+            "a later time keeps its own"
+        );
+    }
+
+    /// A stall of more than [`REPEAT_STALL_INTERVALS`] restarts the schedule at
+    /// now rather than catching up, and within it every interval is emitted.
+    ///
+    /// [`MAX_REPEATS_PER_PUMP`] is not asserted: within the stall limit at most
+    /// one more repeat than the limit's intervals can be due, so the cap never
+    /// binds, and a test of it would pass whatever the cap was.
+    #[test]
+    fn a_stall_restarts_the_schedule_and_a_short_lag_catches_up() {
+        let mut repeat = Repeat {
+            rate: 25,
+            delay: 0,
+            ..Repeat::default()
+        };
+        let interval = 40_000_000;
+        repeat.start(0, repeat_key());
+        // Within the stall limit: caught up, one repeat per interval.
+        let caught_up = repeat.take_due(3 * interval, at);
+        assert_eq!(
+            caught_up,
+            [at(0), at(interval), at(2 * interval), at(3 * interval)]
+        );
+        // Far past it: one repeat now, not a burst of the backlog.
+        let resumed = repeat.take_due(100 * interval, at);
+        assert_eq!(resumed, [at(100 * interval)]);
     }
 
     #[test]

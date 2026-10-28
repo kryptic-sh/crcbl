@@ -569,23 +569,15 @@ impl WaylandShell {
     /// repeat was *due*, so a slow frame does not smear the interval.
     pub(super) fn drive_repeats(&mut self) {
         let now = ffi::monotonic_nanos();
+        let base = self.time;
         for index in 0..self.seats.len() {
-            let Some(mut key) = self.seats[index].repeat.key else {
+            let Some(key) = self.seats[index].repeat.key else {
                 continue;
             };
-            if key.next_nanos > now {
-                continue;
-            }
-            // A stall — a long frame, a breakpoint, a suspended laptop — must
-            // not release a backlog of presses into the action layer. Four
-            // intervals is the point at which catching up stops being catching
-            // up and starts being a burst.
-            let behind = now.saturating_sub(key.next_nanos);
-            if behind > key.interval_nanos.saturating_mul(4) {
-                key.next_nanos = now;
-            }
-            let mut emitted = 0;
-            while key.next_nanos <= now && emitted < 8 {
+            let due = self.seats[index]
+                .repeat
+                .take_due(now, |nanos| base.event_time_nanos(nanos));
+            for time in due {
                 let seat = &mut self.seats[index];
                 // A repeat types as a press does, through the compose
                 // sequence and with the modifiers held now, which is what an
@@ -594,7 +586,6 @@ impl WaylandShell {
                     .keymap
                     .as_mut()
                     .and_then(|keymap| keymap.text(key.scancode));
-                let time = self.time.event_time_nanos(key.next_nanos);
                 self.queue.push_back(ShellEvent::Key {
                     window: key.window,
                     device: seat.device,
@@ -613,11 +604,7 @@ impl WaylandShell {
                         text,
                     });
                 }
-                key.next_nanos = key.next_nanos.saturating_add(key.interval_nanos);
-                emitted += 1;
-                self.seats[index].repeat.last_emitted = Some(time);
             }
-            self.seats[index].repeat.key = Some(key);
         }
     }
 

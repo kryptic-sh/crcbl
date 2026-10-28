@@ -56,20 +56,6 @@ has gone red. A fix is to unlink it, or to gate the field's doc sentence. Not
 fixed: found while fixing the pre-check's dead code under the same feature set,
 and outside that change.
 
-## A key repeat can be stamped after its own release (2026-10-29)
-
-`wayland_e2e::a_held_key_repeats_and_the_repeats_are_flagged` failed once on
-this laptop (nested sway, machine loaded) with "timestamps never go backwards":
-the last repeat was stamped 1.511026517 s and the release 1.511 s. Repeats are
-stamped at full precision when due (`WaylandShell::drive_repeats`), and the
-release carries the compositor's millisecond. `keep_alive` drains the socket
-before driving repeats, but a release the compositor has stamped and not yet
-sent is not in the socket, so a repeat due a few microseconds later goes out
-first. A real ordering defect, not test noise: a caller that orders by time sees
-a press after its release. One fix: clamp a key's release time to at least the
-last repeat emitted for it. Reported to the Windows session, which owns the
-flaky-CI work; not fixed.
-
 ## System audio control, asked by lyr for the owner (2026-10-22)
 
 **Approved by the owner on 2026-10-22, in progress.** **Slice 1 is on main**
@@ -249,6 +235,22 @@ reference and may be taken.
   machines. lyr tests every slice through a local `[patch]` before release.
 - **Order:** the model and the Linux backend first (this machine), then Windows,
   then macOS, each a slice of its own.
+
+## Wayland key repeat: what the timestamp fix left (2026-10-29)
+
+A key release could be stamped before the last repeat (`Repeat::not_before`,
+`Repeat::take_due` in `crcbl_shell::wayland`), caught by
+`a_held_key_repeats_and_the_repeats_are_flagged` on Linux, about once in four
+full runs while a cargo build loaded the machine. What is left:
+
+- **The race is not reproducible on demand.** A 20-run loop of that test under
+  busy-loop load passed 20 of 20 on the fixed branch and on unfixed main alike
+  (office-crcbl, 2026-10-29), so a passing loop says nothing; the unit tests are
+  what pin the fix, and the e2e test stays the end-to-end witness.
+- **`MAX_REPEATS_PER_PUMP` never binds.** Within `REPEAT_STALL_INTERVALS` at
+  most one more repeat than that many intervals can be due, so the cap of eight
+  is a guard nothing reaches and no test can show it working. Kept rather than
+  removed, since it bounds the burst if the stall limit is ever raised.
 
 ## NVIDIA's Wayland WSI crashes with a device per window (2026-10-22)
 
