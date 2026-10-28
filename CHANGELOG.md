@@ -134,6 +134,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `OutOfDeviceMemory`; those frames peak at about 6,200. The heap costs 2 MiB on
   an RX 7900 XTX (4 MiB on WARP), allocated once per device.
 
+### Changed
+
+- **`crcbl_frame::UiRenderer` uploads its start-up textures in one submission.**
+  The built-in glyph atlas, the image page, the glyph pages and the blank
+  texture used to be submitted and waited for one at a time, and on Mesa's ANV
+  each submit and `wait_idle` cost more than the copies. They are now recorded
+  into one command buffer and waited for once. On an Intel RPL-U iGPU the warm
+  `UiRenderer::new` went from a median of 11.70 ms to 8.96 ms in an interleaved
+  debug-build comparison. `upload_texture` and its siblings behave as before.
+
 ### Fixed
 
 - **A `Presenter` retires frames on a timeline semaphore again.** A device
