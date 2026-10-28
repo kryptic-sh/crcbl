@@ -94,9 +94,9 @@ use crcbl_hal::{
     CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePassDesc,
     ComputePipelineHandle, DrawIndirect, DrawIndirectCount, Extent3d, Format,
     GraphicsPipelineHandle, HalError, ImageAspect, ImageCopy, ImageHandle, ImageSubresourceLayers,
-    ImageType, IndexFormat, LoadOp, MemoryLocation, Offset3d, PassTimestampWrites,
-    PipelineLayoutHandle, QueryKind, QuerySetHandle, QueueTransfer, Rect2d, RenderPassDesc,
-    ShaderStages, Viewport,
+    ImageType, IndexFormat, LoadOp, MemoryLocation, Offset3d, PassStatisticsWrites,
+    PassTimestampWrites, PipelineLayoutHandle, QuerySetHandle, QueueTransfer, Rect2d,
+    RenderPassDesc, ShaderStages, Viewport,
 };
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D12::{
@@ -124,6 +124,7 @@ use crate::device::{
     DeviceInner, ImageRef, QuerySetRef, ZERO_SOURCE_BYTES,
 };
 use crate::draw::{IndirectKind, check_count, plan_index_binding, plan_indirect};
+use crate::query::QueryLayout;
 use crate::{query, resolve};
 
 /// A batch of resource-state transitions, and the references they borrowed.
@@ -348,7 +349,12 @@ pub(crate) struct Dx12CommandEncoder {
     /// boundaries are two ordinary calls, and this carries the second one from
     /// the pass's opening to its close.
     pass_end_timestamp: Option<(ID3D12QueryHeap, D3D12_QUERY_TYPE, u32)>,
-    /// Every timestamp this encoder wrote, by set, for
+    /// The heap, query type and index of the open pass's statistics query,
+    /// from [`PassStatisticsWrites`]: begun as the pass opens and ended as it
+    /// closes. D3D12 counts every draw and dispatch in between in the one
+    /// query, mesh draws included, so a pass needs no more than this.
+    pass_statistics: Option<(ID3D12QueryHeap, D3D12_QUERY_TYPE, u32)>,
+    /// Every query this encoder wrote, by set, for
     /// [`finish`](CommandEncoder::finish) to resolve into each set's own
     /// readback buffer. See [`WrittenQueries`].
     written_queries: Vec<WrittenQueries>,
@@ -394,7 +400,7 @@ pub(crate) struct Dx12CommandEncoder {
 struct WrittenQueries {
     heap: ID3D12QueryHeap,
     query_type: D3D12_QUERY_TYPE,
-    kind: QueryKind,
+    layout: QueryLayout,
     /// The set's readback buffer, also held in [`Dx12CommandEncoder::retained`]
     /// because the resolve names it.
     resolve: ID3D12Resource,
@@ -472,6 +478,7 @@ impl Dx12CommandEncoder {
             in_compute_pass: false,
             resolves: Vec::new(),
             pass_end_timestamp: None,
+            pass_statistics: None,
             written_queries: Vec::new(),
             label_depth: 0,
             render_pass_label: false,
@@ -622,11 +629,11 @@ impl Dx12CommandEncoder {
         let Some(resolved) = self.query_set(writes.set) else {
             return;
         };
-        if !matches!(resolved.kind, QueryKind::Timestamp) {
+        if !matches!(resolved.layout, QueryLayout::Timestamp) {
             self.fail(HalError::InvalidDescriptor(format!(
                 "{what} names a {:?} query set for its timestamps; a timestamp is written into a \
                  QueryKind::Timestamp set and D3D12 would end a query of the wrong type in it",
-                resolved.kind
+                resolved.layout
             )));
             return;
         }
@@ -659,6 +666,70 @@ impl Dx12CommandEncoder {
         self.pass_end_timestamp = Some((heap, query_type, writes.end_of_pass));
     }
 
+    /// Opens a pass's statistics query: begins it, and remembers it for
+    /// [`close_pass_statistics`](Self::close_pass_statistics) to end.
+    ///
+    /// Begun outside the scope, after the pass's opening timestamp, and ended
+    /// before its closing one, so the two timestamps bracket the count.
+    ///
+    /// **A set of another kind fails the encoder rather than being begun**, for
+    /// [`open_pass_timestamps`](Self::open_pass_timestamps)' reason: D3D12
+    /// would take a statistics query on a timestamp heap as a debug-layer
+    /// error and silence in a release runtime.
+    fn open_pass_statistics(&mut self, what: &'static str, writes: Option<PassStatisticsWrites>) {
+        self.pass_statistics = None;
+        let Some(writes) = writes else { return };
+        if self.list().is_none() {
+            return;
+        }
+        let Some(resolved) = self.query_set(writes.set) else {
+            return;
+        };
+        if !matches!(
+            resolved.layout,
+            QueryLayout::Statistics | QueryLayout::StatisticsWithMesh
+        ) {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} names a {:?} query set for its statistics; a pass is counted into a \
+                 QueryKind::PipelineStatistics set",
+                resolved.layout
+            )));
+            return;
+        }
+        if let Err(error) = query::check_range(resolved.count, writes.query, 1) {
+            self.fail(error);
+            return;
+        }
+        let heap = resolved.raw.clone();
+        let query_type = resolved.query_type;
+        // Twice, because `note_written` takes a pass's pair; the resolve
+        // dedups, so the one query is resolved once.
+        self.note_written(&resolved, [writes.query, writes.query]);
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, `heap` is a live query heap this
+        // device created and this encoder retained in `query_set` above, the
+        // type is the one the heap was created for, and the index was
+        // bounds-checked against the heap's own query count.
+        unsafe {
+            list.BeginQuery(&heap, query_type, writes.query);
+        }
+        self.pass_statistics = Some((heap, query_type, writes.query));
+    }
+
+    /// Ends the query [`open_pass_statistics`](Self::open_pass_statistics)
+    /// began. A no-op for a pass nothing counts.
+    fn close_pass_statistics(&mut self) {
+        let Some((heap, query_type, index)) = self.pass_statistics.take() else {
+            return;
+        };
+        let Some(list) = self.list() else { return };
+        // SAFETY: as for the begin — heap, type and index were all checked
+        // there, and the heap is retained in `query_heaps`.
+        unsafe {
+            list.EndQuery(&heap, query_type, index);
+        }
+    }
+
     /// Records that `queries` of `set` are written by this list, so
     /// [`resolve_written_queries`](Self::resolve_written_queries) resolves
     /// them, and takes a reference to the set's readback buffer.
@@ -676,7 +747,7 @@ impl Dx12CommandEncoder {
         self.written_queries.push(WrittenQueries {
             heap: set.raw.clone(),
             query_type: set.query_type,
-            kind: set.kind,
+            layout: set.layout,
             resolve: set.resolve.clone(),
             queries: queries.to_vec(),
         });
@@ -715,7 +786,7 @@ impl Dx12CommandEncoder {
                         first,
                         count,
                         &set.resolve,
-                        query::span_bytes(set.kind, u64::from(first)),
+                        query::span_bytes(set.layout, u64::from(first)),
                     );
                 }
             }
@@ -1942,13 +2013,6 @@ impl CommandEncoder for Dx12CommandEncoder {
             ));
             return;
         }
-        if desc.statistics_writes.is_some() {
-            self.fail(HalError::Unsupported {
-                backend: BackendKind::Dx12,
-                what: crcbl_hal::NO_PIPELINE_STATISTICS,
-            });
-            return;
-        }
         if desc.color_attachments.is_empty() && desc.depth_stencil_attachment.is_none() {
             self.fail(HalError::InvalidDescriptor(
                 "a render pass with no colour and no depth/stencil attachment renders nowhere"
@@ -2166,6 +2230,7 @@ impl CommandEncoder for Dx12CommandEncoder {
             self.render_pass_label = true;
         }
         self.open_pass_timestamps("begin_render_pass", desc.timestamp_writes);
+        self.open_pass_statistics("begin_render_pass", desc.statistics_writes);
         self.in_render_pass = true;
     }
 
@@ -2186,6 +2251,7 @@ impl CommandEncoder for Dx12CommandEncoder {
         // After the unbind, so that nothing is transitioning a subresource the
         // output merger still holds a descriptor for.
         self.record_resolves();
+        self.close_pass_statistics();
         self.close_pass_timestamps();
         if core::mem::take(&mut self.render_pass_label) {
             self.end_debug_label();
@@ -2635,18 +2701,12 @@ impl CommandEncoder for Dx12CommandEncoder {
             ));
             return;
         }
-        if desc.statistics_writes.is_some() {
-            self.fail(HalError::Unsupported {
-                backend: BackendKind::Dx12,
-                what: crcbl_hal::NO_PIPELINE_STATISTICS,
-            });
-            return;
-        }
         if let Some(label) = desc.label {
             self.begin_debug_label(label);
             self.compute_pass_label = true;
         }
         self.open_pass_timestamps("begin_compute_pass", desc.timestamp_writes);
+        self.open_pass_statistics("begin_compute_pass", desc.statistics_writes);
         self.in_compute_pass = true;
     }
 
@@ -2659,6 +2719,7 @@ impl CommandEncoder for Dx12CommandEncoder {
     fn end_compute_pass(&mut self) {
         self.in_compute_pass = false;
         self.compute = None;
+        self.close_pass_statistics();
         self.close_pass_timestamps();
         if core::mem::take(&mut self.compute_pass_label) {
             self.end_debug_label();
@@ -2824,7 +2885,8 @@ impl CommandEncoder for Dx12CommandEncoder {
     /// `crate::query::check_destination` refuses an offset D3D12 will not take
     /// and a destination the resolve would run off the end of. A
     /// pipeline-statistics set is where that stops being theoretical — it
-    /// resolves eleven `u64`s per query — and without the check a caller that
+    /// resolves [`QueryLayout::counters`] `u64`s per query — and without the
+    /// check a caller that
     /// sized its buffer at the seam's one `u64` per query would have D3D12 write
     /// past the end of it with nothing anywhere reporting so.
     ///
@@ -2867,7 +2929,7 @@ impl CommandEncoder for Dx12CommandEncoder {
         let queries = u64::from(range.end.saturating_sub(range.start));
         if let Err(error) =
             query::check_range(resolved.count, range.start, queries).and_then(|()| {
-                query::check_destination(resolved.kind, dst_offset, queries, buffer.size)
+                query::check_destination(resolved.layout, dst_offset, queries, buffer.size)
             })
         {
             self.fail(error);

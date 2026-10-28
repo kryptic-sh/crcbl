@@ -88,7 +88,7 @@ use crcbl_hal::{
     DisplayTiming, Extent3d, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle,
     HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
     ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle,
-    PresentInfo, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
+    PresentInfo, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
     ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle,
     SemaphoreKind, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support, SurfaceError,
     SwapchainDesc, SwapchainHandle,
@@ -127,7 +127,7 @@ use crate::handle::{self, Owned, Owner};
 use crate::instance::{AdapterRecord, InstanceInner, OFFSCREEN_HWND, next_owner_id};
 use crate::pipeline::{self, ComputePipelineEntry, GraphicsPipelineEntry, PipelineLayoutEntry};
 use crate::present::{self, PresentWait};
-use crate::query;
+use crate::query::{self, QueryLayout};
 use crate::resolve;
 use crate::retire::RetireQueue;
 use crate::swapchain::{self, SwapchainEntry};
@@ -400,10 +400,13 @@ pub(crate) enum Retired {
 struct QuerySetEntry {
     owner: u64,
     raw: ID3D12QueryHeap,
-    kind: QueryKind,
-    /// The type every `EndQuery` and `ResolveQueryData` on this heap names. Kept
-    /// beside `kind` rather than re-derived at each call, because
-    /// [`conv::query_types`] returns it with the heap type it must agree with.
+    /// What one query resolves as: the kind the set was created for, and for a
+    /// statistics set which structure this device resolves it into.
+    layout: QueryLayout,
+    /// The type every `BeginQuery`, `EndQuery` and `ResolveQueryData` on this
+    /// heap names. Kept beside `layout` rather than re-derived at each call,
+    /// because [`conv::query_types`] returns it with the heap type it must agree
+    /// with.
     query_type: D3D12_QUERY_TYPE,
     count: u32,
     /// The readback buffer [`Device::query_results`] resolves into.
@@ -435,7 +438,7 @@ struct QuerySetEntry {
 #[derive(Debug)]
 pub(crate) struct QuerySetRef {
     pub(crate) raw: ID3D12QueryHeap,
-    pub(crate) kind: QueryKind,
+    pub(crate) layout: QueryLayout,
     pub(crate) query_type: D3D12_QUERY_TYPE,
     pub(crate) count: u32,
     /// The set's readback buffer, which the encoder resolves every query it
@@ -593,6 +596,10 @@ pub(crate) struct DeviceInner {
     /// rather than the upload heap; see [`conv::heap_type`]. Asked of this
     /// device when it opens, through [`adapter::gpu_upload_heap`].
     pub(crate) gpu_upload_heap: bool,
+    /// Whether a statistics set's heap is `_PIPELINE_STATISTICS1`, which counts
+    /// the amplification and mesh stages too. Asked of this device when it
+    /// opens, through [`adapter::mesh_statistics`]; see [`QueryLayout`].
+    mesh_statistics: bool,
     /// What a mesh pipeline with no fragment stage draws with in place of a
     /// null pixel shader, on a software adapter only: WARP removes the device
     /// for a mesh pipeline whose pixel shader is null. See
@@ -935,7 +942,7 @@ impl DeviceInner {
             .clone();
         Ok(QuerySetRef {
             raw: entry.raw.clone(),
-            kind: entry.kind,
+            layout: entry.layout,
             query_type: entry.query_type,
             count: entry.count,
             resolve,
@@ -1782,6 +1789,7 @@ impl Dx12Device {
         })?;
         let timestamp_frequency = query::timestamp_frequency(frequency)?;
         let gpu_upload_heap = adapter::gpu_upload_heap(&raw);
+        let mesh_statistics = adapter::mesh_statistics(&raw);
         let null_pixel = if record.info.device_type == DeviceType::Cpu {
             let (_, bytes) = crcbl_shaders::NULL_PIXEL
                 .dxil_containers()
@@ -1828,6 +1836,7 @@ impl Dx12Device {
             caps,
             timestamp_frequency,
             gpu_upload_heap,
+            mesh_statistics,
             null_pixel,
             zero,
             owner,
@@ -1852,6 +1861,127 @@ impl Dx12Device {
 
     fn state(&self) -> MutexGuard<'_, DeviceState> {
         self.inner.state()
+    }
+
+    /// Waits for every submission naming `set`, then copies its resolved
+    /// results into `out`, starting at `first_query`. `out` holds whole queries
+    /// of the set's [`QueryLayout`], [`QueryLayout::counters`] words each, and
+    /// the layout is returned so the caller can read them.
+    ///
+    /// The read under both [`Device::query_results`] and
+    /// [`Device::pipeline_statistics`], which differ in the sets they accept and
+    /// in what they make of the words; every bound the copy relies on is checked
+    /// here rather than left to them.
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`]; [`HalError::InvalidDescriptor`] for an `out` that
+    /// is not whole queries or a range past the end of the set; and
+    /// [`HalError::Backend`] from the wait or the map.
+    fn read_resolved(
+        &self,
+        set: QuerySetHandle,
+        first_query: u32,
+        out: &mut [u64],
+    ) -> Result<QueryLayout, HalError> {
+        let (layout, pending, resolve) = {
+            let state = self.state();
+            let entry = handle::lookup(&state.query_sets, "query set", set, self.inner.owner)?;
+            let counters = entry.layout.counters();
+            let words = out.len() as u64;
+            if !words.is_multiple_of(counters) {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "{words} words are not whole {:?} queries of {counters} counters each",
+                    entry.layout
+                )));
+            }
+            query::check_range(entry.count, first_query, words / counters)?;
+            let resolve =
+                handle::lookup(&state.buffers, "buffer", entry.resolve, self.inner.owner)?
+                    .raw
+                    .clone();
+            (entry.layout, entry.last_submission, resolve)
+        };
+        if out.is_empty() {
+            return Ok(layout);
+        }
+        // Without the state lock, so other threads keep recording and
+        // submitting meanwhile. Zero for a set no submission has named, which
+        // the fence has reached from creation. `resolve` is this call's own
+        // reference, so a set destroyed during the wait cannot free it.
+        self.inner.wait_for(pending)?;
+
+        // `out` is whole queries of this layout, checked above, so the bytes it
+        // holds are exactly the span the resolve buffer has for them, and the
+        // copy below cannot be told to overrun either.
+        let bytes = size_of_val(out);
+        let offset = query::span_bytes(layout, u64::from(first_query));
+
+        // A `D3D12_RANGE` is expressed in `usize`; only reachable on a 32-bit
+        // host, where the resolve buffer could not have existed either.
+        let begin = usize::try_from(offset).map_err(|_| {
+            HalError::InvalidDescriptor(format!(
+                "query offset {offset} does not fit this host's address space"
+            ))
+        })?;
+        // The read range is not decoration on a readback heap: it is what tells
+        // the runtime which bytes the CPU is about to look at.
+        let read = D3D12_RANGE {
+            Begin: begin,
+            End: begin + bytes,
+        };
+        let mut mapped: *mut core::ffi::c_void = core::ptr::null_mut();
+        // SAFETY: `resolve` is a live buffer on the readback heap this device
+        // created with the set, and subresource 0 is the only one a buffer has.
+        // Both pointers name live locals.
+        unsafe { resolve.Map(0, Some(&read), Some(&mut mapped)) }.map_err(|error| {
+            // A failed Map is where a removed device surfaces on this
+            // backend — the readback is the first call that touches
+            // memory the GPU was writing — so it is the one place the
+            // breadcrumbs are worth most. Without this the caller gets
+            // 0x887A0005 and no diagnosis, which is what a CI run
+            // reproducing a device removal actually printed.
+            // Still `Backend`, not `DeviceLost`: a Map can fail for reasons
+            // that are not a removal, and `debug::diagnosis` returns the
+            // empty string on a healthy device, so the variant must not be
+            // decided by the diagnostic being attached.
+            HalError::Backend(format!(
+                "ID3D12Resource::Map failed: {error}{}",
+                debug::diagnosis(&self.inner.raw)
+            ))
+        })?;
+        if mapped.is_null() {
+            return Err(HalError::Backend(
+                "ID3D12Resource::Map reported success and wrote no pointer".to_string(),
+            ));
+        }
+        // SAFETY: `mapped` points at the resolve buffer's whole allocation,
+        // which `create_query_set` sized for the set's whole query count, and
+        // the span was bounds-checked against that count above. The two regions
+        // cannot overlap: `out` is a caller-owned slice and the source is the
+        // buffer's own mapping. The fence has passed the last submission naming
+        // the set, whose lists ended with the resolve, so every byte it wrote
+        // is visible.
+        //
+        // Copied as **bytes** into `out`, rather than as `u64`s out of the
+        // mapping: `Map` promises no particular alignment for the pointer it
+        // returns, so a `*const u64` built from it would be an unaligned read,
+        // while `out` is a `&mut [u64]` and is aligned by construction. D3D12
+        // wrote the results in this machine's own byte order, so the bytes are
+        // the values.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                mapped.cast::<u8>().add(begin),
+                out.as_mut_ptr().cast::<u8>(),
+                bytes,
+            );
+        }
+        // SAFETY: the matching `Unmap`. The written range is empty because this
+        // call wrote nothing.
+        unsafe {
+            resolve.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
+        }
+        Ok(layout)
     }
 
     /// Resolves every [`BindingResource`] in a batch against this device's
@@ -3658,12 +3788,13 @@ impl Device for Dx12Device {
     fn create_query_set(&self, desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
         // Before the heap is sized, because the refusal is the seam's rather
         // than this device's: see `crcbl_hal::NO_OCCLUSION_QUERY_VERB`. The
-        // occlusion arms of `conv::query_types` and `query::result_bytes` are
-        // left standing — `D3D12_QUERY_TYPE_OCCLUSION` is what a begin/end verb
+        // occlusion arms of `conv::query_types` and `QueryLayout` are left
+        // standing — `D3D12_QUERY_TYPE_OCCLUSION` is what a begin/end verb
         // would resolve, and those arms are what it would reach.
         desc.kind.check_supported(BackendKind::Dx12)?;
-        let bytes = query::resolve_buffer_bytes(desc.kind, desc.count)?;
-        let (heap_type, query_type) = conv::query_types(desc.kind);
+        let layout = QueryLayout::of(desc.kind, self.inner.mesh_statistics);
+        let bytes = query::resolve_buffer_bytes(layout, desc.count)?;
+        let (heap_type, query_type) = conv::query_types(layout);
         let heap_desc = D3D12_QUERY_HEAP_DESC {
             Type: heap_type,
             Count: desc.count,
@@ -3699,7 +3830,7 @@ impl Device for Dx12Device {
         let handle = self.state().query_sets.insert(QuerySetEntry {
             owner: self.inner.owner.id,
             raw,
-            kind: desc.kind,
+            layout,
             query_type,
             count: desc.count,
             resolve,
@@ -3773,136 +3904,94 @@ impl Device for Dx12Device {
     /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`],
     /// [`HalError::InvalidDescriptor`] if the range exceeds the set, and
     /// [`HalError::Unsupported`] for a
-    /// [`QueryKind::PipelineStatistics`] set — see below.
+    /// [`crcbl_hal::QueryKind::PipelineStatistics`] set — see below.
     ///
     /// # A statistics set is refused rather than half-read
     ///
     /// `out` is one `u64` per query and D3D12 resolves a whole
-    /// `D3D12_QUERY_DATA_PIPELINE_STATISTICS` — eleven of them — so there is no
+    /// `D3D12_QUERY_DATA_PIPELINE_STATISTICS` per statistics query, so there is no
     /// `out.len()` that both names a legal query range and matches what the
     /// resolve wrote. Returning the first counter would be answering a different
     /// question in the shape of this one, so this refuses and says so.
     /// `crcbl-vk` refuses the same way. The kind's own read is
-    /// [`Device::pipeline_statistics`], which this backend does not fill yet.
+    /// [`Device::pipeline_statistics`].
     fn query_results(
         &self,
         set: QuerySetHandle,
         first_query: u32,
         out: &mut [u64],
     ) -> Result<(), HalError> {
-        let (kind, pending, resolve) = {
+        {
             let state = self.state();
             let entry = handle::lookup(&state.query_sets, "query set", set, self.inner.owner)?;
             query::check_range(entry.count, first_query, out.len() as u64)?;
-            // The refusal is written as "this kind does not resolve one `u64`
+            // The refusal is written as "this layout does not resolve one `u64`
             // per query" rather than as "this kind is statistics", so it is the
             // shape of `out` that decides it — and a fourth query kind wider
             // than a `u64` would be refused here rather than reading whichever
             // of its counters happened to come first.
-            if query::result_bytes(entry.kind) != size_of::<u64>() as u64 {
+            if entry.layout.counters() != 1 {
                 return Err(HalError::Unsupported {
                     backend: BackendKind::Dx12,
                     what: "query_results reads one u64 per query and D3D12 resolves a whole \
                            D3D12_QUERY_DATA_PIPELINE_STATISTICS per statistics query; use \
-                           resolve_query_set with a destination sized for that",
+                           pipeline_statistics, or resolve_query_set with a destination sized \
+                           for that",
                 });
             }
-            let resolve =
-                handle::lookup(&state.buffers, "buffer", entry.resolve, self.inner.owner)?
-                    .raw
-                    .clone();
-            (entry.kind, entry.last_submission, resolve)
-        };
-        if out.is_empty() {
-            return Ok(());
         }
-        // Without the state lock, so other threads keep recording and
-        // submitting meanwhile. Zero for a set no submission has named, which
-        // the fence has reached from creation. `resolve` is this call's own
-        // reference, so a set destroyed during the wait cannot free it.
-        self.inner.wait_for(pending)?;
-
-        // Every kind that reaches here resolves exactly one `u64` per query —
-        // the refusal above is what guarantees it — so the bytes the resolve
-        // wrote and the bytes `out` holds are the same number, and the copy
-        // below cannot be told to overrun either.
-        let bytes = size_of_val(out);
-        let offset = query::span_bytes(kind, u64::from(first_query));
-
-        // A `D3D12_RANGE` is expressed in `usize`; only reachable on a 32-bit
-        // host, where the resolve buffer could not have existed either.
-        let begin = usize::try_from(offset).map_err(|_| {
-            HalError::InvalidDescriptor(format!(
-                "query offset {offset} does not fit this host's address space"
-            ))
-        })?;
-        // The read range is not decoration on a readback heap: it is what tells
-        // the runtime which bytes the CPU is about to look at.
-        let read = D3D12_RANGE {
-            Begin: begin,
-            End: begin + bytes,
-        };
-        let mut mapped: *mut core::ffi::c_void = core::ptr::null_mut();
-        // SAFETY: `resolve` is a live buffer on the readback heap this device
-        // created with the set, and subresource 0 is the only one a buffer has.
-        // Both pointers name live locals.
-        unsafe { resolve.Map(0, Some(&read), Some(&mut mapped)) }.map_err(|error| {
-            // A failed Map is where a removed device surfaces on this
-            // backend — the readback is the first call that touches
-            // memory the GPU was writing — so it is the one place the
-            // breadcrumbs are worth most. Without this the caller gets
-            // 0x887A0005 and no diagnosis, which is what a CI run
-            // reproducing a device removal actually printed.
-            // Still `Backend`, not `DeviceLost`: a Map can fail for reasons
-            // that are not a removal, and `debug::diagnosis` returns the
-            // empty string on a healthy device, so the variant must not be
-            // decided by the diagnostic being attached.
-            HalError::Backend(format!(
-                "ID3D12Resource::Map failed: {error}{}",
-                debug::diagnosis(&self.inner.raw)
-            ))
-        })?;
-        if mapped.is_null() {
-            return Err(HalError::Backend(
-                "ID3D12Resource::Map reported success and wrote no pointer".to_string(),
-            ));
-        }
-        // SAFETY: `mapped` points at the resolve buffer's whole allocation,
-        // which `create_query_set` sized for the set's whole query count, and
-        // the span was bounds-checked against that count above. The two regions
-        // cannot overlap: `out` is a caller-owned slice and the source is the
-        // buffer's own mapping. The fence has passed the last submission naming
-        // the set, whose lists ended with the resolve, so every byte it wrote
-        // is visible.
-        //
-        // Copied as **bytes** into `out`, rather than as `u64`s out of the
-        // mapping: `Map` promises no particular alignment for the pointer it
-        // returns, so a `*const u64` built from it would be an unaligned read,
-        // while `out` is a `&mut [u64]` and is aligned by construction. D3D12
-        // wrote the results in this machine's own byte order, so the bytes are
-        // the values.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                mapped.cast::<u8>().add(begin),
-                out.as_mut_ptr().cast::<u8>(),
-                bytes,
-            );
-        }
-        // SAFETY: the matching `Unmap`. The written range is empty because this
-        // call wrote nothing.
-        unsafe {
-            resolve.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
-        }
-        // The seam reports a timestamp in nanoseconds and D3D12 resolves ticks,
+        let layout = self.read_resolved(set, first_query, out)?; // The seam reports a timestamp in nanoseconds and D3D12 resolves ticks,
         // so the queue's frequency is spent here — the one place that knows it.
         // An occlusion count is a count and has no unit to convert.
         // `resolve_query_set` writes the raw ticks instead, which its own seam
         // documentation says and which this backend cannot change:
         // `ResolveQueryData` never reaches the CPU.
-        if kind == QueryKind::Timestamp {
+        if layout == QueryLayout::Timestamp {
             for value in out.iter_mut() {
                 *value = query::timestamp_nanos(*value, self.inner.timestamp_frequency);
             }
+        }
+        Ok(())
+    }
+
+    /// Reads statistics queries back from the set's readback buffer, as
+    /// [`query_results`](Device::query_results) reads timestamps, and decodes
+    /// each through [`query::decode_statistics`].
+    ///
+    /// A set on a device that counts the mesh stages resolves
+    /// `D3D12_QUERY_DATA_PIPELINE_STATISTICS1` and reports task and mesh counts;
+    /// one on any other device resolves the plain structure and reports them as
+    /// `None`. See [`QueryLayout`].
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`], and
+    /// [`HalError::InvalidDescriptor`] for a set of another kind or a range past
+    /// its end.
+    fn pipeline_statistics(
+        &self,
+        set: QuerySetHandle,
+        first_query: u32,
+        out: &mut [crcbl_hal::PipelineStatistics],
+    ) -> Result<(), HalError> {
+        let layout = {
+            let state = self.state();
+            handle::lookup(&state.query_sets, "query set", set, self.inner.owner)?.layout
+        };
+        if !matches!(
+            layout,
+            QueryLayout::Statistics | QueryLayout::StatisticsWithMesh
+        ) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "pipeline_statistics reads a QueryKind::PipelineStatistics set, and this one is \
+                 {layout:?}"
+            )));
+        }
+        let counters = usize::try_from(layout.counters()).expect("a query's counters fit a usize");
+        let mut words = vec![0u64; out.len() * counters];
+        let layout = self.read_resolved(set, first_query, &mut words)?;
+        for (statistics, query) in out.iter_mut().zip(words.chunks_exact(counters)) {
+            *statistics = query::decode_statistics(layout, query);
         }
         Ok(())
     }
@@ -5582,6 +5671,15 @@ pub(crate) mod tests {
             LoadOp::Clear,
             Rect2d::from_size(SQUARE.width, SQUARE.height),
         );
+        // The pass is counted as well as drawn, so the counts are checked
+        // against a picture that shows what was drawn.
+        let statistics = device
+            .create_query_set(&QuerySetDesc {
+                label: Some("crcbl-dx12 triangle statistics"),
+                kind: QueryKind::PipelineStatistics,
+                count: 1,
+            })
+            .expect("a statistics set");
         run(&device, |encoder| {
             encoder.pipeline_barrier(&Barriers {
                 images: &[ImageBarrier::new(
@@ -5592,7 +5690,13 @@ pub(crate) mod tests {
                 )],
                 ..Barriers::default()
             });
-            encoder.begin_render_pass(&pass.desc());
+            encoder.begin_render_pass(&RenderPassDesc {
+                statistics_writes: Some(crcbl_hal::PassStatisticsWrites {
+                    set: statistics,
+                    query: 0,
+                }),
+                ..pass.desc()
+            });
             // Pipeline before group: setting a root signature resets every root
             // argument, so the reverse order would bind a table the next call
             // discards.
@@ -5637,6 +5741,36 @@ pub(crate) mod tests {
             .expect("a readback of a HostReadback buffer");
         let bytes = drain(&device, request, SQUARE_BYTES);
         assert_triangle_drawn(&bytes, "a direct draw of three vertices");
+
+        // **What the pass counted.** The input assembler's counts are pinned:
+        // one draw of three vertices is one triangle. The vertex and clipper
+        // counts are bounded below, since an implementation may run the vertex
+        // stage more than once per vertex and clip one primitive into several,
+        // and the fragments are bounded by the target, whose corners the
+        // picture above shows were not drawn.
+        let mut read = [crcbl_hal::PipelineStatistics::default()];
+        device
+            .pipeline_statistics(statistics, 0, &mut read)
+            .expect("the statistics read back");
+        let [counted] = read;
+        eprintln!("crcbl-dx12: triangle pass statistics {counted:?}");
+        assert_eq!(counted.input_vertices, Some(3), "{counted:?}");
+        assert_eq!(counted.input_primitives, Some(1), "{counted:?}");
+        assert!(counted.vertex_invocations >= Some(3), "{counted:?}");
+        assert!(counted.clipper_invocations >= Some(1), "{counted:?}");
+        assert!(counted.clipper_primitives >= Some(1), "{counted:?}");
+        let texels = u64::from(SQUARE.width) * u64::from(SQUARE.height);
+        assert!(
+            counted.fragment_invocations > Some(0) && counted.fragment_invocations < Some(texels),
+            "{counted:?}"
+        );
+        assert_eq!(counted.compute_invocations, Some(0), "{counted:?}");
+        // A device that counts the mesh stages counts none here; one that
+        // cannot says so.
+        let no_mesh_work = device.inner.mesh_statistics.then_some(0);
+        assert_eq!(counted.task_invocations, no_mesh_work, "{counted:?}");
+        assert_eq!(counted.mesh_invocations, no_mesh_work, "{counted:?}");
+        device.destroy_query_set(statistics);
 
         device.destroy_readback(request);
         device.destroy_graphics_pipeline(pipeline);
@@ -6150,6 +6284,15 @@ pub(crate) mod tests {
         /// the pass, both barriers and the copy at once. The depth texels come
         /// back through the caller's own [`DepthProbe::read`], so the return
         /// type is the colour readback either way.
+        ///
+        /// `statistics` counts the pass into a statistics query, which the
+        /// caller reads once this returns: the frame has been waited for by
+        /// then.
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "each is one thing a caller varies; a struct of them would be built \
+                      field by field at every call"
+        )]
         fn frame(
             &self,
             device: &Dx12Device,
@@ -6157,6 +6300,7 @@ pub(crate) mod tests {
             task: Option<ShaderEntry<'static>>,
             entry: &'static str,
             depth: Option<&DepthProbe>,
+            statistics: Option<crcbl_hal::PassStatisticsWrites>,
             dispatch: impl FnOnce(&mut dyn CommandEncoder),
         ) -> Vec<u8> {
             // Off `self` and into locals, so the body below is the closure it was
@@ -6230,7 +6374,7 @@ pub(crate) mod tests {
                 depth_stencil_attachment: depth.map(DepthProbe::attachment),
                 render_area: Rect2d::from_size(SQUARE.width, SQUARE.height),
                 timestamp_writes: None,
-                statistics_writes: None,
+                statistics_writes: statistics,
             };
             // The colour target's transition, and the depth attachment's beside
             // it when there is one — which is why `DepthProbe::acquire` hands a
@@ -6437,12 +6581,21 @@ pub(crate) mod tests {
         // `[numthreads(3, 1, 1)]`, one thread per vertex, and `taskMain`
         // is `[numthreads(1, 1, 1)]` and dispatches one mesh group.
         let dispatch = |encoder: &mut dyn CommandEncoder| encoder.draw_mesh_tasks(1, 1, 1);
-        let plain = probe.frame(&device, "mesh_shader", None, "meshMain", None, dispatch);
+        let plain = probe.frame(
+            &device,
+            "mesh_shader",
+            None,
+            "meshMain",
+            None,
+            None,
+            dispatch,
+        );
         let amplified = probe.frame(
             &device,
             "mesh_shader amplified",
             Some(probe.entry("taskMain")),
             "amplifiedMeshMain",
+            None,
             None,
             dispatch,
         );
@@ -6483,6 +6636,104 @@ pub(crate) mod tests {
         );
 
         probe.destroy(&device);
+    }
+
+    /// **A mesh pass counts its mesh and amplification stages** on a device
+    /// that reports `MeshShaderPipelineStatsSupported`, and reports them as
+    /// `None` on one that does not.
+    ///
+    /// One query counts the whole pass, mesh draw included: D3D12 has no rule
+    /// like Vulkan's against counting the vertex stage beside a mesh draw, so
+    /// the vertex-pipeline counts are present, and zero, because nothing went
+    /// through the input assembler. The stage counts are what the mesh path's
+    /// profiling reads, so they are pinned exactly.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_mesh_pass_counts_its_mesh_and_amplification_stages() {
+        /// Invocations per workgroup, from `mesh_shader.slang`'s `numthreads`.
+        const MESH_INVOCATIONS: u64 = 3;
+        const TASK_INVOCATIONS: u64 = 1;
+
+        let (_instance, device) = open_device();
+        let probe = MeshProbe::new(&device, &[]);
+        let set = device
+            .create_query_set(&QuerySetDesc {
+                label: Some("crcbl-dx12 mesh statistics"),
+                kind: QueryKind::PipelineStatistics,
+                count: 2,
+            })
+            .expect("a statistics set");
+        let count = |label: &'static str,
+                     task: Option<ShaderEntry<'static>>,
+                     entry: &'static str,
+                     query: u32| {
+            probe.frame(
+                &device,
+                label,
+                task,
+                entry,
+                None,
+                Some(crcbl_hal::PassStatisticsWrites { set, query }),
+                |encoder| encoder.draw_mesh_tasks(1, 1, 1),
+            );
+            let mut read = [crcbl_hal::PipelineStatistics::default()];
+            device
+                .pipeline_statistics(set, query, &mut read)
+                .expect("the statistics read back");
+            read[0]
+        };
+        let direct = count("mesh_shader counted", None, "meshMain", 0);
+        let amplified = count(
+            "mesh_shader amplified counted",
+            Some(probe.entry("taskMain")),
+            "amplifiedMeshMain",
+            1,
+        );
+        eprintln!("crcbl-dx12: mesh pass statistics {direct:?}");
+        eprintln!("crcbl-dx12: amplified mesh pass statistics {amplified:?}");
+
+        let mesh = device.inner.mesh_statistics;
+        for (what, counted) in [("direct", direct), ("amplified", amplified)] {
+            assert_eq!(counted.input_vertices, Some(0), "{what}: {counted:?}");
+            assert_eq!(counted.vertex_invocations, Some(0), "{what}: {counted:?}");
+            assert_eq!(counted.compute_invocations, Some(0), "{what}: {counted:?}");
+            assert!(
+                counted.fragment_invocations > Some(0),
+                "{what}: {counted:?}"
+            );
+            if !mesh {
+                assert_eq!(counted.task_invocations, None, "{what}: {counted:?}");
+                assert_eq!(counted.mesh_invocations, None, "{what}: {counted:?}");
+            }
+        }
+        if mesh {
+            assert_eq!(direct.task_invocations, Some(0), "{direct:?}");
+            assert_eq!(
+                direct.mesh_invocations,
+                Some(MESH_INVOCATIONS),
+                "{direct:?}"
+            );
+            assert_eq!(direct.mesh_primitives, Some(1), "{direct:?}");
+            assert_eq!(
+                amplified.task_invocations,
+                Some(TASK_INVOCATIONS),
+                "{amplified:?}"
+            );
+            assert_eq!(
+                amplified.mesh_invocations,
+                Some(MESH_INVOCATIONS),
+                "{amplified:?}"
+            );
+            assert_eq!(amplified.mesh_primitives, Some(1), "{amplified:?}");
+        } else {
+            eprintln!(
+                "crcbl-dx12: no MeshShaderPipelineStatsSupported on this device; the stage \
+                 counts cannot run"
+            );
+        }
+
+        probe.destroy(&device);
+        device.destroy_query_set(set);
     }
 
     /// **`ExecuteIndirect` of a `DISPATCH_MESH` signature, drawing the triangle
@@ -6550,6 +6801,7 @@ pub(crate) mod tests {
             "mesh_shader indirect",
             None,
             "meshMain",
+            None,
             None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
@@ -6633,6 +6885,7 @@ pub(crate) mod tests {
             Some(probe.entry("taskMain")),
             "amplifiedMeshMain",
             None,
+            None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
                     args,
@@ -6702,6 +6955,7 @@ pub(crate) mod tests {
             "mesh_shader amplified indirect at scale",
             Some(probe.entry("taskMain")),
             "amplifiedMeshMain",
+            None,
             None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
@@ -6812,6 +7066,7 @@ pub(crate) mod tests {
                 entry_point: "culledTaskMain",
             }),
             "amplifiedMeshMain",
+            None,
             None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
@@ -7026,6 +7281,7 @@ pub(crate) mod tests {
                 entry_point: "writingTaskMain",
             }),
             "amplifiedMeshMain",
+            None,
             None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
@@ -7332,6 +7588,7 @@ pub(crate) mod tests {
             Some(probe.entry("taskMain")),
             "amplifiedMeshMain",
             Some(&depth),
+            None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
                     args,
@@ -12897,6 +13154,44 @@ pub(crate) mod tests {
         };
         assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
 
+        // The statistics half of the same mistake, and the read of it: a pass
+        // counted into a timestamp set, and a timestamp set read as statistics.
+        let timestamps = device
+            .create_query_set(&QuerySetDesc {
+                label: Some("crcbl-dx12 timestamps"),
+                kind: QueryKind::Timestamp,
+                count: COUNT,
+            })
+            .expect("a timestamp query heap");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-dx12 mismatched statistics"),
+            queue,
+        });
+        encoder.begin_compute_pass(&ComputePassDesc {
+            label: None,
+            timestamp_writes: None,
+            statistics_writes: Some(crcbl_hal::PassStatisticsWrites {
+                set: timestamps,
+                query: 0,
+            }),
+        });
+        encoder.end_compute_pass();
+        let Err(error) = encoder.finish() else {
+            panic!("a pass was counted into a timestamp set");
+        };
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        let mut one = [crcbl_hal::PipelineStatistics::default()];
+        let error = device
+            .pipeline_statistics(timestamps, 0, &mut one)
+            .expect_err("a timestamp set has no statistics to read");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        let mut past_the_end = [crcbl_hal::PipelineStatistics::default(); COUNT as usize + 1];
+        let error = device
+            .pipeline_statistics(statistics, 0, &mut past_the_end)
+            .expect_err("one query past the end of the set");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+        device.destroy_query_set(timestamps);
         device.destroy_buffer(narrow);
         device.destroy_query_set(statistics);
     }

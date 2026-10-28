@@ -49,7 +49,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   each `None` where the device or API cannot count that stage. Vulkan fills it;
   a mesh draw there cannot run under the vertex and clipper counters, so a pass
   on the mesh path reports those as `None`, and the task and mesh counts need
-  the driver's `meshShaderQueries`, which AMD's Windows driver lacks. D3D12,
+  the driver's `meshShaderQueries`, which AMD's Windows driver lacks. D3D12
+  fills it too, counting a whole pass in one query, mesh draws included, and
+  reports the task and mesh counts on a device with
+  `MeshShaderPipelineStatsSupported` (the RX 7900 XTX and WARP both have it).
   Metal and WebGPU fail the encoder when given one, and the trait's default read
   refuses. Every pass descriptor gains the field: set it to `None`.
   `query_results` on a statistics set now refuses on Vulkan, as it did on D3D12

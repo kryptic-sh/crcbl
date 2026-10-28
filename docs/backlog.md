@@ -19513,7 +19513,7 @@ fails loudly, because `FileTransport` bypasses the handshake's schema-hash gate.
 Replays are state recordings, not input demos, and playback is just a client
 over `FileTransport`. Move them to the notes when that plan is folded.
 
-### The profiler (topic 60): per-pass statistics on Vulkan, and what P1 left (2026-10-28)
+### The profiler (topic 60): per-pass statistics on Vulkan and D3D12, and what P1 left (2026-10-28)
 
 `docs/plan/60-profiler.md` is the plan. Its first rung's seam shipped:
 `PassStatisticsWrites` on both pass descriptors, `PipelineStatistics`, and
@@ -19522,15 +19522,17 @@ proved on the RX 7900 XTX by `a_render_pass_counts_the_triangle_it_draws`
 (exactly 3 vertices, 1 primitive, 3 vertex invocations) and
 `a_render_pass_counts_the_mesh_and_task_stages`, both mutation-proven.
 
+`crcbl-dx12` fills it too: a set's `crate::query::QueryLayout` is
+`_PIPELINE_STATISTICS1` on a device reporting OPTIONS9
+`MeshShaderPipelineStatsSupported`, and one query counts the whole pass. On the
+RX 7900 XTX (driver 25.10.36) and on WARP,
+`a_mesh_pass_counts_its_mesh_and_amplification_stages` read 1 task invocation, 3
+mesh invocations and 1 mesh primitive for the amplified draw, and the triangle
+test's pass 3/1/3 in the input assembler and vertex stage: D3D12 is where this
+desktop counts the task stage.
+
 **Still open in P1:**
 
-- **D3D12.** The encoder refuses a `statistics_writes` until it is filled. Its
-  query path sizes every resolve from `crate::query::result_bytes(kind)`, a
-  constant per kind, and `PIPELINE_STATISTICS1` (the task, mesh and
-  mesh-primitive counts) is 14 counters where the plain query is 11 and is gated
-  per device on OPTIONS9 `MeshShaderPipelineStatsSupported`, so the width has to
-  become the set's. This is the route to task and mesh counts on this desktop
-  (next item).
 - **Vulkan cannot count the task and mesh stages on AMD's Windows driver**:
   `vulkaninfo` reports `meshShaderQueries = false` for 25.10.36, so those fields
   read `None` there. Not checked on radv, ANV, lavapipe or NVIDIA.
@@ -19539,9 +19541,11 @@ proved on the RX 7900 XTX by `a_render_pass_counts_the_triangle_it_draws`
   path's depth passes.
 - **Metal** waits for the owner's Mac work (owner, 2026-10-28); its encoder
   refuses meanwhile. WebGPU has no statistics query and records the refusal.
-- **Not tested**: a compute pass's statistics (the decode is unit-tested, no e2e
-  dispatch counts one), the refusal on a non-graphics queue, and the null
-  backend, which checks only that the set is live. **Not reviewed**:
+- **Not tested**: a compute pass's statistics on either backend (the decodes are
+  unit-tested, no e2e dispatch counts one), the Vulkan refusal on a non-graphics
+  queue, and the null backend, which checks only that the set is live. The D3D12
+  runs here had the debug layer off (none installed); CI's WARP job is the first
+  validated run of `BeginQuery` on a statistics heap. **Not reviewed**:
   `resolve_query_set` on a Vulkan statistics set copies with an eight-byte
   stride, which looks wrong for a pool of several counters; it predates this
   work.
