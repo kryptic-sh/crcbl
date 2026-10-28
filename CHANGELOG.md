@@ -15,6 +15,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`FontData` from an `Arc<dyn AsRef<[u8]> + Send + Sync>`**, read in place: a
+  font file mapped into memory, or any other holder of the bytes, is parsed and
+  shaped without being copied onto the heap.
+
 - **`crcbl_font::FontMatch::read_cmap`** reads one face's `cmap` table alone, as
   a font file holding only that table, by seeking to the face's table directory
   and the table rather than reading the file. It is what says which chars a face

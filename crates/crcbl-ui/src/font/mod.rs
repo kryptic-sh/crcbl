@@ -315,6 +315,10 @@ const LATIN1_END: u32 = 0x100;
 /// application read itself — a system font it looked up, a font file a user
 /// chose. The font keeps them alive for as long as any clone of it lives, so
 /// nothing has to be leaked to make them last.
+///
+/// Bytes that are not on the heap — a font file mapped into memory — come in
+/// as an `Arc<dyn AsRef<[u8]> + Send + Sync>` over whatever holds them, and are
+/// read in place: the font and its shaper share that `Arc` and copy nothing.
 #[derive(Clone)]
 pub struct FontData(Bytes);
 
@@ -375,6 +379,12 @@ impl From<Vec<u8>> for FontData {
 impl From<Box<[u8]>> for FontData {
     fn from(bytes: Box<[u8]>) -> Self {
         Self(Bytes::Shared(Arc::new(bytes)))
+    }
+}
+
+impl From<Arc<dyn AsRef<[u8]> + Send + Sync>> for FontData {
+    fn from(bytes: Arc<dyn AsRef<[u8]> + Send + Sync>) -> Self {
+        Self(Bytes::Shared(bytes))
     }
 }
 
@@ -1039,6 +1049,25 @@ mod off_tests {
 #[cfg(all(test, feature = "parsed-font"))]
 mod tests {
     use super::*;
+
+    /// **A caller's own holder of the bytes is read in place**: the parsed
+    /// font's bytes are the holder's, not a copy, and it is kept alive by the
+    /// font alone.
+    #[test]
+    fn bytes_behind_a_callers_holder_are_not_copied() {
+        struct Mapped(&'static [u8]);
+        impl AsRef<[u8]> for Mapped {
+            fn as_ref(&self) -> &[u8] {
+                self.0
+            }
+        }
+        let holder: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(Mapped(SANS_TTF));
+        let font = Font::parse(Arc::clone(&holder)).expect("the committed font parses");
+        assert_eq!(font.data().as_ptr(), SANS_TTF.as_ptr());
+        assert_eq!(font.data().len(), SANS_TTF.len());
+        drop(holder);
+        assert_ne!(font.glyph_id('a'), GlyphId::NOTDEF);
+    }
 
     /// **The committed font parses into what layout reads**: its units per em
     /// and line metrics as `skrifa` reports them, a glyph for every printable
