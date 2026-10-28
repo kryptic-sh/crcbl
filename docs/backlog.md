@@ -19556,10 +19556,7 @@ desktop counts the task stage.
   unit-tested, no e2e dispatch counts one), the Vulkan refusal on a non-graphics
   queue, and the null backend, which checks only that the set is live. The D3D12
   runs here had the debug layer off (none installed); CI's WARP job is the first
-  validated run of `BeginQuery` on a statistics heap. **Not reviewed**:
-  `resolve_query_set` on a Vulkan statistics set copies with an eight-byte
-  stride, which looks wrong for a pool of several counters; it predates this
-  work.
+  validated run of `BeginQuery` on a statistics heap.
 
 **Surprising, worked around:** AMD's D3D12 driver (RX 7900 XTX on 25.10.36,
 Raphael iGPU on 25.10.42) resolves every statistics query begun after a draw

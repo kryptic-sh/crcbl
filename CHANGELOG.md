@@ -69,7 +69,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   timer ring is one slot longer: each frame resets the next slot's statistics,
   since AMD's Vulkan driver loses counts reset in the same command buffer.
   `query_results` on a statistics set now refuses on Vulkan, as it did on D3D12
-  and Metal; it read past what it was handed.
+  and Metal; it read past what it was handed. So does Vulkan's
+  `resolve_query_set`, which copied one of the set's two pools with queries a
+  single `u64` apart, each overwriting the last.
 
 - **`CRCBL_VK_SHADER_STATS=1` logs what the driver compiled every Vulkan
   pipeline into**: per stage, the statistics

@@ -1565,7 +1565,7 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         }
         let state = self.device.state();
-        let (Ok((raw, _, count)), Ok(buffer)) = (
+        let (Ok((raw, kind, count)), Ok(buffer)) = (
             self.device.query_set_raw(&state, set),
             self.device.buffer_raw(&state, dst),
         ) else {
@@ -1573,6 +1573,20 @@ impl CommandEncoder for VkCommandEncoder {
             self.fail(HalError::invalid_handle("query set or buffer", dst));
             return;
         };
+        // A statistics set is two pools whose counts are merged on the way
+        // out (see `crate::statistics`), so there is no "as the device wrote
+        // them" to copy: the copy below would take one pool alone, one `u64`
+        // apart where each query is several. Its read is
+        // `Device::pipeline_statistics`.
+        if kind == QueryKind::PipelineStatistics {
+            drop(state);
+            self.fail(HalError::Unsupported {
+                backend: crcbl_hal::BackendKind::Vulkan,
+                what: "resolve_query_set on a QueryKind::PipelineStatistics set: its counts \
+                       are merged from two pools, read with Device::pipeline_statistics",
+            });
+            return;
+        }
         if range.end > count {
             drop(state);
             self.fail(HalError::InvalidDescriptor(format!(

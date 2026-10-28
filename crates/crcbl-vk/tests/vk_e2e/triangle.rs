@@ -542,6 +542,31 @@ fn a_render_pass_counts_the_triangle_it_draws() {
     assert!(statistics.fragment_invocations > Some(0), "{statistics:?}");
     assert_eq!(statistics.compute_invocations, Some(0), "{statistics:?}");
 
+    // The raw copy has nothing to copy for this kind: the counts above were
+    // merged from two pools on the way out. Refused, rather than copying one
+    // pool one `u64` apart.
+    let destination = device
+        .create_buffer(&BufferDesc {
+            label: Some("statistics resolve"),
+            size: 1 << 10,
+            usage: BufferUsage::QUERY_RESOLVE | BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("statistics resolve"),
+        queue: headless.queue,
+    });
+    encoder.resolve_query_set(set, 0..1, destination, 0);
+    let error = encoder
+        .finish()
+        .expect_err("a statistics set has no raw copy");
+    assert!(
+        matches!(error, crcbl_hal::HalError::Unsupported { .. }),
+        "{error:?}"
+    );
+    device.destroy_buffer(destination);
+
     resources.destroy(device);
     device.destroy_query_set(set);
     headless.finish();
