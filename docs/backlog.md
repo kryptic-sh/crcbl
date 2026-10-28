@@ -19561,10 +19561,9 @@ desktop counts the task stage.
   stage per draw) rather than measuring it.
 - **Metal** waits for the owner's Mac work (owner, 2026-10-28); its encoder
   refuses meanwhile. WebGPU has no statistics query and records the refusal.
-- **Not tested**: the Vulkan refusal on a non-graphics queue, and the null
-  backend, which checks only that the set is live. The D3D12 runs here had the
-  debug layer off (none installed); CI's WARP job is the first validated run of
-  `BeginQuery` on a statistics heap.
+- **Not tested**: the null backend's statistics, which checks only that the set
+  is live. The D3D12 runs here had the debug layer off (none installed); CI's
+  WARP job is the first validated run of `BeginQuery` on a statistics heap.
 
 **Surprising, worked around:** AMD's D3D12 driver (RX 7900 XTX on 25.10.36,
 Raphael iGPU on 25.10.42) resolves every statistics query begun after a draw

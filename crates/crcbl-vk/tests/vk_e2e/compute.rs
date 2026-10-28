@@ -873,3 +873,57 @@ fn a_compute_pass_counts_every_invocation_it_dispatches() {
     probe.destroy(device);
     headless.finish();
 }
+
+/// **A pass on a queue without graphics is refused a statistics query**: the
+/// pools count graphics stages, which Vulkan lets a query do only on a queue
+/// family that has them.
+///
+/// Opens its own device asking for `ASYNC_COMPUTE_QUEUE`, for
+/// `a_command_buffer_is_refused_by_a_queue_of_another_family`'s reason: the
+/// ordinary harness never has a second queue. A device with no separate
+/// compute family cannot make the mistake, and says so rather than passing.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_pass_on_a_queue_without_graphics_is_not_counted() {
+    let headless = Headless::open_pinning_format(
+        "vk e2e compute-queue statistics",
+        Features::ASYNC_COMPUTE_QUEUE | Features::PIPELINE_STATISTICS_QUERY,
+        (64, 64),
+    );
+    let device = headless.device.as_ref();
+    let Some(compute) = device.queue(crcbl_hal::QueueKind::Compute) else {
+        eprintln!(
+            "vk e2e: this device has no async-compute family, so no pass can be counted on a \
+             queue without graphics"
+        );
+        headless.finish();
+        return;
+    };
+    let set = device
+        .create_query_set(&crcbl_hal::QuerySetDesc {
+            label: Some("compute-queue statistics"),
+            kind: crcbl_hal::QueryKind::PipelineStatistics,
+            count: 1,
+        })
+        .expect("a statistics set");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("counted on the compute queue"),
+        queue: compute,
+    });
+    encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+        label: None,
+        timestamp_writes: None,
+        statistics_writes: Some(crcbl_hal::PassStatisticsWrites { set, query: 0 }),
+    });
+    encoder.end_compute_pass();
+    let error = encoder
+        .finish()
+        .expect_err("a queue without graphics cannot count");
+    assert!(
+        matches!(error, crcbl_hal::HalError::InvalidDescriptor(_))
+            && error.to_string().contains("graphics"),
+        "the refusal names the missing graphics: {error}"
+    );
+    device.destroy_query_set(set);
+    headless.finish();
+}
