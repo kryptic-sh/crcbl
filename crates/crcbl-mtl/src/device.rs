@@ -31,6 +31,7 @@
 //! slice adds `commandBufferWithUnretainedReferences` — the opt-out — it
 //! reintroduces the hazard and must reintroduce the queue with it.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, Once};
 use std::time::{Duration, Instant};
 
@@ -292,6 +293,42 @@ struct SemaphoreEntry {
     /// two submissions in flight can encode the same value and the second wait
     /// is satisfied by the first submission's work.
     encoded: u64,
+    /// Each timeline value a committed submission signals, lowest first, with
+    /// the command buffer that carries the signal, until that buffer is
+    /// complete. See [`SemaphoreEntry::reached`].
+    signalling: VecDeque<(u64, Retained<ProtocolObject<dyn MTLCommandBuffer>>)>,
+}
+
+impl SemaphoreEntry {
+    /// The value a timeline has reached, as the CPU may act on it: the
+    /// event's `signaledValue`, held below any value whose command buffer is
+    /// not yet complete.
+    ///
+    /// `encodeSignalEvent:value:` fires when the GPU reaches it, which can be
+    /// before the command buffer carrying it reports
+    /// `MTLCommandBufferStatusCompleted`. The seam's timeline is "signalled on
+    /// completion", and Apple's paravirtual device holds us to it: touching a
+    /// texture that buffer used in the gap fails
+    /// `commandBuffer.status == MTLCommandBufferStatusCompleted` in
+    /// `-[AppleParavirtTexture uniqueIdentifier]`, which `crcbl::mesh_e2e`
+    /// hit once a presenter retired its frames on a timeline. A failed buffer
+    /// counts as finished: reporting the failure is `DeviceState::in_flight`'s
+    /// job, not this one's.
+    fn reached(&mut self, shared: &ProtocolObject<dyn MTLSharedEvent>) -> u64 {
+        while self.signalling.front().is_some_and(|(_, command_buffer)| {
+            matches!(
+                command_buffer.status(),
+                MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error
+            )
+        }) {
+            self.signalling.pop_front();
+        }
+        let signalled = shared.signaledValue();
+        match self.signalling.front() {
+            Some(&(pending, _)) => signalled.min(pending.saturating_sub(1)),
+            None => signalled,
+        }
+    }
 }
 
 impl core::fmt::Debug for SemaphoreEntry {
@@ -2015,7 +2052,7 @@ impl Device for MetalDevice {
         readback: ReadbackHandle,
         out: &mut [u8],
     ) -> Result<ReadbackState, HalError> {
-        let state = self.state();
+        let mut state = self.state();
         let entry = lookup(&state.readbacks, "readback", readback, &*self.inner)?;
         if out.len() as u64 != entry.size {
             return Err(HalError::InvalidDescriptor(format!(
@@ -2024,10 +2061,10 @@ impl Device for MetalDevice {
                 out.len()
             )));
         }
-        match &entry.wait {
-            ReadbackWait::Submission(None) => {}
+        let timeline = match &entry.wait {
+            ReadbackWait::Submission(None) => None,
             ReadbackWait::Submission(Some(command_buffer)) => match command_buffer.status() {
-                MTLCommandBufferStatus::Completed => {}
+                MTLCommandBufferStatus::Completed => None,
                 MTLCommandBufferStatus::Error => {
                     return Err(HalError::DeviceLost(format!(
                         "the submission a readback was waiting for failed: {}",
@@ -2036,22 +2073,24 @@ impl Device for MetalDevice {
                 }
                 _ => return Ok(ReadbackState::Pending),
             },
-            ReadbackWait::Timeline { semaphore, value } => {
-                // Resolved from the handle stored at request time, so a
-                // semaphore destroyed in between fails lookup here rather than
-                // being dereferenced after its last reference went.
-                let entry = lookup(&state.semaphores, "semaphore", *semaphore, &*self.inner)?;
-                let Some(shared) = entry.shared.as_ref() else {
-                    return Err(HalError::Unsupported {
-                        backend: BackendKind::Metal,
-                        what: "ReadbackDesc::after must name a timeline semaphore",
-                    });
-                };
-                if shared.signaledValue() < *value {
-                    return Ok(ReadbackState::Pending);
-                }
+            &ReadbackWait::Timeline { semaphore, value } => Some((semaphore, value)),
+        };
+        if let Some((semaphore, value)) = timeline {
+            // Resolved from the handle stored at request time, so a
+            // semaphore destroyed in between fails lookup here rather than
+            // being dereferenced after its last reference went.
+            let entry = lookup_mut(&mut state.semaphores, "semaphore", semaphore, &*self.inner)?;
+            let Some(shared) = entry.shared.clone() else {
+                return Err(HalError::Unsupported {
+                    backend: BackendKind::Metal,
+                    what: "ReadbackDesc::after must name a timeline semaphore",
+                });
+            };
+            if entry.reached(&shared) < value {
+                return Ok(ReadbackState::Pending);
             }
         }
+        let entry = lookup(&state.readbacks, "readback", readback, &*self.inner)?;
         if entry.size == 0 {
             return Ok(ReadbackState::Ready);
         }
@@ -2825,6 +2864,7 @@ impl Device for MetalDevice {
             raw,
             shared,
             encoded,
+            signalling: VecDeque::new(),
         });
         Ok(self.stamp(handle))
     }
@@ -2838,16 +2878,18 @@ impl Device for MetalDevice {
         take_owned(&mut state.semaphores, semaphore, &*self.inner);
     }
 
+    /// The value the timeline has reached: see `SemaphoreEntry::reached`
+    /// for why that can trail `signaledValue`.
     fn semaphore_value(&self, semaphore: SemaphoreHandle) -> Result<u64, HalError> {
-        let state = self.state();
-        let entry = lookup(&state.semaphores, "semaphore", semaphore, &*self.inner)?;
-        let Some(shared) = entry.shared.as_ref() else {
+        let mut state = self.state();
+        let entry = lookup_mut(&mut state.semaphores, "semaphore", semaphore, &*self.inner)?;
+        let Some(shared) = entry.shared.clone() else {
             return Err(HalError::Unsupported {
                 backend: BackendKind::Metal,
                 what: "a binary semaphore has no value to read",
             });
         };
-        Ok(shared.signaledValue())
+        Ok(entry.reached(&shared))
     }
 
     /// Advances a timeline from the host with `MTLSharedEvent`'s
@@ -2954,6 +2996,32 @@ impl Device for MetalDevice {
                 // Not an error: a frame-pacing poll times out routinely.
                 return Ok(false);
             }
+        }
+        // Every event has fired; the command buffers that fired them may not
+        // have completed yet (see `SemaphoreEntry::reached`). They are past
+        // their last command, so this wait is the moment between the two and
+        // is not held to the timeout. The lock is released first, as above.
+        let carrying: Vec<_> = {
+            let state = self.state();
+            waits
+                .iter()
+                .filter_map(|wait| {
+                    lookup(&state.semaphores, "semaphore", wait.semaphore, &*self.inner)
+                        .ok()
+                        .map(|entry| {
+                            entry
+                                .signalling
+                                .iter()
+                                .take_while(|(pending, _)| *pending <= wait.value)
+                                .map(|(_, command_buffer)| command_buffer.clone())
+                                .collect::<Vec<_>>()
+                        })
+                })
+                .flatten()
+                .collect()
+        };
+        for command_buffer in carrying {
+            command_buffer.waitUntilCompleted();
         }
         Ok(true)
     }
@@ -3185,6 +3253,7 @@ impl Device for MetalDevice {
                 last.encodeSignalEvent_value(event, *value);
             }
         }
+        let carrier = committed.last().cloned();
 
         for raw in &committed {
             raw.commit();
@@ -3212,6 +3281,12 @@ impl Device for MetalDevice {
                 && let Some(entry) = state.semaphores.get_mut(local)
             {
                 entry.encoded = value;
+                if let (Some(shared), Some(carrier)) = (entry.shared.clone(), carrier.as_ref()) {
+                    // Pruned here as well as on every read, so a timeline
+                    // nobody reads holds only the buffers still running.
+                    entry.reached(&shared);
+                    entry.signalling.push_back((value, carrier.clone()));
+                }
             }
         }
         state.last_submission = committed.pop();

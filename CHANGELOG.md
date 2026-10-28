@@ -158,6 +158,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A Metal timeline reads as reached only once the command buffer that
+  signalled it has completed.** `encodeSignalEvent:value:` fires when the GPU
+  reaches it, which can be before its command buffer reports completed, and
+  `crcbl-mtl` answered `semaphore_value`, `wait_semaphores` and timeline
+  readbacks from the event alone. A presenter retiring its frames on a timeline
+  then touched textures in that gap, and Apple's paravirtual device aborted on
+  `commandBuffer.status == MTLCommandBufferStatusCompleted` in
+  `-[AppleParavirtTexture uniqueIdentifier]`. The three now also wait for, or
+  hold the value below, the command buffer that carries each signal.
+
 - **A route follower's walker arrives at a route's end it stops just short of.**
   `crcbl_nav::follow` reached the last waypoint at exactly the stop distance it
   steered the walker to, so a walker braking to that distance could rest a
