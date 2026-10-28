@@ -19548,10 +19548,10 @@ desktop counts the task stage.
 - **On AMD's D3D12 driver a frame with two views counts only the first.** A pass
   counted after a draw through an amplification stage in the same list is void
   (see _Surprising, worked around_ below), and lantern's second view follows its
-  first view's `shadow` pass, so every label it shares across the views sums to
-  `None` and `PassStats` prints no counts there. What would help: counting per
-  occurrence rather than per label, or recording each view in its own command
-  list. Not checked on NVIDIA or Intel D3D12.
+  first view's `shadow` pass. `PassStats` leaves the void passes out and says so
+  (`shadow ... (1 of 2 passes counted)`), and a label with none counted, as
+  `forward` there, prints no counts. What would count them: recording each view
+  in its own command list. Not checked on NVIDIA or Intel D3D12.
 - **First use on the mesh path**, lantern, 2026-10-28: on D3D12 the two `shadow`
   passes ran 1 344 task invocations, 3 136 mesh invocations and 746 mesh
   primitives a frame in 0.036 ms; the same pass on Vulkan took 0.052 ms with the

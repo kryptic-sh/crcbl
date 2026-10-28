@@ -57,21 +57,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the same command list, reads every stage as `None`: the driver resolves those
   counts as zeros. Metal and WebGPU fail the encoder when given one, and the
   trait's default read refuses. Every pass descriptor gains the field: set it to
-  `None`.
+  `None`. `query_results` on a statistics set now refuses on Vulkan, as it did
+  on D3D12 and Metal; it read past what it was handed. So does Vulkan's
+  `resolve_query_set`, which copied one of the set's two pools with queries a
+  single `u64` apart, each overwriting the last.
 - **The pass timers count each pass's work when asked.**
   `CRCBL_PASS_STATISTICS=1`, or `PassTimers::counting` in place of
   `PassTimers::new`, gives every timed pass a statistics query, and `PassTiming`
   gains `statistics: Option<PipelineStatistics>` (a struct literal of it must
   now name the field). The frame report and the end-of-run `PassStats` report
   print each pass's counts after its time, the latter the newest frame's, summed
-  over a label's passes. The engine asks for
-  `Features::PIPELINE_STATISTICS_QUERY` optionally so the timers can count. The
-  timer ring is one slot longer: each frame resets the next slot's statistics,
-  since AMD's Vulkan driver loses counts reset in the same command buffer.
-  `query_results` on a statistics set now refuses on Vulkan, as it did on D3D12
-  and Metal; it read past what it was handed. So does Vulkan's
-  `resolve_query_set`, which copied one of the set's two pools with queries a
-  single `u64` apart, each overwriting the last.
+  over a label's passes; a pass the device could not count is left out of that
+  sum, and the row says how many of the label's passes it covers. The engine
+  asks for `Features::PIPELINE_STATISTICS_QUERY` optionally so the timers can
+  count. The timer ring is one slot longer: each frame resets the next slot's
+  statistics, since AMD's Vulkan driver loses counts reset in the same command
+  buffer.
 
 - **`CRCBL_VK_SHADER_STATS=1` logs what the driver compiled every Vulkan
   pipeline into**: per stage, the statistics

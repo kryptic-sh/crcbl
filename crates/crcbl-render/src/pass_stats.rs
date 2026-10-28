@@ -37,6 +37,15 @@
 //! not a distribution: a scene that does not move counts the same every frame,
 //! and one that does is a sample a reader has to take as one.
 //!
+//! **An occurrence the device could not count is left out of the sum, and the
+//! row says so.** A count that is every stage `None` is a device that cannot
+//! speak for that pass — AMD's D3D12 driver after an amplified draw, see
+//! `crcbl_dx12::command::CountedQuery` — and summing it in would erase the
+//! label's other occurrences with it. So the row carries the sum of the
+//! occurrences that were counted and names how many those were, as "1 of 2
+//! passes counted", which is a smaller claim than the label's whole and says
+//! it is one.
+//!
 //! # What it still does not do
 //!
 //! Fail. Nothing here compares against a recorded baseline, so a rung that
@@ -59,8 +68,11 @@ struct Pass {
     /// How many times the label appeared in the most recent frame recorded.
     occurrences: usize,
     /// What the label's passes counted in the most recent frame that counted
-    /// them, summed; see the module docs.
+    /// any of them, summed over those it counted; see the module docs.
     statistics: Option<PipelineStatistics>,
+    /// How many of that frame's occurrences the sum is of, and how many there
+    /// were.
+    counted: (usize, usize),
 }
 
 /// Two passes' counts as one: each stage summed where both counted it, and
@@ -136,6 +148,7 @@ impl PassStats {
                     window: Window::new(),
                     occurrences: 1,
                     statistics: None,
+                    counted: (0, 0),
                 }),
             }
         }
@@ -155,16 +168,19 @@ impl PassStats {
                 .sum();
             pass.window.record(nanos);
             // A frame that counted nothing keeps the last counts rather than
-            // erasing them; one that counted some occurrences and not others
-            // has no whole to report.
-            let counts: Option<Vec<PipelineStatistics>> = timings
+            // erasing them. An occurrence counted as every stage `None` is one
+            // the device could not count, and is left out; see the module docs.
+            let counts: Vec<PipelineStatistics> = timings
                 .passes
                 .iter()
                 .filter(|timed| timed.label == pass.label)
-                .map(|timed| timed.statistics)
+                .filter_map(|timed| timed.statistics)
+                .filter(|counted| *counted != PipelineStatistics::default())
                 .collect();
-            if let Some(counts) = counts {
-                pass.statistics = counts.into_iter().reduce(sum);
+            let of = counts.len();
+            if let Some(counted) = counts.into_iter().reduce(sum) {
+                pass.statistics = Some(counted);
+                pass.counted = (of, pass.occurrences);
             }
         }
         true
@@ -273,6 +289,10 @@ impl PassStats {
             );
             if let Some(statistics) = &pass.statistics {
                 let _ = write!(out, "  {}", statistics_columns(statistics));
+                let (counted, of) = pass.counted;
+                if counted < of {
+                    let _ = write!(out, " ({counted} of {of} passes counted)");
+                }
             }
             out.push('\n');
         }
@@ -494,5 +514,49 @@ mod tests {
         );
         let report = stats.report();
         assert!(report.contains("vs 7"), "{report}");
+    }
+
+    /// **An occurrence the device could not count is left out, and the row
+    /// says how many were counted**, rather than the label losing its counts.
+    #[test]
+    fn a_label_with_an_uncountable_pass_reports_the_ones_counted() {
+        use crcbl_hal::PipelineStatistics;
+
+        let pass = |statistics| PassTiming {
+            label: "forward".to_string(),
+            gpu_nanos: 1_000,
+            statistics: Some(statistics),
+        };
+        let counted = PipelineStatistics {
+            fragment_invocations: Some(689_723),
+            ..PipelineStatistics::default()
+        };
+        let mut stats = PassStats::new();
+        for number in 0..MIN_PERCENTILE_SAMPLES as u64 + 3 {
+            stats.record(&FrameTimings {
+                elapsed_nanos: None,
+                frame: number,
+                passes: vec![pass(counted), pass(PipelineStatistics::default())],
+            });
+        }
+        assert_eq!(stats.passes[0].statistics, Some(counted));
+        let report = stats.report();
+        assert!(
+            report.contains("fs 689723 (1 of 2 passes counted)"),
+            "{report}"
+        );
+
+        // Every occurrence counted: no qualifier.
+        let mut whole = PassStats::new();
+        for number in 0..MIN_PERCENTILE_SAMPLES as u64 + 3 {
+            whole.record(&FrameTimings {
+                elapsed_nanos: None,
+                frame: number,
+                passes: vec![pass(counted), pass(counted)],
+            });
+        }
+        let report = whole.report();
+        assert!(report.contains("fs 1379446"), "{report}");
+        assert!(!report.contains("passes counted"), "{report}");
     }
 }
