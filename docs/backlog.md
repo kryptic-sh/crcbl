@@ -3,6 +3,54 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## pikr's start-up: what is left after one upload batch (2026-10-29)
+
+pikr measured `UiRenderer::new` as its largest step before first paint (12.4 ms
+on 0.12.1, Intel RPL-U, ANV, nested Hyprland) and asked for three things. Two
+shipped: the presenter now asks for `Features::TIMELINE_SEMAPHORE` (it never
+did, so every presenter retired frames with `wait_idle`), and
+`UiRenderer::build` records its four start-up textures into one
+`texture::UploadBatch` with one submit and one wait. What is left:
+
+- **Don't wait at all.** The batch still ends in `Device::wait_idle`. Submitting
+  without waiting, and destroying the staging and zero buffers once the first
+  frame's timeline value has passed, would overlap the copies with the
+  presenter's swapchain creation and the first frame. It needs the batch to hand
+  its buffers to whoever owns a timeline (the `Presenter`, or the caller), which
+  `crcbl-frame` does not have today. Not started.
+- **ANV's first submission is the bulk of what remains.** Measured with a
+  throwaway test on the iGPU (debug build): the first upload on a fresh device
+  took 7–10 ms, later identical ones about 0.5 ms. That is a per-device driver
+  warm-up, so batching cannot remove it, only an earlier or overlapped first
+  submit can.
+- **A cleared page is a fresh device-local zero buffer plus a copy.**
+  `upload_cleared_texture` zeroes a buffer the size of a layer and copies it in,
+  which is the wasm-heap argument in its docs. A render-pass clear of the image
+  would need no buffer but adds `ImageUsage` the page does not otherwise have.
+  The 1024² image page measured 2.3–2.6 ms warm on the iGPU. Not measured: how
+  much of that is the zero buffer.
+- **Open the instance and device before the window's first configure.** pikr's
+  timeline: shell open at 1.9 ms, sized at 5.4 ms, Vulkan backend opened at 13.0
+  ms, adapter at 13.8 ms, swapchain at 17.7 ms. Loading the driver and creating
+  the instance need no surface, but `Presenter::request_open` takes the window
+  and creates the surface first, and on Vulkan the device's present-capable
+  queue family is checked against that surface. A split would open the instance
+  early and pick the adapter once the surface exists. Not designed.
+
+## A key repeat can be stamped after its own release (2026-10-29)
+
+`wayland_e2e::a_held_key_repeats_and_the_repeats_are_flagged` failed once on
+this laptop (nested sway, machine loaded) with "timestamps never go backwards":
+the last repeat was stamped 1.511026517 s and the release 1.511 s. Repeats are
+stamped at full precision when due (`WaylandShell::drive_repeats`), and the
+release carries the compositor's millisecond. `keep_alive` drains the socket
+before driving repeats, but a release the compositor has stamped and not yet
+sent is not in the socket, so a repeat due a few microseconds later goes out
+first. A real ordering defect, not test noise: a caller that orders by time sees
+a press after its release. One fix: clamp a key's release time to at least the
+last repeat emitted for it. Reported to the Windows session, which owns the
+flaky-CI work; not fixed.
+
 ## System audio control, asked by lyr for the owner (2026-10-22)
 
 **Approved by the owner on 2026-10-22, in progress.** **Slice 1 is on main**
