@@ -3,14 +3,26 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## pikr's start-up: what is left after one upload batch (2026-10-29)
+## pikr's start-up: the upload batch and what is left (2026-10-29)
 
 pikr measured `UiRenderer::new` as its largest step before first paint (12.4 ms
-on 0.12.1, Intel RPL-U, ANV, nested Hyprland) and asked for three things. Two
+on 0.12.1, Intel RPL-U, ANV, nested Hyprland) and asked for three things. One
 shipped: the presenter now asks for `Features::TIMELINE_SEMAPHORE` (it never
-did, so every presenter retired frames with `wait_idle`), and
-`UiRenderer::build` records its four start-up textures into one
-`texture::UploadBatch` with one submit and one wait. What is left:
+did, so every presenter retired frames with `wait_idle`). What is left:
+
+- **The upload batch, reverted.** 676c1418 recorded `UiRenderer::build`'s four
+  start-up textures into one `texture::UploadBatch` with one submit and one
+  wait. Together with the timeline it turned `mtl e2e forward + mesh (macos-15)`
+  red: Apple's paravirtual device aborts on
+  `commandBuffer.status == MTLCommandBufferStatusCompleted` in
+  `-[AppleParavirtTexture uniqueIdentifier]` as the test's next device opens. A
+  bisect on branches passed d08f09aa and failed 676c1418; main minus d08f09aa,
+  with the batch, passed. So it needs both, and 1857671a reverted the batch. A
+  candidate cause on the timeline side: `crcbl-mtl` answers CPU timeline reads
+  from `MTLSharedEvent::signaledValue`, which can run ahead of the signalling
+  command buffer's completion. The branch `mtl-timeline-completion` makes them
+  wait for that buffer. Re-land the batch only after a Metal run passes with it;
+  not proven that the branch is the whole cause.
 
 - **Don't wait at all.** The batch still ends in `Device::wait_idle`. Submitting
   without waiting, and destroying the staging and zero buffers once the first
