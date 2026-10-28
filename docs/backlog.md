@@ -19536,19 +19536,13 @@ desktop counts the task stage.
 - **Vulkan cannot count the task and mesh stages on AMD's Windows driver**:
   `vulkaninfo` reports `meshShaderQueries = false` for 25.10.36, so those fields
   read `None` there. Not checked on radv, ANV, lavapipe or NVIDIA.
-- **AMD's D3D12 driver counts nothing after a mesh draw in the same command
-  list.** Lantern under `CRCBL_PASS_STATISTICS=1` on the RX 7900 XTX and on the
-  Raphael iGPU: every pass up to and including the mesh-path `shadow` pass is
-  counted, and every statistics query after it in the list reads all zeros — the
-  forward pass's 689 723 fragments read 0. Leaving `shadow` uncounted does not
-  help (so it is the mesh draws, not that query),
-  `--force-geometry indirect-count` counts every pass, and WARP counts every
-  pass on the mesh path. Those zeros pass as "no work", which
-  `PipelineStatistics` promises never to do. **Next slice:** the dx12 encoder
-  notes a pass opened after a mesh draw on an AMD hardware adapter, and
-  `pipeline_statistics` reads its query as all `None`. Not checked on NVIDIA or
-  Intel, nor whether a direct `DispatchMesh` triggers it as the renderer's
-  `ExecuteIndirect` does.
+- **On AMD's D3D12 driver a frame with two views counts only the first.** A pass
+  counted after a draw through an amplification stage in the same list is void
+  (see _Surprising, worked around_ below), and lantern's second view follows its
+  first view's `shadow` pass, so every label it shares across the views sums to
+  `None` and `PassStats` prints no counts there. What would help: counting per
+  occurrence rather than per label, or recording each view in its own command
+  list. Not checked on NVIDIA or Intel D3D12.
 - **First use on the mesh path**, lantern, 2026-10-28: on D3D12 the two `shadow`
   passes ran 1 344 task invocations, 3 136 mesh invocations and 746 mesh
   primitives a frame in 0.036 ms; the same pass on Vulkan took 0.052 ms with the
@@ -19566,6 +19560,15 @@ desktop counts the task stage.
   `resolve_query_set` on a Vulkan statistics set copies with an eight-byte
   stride, which looks wrong for a pool of several counters; it predates this
   work.
+
+**Surprising, worked around:** AMD's D3D12 driver (RX 7900 XTX on 25.10.36,
+Raphael iGPU on 25.10.42) resolves every statistics query begun after a draw
+through an amplification stage, for the rest of the command list, as all zeros —
+direct `DispatchMesh` and `ExecuteIndirect` alike, while a mesh draw without one
+leaves counting alone and WARP counts everything
+(`a_pass_counted_after_a_mesh_draw_in_the_same_list`). `crcbl-dx12` marks such
+counts void (`crate::command::CountedQuery`) and reads them as every stage
+`None` on AMD hardware.
 
 **Surprising, worked around:** on AMD's Windows Vulkan driver (25.10.36 on the
 RX 7900 XTX, 25.10.42 on the iGPU), a statistics pool reset in the same command

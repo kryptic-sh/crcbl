@@ -52,9 +52,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the driver's `meshShaderQueries`, which AMD's Windows driver lacks. D3D12
   fills it too, counting a whole pass in one query, mesh draws included, and
   reports the task and mesh counts on a device with
-  `MeshShaderPipelineStatsSupported` (the RX 7900 XTX and WARP both have it).
-  Metal and WebGPU fail the encoder when given one, and the trait's default read
-  refuses. Every pass descriptor gains the field: set it to `None`.
+  `MeshShaderPipelineStatsSupported` (the RX 7900 XTX and WARP both have it). On
+  AMD hardware a pass counted after a draw through an amplification stage, in
+  the same command list, reads every stage as `None`: the driver resolves those
+  counts as zeros. Metal and WebGPU fail the encoder when given one, and the
+  trait's default read refuses. Every pass descriptor gains the field: set it to
+  `None`.
 - **The pass timers count each pass's work when asked.**
   `CRCBL_PASS_STATISTICS=1`, or `PassTimers::counting` in place of
   `PassTimers::new`, gives every timed pass a statistics query, and `PassTiming`

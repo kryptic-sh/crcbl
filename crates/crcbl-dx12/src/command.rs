@@ -354,6 +354,13 @@ pub(crate) struct Dx12CommandEncoder {
     /// closes. D3D12 counts every draw and dispatch in between in the one
     /// query, mesh draws included, so a pass needs no more than this.
     pass_statistics: Option<(ID3D12QueryHeap, D3D12_QUERY_TYPE, u32)>,
+    /// Every statistics query counted into, for the command buffer to carry;
+    /// see [`CountedQuery`].
+    counted: Vec<CountedQuery>,
+    /// Whether a draw through an amplification stage has been recorded on
+    /// this list, after which some drivers count nothing; see
+    /// [`CountedQuery`].
+    task_drawn: bool,
     /// Every query this encoder wrote, by set, for
     /// [`finish`](CommandEncoder::finish) to resolve into each set's own
     /// readback buffer. See [`WrittenQueries`].
@@ -406,6 +413,28 @@ struct WrittenQueries {
     resolve: ID3D12Resource,
     /// Every query written, in recording order, repeats included.
     queries: Vec<u32>,
+}
+
+/// A statistics query a recorded pass counted into, carried by the command
+/// buffer to the set at submission, and whether the count is void.
+///
+/// # Why a count can be void
+///
+/// **AMD's D3D12 driver counts nothing after a draw through an amplification
+/// stage, for the rest of the command list.** Every statistics query begun
+/// after such a draw resolves as all zeros — the RX 7900 XTX on 25.10.36 and
+/// the Raphael iGPU on 25.10.42, measured 2026-10-28 by
+/// `a_pass_counted_after_a_mesh_draw_in_the_same_list`, direct and indirect
+/// alike — while a mesh draw without one leaves counting alone and WARP
+/// counts everything. A zero is "no work", which
+/// [`PipelineStatistics`](crcbl_hal::PipelineStatistics) promises never to say
+/// for a stage it cannot speak for, so such a count is marked void and read as
+/// every stage `None`. The pass that holds the draw is counted correctly.
+#[derive(Clone, Debug)]
+pub(crate) struct CountedQuery {
+    pub(crate) heap: ID3D12QueryHeap,
+    pub(crate) query: u32,
+    pub(crate) void: bool,
 }
 
 /// `WINPIX_EVENT_UNICODE_VERSION` — the `Metadata` value that says an event's
@@ -479,6 +508,8 @@ impl Dx12CommandEncoder {
             resolves: Vec::new(),
             pass_end_timestamp: None,
             pass_statistics: None,
+            counted: Vec::new(),
+            task_drawn: false,
             written_queries: Vec::new(),
             label_depth: 0,
             render_pass_label: false,
@@ -705,6 +736,11 @@ impl Dx12CommandEncoder {
         // Twice, because `note_written` takes a pass's pair; the resolve
         // dedups, so the one query is resolved once.
         self.note_written(&resolved, [writes.query, writes.query]);
+        self.counted.push(CountedQuery {
+            heap: heap.clone(),
+            query: writes.query,
+            void: self.task_drawn && self.device.task_draws_end_counting,
+        });
         let Some(list) = self.list() else { return };
         // SAFETY: `list` is live and recording, `heap` is a live query heap this
         // device created and this encoder retained in `query_set` above, the
@@ -714,6 +750,15 @@ impl Dx12CommandEncoder {
             list.BeginQuery(&heap, query_type, writes.query);
         }
         self.pass_statistics = Some((heap, query_type, writes.query));
+    }
+
+    /// Notes a mesh draw through the bound pipeline: one through an
+    /// amplification stage ends counting for the rest of the list on some
+    /// drivers. See [`CountedQuery`].
+    fn note_mesh_draw(&mut self) {
+        if self.pipeline.as_ref().is_some_and(|bound| bound.amplified) {
+            self.task_drawn = true;
+        }
     }
 
     /// Ends the query [`open_pass_statistics`](Self::open_pass_statistics)
@@ -2652,6 +2697,7 @@ impl CommandEncoder for Dx12CommandEncoder {
         if self.list().is_none() || !self.drawable("a mesh draw") {
             return;
         }
+        self.note_mesh_draw();
         let Some(list) = self.list() else { return };
         match list.cast::<ID3D12GraphicsCommandList6>() {
             // SAFETY: the cast handed back an interface onto the same live,
@@ -2681,6 +2727,7 @@ impl CommandEncoder for Dx12CommandEncoder {
     /// There is no count-buffer twin because the seam has none: mesh work is
     /// culled by the amplification stage rather than by a count somebody wrote.
     fn draw_mesh_tasks_indirect(&mut self, draw: &DrawIndirect) {
+        self.note_mesh_draw();
         self.indirect(draw, IndirectKind::DispatchMesh);
     }
 
@@ -2996,6 +3043,7 @@ impl CommandEncoder for Dx12CommandEncoder {
             list,
             retained: core::mem::take(&mut self.retained),
             query_heaps: core::mem::take(&mut self.query_heaps),
+            counted: core::mem::take(&mut self.counted),
         }))
     }
 }

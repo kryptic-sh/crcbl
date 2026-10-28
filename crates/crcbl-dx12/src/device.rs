@@ -135,6 +135,10 @@ use crate::sync;
 use crate::view::Subresource;
 use crate::{buffer, conv, validate};
 
+/// AMD's PCI vendor id, fixed by the PCI-SIG; what
+/// [`DeviceInner::task_draws_end_counting`] is decided by.
+const PCI_VENDOR_AMD: u32 = 0x1002;
+
 /// Node mask naming the single adapter node the seam models.
 ///
 /// `crcbl-hal` has no multi-adapter vocabulary at all, so a linked-node rig is
@@ -293,6 +297,9 @@ pub(crate) struct CommandBufferEntry {
     /// and separately because it is a different interface. See
     /// [`Retired::QueryHeap`].
     pub(crate) query_heaps: Vec<ID3D12QueryHeap>,
+    /// Every statistics query the recorded passes counted into, and whether
+    /// each count is void; applied to the sets when this is submitted.
+    pub(crate) counted: Vec<crate::command::CountedQuery>,
 }
 
 /// An in-flight readback request.
@@ -409,6 +416,11 @@ struct QuerySetEntry {
     /// with.
     query_type: D3D12_QUERY_TYPE,
     count: u32,
+    /// Per query of a statistics set, whether the submission that last counted
+    /// into it counted after a draw that ends counting on this driver, so its
+    /// result is no count at all; empty for any other set. See
+    /// `crate::command::CountedQuery`.
+    void: Vec<bool>,
     /// The readback buffer [`Device::query_results`] resolves into.
     ///
     /// A seam handle rather than the resource, so the destination is allocated,
@@ -600,6 +612,10 @@ pub(crate) struct DeviceInner {
     /// the amplification and mesh stages too. Asked of this device when it
     /// opens, through [`adapter::mesh_statistics`]; see [`QueryLayout`].
     mesh_statistics: bool,
+    /// Whether a draw through an amplification stage ends statistics counting
+    /// for the rest of its command list on this adapter: AMD hardware, see
+    /// `crate::command::CountedQuery`.
+    pub(crate) task_draws_end_counting: bool,
     /// What a mesh pipeline with no fragment stage draws with in place of a
     /// null pixel shader, on a software adapter only: WARP removes the device
     /// for a mesh pipeline whose pixel shader is null. See
@@ -771,6 +787,8 @@ pub(crate) struct BoundPipeline {
     /// `None` for a mesh pipeline; see
     /// [`GraphicsPipelineEntry::topology`](crate::pipeline::GraphicsPipelineEntry::topology).
     pub(crate) topology: Option<D3D_PRIMITIVE_TOPOLOGY>,
+    /// See [`GraphicsPipelineEntry::amplified`](crate::pipeline::GraphicsPipelineEntry::amplified).
+    pub(crate) amplified: bool,
 }
 
 /// A compute pipeline resolved to what the command list must be told.
@@ -1043,6 +1061,7 @@ impl DeviceInner {
             raw: entry.raw.clone(),
             root_signature: entry.root_signature.clone(),
             topology: entry.topology,
+            amplified: entry.amplified,
         })
     }
 
@@ -1790,6 +1809,8 @@ impl Dx12Device {
         let timestamp_frequency = query::timestamp_frequency(frequency)?;
         let gpu_upload_heap = adapter::gpu_upload_heap(&raw);
         let mesh_statistics = adapter::mesh_statistics(&raw);
+        let task_draws_end_counting =
+            record.info.vendor_id == PCI_VENDOR_AMD && record.info.device_type != DeviceType::Cpu;
         let null_pixel = if record.info.device_type == DeviceType::Cpu {
             let (_, bytes) = crcbl_shaders::NULL_PIXEL
                 .dxil_containers()
@@ -1837,6 +1858,7 @@ impl Dx12Device {
             timestamp_frequency,
             gpu_upload_heap,
             mesh_statistics,
+            task_draws_end_counting,
             null_pixel,
             zero,
             owner,
@@ -3833,6 +3855,14 @@ impl Device for Dx12Device {
             layout,
             query_type,
             count: desc.count,
+            void: if matches!(
+                layout,
+                QueryLayout::Statistics | QueryLayout::StatisticsWithMesh
+            ) {
+                vec![false; desc.count as usize]
+            } else {
+                Vec::new()
+            },
             resolve,
             last_submission: 0,
         });
@@ -3990,8 +4020,19 @@ impl Device for Dx12Device {
         let counters = usize::try_from(layout.counters()).expect("a query's counters fit a usize");
         let mut words = vec![0u64; out.len() * counters];
         let layout = self.read_resolved(set, first_query, &mut words)?;
-        for (statistics, query) in out.iter_mut().zip(words.chunks_exact(counters)) {
-            *statistics = query::decode_statistics(layout, query);
+        let state = self.state();
+        let void = &handle::lookup(&state.query_sets, "query set", set, self.inner.owner)?.void;
+        let first = first_query as usize;
+        for (index, (statistics, query)) in
+            out.iter_mut().zip(words.chunks_exact(counters)).enumerate()
+        {
+            // A void count is no count: every stage `None`, never the zeros
+            // the driver resolved.
+            *statistics = if void.get(first + index) == Some(&true) {
+                crcbl_hal::PipelineStatistics::default()
+            } else {
+                query::decode_statistics(layout, query)
+            };
         }
         Ok(())
     }
@@ -4369,6 +4410,7 @@ impl Device for Dx12Device {
         // can be moved to this submission's value below. Matched by interface
         // address, which cannot be reused while `held` keeps the heap alive.
         let mut named_heaps: Vec<*mut core::ffi::c_void> = Vec::new();
+        let mut counted: Vec<crate::command::CountedQuery> = Vec::new();
         for &buffer in submit.command_buffers {
             let entry = handle::lookup(
                 &state.command_buffers,
@@ -4385,6 +4427,7 @@ impl Device for Dx12Device {
                     .map(|raw| Retired::Resource { _raw: raw }),
             );
             named_heaps.extend(entry.query_heaps.iter().map(Interface::as_raw));
+            counted.extend(entry.counted.iter().cloned());
             held.extend(
                 entry
                     .query_heaps
@@ -4463,6 +4506,19 @@ impl Device for Dx12Device {
             for (_, set) in state.query_sets.iter_mut() {
                 if named_heaps.contains(&set.raw.as_raw()) {
                     set.last_submission = at;
+                }
+            }
+            // In submission order, so a later buffer's count of a query
+            // replaces an earlier one's, as its resolve does.
+            for mark in &counted {
+                let heap = mark.heap.as_raw();
+                if let Some((_, set)) = state
+                    .query_sets
+                    .iter_mut()
+                    .find(|(_, set)| set.raw.as_raw() == heap)
+                    && let Some(void) = set.void.get_mut(mark.query as usize)
+                {
+                    *void = mark.void;
                 }
             }
         }
@@ -6734,6 +6790,143 @@ pub(crate) mod tests {
 
         probe.destroy(&device);
         device.destroy_query_set(set);
+    }
+
+    /// **A pass counted after a draw through an amplification stage is void
+    /// on AMD hardware, and counted everywhere else.**
+    ///
+    /// Two counted mesh passes in one command list, the second opened after
+    /// the first's draw, by a direct `DispatchMesh` and by an `ExecuteIndirect`
+    /// of the same extents, with and without the amplification stage. AMD's
+    /// driver resolves the second count of the amplified pair as zeros (see
+    /// `crate::command::CountedQuery`); this reads it as every stage `None`
+    /// there, and as the same count as the first pass on every other pairing
+    /// and on WARP. Red if the void is dropped (zeros on AMD), applied without
+    /// an amplification stage, or applied off AMD hardware.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_pass_counted_after_a_mesh_draw_in_the_same_list() {
+        // Which adapter this is, asked of the instance rather than of the
+        // device's own flag, so a flag set wrongly disagrees with this.
+        let amd_hardware = {
+            let instance = open_instance();
+            let pinned = pinned_adapter(&instance);
+            let info = instance
+                .adapters()
+                .into_iter()
+                .find(|adapter| adapter.id == pinned)
+                .expect("the pinned adapter is enumerated");
+            info.vendor_id == 0x1002 && info.device_type != DeviceType::Cpu
+        };
+        let (_instance, device) = open_device();
+        let probe = MeshProbe::new(&device, &[]);
+        let extents: Vec<u8> = [1u32, 1, 1].iter().flat_map(|n| n.to_le_bytes()).collect();
+        let args = indirect_buffer(&device, "mesh dispatch extents", &extents);
+        let direct = |encoder: &mut dyn CommandEncoder| encoder.draw_mesh_tasks(1, 1, 1);
+        let indirect = |encoder: &mut dyn CommandEncoder| {
+            encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 1,
+                stride: 0,
+            });
+        };
+        type Dispatch<'a> = &'a dyn Fn(&mut dyn CommandEncoder);
+        let dispatches: [(&str, Dispatch<'_>); 2] = [("direct", &direct), ("indirect", &indirect)];
+        let stages = [
+            ("mesh only", None, "meshMain"),
+            (
+                "amplified",
+                Some(probe.entry("taskMain")),
+                "amplifiedMeshMain",
+            ),
+        ];
+        for ((how, dispatch), (stage, task, entry)) in dispatches
+            .into_iter()
+            .flat_map(|dispatch| stages.into_iter().map(move |stage| (dispatch, stage)))
+        {
+            let set = device
+                .create_query_set(&QuerySetDesc {
+                    label: Some("crcbl-dx12 two mesh passes"),
+                    kind: QueryKind::PipelineStatistics,
+                    count: 2,
+                })
+                .expect("a statistics set");
+            // The second pass's own target, in the probe's format and size, so
+            // the pipeline the first pass bound still matches it.
+            let second = device
+                .create_image(&image(
+                    Format::Rgba8Unorm,
+                    ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                    SQUARE,
+                ))
+                .expect("a second colour target");
+            let second_view = device
+                .create_image_view(&whole(second, Format::Rgba8Unorm))
+                .expect("a render target view");
+            let second_colour = ColorAttachment {
+                view: second_view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(CLEAR),
+            };
+            probe.frame(
+                &device,
+                "mesh_shader twice",
+                task,
+                entry,
+                None,
+                Some(crcbl_hal::PassStatisticsWrites { set, query: 0 }),
+                |encoder| {
+                    dispatch(encoder);
+                    encoder.end_render_pass();
+                    encoder.pipeline_barrier(&Barriers {
+                        images: &[ImageBarrier::new(
+                            second,
+                            ImageSubresourceRange::all(Format::Rgba8Unorm),
+                            ResourceState::Undefined,
+                            ResourceState::ColorAttachment,
+                        )],
+                        ..Barriers::default()
+                    });
+                    encoder.begin_render_pass(&RenderPassDesc {
+                        label: Some("the second mesh pass"),
+                        color_attachments: core::slice::from_ref(&second_colour),
+                        depth_stencil_attachment: None,
+                        render_area: Rect2d::from_size(SQUARE.width, SQUARE.height),
+                        timestamp_writes: None,
+                        statistics_writes: Some(crcbl_hal::PassStatisticsWrites { set, query: 1 }),
+                    });
+                    dispatch(encoder);
+                },
+            );
+            let mut read = [crcbl_hal::PipelineStatistics::default(); 2];
+            device
+                .pipeline_statistics(set, 0, &mut read)
+                .expect("the statistics read back");
+            let [first, after] = read;
+            eprintln!("crcbl-dx12: {how} {stage}: first {first:?}");
+            eprintln!("crcbl-dx12: {how} {stage}: after {after:?}");
+            assert!(
+                first.fragment_invocations > Some(0),
+                "{how} {stage}: {first:?}"
+            );
+            if task.is_some() && amd_hardware {
+                assert_eq!(
+                    after,
+                    crcbl_hal::PipelineStatistics::default(),
+                    "{how} {stage}: a count after an amplified draw is void here"
+                );
+            } else {
+                assert_eq!(after, first, "{how} {stage}: the same draw counts the same");
+            }
+            device.destroy_image_view(second_view);
+            device.destroy_image(second);
+            device.destroy_query_set(set);
+        }
+        device.destroy_buffer(args);
+        probe.destroy(&device);
     }
 
     /// **`ExecuteIndirect` of a `DISPATCH_MESH` signature, drawing the triangle

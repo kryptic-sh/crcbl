@@ -220,6 +220,10 @@ pub(crate) struct GraphicsPipelineEntry {
     /// and `IASetPrimitiveTopology(UNDEFINED)` is a debug-layer error rather
     /// than a no-op, so the absence has to be a value the encoder can read.
     pub(crate) topology: Option<D3D_PRIMITIVE_TOPOLOGY>,
+    /// Whether this is a mesh pipeline with an amplification stage, which is
+    /// what decides whether a draw through it ends counting on some drivers;
+    /// see `crate::command::CountedQuery`.
+    pub(crate) amplified: bool,
 }
 
 /// A compute pipeline: the state object and the signature it was built against.
@@ -623,6 +627,7 @@ pub(crate) fn graphics(
         raw,
         root_signature: layout.raw.clone(),
         topology: Some(conv::primitive_topology(desc.primitive.topology)),
+        amplified: false,
     })
 }
 
@@ -984,6 +989,7 @@ pub(crate) fn mesh(
         // A mesh pipeline has no input assembly to set a topology on; see the
         // doc comment.
         topology: None,
+        amplified: task.is_some(),
     })
 }
 
