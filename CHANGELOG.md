@@ -15,6 +15,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_store::run_marker`: tell the next run this one did not close
+  normally.** `begin(app)` writes a marker in the app's data folder as a run
+  starts, `finish(app)` deletes it on a clean exit, `record(app, message)` puts
+  an error's or caught panic's message in it, and the next run's `take(app)`
+  returns `Some(message)` once, so a build with no console can say the last run
+  failed and point at its log. A panic on another thread, an abort, a driver
+  fault or a killed process leave the marker too. Ported from EW.
 - **`FontData` from an `Arc<dyn AsRef<[u8]> + Send + Sync>`**, read in place: a
   font file mapped into memory, or any other holder of the bytes, is parsed and
   shaped without being copied onto the heap.

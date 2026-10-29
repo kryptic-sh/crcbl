@@ -38,6 +38,7 @@ mod kill_during_write;
 pub mod profile;
 pub mod record;
 pub mod replay;
+pub mod run_marker;
 pub mod save;
 pub mod settings;
 pub mod synced;
