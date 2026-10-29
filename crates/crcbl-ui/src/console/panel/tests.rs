@@ -63,6 +63,7 @@ fn typed(edits: impl IntoIterator<Item = Edit>) -> TextInput {
         edits: edits.into_iter().collect(),
         clipboard: Vec::new(),
         preedit: None,
+        extend: false,
     }
 }
 
@@ -295,6 +296,7 @@ fn the_field_selects_copies_and_pastes() {
                 reply: ClipboardReply::Text("0".to_owned()),
             }],
             preedit: None,
+            extend: false,
         },
     );
     assert_eq!(

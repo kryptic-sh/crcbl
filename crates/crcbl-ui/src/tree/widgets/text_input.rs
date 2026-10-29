@@ -24,7 +24,9 @@
 //! editor's rename begins with — as a browser's Tab into a field and a file
 //! dialog's name box do. **A click places the caret where it lands instead**,
 //! as on every platform, and a double-click selects the word under it, as
-//! Windows, macOS and GTK do. An input built with
+//! Windows, macOS and GTK do. A press with Shift held
+//! ([`TextInput::extend`]) extends the selection to where it lands instead,
+//! from the anchor the input already had. An input built with
 //! [`TextInputOptions::keep_caret`] keeps its caret through every engagement: a
 //! prompt engaged again after each click elsewhere, whose half-typed line the
 //! next key must not replace, or a line offering text to type after.
@@ -133,6 +135,10 @@ pub struct TextInput {
     /// The input method's composition in progress, which the engaged input
     /// shows at its caret; see the module docs. `None` while there is none.
     pub preedit: Option<Preedit>,
+    /// Whether the primary button went down this frame with Shift held, so a
+    /// press landing on an input extends its selection to there rather than
+    /// placing the caret. The tree reads no keyboard, so the caller says.
+    pub extend: bool,
 }
 
 /// An input method's composition in progress: text shown at the caret that is
@@ -573,7 +579,8 @@ impl Ui {
     }
 
     /// A press held on the input `key`: the frame it lands, a caret placed
-    /// where it landed — or, a second press soon enough and near enough after
+    /// where it landed — or, with [`TextInput::extend`], the selection
+    /// extended to there, or, a second press soon enough and near enough after
     /// the first, the word under it selected; on later frames, the selection
     /// dragged to where the pointer is. Returns whether the caret moved.
     fn press_text(&self, key: NodeKey, state: &mut EditState) -> bool {
@@ -585,7 +592,11 @@ impl Ui {
             return !state.words && state.line.place(state.carets.nearest(x), true);
         }
         let pos = self.pointer.pos;
-        if self.second_press(state.last_press) {
+        if self.text_frame.extend {
+            state.last_press = None;
+            state.words = false;
+            state.line.place(state.carets.nearest(x), true)
+        } else if self.second_press(state.last_press) {
             state.last_press = None;
             state.words = true;
             let chars: Vec<char> = state.line.text().chars().collect();

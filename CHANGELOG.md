@@ -23,8 +23,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   outside the workspace matching on it must answer for it.
 - **`crcbl_ui::edit::Edit` has two new variants, `BackspaceWord` and
   `DeleteWord`**, so code matching on it must answer for them.
+- **`crcbl_ui::tree::TextInput` has a new field, `extend: bool`**, so code
+  building one field by field must name it (`false` keeps the old meaning).
+  `TextPump::frame` fills it.
 
 ### Added
+
+- **Shift+click extends a text input's selection** from its anchor to where the
+  press lands, and a drag after it keeps that anchor. `TextPump` reads Shift off
+  the primary button's press and hands it to the tree as `TextInput::extend`.
 
 - **Text inputs delete a word at a time**: `Ctrl`+Backspace and `Ctrl`+Delete
   (`Option` on a Mac keyboard) delete the selection, or else what the word move

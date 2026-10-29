@@ -28,6 +28,7 @@ fn typed(edits: impl IntoIterator<Item = Edit>) -> TextInput {
         edits: edits.into_iter().collect(),
         clipboard: Vec::new(),
         preedit: None,
+        extend: false,
     }
 }
 
@@ -336,6 +337,99 @@ fn a_click_places_the_caret_a_drag_selects_and_a_double_click_selects_a_word() {
         "a drag-select did not end engaged"
     );
     assert_eq!(fresh.text_caret(key), Some((5, 1)));
+}
+
+/// **A press with Shift held extends the selection** from the anchor the input
+/// already had to where it lands, a drag after it keeps that anchor, and a
+/// press right after one is not taken for a double-click's second.
+#[test]
+fn a_shift_press_extends_the_selection_from_its_anchor() {
+    let mut ui = Ui::new();
+    let mut values = [String::from("hello world"), String::new()];
+    let first = page(&mut ui, idle(), NavInput::default(), quiet(), &mut values);
+    let key = first.name.key;
+    let span = part(&ui, key, ".text-input-text").expect("the text is a part");
+    let (origin, bottom) = rect(&ui, span);
+    let y = (origin.y + bottom.y) * 0.5;
+    let advance = bitmap_width(&ui, span, "M");
+    let at = |stops: f32| Vec2::new(origin.x + stops * advance, y);
+    let shifted = TextInput {
+        extend: true,
+        ..quiet()
+    };
+
+    click(&mut ui, at(2.0), &mut values);
+    assert_eq!(ui.text_caret(key), Some((2, 2)));
+    page(
+        &mut ui,
+        press(at(8.0)),
+        NavInput::default(),
+        shifted.clone(),
+        &mut values,
+    );
+    page(
+        &mut ui,
+        release(at(8.0)),
+        NavInput::default(),
+        quiet(),
+        &mut values,
+    );
+    assert_eq!(
+        ui.text_caret(key),
+        Some((8, 2)),
+        "a Shift press did not extend from the caret it found"
+    );
+
+    page(
+        &mut ui,
+        press(at(5.0)),
+        NavInput::default(),
+        shifted.clone(),
+        &mut values,
+    );
+    page(
+        &mut ui,
+        press(at(10.0)),
+        NavInput::default(),
+        quiet(),
+        &mut values,
+    );
+    page(
+        &mut ui,
+        release(at(10.0)),
+        NavInput::default(),
+        quiet(),
+        &mut values,
+    );
+    assert_eq!(
+        ui.text_caret(key),
+        Some((10, 2)),
+        "a drag after a Shift press lost its anchor"
+    );
+
+    // A Shift press where a click just landed is no double-click: it extends
+    // to where the caret already is, where a second press would take `hello`.
+    click(&mut ui, at(3.0), &mut values);
+    page(
+        &mut ui,
+        press(at(3.0)),
+        NavInput::default(),
+        shifted,
+        &mut values,
+    );
+    page(
+        &mut ui,
+        release(at(3.0)),
+        NavInput::default(),
+        quiet(),
+        &mut values,
+    );
+    assert_eq!(
+        ui.text_caret(key),
+        Some((3, 3)),
+        "a Shift press made a double-click"
+    );
+    assert_eq!(values[0], "hello world", "the pointer changed the text");
 }
 
 /// **An engagement no pointer began selects the whole text, and the first key

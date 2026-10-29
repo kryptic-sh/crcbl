@@ -74,8 +74,8 @@
 use std::time::Duration;
 
 use crcbl_shell::{
-    ButtonState, ClipboardContent, ClipboardOffer, ClipboardRequestId, MimeType, PhysicalRect,
-    Shell, ShellEvent, TextPurpose, WindowId,
+    ButtonState, ClipboardContent, ClipboardOffer, ClipboardRequestId, MimeType, Modifiers,
+    PhysicalRect, PointerButton, Shell, ShellEvent, TextPurpose, WindowId,
 };
 use crcbl_ui::edit::{ClipboardOp, Edit};
 use crcbl_ui::tree::{
@@ -102,6 +102,9 @@ pub struct TextPump {
     /// What [`place`](Self::place) last told the shell, so it asks only on a
     /// change; `None` until it has, and again whenever the field changes.
     area: Option<Option<PhysicalRect>>,
+    /// Whether the primary button last went down with Shift held, since the
+    /// last frame: [`TextInput::extend`].
+    extend: bool,
 }
 
 impl TextPump {
@@ -166,13 +169,25 @@ impl TextPump {
                 self.answers.push(ClipboardAnswer { to, reply });
                 true
             }
+            // Read whether or not anything is editing, since the press is what
+            // engages a field, and never taken: the tree's pointer reads it too.
+            ShellEvent::Button {
+                button: PointerButton::Left,
+                state: ButtonState::Pressed,
+                modifiers,
+                ..
+            } => {
+                self.extend = modifiers.contains(Modifiers::SHIFT);
+                false
+            }
             _ => false,
         }
     }
 
     /// This frame's text input for [`Ui::set_text_input`], `dt` long: every
-    /// edit and answer observed since the last call, and the composition in
-    /// progress, which lasts until it is cleared.
+    /// edit and answer observed since the last call, whether the last press
+    /// since then held Shift, and the composition in progress, which lasts
+    /// until it is cleared.
     ///
     /// [`Ui::set_text_input`]: crcbl_ui::tree::Ui::set_text_input
     pub fn frame(&mut self, dt: Duration) -> TextInput {
@@ -181,6 +196,7 @@ impl TextPump {
             edits: std::mem::take(&mut self.edits),
             clipboard: std::mem::take(&mut self.answers),
             preedit: self.preedit.clone(),
+            extend: std::mem::take(&mut self.extend),
         }
     }
 
@@ -377,6 +393,39 @@ mod tests {
         pump.engage(Some(TextPurpose::Normal), &mut shell, window);
         pump.engage(None, &mut shell, window);
         assert_eq!(field(&shell), None);
+    }
+
+    /// **A primary press with Shift held asks the next frame to extend**, and
+    /// only that frame; a press without Shift, or another button's, does not,
+    /// and the press is never the pump's to take.
+    #[test]
+    fn a_shift_press_asks_one_frame_to_extend() {
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("a headless window");
+        let mut pump = TextPump::new();
+        let press = |shell: &mut HeadlessShell, button| {
+            shell
+                .button(window, button, ButtonState::Pressed, None)
+                .expect("live");
+        };
+
+        shell.set_modifiers(Modifiers::SHIFT);
+        press(&mut shell, PointerButton::Left);
+        let mut events = Vec::new();
+        shell.pump(&mut |event| events.push(event));
+        for event in &events {
+            assert!(!pump.observe(event, false), "{} was taken", event.name());
+        }
+        assert!(pump.frame(FRAME).extend);
+        assert!(!pump.frame(FRAME).extend, "the next frame extended too");
+
+        press(&mut shell, PointerButton::Right);
+        assert!(!pumped(&mut shell, &mut pump).extend, "a secondary press");
+        shell.set_modifiers(Modifiers::empty());
+        press(&mut shell, PointerButton::Left);
+        assert!(!pumped(&mut shell, &mut pump).extend, "no Shift held");
     }
 
     /// Pumps `shell` into `pump`, editing, and hands back the frame after.

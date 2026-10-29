@@ -521,6 +521,7 @@ impl ConsolePanel {
             edits,
             clipboard: input.clipboard,
             preedit: input.preedit,
+            extend: input.extend,
         });
 
         let built = {
