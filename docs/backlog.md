@@ -49,16 +49,6 @@ the three Metal CI jobs passed with both in (run 40758600597). What is left:
   in flight, so the per-frame `wait_idle` was never on its start-up path. pikr
   will re-measure `UiRenderer::new` and first paint on the next release.
 
-## crcbl-ui's docs do not build with `parsed-font` alone (2026-10-29)
-
-`RUSTDOCFLAGS="-D warnings" cargo doc -p crcbl-ui --features parsed-font --document-private-items`
-fails on an unresolved link: the doc of `Source::what` in `font/mod.rs` links
-`Font::from_system_lazy`, which exists only with `system-fonts`. It predates the
-cmap pre-check and CI's rustdoc job does not build that feature set, so nothing
-has gone red. A fix is to unlink it, or to gate the field's doc sentence. Not
-fixed: found while fixing the pre-check's dead code under the same feature set,
-and outside that change.
-
 ## System audio control, asked by lyr for the owner (2026-10-22)
 
 **Approved by the owner on 2026-10-22, in progress.** **Slice 1 is on main**

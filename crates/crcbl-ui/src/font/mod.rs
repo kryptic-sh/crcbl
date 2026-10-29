@@ -431,7 +431,7 @@ struct Source {
     #[cfg(feature = "parsed-font")]
     load: Mutex<Option<Loader>>,
     /// What a [`Font::lazy`] face's warning calls it when it cannot be read:
-    /// its file, for one [`Font::from_system_lazy`] made.
+    /// its file, for one `Font::from_system_lazy` made.
     #[cfg(feature = "parsed-font")]
     what: String,
     /// What a [`Font::lazy`] face not yet read answers "do you map this
