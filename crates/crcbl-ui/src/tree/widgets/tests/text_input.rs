@@ -339,6 +339,90 @@ fn a_click_places_the_caret_a_drag_selects_and_a_double_click_selects_a_word() {
     assert_eq!(fresh.text_caret(key), Some((5, 1)));
 }
 
+/// **A third press soon and near enough after a double-click selects the
+/// whole line**, a fourth keeps it, a drag after it keeps it too, and a slow
+/// third press is a click again.
+#[test]
+fn a_triple_click_selects_the_whole_line() {
+    let mut ui = Ui::new();
+    let mut values = [String::from("hello world"), String::new()];
+    let first = page(&mut ui, idle(), NavInput::default(), quiet(), &mut values);
+    let key = first.name.key;
+    let span = part(&ui, key, ".text-input-text").expect("the text is a part");
+    let (origin, bottom) = rect(&ui, span);
+    let y = (origin.y + bottom.y) * 0.5;
+    let advance = bitmap_width(&ui, span, "M");
+    let at = |stops: f32| Vec2::new(origin.x + stops * advance, y);
+
+    click(&mut ui, at(8.4), &mut values);
+    click(&mut ui, at(8.4), &mut values);
+    assert_eq!(
+        ui.text_caret(key),
+        Some((11, 6)),
+        "the double-click took `world`"
+    );
+    click(&mut ui, at(8.4), &mut values);
+    assert_eq!(
+        ui.text_caret(key),
+        Some((11, 0)),
+        "the third press took the line"
+    );
+    page(
+        &mut ui,
+        press(at(8.4)),
+        NavInput::default(),
+        quiet(),
+        &mut values,
+    );
+    page(
+        &mut ui,
+        press(at(2.0)),
+        NavInput::default(),
+        quiet(),
+        &mut values,
+    );
+    page(
+        &mut ui,
+        release(at(2.0)),
+        NavInput::default(),
+        quiet(),
+        &mut values,
+    );
+    assert_eq!(
+        ui.text_caret(key),
+        Some((11, 0)),
+        "a fourth press and its drag kept the line"
+    );
+
+    let slow = TextInput {
+        dt: DOUBLE_CLICK_TIME,
+        ..quiet()
+    };
+    click(&mut ui, at(8.4), &mut values);
+    click(&mut ui, at(8.4), &mut values);
+    page(
+        &mut ui,
+        press(at(8.4)),
+        NavInput::default(),
+        slow,
+        &mut values,
+    );
+    page(
+        &mut ui,
+        release(at(8.4)),
+        NavInput::default(),
+        quiet(),
+        &mut values,
+    );
+    // Where it lands depends on how far the line's end scrolled the field;
+    // that it selects nothing is the click.
+    let caret = ui.text_caret(key);
+    assert!(
+        caret.is_some_and(|(caret, anchor)| caret == anchor),
+        "a slow third press is a click, not {caret:?}"
+    );
+}
+
 /// **A press with Shift held extends the selection** from the anchor the input
 /// already had to where it lands, a drag after it keeps that anchor, and a
 /// press right after one is not taken for a double-click's second.

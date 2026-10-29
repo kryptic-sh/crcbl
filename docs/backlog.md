@@ -8177,8 +8177,8 @@ the gaps below.
   `Ctrl`+arrow and `Ctrl`+Backspace in a password field stop at the hidden
   text's word edges, which browsers avoid by treating the whole value as one
   word. Not decided; found adding word delete, which follows the moves.
-- **Not built**: triple-click, undo, progressive scrolling while dragging past
-  an edge, and an on-screen keyboard for touch.
+- **Not built**: undo, progressive scrolling while dragging past an edge, and an
+  on-screen keyboard for touch.
 - **Word moves follow the macOS and GTK convention** (Right stops at a word's
   end), not Windows' (Ctrl+Right stops at the next word's start) — chosen, not
   per-platform.

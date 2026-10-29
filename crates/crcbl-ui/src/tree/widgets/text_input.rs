@@ -23,8 +23,8 @@
 //! first replaces it: accept on a focused input, and [`Ui::engage`] — which the
 //! editor's rename begins with — as a browser's Tab into a field and a file
 //! dialog's name box do. **A click places the caret where it lands instead**,
-//! as on every platform, and a double-click selects the word under it, as
-//! Windows, macOS and GTK do. A press with Shift held
+//! as on every platform, a double-click selects the word under it and a
+//! triple-click the whole line, as Windows, macOS and GTK do. A press with Shift held
 //! ([`TextInput::extend`]) extends the selection to where it lands instead,
 //! from the anchor the input already had. An input built with
 //! [`TextInputOptions::keep_caret`] keeps its caret through every engagement: a
@@ -211,8 +211,12 @@ pub(crate) struct EditState {
     origin: f32,
     /// How long since the caret last moved or the text last changed.
     blink: Duration,
-    /// When and where the last single press began, for a double-click.
+    /// When and where the last press began, for a double- or triple-click.
     last_press: Option<(Duration, Vec2)>,
+    /// How many presses in a row landed soon and near enough after the one
+    /// before: one for a click, two for a double-click, three or more for a
+    /// triple-click.
+    presses: u32,
     /// Whether the input held the press last frame.
     held: bool,
     /// Whether the press held now selected a word, so a drag keeps it.
@@ -581,8 +585,9 @@ impl Ui {
     /// A press held on the input `key`: the frame it lands, a caret placed
     /// where it landed — or, with [`TextInput::extend`], the selection
     /// extended to there, or, a second press soon enough and near enough after
-    /// the first, the word under it selected; on later frames, the selection
-    /// dragged to where the pointer is. Returns whether the caret moved.
+    /// the first, the word under it selected, and a third, the whole line; on
+    /// later frames, the selection dragged to where the pointer is, unless a
+    /// word or the line was selected. Returns whether the caret moved.
     fn press_text(&self, key: NodeKey, state: &mut EditState) -> bool {
         let Some(node) = self.store.by_key(key) else {
             return false;
@@ -594,17 +599,24 @@ impl Ui {
         let pos = self.pointer.pos;
         if self.text_frame.extend {
             state.last_press = None;
+            state.presses = 0;
             state.words = false;
-            state.line.place(state.carets.nearest(x), true)
-        } else if self.second_press(state.last_press) {
-            state.last_press = None;
-            state.words = true;
-            let chars: Vec<char> = state.line.text().chars().collect();
-            state.line.select(run_at(&chars, state.carets.char_at(x)))
+            return state.line.place(state.carets.nearest(x), true);
+        }
+        state.presses = if self.second_press(state.last_press) {
+            state.presses + 1
         } else {
-            state.last_press = Some((self.text_clock, pos));
-            state.words = false;
-            state.line.place(state.carets.nearest(x), false)
+            1
+        };
+        state.last_press = Some((self.text_clock, pos));
+        state.words = state.presses > 1;
+        match state.presses {
+            1 => state.line.place(state.carets.nearest(x), false),
+            2 => {
+                let chars: Vec<char> = state.line.text().chars().collect();
+                state.line.select(run_at(&chars, state.carets.char_at(x)))
+            }
+            _ => state.line.select(0..state.line.len()),
         }
     }
 

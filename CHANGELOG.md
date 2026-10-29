@@ -29,6 +29,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A triple-click selects a text input's whole line**, and a drag after it
+  keeps the line, as a double-click's word is kept.
 - **Shift+click extends a text input's selection** from its anchor to where the
   press lands, and a drag after it keeps that anchor. `TextPump` reads Shift off
   the primary button's press and hands it to the tree as `TextInput::extend`.
