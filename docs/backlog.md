@@ -4235,7 +4235,12 @@ machine, or twice in CI, is real.
   `recorded_draws` assertion. Not diagnosed; the shape matches the
   `r_ssao_intensity` race fixed the same day (a test reading a console default
   another test moves under `ssao::TECHNIQUE_SWITCH`), so look first for a
-  console variable it reads without that lock or `forward`'s own.
+  console variable it reads without that lock or `forward`'s own. Not reproduced
+  on 2026-10-29: 40 of 40 runs of the whole `crcbl-render` lib test binary
+  passed on Windows (RX 7900 XTX machine, null device). The test takes none of
+  `forward`'s console-variable guards, but the one its draw counter most
+  obviously shares, `r_ssao_blur_passes`, is read once a frame
+  (`frame_ssao_blurs`), so that guard alone is not shown to be the fix.
 
 - **`editor document::undo_property_tests::random_histories_walk_back_through_every_state`**
   — a proptest that takes about 25 s alone. During a local verify on 2026-10-06,
