@@ -7,7 +7,9 @@
 //!   on, keeps the last [`DEFAULT_FRAME_WINDOW`] frames of CPU spans and GPU
 //!   passes in a [`Recorder`], and writes them to that path as it finishes.
 //!   With [`BUDGET_VAR`] set too, it writes them instead as the first frame
-//!   over that budget is recorded: the frames before the hitch, ending with it.
+//!   over that budget is recorded, CPU or GPU: the frames before the hitch,
+//!   ending with it. A GPU frame arrives frames latent, so its capture's CPU
+//!   half runs those few frames past it.
 //! - The console's `profile_capture <frames> <path>` captures the next
 //!   `frames` frames and writes them as the last one is recorded, turning the
 //!   CPU trace on for them and off again after if it was off.
@@ -36,7 +38,8 @@ pub use crcbl_ui::DEFAULT_FRAME_WINDOW;
 pub const CAPTURE_VAR: &str = "CRCBL_PROFILE_CAPTURE";
 
 /// The variable giving [`CAPTURE_VAR`]'s capture a frame budget, in
-/// milliseconds of CPU frame time: the first frame over it writes the capture.
+/// milliseconds of CPU frame time or of GPU frame time, the timers' elapsed
+/// interval: the first frame over it, of either, writes the capture.
 pub const BUDGET_VAR: &str = "CRCBL_PROFILE_BUDGET_MS";
 
 /// [`BUDGET_VAR`]'s value as a budget: `None` when unset or empty.
@@ -111,8 +114,8 @@ pub(crate) struct Requested {
     /// line runs partway through a frame, so that frame's trace holds its
     /// phases without the `frame` span around them, and is not recorded.
     partial_frame: bool,
-    /// [`BUDGET_VAR`]'s budget: the first CPU frame over it completes the
-    /// capture.
+    /// [`BUDGET_VAR`]'s budget: the first CPU or GPU frame over it completes
+    /// the capture.
     budget: Option<Duration>,
     /// What completed the capture early, when a frame went over the budget,
     /// as the capture's environment says it.
@@ -189,11 +192,24 @@ impl Requested {
     }
 
     /// Records the GPU passes of the newest frame the timers resolved, as
-    /// [`Recorder::record_gpu`] does, and counts the time it took.
+    /// [`Recorder::record_gpu`] does, counts the time it took, and notes the
+    /// frame that went over the budget.
     pub(crate) fn record_gpu(&mut self, timings: &FrameTimings) {
         let began = Instant::now();
         self.recorder.record_gpu(timings);
         self.recording += began.elapsed();
+        if let Some(budget) = self.budget
+            && self.trigger.is_none()
+            && let Some(elapsed) = timings.elapsed_nanos.map(Duration::from_nanos)
+            && elapsed > budget
+        {
+            self.trigger = Some(format!(
+                "GPU frame {} took {:.3} ms, over the {:.3} ms budget",
+                timings.frame,
+                elapsed.as_secs_f64() * 1_000.0,
+                budget.as_secs_f64() * 1_000.0
+            ));
+        }
     }
 
     /// Whether this capture holds every frame it asked for, or a frame went
@@ -700,6 +716,55 @@ mod tests {
             .get("recording cost")
             .unwrap_or_default();
         assert!(cost.ends_with("over 5 frames"), "{cost}");
+    }
+
+    /// Timers' report of GPU frame `frame`, one pass of `millis` milliseconds.
+    fn gpu_frame_of(frame: u64, millis: u64) -> FrameTimings {
+        let nanos = millis * 1_000_000;
+        FrameTimings {
+            passes: vec![PassTiming {
+                label: "forward".to_string(),
+                begin_nanos: 0,
+                gpu_nanos: nanos,
+                statistics: None,
+            }],
+            frame,
+            elapsed_nanos: Some(nanos),
+        }
+    }
+
+    /// **The first GPU frame over the budget completes the capture too**,
+    /// ending its GPU half with that frame, and the capture names it by the
+    /// timers' number. A frame at the budget is within it.
+    #[test]
+    fn a_gpu_frame_over_the_budget_completes_the_capture() {
+        let mut requested = Requested {
+            recorder: Recorder::new(DEFAULT_FRAME_WINDOW),
+            path: PathBuf::new(),
+            frames: None,
+            trace_was_off: false,
+            partial_frame: false,
+            budget: Some(Duration::from_millis(16)),
+            trigger: None,
+            recording: Duration::ZERO,
+        };
+        for (frame, millis) in [(7, 8), (8, 16)] {
+            requested.record_cpu(&frame_of(1));
+            requested.record_gpu(&gpu_frame_of(frame, millis));
+            assert!(!requested.is_complete(), "{millis} ms is within the budget");
+        }
+        requested.record_gpu(&gpu_frame_of(9, 40));
+        assert!(requested.is_complete());
+        assert_eq!(
+            requested.trigger.as_deref(),
+            Some("GPU frame 9 took 40.000 ms, over the 16.000 ms budget")
+        );
+        let capture = requested.recorder.capture(Environment::default());
+        assert_eq!(
+            capture.gpu.last().map(|frame| frame.number),
+            Some(9),
+            "the GPU half ends with the frame over"
+        );
     }
 
     /// **`CRCBL_PROFILE_BUDGET_MS` takes positive milliseconds**, fractions

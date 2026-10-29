@@ -19648,15 +19648,15 @@ desktop counts the task stage.
   first producer, `CRCBL_PROFILE_CAPTURE=<path>` writing the last frames as the
   run finishes (`crcbl::profile`), and the console's
   `profile_capture <frames> <path>` writing the next frames, and
-  `CRCBL_PROFILE_BUDGET_MS` writing the frames up to the first one over a CPU
-  budget. The CLI's trigger is `--exec "profile_capture <frames> <path>"`, which
-  runs before the first frame. A capture's environment says what it enabled and
-  what copying frames into its recorder cost a frame (`recording cost`); not
-  what the CPU trace's spans or the GPU timers' queries cost, which nothing
-  measures, and the accumulation itself is untested (a frame's copy can fall
-  under one tick of `Instant`). Left: a GPU frame over budget, which arrives
-  frames latent and so needs the ring to keep going past it; the clock pair on
-  Metal (`Capability::GpuClock`'s `Unwritten` row:
+  `CRCBL_PROFILE_BUDGET_MS` writing the frames up to the first one over a CPU or
+  GPU budget (the GPU's by the timers' elapsed interval, frames latent, so the
+  CPU half runs a few frames past it). The CLI's trigger is
+  `--exec "profile_capture <frames> <path>"`, which runs before the first frame.
+  A capture's environment says what it enabled and what copying frames into its
+  recorder cost a frame (`recording cost`); not what the CPU trace's spans or
+  the GPU timers' queries cost, which nothing measures, and the accumulation
+  itself is untested (a frame's copy can fall under one tick of `Instant`).
+  Left: the clock pair on Metal (`Capability::GpuClock`'s `Unwritten` row:
   `sampleTimestamps:gpuTimestamp:` unbound, with the Mac work); and **a key,
   which needs the owner's call**: the loop already keeps F3, F11, Escape and the
   backquote from every game, and a capture key would take one more (F12 is the
