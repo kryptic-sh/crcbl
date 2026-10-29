@@ -29,6 +29,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/breach`'s loadout panel takes a keyboard drag back with `Backspace`**,
+  as shard's inventory panel does: `Escape` is the loop's pause key and never
+  reaches the panel.
 - **A triple-click selects a text input's whole line**, and a drag after it
   keeps the line, as a double-click's word is kept.
 - **Shift+click extends a text input's selection** from its anchor to where the

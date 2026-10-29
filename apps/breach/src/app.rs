@@ -153,9 +153,19 @@ fn action_map() -> ActionMap {
     map
 }
 
+/// The keyboard's `ui_back` on the loadout panel, beside the `Escape` the
+/// reserved `ui` context binds.
+///
+/// `Escape` is the loop's [`PAUSE_KEY`](crcbl::engine::PAUSE_KEY) and never
+/// reaches [`Breach::key_event`], so without a second key the keyboard could
+/// pick a stack up and not put it back where it came from. `Backspace` is free
+/// in this sample's map and the console only reads it while it is open.
+const PANEL_BACK_KEY: KeyCode = KeyCode::Backspace;
+
 /// The keyboard and the pad as the loadout panel reads them: the reserved
-/// `ui` context — `ui_move`, `ui_accept`, `ui_back` — and [`ACTION_SEND`] in
-/// it, pushed only while the panel is open.
+/// `ui` context — `ui_move`, `ui_accept`, `ui_back`, with [`PANEL_BACK_KEY`]
+/// beside its `Escape` — and [`ACTION_SEND`] in it, pushed only while the
+/// panel is open.
 ///
 /// **A map of its own, not the game's.** The game's map begins a tick per
 /// simulation tick, and the panel's edges are per frame —
@@ -167,6 +177,13 @@ fn action_map() -> ActionMap {
 fn panel_actions() -> ActionMap {
     let mut map = ActionMap::new();
     crcbl::input::ui::declare(&mut map).expect("a new map has no ui action in it");
+    let mut back = map
+        .bindings(crcbl::input::ui::BACK)
+        .expect("declare declared ui_back")
+        .to_vec();
+    back.push(Binding::Key(PANEL_BACK_KEY));
+    map.rebind(crcbl::input::ui::BACK, back)
+        .expect("ui_back is declared and a key binding has no dead zone");
     map.declare_in(
         crcbl::input::ui::CONTEXT,
         ActionDecl {
@@ -1776,6 +1793,38 @@ mod tests {
                 )
             })
             .count()
+    }
+
+    /// **`Backspace` takes the keyboard's drag back**, `Escape` being the
+    /// loop's: the sidearm carried into the pack and let go of with
+    /// `Backspace` is back in the rig, where the `Enter` after it would have
+    /// dropped it into the pack had the drag still been held.
+    #[test]
+    fn backspace_takes_the_keyboards_drag_back() {
+        let mut engine = with_the_panel_open(200);
+        let rig = engine.game().game().loadout();
+        let sidearm = rig
+            .slot(rig.at(Cell::new(0, 0)).expect("the sidearm"))
+            .expect("held")
+            .stack();
+
+        tap(&mut engine, KeyCode::ArrowDown);
+        tap(&mut engine, KeyCode::Space);
+        for _ in 0..loadout::GRID_H {
+            tap(&mut engine, KeyCode::ArrowDown);
+        }
+        tap(&mut engine, PANEL_BACK_KEY);
+        tap(&mut engine, KeyCode::Enter);
+
+        let (rig, pack) = (engine.game().game().loadout(), engine.game().game().pack());
+        assert_eq!(
+            pack.find(sidearm.id()),
+            None,
+            "the drag outlived Backspace and the Enter after it dropped it into the pack",
+        );
+        let kept = rig.find(sidearm.id()).expect("the sidearm left the rig");
+        assert_eq!(rig.slot(kept).expect("held").at(), Cell::new(0, 0));
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
     /// **`X` sends the focused stack to the other container**, the panel's

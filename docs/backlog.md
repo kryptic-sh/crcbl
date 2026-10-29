@@ -24253,7 +24253,7 @@ so it is not re-argued:
   picking a stack up is not a swing and `W` is not a step.
 - **`Backspace` is added to `ui_back`** in that map (`app::PANEL_BACK_KEY`),
   because `Escape` is the loop's pause key and never reaches `key_event`. Breach
-  has the same gap and did not take this; it is a one-line rebind there too.
+  takes the same rebind (its own `app::PANEL_BACK_KEY`).
 - **Touch is wired, and the pointer echo is told apart by fingers down.**
   `Shard::touch_event` counts the contacts that are down and queues them for the
   panel, which offers them to `GridDrag::touch` in `draw` (where the extent
