@@ -2507,6 +2507,10 @@ impl Device for Dx12Device {
                 Features::PIPELINE_STATISTICS_QUERY,
                 "this device reports no PIPELINE_STATISTICS_QUERY",
             ),
+            Capability::GpuClock => gated(
+                Features::GPU_CLOCK,
+                "this device was opened without GPU_CLOCK",
+            ),
             // `CreateFence` is on every D3D12 device, so `features_of` reports
             // the flag unconditionally — but the answer is still the device's
             // rather than a constant, because a backend claiming a capability
@@ -3982,6 +3986,39 @@ impl Device for Dx12Device {
             }
         }
         Ok(())
+    }
+
+    /// `ID3D12CommandQueue::GetClockCalibration`'s GPU half, in nanoseconds
+    /// through the queue's own frequency, as
+    /// [`query_results`](Device::query_results) converts a timestamp: the same
+    /// queue's clock, so the two compare.
+    fn gpu_clock(&self) -> Result<u64, HalError> {
+        if !self.inner.caps.features.contains(Features::GPU_CLOCK) {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Dx12,
+                what: "gpu_clock on a device opened without Features::GPU_CLOCK",
+            });
+        }
+        let mut gpu_ticks = 0u64;
+        let mut cpu_ticks = 0u64;
+        // SAFETY: `queue` is this device's live `ID3D12CommandQueue`, and both
+        // pointers are to locals that outlive the call, which writes one `u64`
+        // through each.
+        unsafe {
+            self.inner
+                .queue
+                .GetClockCalibration(&raw mut gpu_ticks, &raw mut cpu_ticks)
+        }
+        .map_err(|error| {
+            HalError::Backend(format!(
+                "ID3D12CommandQueue::GetClockCalibration failed: {error}{}",
+                debug::diagnosis(&self.inner.raw)
+            ))
+        })?;
+        Ok(query::timestamp_nanos(
+            gpu_ticks,
+            self.inner.timestamp_frequency,
+        ))
     }
 
     /// Reads statistics queries back from the set's readback buffer, as

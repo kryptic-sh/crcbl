@@ -19,6 +19,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   code building one field by field must name it (`None` keeps the old meaning).
   `.crcblprof` is format version 2, which carries it; version-1 files still
   read, as captures with no clock pair.
+- **`crcbl_hal::Capability` has a new variant, `GpuClock`**, so a backend
+  outside the workspace matching on it must answer for it.
 
 ### Added
 
@@ -28,7 +30,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   timeline. `crcbl profile report` uses it: the Chrome trace puts every pass on
   the CPU's timeline and names the GPU process with the pair's uncertainty, or,
   when the pair cannot place every pass, leaves them on the GPU's own clock as
-  before. The engine does not measure a pair yet, so its captures carry none.
+  before. The engine measures the pair as it writes a capture, reading the GPU's
+  clock between two reads of the trace's, so captures from a device that reads
+  its clock land on one timeline.
+- **`Device::gpu_clock` reads the GPU's timestamp clock from the CPU**, in the
+  nanoseconds and on the timebase a timestamp query reports, on a device opened
+  with the new `Features::GPU_CLOCK`. D3D12 reports it on every device
+  (`GetClockCalibration`); Vulkan where `VK_KHR_calibrated_timestamps`
+  calibrates the device time domain. Metal does not read it yet and WebGPU has
+  no call for it; both refuse, each with its parity row. The engine asks for the
+  flag by default.
 
 - **`CRCBL_PROFILE_BUDGET_MS` captures the frames before a hitch.** Set beside
   `CRCBL_PROFILE_CAPTURE`, it writes the capture as the first frame whose CPU

@@ -2793,6 +2793,7 @@ stops a third kind of row joining them quietly.
 | ------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------ |
 | dx12 `MeshShading`, `TaskShaderStage`             | `Unwritten` | the WARP device removal — `features_of` still never asks for `MeshShaderTier`        |
 | Metal `TimestampQuery`, `PipelineStatisticsQuery` | `Unrun`     | **hardware.** Written and compiled; the runner advertises no `counterSets`           |
+| Metal `GpuClock`                                  | `Unwritten` | binding `sampleTimestamps:gpuTimestamp:` and converting its units, with the Mac work |
 | `OcclusionQuery` on all four                      | `Unwritten` | **a seam verb.** A begin/end pair on `CommandEncoder`, then five backends serving it |
 
 **The two kinds are not the same distance from done, which is why `Unrun`

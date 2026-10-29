@@ -908,6 +908,9 @@ impl Device for WebGpuDevice {
             // `Unwritten` rather than an `ApiAbsence`.
             Capability::OcclusionQuery => Support::No(NO_OCCLUSION_QUERY_VERB),
             Capability::PipelineStatisticsQuery => Support::No(NO_STATISTICS_SET),
+            // No member of the API reads the GPU's clock; see the
+            // `DIVERGENCES` row.
+            Capability::GpuClock => Support::No(crcbl_hal::NO_GPU_CLOCK),
             // WebGPU has no semaphore of any kind. It orders submissions
             // implicitly — one queue, executed in order, hazards tracked by the
             // browser — and its only completion signal is

@@ -273,6 +273,9 @@ pub(crate) struct ExtensionSupport {
     /// `VK_KHR_ray_tracing_pipeline` with `rayTracingPipeline`, and only
     /// alongside `acceleration_structure`, for the same reason.
     pub(crate) ray_tracing_pipeline: bool,
+    /// `VK_KHR_calibrated_timestamps` with the device time domain among those
+    /// it calibrates, which is the clock a timestamp query reads.
+    pub(crate) gpu_clock: bool,
 }
 
 /// Which of the mesh-shading and ray-tracing device extensions a device lists.
@@ -491,6 +494,11 @@ pub(crate) fn features_of(
     // profiler HUD must degrade rather than divide by it.
     if limits.timestamp_compute_and_graphics == vk::TRUE && limits.timestamp_period > 0.0 {
         features |= Features::TIMESTAMP_QUERY;
+        // Only beside timestamps: the clock is read in ticks, and the period
+        // above is what turns one into the nanoseconds a query reports.
+        if extensions.gpu_clock {
+            features |= Features::GPU_CLOCK;
+        }
     }
     if extensions.debug_utils {
         features |= Features::DEBUG_MARKERS;
@@ -655,7 +663,29 @@ fn common_sample_count(limits: &vk::PhysicalDeviceLimits) -> u32 {
 /// presenter's `Presenter::start_device` walks it and takes the first adapter
 /// that can present, and a caller with no surface to ask about gets the
 /// preferred adapter first.
+/// Whether `physical` calibrates its own clock, the device time domain, under
+/// `VK_KHR_calibrated_timestamps`, which the caller has seen it list.
+fn device_clock_calibrates(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+) -> bool {
+    let calibration = khr::calibrated_timestamps::Instance::new(entry, instance);
+    // SAFETY: `physical` came from this instance and lists the extension the
+    // command belongs to; the call only reads driver-owned tables.
+    match unsafe { calibration.get_physical_device_calibrateable_time_domains(physical) } {
+        Ok(domains) => domains.contains(&vk::TimeDomainKHR::DEVICE),
+        Err(error) => {
+            crcbl_core::log::warn!(
+                "crcbl-vk: vkGetPhysicalDeviceCalibrateableTimeDomainsKHR failed: {error:?}"
+            );
+            false
+        }
+    }
+}
+
 pub(crate) fn enumerate(
+    entry: &ash::Entry,
     instance: &ash::Instance,
     debug_utils: bool,
     surface_caps2: bool,
@@ -681,7 +711,7 @@ pub(crate) fn enumerate(
 
     let described: Vec<AdapterRecord> = physicals
         .into_iter()
-        .map(|physical| describe(instance, physical, debug_utils, surface_caps2))
+        .map(|physical| describe(entry, instance, physical, debug_utils, surface_caps2))
         .collect();
     // **One driver on one device is one adapter, however often the loader
     // offers it.** AMD's Windows driver is registered twice on some machines
@@ -750,6 +780,7 @@ fn first_of_each<T, K: PartialEq>(
 }
 
 fn describe(
+    entry: &ash::Entry,
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
     debug_utils: bool,
@@ -818,6 +849,11 @@ fn describe(
         && has_device_extension(&device_extensions, present_timing::PRESENT_ID2_NAME)
         && has_device_extension(&device_extensions, khr::calibrated_timestamps::NAME)
         && has_device_extension(&device_extensions, present_timing::PRESENT_TIMING_NAME);
+    // The extension listed is not the clock calibrating: the device domain has
+    // to be among the ones it names, since that is the clock a timestamp query
+    // reads.
+    let gpu_clock = has_device_extension(&device_extensions, khr::calibrated_timestamps::NAME)
+        && device_clock_calibrates(entry, instance, physical);
     // The mesh-shading and ray-tracing extensions, probed once: the answer
     // decides both which feature structs may be chained below and, with those
     // structs' bits, which capabilities are real.
@@ -905,6 +941,7 @@ fn describe(
         debug_utils,
         present_feedback,
         present_timing,
+        gpu_clock,
         ..ExtensionSupport::default()
     }
     .with_stages(

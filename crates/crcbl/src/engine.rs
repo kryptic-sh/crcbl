@@ -607,6 +607,9 @@ impl Default for GpuContextDesc<'_> {
                 // `CRCBL_PASS_STATISTICS=1` asks; a device without it times
                 // passes and counts nothing.
                 | Features::PIPELINE_STATISTICS_QUERY
+                // What a profiler capture reads to put its GPU passes on the
+                // CPU's timeline; a device without it keeps them apart.
+                | Features::GPU_CLOCK
                 | Features::DEBUG_MARKERS
                 | Features::PRESENT_FEEDBACK
                 | Features::PRESENT_TIMING
@@ -7569,13 +7572,16 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     }
 
     /// Writes the loop's capture, `taken` from it, with the presenting
-    /// adapter in its environment.
+    /// adapter in its environment and that device's clock pair.
     fn write_profile(&mut self, taken: crate::profile::Requested) {
-        let adapter = self
-            .gpu
-            .presenting_context()
-            .and_then(|context| context.adapter());
-        taken.write(adapter.as_ref());
+        let (adapter, clock) = match self.gpu.presenting_context() {
+            Some(context) => (
+                context.adapter(),
+                crate::profile::clock_pair(context.device()),
+            ),
+            None => (None, None),
+        };
+        taken.write(adapter.as_ref(), clock);
     }
 
     /// Hands every typed `save` to the game's one save path, in the order

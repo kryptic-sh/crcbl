@@ -328,6 +328,19 @@ bitflags::bitflags! {
         /// of [`GPU_DRIVEN`](Self::GPU_DRIVEN): a device without it draws the
         /// same frames with a call per bucket.
         const DRAW_INDEX = 1 << 27;
+        /// The GPU's timestamp clock can be read from the CPU, in the
+        /// nanoseconds [`Device::query_results`](crate::Device::query_results)
+        /// reports a timestamp in, through
+        /// [`Device::gpu_clock`](crate::Device::gpu_clock): what puts a
+        /// profile's GPU passes on the CPU's timeline.
+        ///
+        /// D3D12's `GetClockCalibration`, Vulkan's
+        /// `VK_KHR_calibrated_timestamps` with the device time domain, Metal's
+        /// `sampleTimestamps:gpuTimestamp:`. Absent on WebGPU, which has no
+        /// call reading the GPU's clock. Optional and **not** part of
+        /// [`GPU_DRIVEN`](Self::GPU_DRIVEN): a device without it renders the
+        /// same frames, and its profiles keep the GPU on its own clock.
+        const GPU_CLOCK = 1 << 28;
 
         /// The feature set the full GPU-driven path uses.
         ///

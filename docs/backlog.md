@@ -19651,19 +19651,17 @@ desktop counts the task stage.
   `CRCBL_PROFILE_BUDGET_MS` writing the frames up to the first one over a CPU
   budget. Left: the other triggers (a key, the CLI, a GPU frame over budget,
   which arrives frames latent and so needs the ring to keep going past it); the
-  producer's half of the calibrated CPU/GPU clock pair (the format carries
-  `crcbl_profile::ClockPair` and the report aligns with it; nothing measures one
-  yet: a HAL call reading the GPU's timestamp clock in the same nanoseconds
-  `Device::query_results` returns, bracketed by two reads of the trace clock for
-  the uncertainty, from `GetClockCalibration` on D3D12 and
-  `VK_KHR_calibrated_timestamps` on Vulkan, which is today enabled only with
-  present timing); and the capture recording its own cost (what it enabled is in
-  its environment entries). Not tested: the loop's own recording and write,
-  which runs checked by hand (a lantern run's 120 CPU and 120 GPU frames; an
-  asteroids run's `profile_capture 10` through `--exec`, 10 CPU and 7 GPU
-  frames, decoded back) and no test runs. The D3D12 runs here had the debug
-  layer off (none installed); CI's WARP job is the first validated run of
-  `BeginQuery` on a statistics heap.
+  clock pair on Metal (`Capability::GpuClock`'s `Unwritten` row:
+  `sampleTimestamps:gpuTimestamp:` unbound, with the Mac work); and the capture
+  recording its own cost (what it enabled is in its environment entries). The
+  clock pair is read once, as the capture is written, and assumes the two clocks
+  keep one rate over the capture; a second pair at its start would measure the
+  drift, and nothing has. Not tested: the loop's own recording and write, which
+  runs checked by hand (a lantern run's 120 CPU and 120 GPU frames; an asteroids
+  run's `profile_capture 10` through `--exec`, 10 CPU and 7 GPU frames, decoded
+  back) and no test runs. The D3D12 runs here had the debug layer off (none
+  installed); CI's WARP job is the first validated run of `BeginQuery` on a
+  statistics heap.
 
 **Surprising, worked around:** AMD's D3D12 driver (RX 7900 XTX on 25.10.36,
 Raphael iGPU on 25.10.42) resolves every statistics query begun after a draw

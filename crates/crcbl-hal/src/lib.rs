@@ -224,7 +224,7 @@ pub mod threading;
 
 pub use capability::{
     Capability, DIVERGENCES, Divergence, DivergenceKind, METAL_NO_DRAW_INDIRECT_COUNT,
-    NO_OCCLUSION_QUERY_VERB, NO_PIPELINE_STATISTICS, ParityVerdict, Support,
+    NO_GPU_CLOCK, NO_OCCLUSION_QUERY_VERB, NO_PIPELINE_STATISTICS, ParityVerdict, Support,
     WEBGPU_BIND_GROUPS_ARE_IMMUTABLE, divergence, parity_blockers, parity_verdict,
 };
 pub use caps::{

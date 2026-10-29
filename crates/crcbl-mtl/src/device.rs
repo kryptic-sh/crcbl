@@ -1794,6 +1794,9 @@ impl Device for MetalDevice {
                  for a device that advertises MTLCommonCounterSetStatistic in \
                  MTLDevice::counterSets",
             ),
+            // The trait's refusing `Device::gpu_clock` is this backend's: see
+            // the `DIVERGENCES` row.
+            Capability::GpuClock => Support::No(crcbl_hal::NO_GPU_CLOCK),
             // `MTLSharedEvent` is the seam's timeline almost verbatim: a
             // monotonic `u64` the GPU signals and waits on, the host reads
             // through `signaledValue` and writes through `setSignaledValue:`.

@@ -7899,6 +7899,115 @@ const CREATED_QUERIES: u32 = 2;
 /// that was reset and never written never becomes available. Reading the
 /// non-blocking path first means a backend whose pass timestamps are a silent
 /// no-op fails this exercise rather than hanging the suite inside it.
+/// **The GPU's clock, read from the CPU, brackets a pass the GPU timed.**
+///
+/// The claim is the timebase, not merely a clock: a read before a timed clear
+/// is submitted and one after it has finished must hold the pass's two
+/// timestamps between them. A clock in the right unit on another timebase — a
+/// QPC value, a raw tick count, a clock zeroed at device open — fails the
+/// bracket; a read that does not move reads the same value twice, which is the
+/// silently ignored case.
+fn exercise_gpu_clock(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let before = match device.gpu_clock() {
+        Ok(nanos) => nanos,
+        Err(error) => return Exercise::Refused(error),
+    };
+    let set = device
+        .create_query_set(&QuerySetDesc {
+            label: Some("gpu clock exercise"),
+            kind: QueryKind::Timestamp,
+            count: 2,
+        })
+        .expect("a device reading its GPU clock times passes too");
+    let target = device
+        .create_image(&ImageDesc {
+            label: Some("clock-bracketed clear target"),
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(TIMED_CLEAR_EXTENT, TIMED_CLEAR_EXTENT),
+            format: RASTER_FORMAT,
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::COLOR_ATTACHMENT,
+        })
+        .expect("a colour attachment");
+    let view = device
+        .create_image_view(&ImageViewDesc {
+            label: Some("clock-bracketed clear view"),
+            image: target,
+            view_type: ImageViewType::D2,
+            format: RASTER_FORMAT,
+            range: ImageSubresourceRange::all(RASTER_FORMAT),
+        })
+        .expect("a view of a colour attachment");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("gpu clock exercise"),
+        queue: headless.queue,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        images: &[ImageBarrier::new(
+            target,
+            ImageSubresourceRange::all(RASTER_FORMAT),
+            ResourceState::Undefined,
+            ResourceState::ColorAttachment,
+        )],
+        ..Barriers::default()
+    });
+    encoder.reset_query_set(set, 0..2);
+    encoder.begin_render_pass(&crcbl::hal::RenderPassDesc {
+        label: Some("clock-bracketed clear"),
+        color_attachments: &[ColorAttachment {
+            view,
+            resolve: None,
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::color([0.25, 0.5, 0.75, 1.0]),
+        }],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(TIMED_CLEAR_EXTENT, TIMED_CLEAR_EXTENT),
+        timestamp_writes: Some(crcbl::hal::PassTimestampWrites {
+            set,
+            beginning_of_pass: 0,
+            end_of_pass: 1,
+        }),
+        statistics_writes: None,
+    });
+    encoder.end_render_pass();
+    let commands = encoder.finish().expect("a timed clear records");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    let after = device.gpu_clock().expect("the clock read once reads again");
+    let mut nanos = [QUERY_POISON; 2];
+    device
+        .query_results(set, 0, &mut nanos)
+        .expect("reading a set this exercise created, over the range it created it with");
+    device.destroy_command_buffer(commands);
+    device.destroy_image_view(view);
+    device.destroy_image(target);
+    device.destroy_query_set(set);
+
+    let [start, end] = nanos;
+    if before == after {
+        return Exercise::SilentlyIgnored;
+    }
+    assert!(
+        before <= start && start <= end && end <= after,
+        "the GPU clock read {before} before a timed clear was submitted and {after} after it \
+         finished, and the clear's own timestamps were {start} and {end}. A clock on the \
+         timestamps' timebase holds them between its two reads, so this one is another clock \
+         or another unit."
+    );
+    eprintln!(
+        "crcbl hal seam e2e: the GPU clock bracketed the timed clear by {} ns before and {} ns \
+         after",
+        start - before,
+        after - end,
+    );
+    Exercise::Worked
+}
+
 fn exercise_timestamp_query(headless: &Headless) -> Exercise {
     let device = headless.device.as_ref();
     let set = match device.create_query_set(&QuerySetDesc {
@@ -9213,6 +9322,7 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::PipelineStatisticsQuery => {
             exercise_query_set_creation(headless, QueryKind::PipelineStatistics)
         }
+        C::GpuClock => exercise_gpu_clock(headless),
         C::TimelineSemaphore => exercise_timeline(headless, TimelineClaim::Counter),
         C::CpuTimelineWait => exercise_timeline(headless, TimelineClaim::CpuWait),
         // **Not covered by the timeline test**, which creates only a

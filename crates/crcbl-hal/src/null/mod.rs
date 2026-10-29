@@ -1027,6 +1027,9 @@ impl Device for NullDevice {
                 Features::PIPELINE_STATISTICS_QUERY,
                 "this preset did not grant PIPELINE_STATISTICS_QUERY",
             ),
+            // Whatever it was granted: this recorder executes nothing, so there
+            // is no GPU clock to read, and the trait's refusal is its answer.
+            Capability::GpuClock => Support::No(crate::NO_GPU_CLOCK),
             Capability::TimelineSemaphore
             | Capability::CpuTimelineWait
             | Capability::CpuTimelineSignal => gated(

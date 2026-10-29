@@ -1154,6 +1154,29 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
         })
     }
 
+    /// The GPU's timestamp clock now, on the timebase and in the nanoseconds
+    /// [`query_results`](Self::query_results) reads a timestamp in: a value a
+    /// pass's timestamps can be compared with, read from the CPU.
+    ///
+    /// A profiler reads it between two reads of its own clock to put the
+    /// GPU's passes on the CPU's timeline. Nothing waits: it reads the clock,
+    /// not any work.
+    ///
+    /// The default refuses: a backend that does not read the clock has nothing
+    /// to answer with.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::Unsupported`] on a device without
+    /// [`Features::GPU_CLOCK`] or a backend that does not read the clock, and
+    /// whatever the API reports for a lost device.
+    fn gpu_clock(&self) -> Result<u64, HalError> {
+        Err(HalError::Unsupported {
+            backend: self.backend(),
+            what: crate::NO_GPU_CLOCK,
+        })
+    }
+
     // --- synchronisation ---
 
     /// Creates a semaphore. See [`crate::sync`] on why timeline is the default.

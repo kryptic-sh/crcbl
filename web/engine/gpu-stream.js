@@ -40,8 +40,8 @@
 //     enormous, so nothing downstream would question it. Sequence numbers are
 //     64-bit precisely because they are never allowed to wrap within a session.
 //   * `RequestDevice`'s two feature words are `BigInt` too. `crcbl_hal::Features`
-//     is a 64-bit bitflags and the flags it has today all sit in the low
-//     twenty-eight bits, so a number would be exact *for now* — which is the
+//     is a 64-bit bitflags and the flags it has today all sit far below bit
+//     53, so a number would be exact *for now* — which is the
 //     worst of the three possibilities, since the day a flag is added past bit
 //     53 nothing here would fail, and a required feature would quietly go
 //     missing.
@@ -661,8 +661,8 @@ const COLOR_WRITES = ['R', 'G', 'B', 'A'];
  *
  * A MASK RATHER THAN A NAME TABLE, and the one bitflags field here that gets
  * one. The other two decode to lists of flag names, which is what makes a
- * decoded stream readable; a twenty-eight row table for this one would be
- * twenty-eight more things to keep in step with `crcbl-hal` for a value nothing
+ * decoded stream readable; a row per flag for this one would be one more thing
+ * per flag to keep in step with `crcbl-hal` for a value nothing
  * downstream reads by name — `gpu-replay.js` maps *bits* to `GPUFeatureName`s.
  *
  * It is still checked rather than waved through, because the seam's rule is
@@ -673,7 +673,7 @@ const COLOR_WRITES = ['R', 'G', 'B', 'A'];
  * is `Features::all()`, so a mask narrower than Rust's refuses the fixture and
  * `stream-decode.mjs` goes red.
  */
-const FEATURES_CLAIMED = (1n << 28n) - 1n;
+const FEATURES_CLAIMED = (1n << 29n) - 1n;
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 

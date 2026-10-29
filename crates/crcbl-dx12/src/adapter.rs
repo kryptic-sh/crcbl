@@ -757,7 +757,10 @@ fn features_of(raw: &RawCaps) -> Features {
         | Features::TIMELINE_SEMAPHORE
         | Features::TIMESTAMP_QUERY
         | Features::OCCLUSION_QUERY
-        | Features::PIPELINE_STATISTICS_QUERY;
+        | Features::PIPELINE_STATISTICS_QUERY
+        // `ID3D12CommandQueue::GetClockCalibration` is on every queue, as
+        // `GetTimestampFrequency` beside it is.
+        | Features::GPU_CLOCK;
     out
 }
 

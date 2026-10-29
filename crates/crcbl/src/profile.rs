@@ -17,7 +17,9 @@
 //!
 //! The GPU half is whatever the run's pass timers measured, frames latent as
 //! they always are, and counted only when `CRCBL_PASS_STATISTICS=1` asked the
-//! timers to count.
+//! timers to count. Where the device reads its GPU clock, the capture carries
+//! a [`ClockPair`] measured as it is written, which puts the passes on the CPU's
+//! timeline.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -25,7 +27,7 @@ use std::time::Duration;
 
 use crcbl_core::trace::{RecordKind, Snapshot};
 use crcbl_profile::{
-    Capture, CpuFrame, Environment, Event, EventKind, GpuFrame, Pass, Statistics, Thread,
+    Capture, ClockPair, CpuFrame, Environment, Event, EventKind, GpuFrame, Pass, Statistics, Thread,
 };
 use crcbl_render::FrameTimings;
 pub use crcbl_ui::DEFAULT_FRAME_WINDOW;
@@ -190,10 +192,11 @@ impl Requested {
                 .is_some_and(|frames| self.recorder.cpu_frames >= frames)
     }
 
-    /// Writes the capture to its file, and says in the log where it went or
-    /// why it did not: the run's own outcome does not hang on it. Turns the
-    /// CPU trace back off if this capture turned it on.
-    pub(crate) fn write(self, adapter: Option<&crcbl_hal::AdapterInfo>) {
+    /// Writes the capture to its file, with `clock` as its clock pair, and
+    /// says in the log where it went or why it did not: the run's own outcome
+    /// does not hang on it. Turns the CPU trace back off if this capture turned
+    /// it on.
+    pub(crate) fn write(self, adapter: Option<&crcbl_hal::AdapterInfo>, clock: Option<ClockPair>) {
         if self.trace_was_off {
             crcbl_core::trace::set_enabled(false);
         }
@@ -206,7 +209,8 @@ impl Requested {
                 .entries
                 .push(("trigger".to_string(), trigger.clone()));
         }
-        let capture = self.recorder.capture(environment);
+        let mut capture = self.recorder.capture(environment);
+        capture.clock = clock;
         let written = capture
             .encode()
             .map_err(|error| error.to_string())
@@ -223,6 +227,32 @@ impl Requested {
                 self.path.display()
             ),
         }
+    }
+}
+
+/// The GPU's clock read between two reads of the trace's, as a capture's clock
+/// pair, or `None` where `device` does not read its GPU clock, which the log
+/// says: the capture's passes then stay on their own clock.
+pub(crate) fn clock_pair(device: &dyn crcbl_hal::Device) -> Option<ClockPair> {
+    let before = crcbl_core::trace::clock_nanos();
+    let gpu = device.gpu_clock();
+    let after = crcbl_core::trace::clock_nanos();
+    gpu.map(|gpu_nanos| bracketed(before, gpu_nanos, after))
+        .map_err(|error| {
+            crate::log::info!("profile: the capture's GPU passes stay on their own clock: {error}");
+        })
+        .ok()
+}
+
+/// The pair a GPU reading taken between the CPU reads `before` and `after`
+/// makes: the GPU read happened somewhere in that gap, so the CPU time is its
+/// middle and the uncertainty half its width, rounded up.
+fn bracketed(before: u64, gpu_nanos: u64, after: u64) -> ClockPair {
+    let gap = after.saturating_sub(before);
+    ClockPair {
+        cpu_nanos: before + gap / 2,
+        gpu_nanos,
+        uncertainty_nanos: gap.div_ceil(2),
     }
 }
 
@@ -491,7 +521,7 @@ mod tests {
         }
         assert!(requested.is_complete());
 
-        requested.write(None);
+        requested.write(None, None);
         assert!(!crcbl_core::trace::is_enabled(), "off again once written");
         let written = Capture::decode(&std::fs::read(&path).unwrap()).unwrap();
         std::fs::remove_file(&path).unwrap();
@@ -509,6 +539,38 @@ mod tests {
         run_long.recorder.record_cpu(&Snapshot::default());
         run_long.recorder.record_cpu(&Snapshot::default());
         assert!(!run_long.is_complete(), "written as the run finishes");
+    }
+
+    /// **A GPU reading bracketed by two CPU reads is placed at their middle**,
+    /// uncertain by half the gap, rounded up so an odd gap is not understated.
+    #[test]
+    fn a_bracketed_reading_is_placed_at_the_middle_of_its_gap() {
+        assert_eq!(
+            bracketed(1_000, 77, 1_401),
+            ClockPair {
+                cpu_nanos: 1_200,
+                gpu_nanos: 77,
+                uncertainty_nanos: 201,
+            }
+        );
+        assert_eq!(bracketed(5, 9, 5).uncertainty_nanos, 0);
+    }
+
+    /// **A device that does not read its GPU clock gives no pair**, rather
+    /// than one placing the passes somewhere false.
+    #[test]
+    fn a_device_without_a_gpu_clock_gives_no_pair() {
+        let instance = crcbl_hal::null::NullInstance::gpu_driven();
+        let adapter = crcbl_hal::Instance::adapters(&instance)
+            .into_iter()
+            .next()
+            .expect("the null instance has an adapter");
+        let device = crcbl_hal::Instance::create_device(
+            &instance,
+            &crcbl_hal::DeviceDesc::for_adapter(adapter.id),
+        )
+        .expect("a null device opens");
+        assert_eq!(clock_pair(device.as_ref()), None);
     }
 
     /// A snapshot holding one whole frame of `millis` milliseconds.
@@ -570,8 +632,18 @@ mod tests {
             "the first frame over is the one named"
         );
 
-        requested.write(None);
+        let clock = ClockPair {
+            cpu_nanos: 1,
+            gpu_nanos: 2,
+            uncertainty_nanos: 3,
+        };
+        requested.write(None, Some(clock));
         let written = Capture::decode(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            written.clock,
+            Some(clock),
+            "the pair it was given is written"
+        );
         std::fs::remove_file(&path).unwrap();
         let numbers: Vec<u64> = written.cpu.iter().map(|frame| frame.number).collect();
         assert_eq!(numbers, [0, 1, 2, 3, 4], "the frames before it are held");

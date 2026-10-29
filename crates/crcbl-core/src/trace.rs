@@ -295,6 +295,13 @@ pub(crate) fn parse_enabled(value: &str) -> Option<bool> {
     }
 }
 
+/// Nanoseconds since the trace epoch: the clock every record's `nanos` is
+/// on, for a caller pairing it with another clock.
+#[must_use]
+pub fn clock_nanos() -> u64 {
+    now_nanos()
+}
+
 /// Nanoseconds since the trace epoch.
 fn now_nanos() -> u64 {
     let epoch = EPOCH.get_or_init(MonotonicTime::new);

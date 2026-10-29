@@ -483,6 +483,9 @@ pub(crate) struct DeviceInner {
     /// [`Device::query_results`] spends it
     /// here and reports nanoseconds, which is a unit every backend has.
     timestamp_period_ns: f32,
+    /// `VK_KHR_calibrated_timestamps`, loaded when the device was opened with
+    /// [`Features::GPU_CLOCK`]; what [`Device::gpu_clock`] reads through.
+    calibration_ext: Option<khr::calibrated_timestamps::Device>,
     pub(crate) id: u64,
     /// This device's stamp on every handle it issues. See the handle-tagging
     /// section above; never zero.
@@ -866,6 +869,9 @@ impl VkDevice {
         // `VK_KHR_get_surface_capabilities2` is an instance extension the
         // instance enabled, which leaves these two to add here.
         let present_timing = granted.contains(Features::PRESENT_TIMING);
+        // `adapter::describe` reports `GPU_CLOCK` only when the extension is
+        // listed and calibrates the device domain, so asking is never a guess.
+        let gpu_clock = granted.contains(Features::GPU_CLOCK);
         // The same argument once more for the mesh-shading and ray-tracing
         // extensions: `adapter::describe` reports each of these only when the
         // extension was listed *and* its feature bit came back true, so asking
@@ -895,8 +901,12 @@ impl VkDevice {
             device_extensions.push(khr::present_id::NAME.as_ptr());
             device_extensions.push(khr::present_wait::NAME.as_ptr());
         }
-        if present_timing {
+        // Once, whichever of the two wanted it: present timing depends on it,
+        // and the GPU clock is read through it.
+        if present_timing || gpu_clock {
             device_extensions.push(khr::calibrated_timestamps::NAME.as_ptr());
+        }
+        if present_timing {
             device_extensions.push(present_timing::PRESENT_ID2_NAME.as_ptr());
             device_extensions.push(present_timing::PRESENT_TIMING_NAME.as_ptr());
         }
@@ -1016,6 +1026,9 @@ impl VkDevice {
             mesh_shader.then(|| ext::mesh_shader::Device::new(&instance.raw, &raw));
         let shader_stats_ext = shader_stats
             .then(|| khr::pipeline_executable_properties::Device::new(&instance.raw, &raw));
+        // Same idiom again: `Some` is the record that `gpu_clock` can read.
+        let calibration_ext =
+            gpu_clock.then(|| khr::calibrated_timestamps::Device::new(&instance.raw, &raw));
         let debug_ext = instance
             .debug_ext
             .as_ref()
@@ -1094,6 +1107,7 @@ impl VkDevice {
             // declined the optional feature still opened a device whose clock
             // ticks at the rate the adapter reported.
             timestamp_period_ns: record.timestamp_period_ns,
+            calibration_ext,
             id,
             tag: owner_tag(id),
             memory_properties,
@@ -1995,6 +2009,11 @@ impl Device for VkDevice {
                 Features::PIPELINE_STATISTICS_QUERY,
                 "this device reports no PIPELINE_STATISTICS_QUERY",
             ),
+            Capability::GpuClock => gated(
+                Features::GPU_CLOCK,
+                "this device reports no GPU_CLOCK: VK_KHR_calibrated_timestamps calibrating the \
+                 device time domain",
+            ),
             // `crcbl-vk` requires Vulkan 1.3, where `timelineSemaphore` is core,
             // so the flag is reported by every device this backend opens — but
             // the answer is still the device's rather than a constant, because a
@@ -2691,6 +2710,28 @@ impl Device for VkDevice {
         if let Some((pool, _)) = entry.mesh {
             self.inner.park(&mut state, Trash::QueryPool(pool));
         }
+    }
+
+    /// `vkGetCalibratedTimestampsKHR` over the device time domain alone, in
+    /// nanoseconds through the period [`query_results`](Device::query_results)
+    /// converts a timestamp with: the clock a timestamp query writes.
+    fn gpu_clock(&self) -> Result<u64, HalError> {
+        let Some(calibration) = &self.inner.calibration_ext else {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Vulkan,
+                what: "gpu_clock on a device opened without Features::GPU_CLOCK",
+            });
+        };
+        let info =
+            [vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::DEVICE)];
+        // SAFETY: the extension was enabled on this device, which is live, and
+        // `adapter::describe` saw the device domain among those it calibrates.
+        let (ticks, _deviation) = unsafe { calibration.get_calibrated_timestamps(&info) }
+            .map_err(|error| conv::hal_error("vkGetCalibratedTimestampsKHR", error))?;
+        Ok(conv::timestamp_nanos(
+            ticks[0],
+            self.inner.timestamp_period_ns,
+        ))
     }
 
     fn query_results(

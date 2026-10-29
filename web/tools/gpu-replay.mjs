@@ -10335,9 +10335,9 @@ async function main() {
         `${name} survives both directions of the mapping`
       );
     }
-    // Twenty of the seam's twenty-eight flags have nothing behind them in
-    // WebGPU. Each comes back as unsatisfiable rather than as silence, which is
-    // what lets a *required* one fail the request.
+    // The seam's flags with nothing behind them in WebGPU each come back as
+    // unsatisfiable rather than as silence, which is what lets a *required*
+    // one fail the request.
     const unmappable =
       (1n << 9n) |
       (1n << 0n) |

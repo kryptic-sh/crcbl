@@ -422,6 +422,11 @@ capabilities! {
     /// claim the lot.
     PipelineStatisticsQuery,
 
+    /// [`gpu_clock`](crate::Device::gpu_clock): the GPU's timestamp clock read
+    /// from the CPU, on the same timebase and in the same nanoseconds as a
+    /// [`QueryKind::Timestamp`](crate::QueryKind::Timestamp) set's reads.
+    GpuClock,
+
     // --- synchronisation ---
 
     /// [`SemaphoreKind::Timeline`](crate::SemaphoreKind::Timeline): a monotonic
@@ -525,6 +530,7 @@ impl Capability {
             Self::TimestampQuery => Some(Features::TIMESTAMP_QUERY),
             Self::OcclusionQuery => Some(Features::OCCLUSION_QUERY),
             Self::PipelineStatisticsQuery => Some(Features::PIPELINE_STATISTICS_QUERY),
+            Self::GpuClock => Some(Features::GPU_CLOCK),
             // All four are about one object, so one flag governs them.
             Self::TimelineSemaphore
             | Self::CpuTimelineWait
@@ -798,6 +804,11 @@ pub const WEBGPU_BIND_GROUPS_ARE_IMMUTABLE: &str = "WebGPU bind groups are immut
 pub const NO_PIPELINE_STATISTICS: &str = "pipeline statistics: this backend does not count a \
      pass's work yet";
 
+/// Why a backend's [`Device::gpu_clock`](crate::Device::gpu_clock) refuses: it
+/// does not read the GPU's timestamp clock from the CPU.
+pub const NO_GPU_CLOCK: &str = "gpu_clock: this backend does not read the GPU's timestamp clock \
+     from the CPU";
+
 pub const NO_OCCLUSION_QUERY_VERB: &str = "a QueryKind::Occlusion set. Every API scopes an \
      occlusion count with a begin/end pair around a draw — vkCmdBeginQuery, D3D12 BeginQuery, \
      Metal setVisibilityResultMode:offset:, WebGPU beginOcclusionQuery — and crcbl_hal's \
@@ -1025,6 +1036,24 @@ pub const DIVERGENCES: &[Divergence] = &[
         kind: DivergenceKind::ApiAbsence,
         why: "GPUQueryType is exactly 'occlusion' and 'timestamp', so there is no \
               pipeline-statistics query set for WebGPU to create",
+    },
+    Divergence {
+        capability: Capability::GpuClock,
+        backend: BackendKind::Metal,
+        kind: DivergenceKind::Unwritten,
+        why: "MTLDevice's sampleTimestamps:gpuTimestamp: reads the CPU's and the GPU's clocks \
+              together, and crcbl_mtl keeps the trait's refusing Device::gpu_clock: the call is \
+              not bound, and Metal's GPU timestamps are in its counter-sampling units, which \
+              crcbl_mtl converts to nanoseconds nowhere yet. Waits for the Mac work (owner, \
+              2026-10-28)",
+    },
+    Divergence {
+        capability: Capability::GpuClock,
+        backend: BackendKind::WebGpu,
+        kind: DivergenceKind::ApiAbsence,
+        why: "GPUDevice and GPUQueue have no member reading the GPU's clock, and a \
+              GPUQuerySet's timestamps are only ever resolved into a GPUBuffer by GPU work, so \
+              no call places one against the CPU's clock",
     },
     // --- synchronisation ---
     Divergence {
@@ -1700,6 +1729,13 @@ mod tests {
             Capability::PipelineStatisticsQuery,
             BackendKind::Metal,
             DivergenceKind::Unrun,
+        ),
+        // Arrived with the capability on 2026-10-29, parked with the rest of
+        // Metal: the call exists, nothing here binds it.
+        (
+            Capability::GpuClock,
+            BackendKind::Metal,
+            DivergenceKind::Unwritten,
         ),
         // `crcbl-webgpu`'s only row is the occlusion one at the top, and that
         // is worth reading twice: everything *WebGPU* refuses is WebGPU itself
