@@ -61,6 +61,7 @@ use crcbl_ui::tree::{ClipboardRequest, TextInput};
 use crcbl_ui::{FontAtlas, PointerInput, UiState, draw_list::DrawList};
 
 use crate::engine::SettingsSource;
+use crate::profile::CaptureAsk;
 use crate::save::{SaveRequest, SaveTrigger};
 use crate::settings::{ConsoleHost, SharedSettings};
 
@@ -153,6 +154,10 @@ pub struct EngineLink {
     /// ([`HostedGame::save`](crate::engine::HostedGame::save)). A queue for
     /// [`Self::binds`]' reason: `save; save slot2` is two saves.
     pub(crate) saves: Vec<SaveRequest>,
+    /// The capture `profile_capture` asked for since the loop last looked. One
+    /// slot: a loop records one capture at a time, so a second line replaces
+    /// the first before it starts.
+    pub(crate) profile_capture: Option<CaptureAsk>,
 }
 
 impl EngineLink {
@@ -168,6 +173,7 @@ impl EngineLink {
             binds: Vec::new(),
             sim_sets: Vec::new(),
             saves: Vec::new(),
+            profile_capture: None,
         }
     }
 
@@ -207,6 +213,11 @@ impl EngineLink {
     /// Every save typed since the loop last looked, in order.
     pub fn take_saves(&mut self) -> Vec<SaveRequest> {
         std::mem::take(&mut self.saves)
+    }
+
+    /// The capture `profile_capture` asked for since the loop last looked.
+    pub const fn take_profile_capture(&mut self) -> Option<CaptureAsk> {
+        self.profile_capture.take()
     }
 }
 
@@ -270,6 +281,20 @@ crcbl_console::concommand! {
     pub fn save(cx, args) {
         let request = SaveRequest::from_args(SaveTrigger::Console, args).map_err(Fault::new)?;
         link(cx.host_mut()).saves.push(request);
+        Ok(())
+    }
+}
+
+crcbl_console::concommand! {
+    /// Capture the next frames' CPU spans and GPU passes to a file: `profile_capture 120 run.crcblprof`.
+    pub fn profile_capture(cx, args) {
+        let ask = CaptureAsk::from_args(args).map_err(Fault::new)?;
+        cx.print(format!(
+            "capturing the next {} frames to {}",
+            ask.frames,
+            ask.path.display()
+        ));
+        link(cx.host_mut()).profile_capture = Some(ask);
         Ok(())
     }
 }
@@ -1246,6 +1271,35 @@ mod tests {
             .map(|record| record.message)
             .collect();
         assert!(printed.is_empty(), "{printed:?}");
+    }
+
+    /// **`profile_capture` reaches the loop as one ask**, and a line it
+    /// refuses reaches it as none.
+    #[test]
+    fn profile_capture_hands_the_loop_its_ask() {
+        let tables: Vec<Table> = engine_tables()
+            .into_iter()
+            .map(|(_, table)| table)
+            .collect();
+        let host = ConsoleHost::new(crcbl_store::settings::SettingsStack::new());
+        let mut console = Console::new(&tables, host);
+
+        console.run_exec(&["profile_capture 0 run.crcblprof".to_owned()]);
+        assert_eq!(console.host_mut().engine_mut().take_profile_capture(), None);
+
+        console.run_exec(&["profile_capture 30 run.crcblprof".to_owned()]);
+        assert_eq!(
+            console.host_mut().engine_mut().take_profile_capture(),
+            Some(CaptureAsk {
+                frames: 30,
+                path: std::path::PathBuf::from("run.crcblprof"),
+            })
+        );
+        assert_eq!(
+            console.host_mut().engine_mut().take_profile_capture(),
+            None,
+            "taken once"
+        );
     }
 
     /// **The same console that ran no autoexec still runs `--exec`**, and

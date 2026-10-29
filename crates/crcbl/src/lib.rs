@@ -480,6 +480,7 @@ pub fn console_table() -> crcbl_console::Table {
         &debug_console::bind,
         &debug_console::fps,
         &debug_console::pause,
+        &debug_console::profile_capture,
         &debug_console::quit,
         &debug_console::save,
         &debug_console::unbind,

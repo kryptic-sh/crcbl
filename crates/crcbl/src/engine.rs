@@ -6747,6 +6747,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         self.drain_binds();
         self.drain_sim_sets();
         self.drain_saves();
+        self.drain_profile_capture();
         self.apply_debug_view();
         if self.console.host_mut().engine_mut().take_quit() {
             return Ok(Flow::Stop(ExitReason::Quit));
@@ -7092,8 +7093,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 self.debug.budget.record_cpu(cpu);
             }
             if let Some(profile) = self.profile.as_mut() {
-                profile.recorder.record_cpu(&snapshot);
+                profile.record_cpu(&snapshot);
             }
+        }
+        if let Some(profile) = self.profile.take_if(|profile| profile.is_complete()) {
+            self.write_profile(profile);
         }
         if let Some(timings) = self.gpu.timings()
             && !timings.is_empty()
@@ -7548,6 +7552,32 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         }
     }
 
+    /// Starts the capture `profile_capture` asked for, unless one is already
+    /// recording: one at a time, so [`CAPTURE_VAR`](crate::profile::CAPTURE_VAR)'s
+    /// run-long capture is never cut short by a console line.
+    fn drain_profile_capture(&mut self) {
+        let Some(ask) = self.console.host_mut().engine_mut().take_profile_capture() else {
+            return;
+        };
+        if self.profile.is_some() {
+            crcbl_core::log::console::print(
+                "profile: a capture is already recording; this one was not started",
+            );
+            return;
+        }
+        self.profile = Some(crate::profile::Requested::from_ask(ask));
+    }
+
+    /// Writes the loop's capture, `taken` from it, with the presenting
+    /// adapter in its environment.
+    fn write_profile(&mut self, taken: crate::profile::Requested) {
+        let adapter = self
+            .gpu
+            .presenting_context()
+            .and_then(|context| context.adapter());
+        taken.write(adapter.as_ref());
+    }
+
     /// Hands every typed `save` to the game's one save path, in the order
     /// typed, and prints what each came to — the file and tick, or why not.
     ///
@@ -7634,11 +7664,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             }
         }
         if let Some(profile) = self.profile.take() {
-            let adapter = self
-                .gpu
-                .presenting_context()
-                .and_then(|context| context.adapter());
-            profile.write(adapter.as_ref());
+            self.write_profile(profile);
         }
         // **The CPU half of the same report.** `FrameTimings` above is GPU
         // timestamps; this is the monotonic clock the loop was actually driven

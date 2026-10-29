@@ -98,6 +98,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   cost per frame (a label drawn twice summed within the frame); `--chrome <OUT>`
   also writes the capture as Chrome Trace Event JSON for Perfetto and
   `chrome://tracing`, the CPU and the GPU as two processes on their own clocks.
+- **`profile_capture <frames> <path>` captures the next frames from the
+  console.** The loop turns the CPU trace on, records that many whole frames of
+  CPU spans and GPU passes, writes them to the path as the last one is recorded,
+  and turns the trace off again if it was off. One capture at a time: a line
+  while one is recording, including `CRCBL_PROFILE_CAPTURE`'s, is refused. Frame
+  counts run from 1 to `crcbl::profile::MAX_CAPTURE_FRAMES`.
 - **`CRCBL_PROFILE_CAPTURE=<path>` writes a capture of the run's last frames.**
   The loop turns the CPU trace on, keeps the last 120 frames of CPU spans and
   GPU passes in a `crcbl::profile::Recorder`, and writes them to the path as it

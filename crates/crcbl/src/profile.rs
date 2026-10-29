@@ -1,11 +1,17 @@
 //! A profiler capture of the run's last frames: what the loop records each
 //! frame, and the `.crcblprof` file it writes on request.
 //!
-//! `docs/plan/60-profiler.md`'s P2, its first producer. [`CAPTURE_VAR`] names
-//! a path; a loop that finds it set turns the CPU trace on, keeps the last
-//! [`DEFAULT_FRAME_WINDOW`] frames of CPU spans and GPU passes in a [`Recorder`],
-//! and writes them to that path as it finishes. The file is
-//! [`crcbl_profile::Capture`], which any viewer reads without the engine.
+//! `docs/plan/60-profiler.md`'s P2. Two triggers, one file:
+//!
+//! - [`CAPTURE_VAR`] names a path; a loop that finds it set turns the CPU trace
+//!   on, keeps the last [`DEFAULT_FRAME_WINDOW`] frames of CPU spans and GPU
+//!   passes in a [`Recorder`], and writes them to that path as it finishes.
+//! - The console's `profile_capture <frames> <path>` captures the next
+//!   `frames` frames and writes them as the last one is recorded, turning the
+//!   CPU trace on for them and off again after if it was off.
+//!
+//! The file is [`crcbl_profile::Capture`], which any viewer reads without the
+//! engine.
 //!
 //! The GPU half is whatever the run's pass timers measured, frames latent as
 //! they always are, and counted only when `CRCBL_PASS_STATISTICS=1` asked the
@@ -24,12 +30,59 @@ pub use crcbl_ui::DEFAULT_FRAME_WINDOW;
 /// The variable naming the file a run writes its capture to.
 pub const CAPTURE_VAR: &str = "CRCBL_PROFILE_CAPTURE";
 
-/// A capture the loop records because [`CAPTURE_VAR`] asked for one, and the
-/// file it goes to.
+/// The most frames one `profile_capture` takes: a minute at 60 Hz. The rings
+/// are allocated up front, so a typo of a few zeros must not ask for gigabytes.
+pub const MAX_CAPTURE_FRAMES: usize = 3_600;
+
+/// What one `profile_capture` line asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureAsk {
+    /// How many frames to capture, from the next one on.
+    pub frames: usize,
+    /// The file the capture is written to.
+    pub path: PathBuf,
+}
+
+impl CaptureAsk {
+    /// `profile_capture`'s arguments: a frame count from 1 to
+    /// [`MAX_CAPTURE_FRAMES`], then the file.
+    ///
+    /// # Errors
+    ///
+    /// What a person reads, when the line is not that.
+    pub fn from_args(args: &[&str]) -> Result<Self, String> {
+        let [frames, path] = args else {
+            return Err("usage: profile_capture <frames> <path>".to_string());
+        };
+        let frames = frames
+            .parse::<usize>()
+            .ok()
+            .filter(|frames| (1..=MAX_CAPTURE_FRAMES).contains(frames))
+            .ok_or_else(|| {
+                format!("`{frames}` is not a frame count from 1 to {MAX_CAPTURE_FRAMES}")
+            })?;
+        Ok(Self {
+            frames,
+            path: PathBuf::from(path),
+        })
+    }
+}
+
+/// A capture the loop records, and the file it goes to.
 #[derive(Debug)]
 pub(crate) struct Requested {
     pub(crate) recorder: Recorder,
     path: PathBuf,
+    /// How many CPU frames make the capture complete, for one the console
+    /// asked for; `None` for [`CAPTURE_VAR`]'s, written as the run finishes.
+    frames: Option<u64>,
+    /// Whether the CPU trace was off before this capture turned it on, so
+    /// writing it turns the trace off again.
+    trace_was_off: bool,
+    /// Whether the next CPU frame began before the trace was on: a console
+    /// line runs partway through a frame, so that frame's trace holds its
+    /// phases without the `frame` span around them, and is not recorded.
+    partial_frame: bool,
 }
 
 impl Requested {
@@ -42,12 +95,52 @@ impl Requested {
         Some(Self {
             recorder: Recorder::new(DEFAULT_FRAME_WINDOW),
             path: path.into(),
+            frames: None,
+            trace_was_off: false,
+            partial_frame: false,
         })
     }
 
+    /// The capture `ask` describes, of the frames from the next one on. Turns
+    /// the CPU trace on for them, as [`Requested::from_env`] does.
+    pub(crate) fn from_ask(ask: CaptureAsk) -> Self {
+        let trace_was_off = !crcbl_core::trace::is_enabled();
+        crcbl_core::trace::set_enabled(true);
+        Self {
+            recorder: Recorder::new(ask.frames),
+            path: ask.path,
+            frames: Some(ask.frames as u64),
+            trace_was_off,
+            partial_frame: trace_was_off,
+        }
+    }
+
+    /// Records one frame's CPU spans, unless it is the partial frame the
+    /// trace was turned on in.
+    pub(crate) fn record_cpu(&mut self, snapshot: &Snapshot) {
+        if std::mem::take(&mut self.partial_frame) {
+            return;
+        }
+        self.recorder.record_cpu(snapshot);
+    }
+
+    /// Whether this capture holds every frame it asked for, and is written
+    /// now rather than as the run finishes.
+    ///
+    /// Counted in CPU frames: the GPU's arrive frames latent, so the GPU half
+    /// holds those resolved by then, a few frames behind.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.frames
+            .is_some_and(|frames| self.recorder.cpu_frames >= frames)
+    }
+
     /// Writes the capture to its file, and says in the log where it went or
-    /// why it did not: the run's own outcome does not hang on it.
-    pub(crate) fn write(&self, adapter: Option<&crcbl_hal::AdapterInfo>) {
+    /// why it did not: the run's own outcome does not hang on it. Turns the
+    /// CPU trace back off if this capture turned it on.
+    pub(crate) fn write(self, adapter: Option<&crcbl_hal::AdapterInfo>) {
+        if self.trace_was_off {
+            crcbl_core::trace::set_enabled(false);
+        }
         let mut environment = environment(adapter);
         environment
             .entries
@@ -273,6 +366,85 @@ mod tests {
                 }),
             }],
         }
+    }
+
+    /// **`profile_capture` takes a frame count in range and a file**, and
+    /// says what is wrong with anything else.
+    #[test]
+    fn a_capture_ask_takes_a_frame_count_in_range_and_a_file() {
+        assert_eq!(
+            CaptureAsk::from_args(&["120", "run.crcblprof"]),
+            Ok(CaptureAsk {
+                frames: 120,
+                path: PathBuf::from("run.crcblprof"),
+            })
+        );
+        let max = MAX_CAPTURE_FRAMES.to_string();
+        assert!(
+            CaptureAsk::from_args(&[&max, "a"]).is_ok(),
+            "the cap is in range"
+        );
+        let over = (MAX_CAPTURE_FRAMES + 1).to_string();
+        for refused in [
+            &["0", "a"][..],
+            &[&over, "a"],
+            &["many", "a"],
+            &["120"],
+            &["120", "a", "b"],
+            &[],
+        ] {
+            assert!(CaptureAsk::from_args(refused).is_err(), "{refused:?}");
+        }
+    }
+
+    /// **A console capture is written once it holds its frames, and leaves
+    /// the trace as it found it**: off before it, on while it records, off
+    /// after its file is written; the file decodes to exactly those frames.
+    /// The run-long capture never completes early.
+    #[test]
+    fn a_console_capture_is_written_after_its_frames_and_restores_the_trace() {
+        const FRAMES: usize = 3;
+        let path = std::env::temp_dir().join(format!(
+            "crcbl-profile-capture-{}.crcblprof",
+            std::process::id()
+        ));
+        crcbl_core::trace::set_enabled(false);
+        let mut requested = Requested::from_ask(CaptureAsk {
+            frames: FRAMES,
+            path: path.clone(),
+        });
+        assert!(crcbl_core::trace::is_enabled(), "on while it records");
+        requested.record_cpu(&Snapshot::default());
+        assert!(
+            requested
+                .recorder
+                .capture(Environment::default())
+                .cpu
+                .is_empty(),
+            "the frame the trace was turned on in is not recorded"
+        );
+        for frame in 0..FRAMES {
+            assert!(!requested.is_complete(), "complete after {frame} frames");
+            requested.record_cpu(&Snapshot::default());
+        }
+        assert!(requested.is_complete());
+
+        requested.write(None);
+        assert!(!crcbl_core::trace::is_enabled(), "off again once written");
+        let written = Capture::decode(&std::fs::read(&path).unwrap()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(written.cpu.len(), FRAMES);
+
+        let mut run_long = Requested {
+            recorder: Recorder::new(1),
+            path: PathBuf::new(),
+            frames: None,
+            trace_was_off: false,
+            partial_frame: false,
+        };
+        run_long.recorder.record_cpu(&Snapshot::default());
+        run_long.recorder.record_cpu(&Snapshot::default());
+        assert!(!run_long.is_complete(), "written as the run finishes");
     }
 
     /// **A capture says what it turned on**, and marks counted passes as
