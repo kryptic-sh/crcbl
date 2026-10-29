@@ -1614,6 +1614,13 @@ const EXPECTATIONS = {
     // lantern's row and group D.
     culls: true,
     key: null,
+    // **This demo's heartbeat is twice as fast as everyone else's**, at half a
+    // simulated second — `apps/sparks/src/app.rs`'s `HEARTBEAT_TICKS` says why:
+    // the `budget` block reads the puff on both sides of a stop. Declared here
+    // because group B divides by it to work out how far behind real time this
+    // machine is running the demo. `apps/sparks/src/app.rs`'s
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds it to that.
+    beatMs: 500,
     // Read off the *first* line. What it asks is that the effects are already
     // running — a pool with particles in it and a share the greedy effect is
     // being held to — because this demo has no start screen and no waiting

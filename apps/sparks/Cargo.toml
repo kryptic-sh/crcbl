@@ -32,5 +32,8 @@ path = "src/main.rs"
 [dependencies]
 crcbl = { workspace = true, features = ["greybox", "vfx"] }
 
+[dev-dependencies]
+crcbl-sample-test = { workspace = true }
+
 [lints]
 workspace = true
