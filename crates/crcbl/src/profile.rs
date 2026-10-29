@@ -1,11 +1,13 @@
 //! A profiler capture of the run's last frames: what the loop records each
 //! frame, and the `.crcblprof` file it writes on request.
 //!
-//! `docs/plan/60-profiler.md`'s P2. Two triggers, one file:
+//! `docs/plan/60-profiler.md`'s P2. Three triggers, one file:
 //!
 //! - [`CAPTURE_VAR`] names a path; a loop that finds it set turns the CPU trace
 //!   on, keeps the last [`DEFAULT_FRAME_WINDOW`] frames of CPU spans and GPU
 //!   passes in a [`Recorder`], and writes them to that path as it finishes.
+//!   With [`BUDGET_VAR`] set too, it writes them instead as the first frame
+//!   over that budget is recorded: the frames before the hitch, ending with it.
 //! - The console's `profile_capture <frames> <path>` captures the next
 //!   `frames` frames and writes them as the last one is recorded, turning the
 //!   CPU trace on for them and off again after if it was off.
@@ -19,6 +21,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crcbl_core::trace::{RecordKind, Snapshot};
 use crcbl_profile::{
@@ -29,6 +32,29 @@ pub use crcbl_ui::DEFAULT_FRAME_WINDOW;
 
 /// The variable naming the file a run writes its capture to.
 pub const CAPTURE_VAR: &str = "CRCBL_PROFILE_CAPTURE";
+
+/// The variable giving [`CAPTURE_VAR`]'s capture a frame budget, in
+/// milliseconds of CPU frame time: the first frame over it writes the capture.
+pub const BUDGET_VAR: &str = "CRCBL_PROFILE_BUDGET_MS";
+
+/// [`BUDGET_VAR`]'s value as a budget: `None` when unset or empty.
+///
+/// # Errors
+///
+/// What a person reads, when the value is not a positive number of
+/// milliseconds.
+fn budget(value: Option<&str>) -> Result<Option<Duration>, String> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|millis| *millis > 0.0)
+        .and_then(|millis| Duration::try_from_secs_f64(millis / 1_000.0).ok())
+        .map(Some)
+        .ok_or_else(|| format!("`{value}` is not a positive number of milliseconds"))
+}
 
 /// The most frames one `profile_capture` takes: a minute at 60 Hz. The rings
 /// are allocated up front, so a typo of a few zeros must not ask for gigabytes.
@@ -83,6 +109,12 @@ pub(crate) struct Requested {
     /// line runs partway through a frame, so that frame's trace holds its
     /// phases without the `frame` span around them, and is not recorded.
     partial_frame: bool,
+    /// [`BUDGET_VAR`]'s budget: the first CPU frame over it completes the
+    /// capture.
+    budget: Option<Duration>,
+    /// What completed the capture early, when a frame went over the budget,
+    /// as the capture's environment says it.
+    trigger: Option<String>,
 }
 
 impl Requested {
@@ -91,6 +123,12 @@ impl Requested {
     /// half of what it says.
     pub(crate) fn from_env() -> Option<Self> {
         let path = std::env::var_os(CAPTURE_VAR).filter(|path| !path.is_empty())?;
+        let budget = budget(std::env::var(BUDGET_VAR).ok().as_deref()).unwrap_or_else(|why| {
+            crate::log::error!(
+                "profile: {BUDGET_VAR} {why}; the capture is written as the run finishes"
+            );
+            None
+        });
         crcbl_core::trace::set_enabled(true);
         Some(Self {
             recorder: Recorder::new(DEFAULT_FRAME_WINDOW),
@@ -98,6 +136,8 @@ impl Requested {
             frames: None,
             trace_was_off: false,
             partial_frame: false,
+            budget,
+            trigger: None,
         })
     }
 
@@ -112,26 +152,42 @@ impl Requested {
             frames: Some(ask.frames as u64),
             trace_was_off,
             partial_frame: trace_was_off,
+            budget: None,
+            trigger: None,
         }
     }
 
     /// Records one frame's CPU spans, unless it is the partial frame the
-    /// trace was turned on in.
+    /// trace was turned on in, and notes the frame that went over the budget.
     pub(crate) fn record_cpu(&mut self, snapshot: &Snapshot) {
         if std::mem::take(&mut self.partial_frame) {
             return;
         }
+        let number = self.recorder.cpu_frames;
         self.recorder.record_cpu(snapshot);
+        if let Some(budget) = self.budget
+            && self.trigger.is_none()
+            && let Some(cpu) = crate::perf::frame_cpu_time(snapshot)
+            && cpu > budget
+        {
+            self.trigger = Some(format!(
+                "CPU frame {number} took {:.3} ms, over the {:.3} ms budget",
+                cpu.as_secs_f64() * 1_000.0,
+                budget.as_secs_f64() * 1_000.0
+            ));
+        }
     }
 
-    /// Whether this capture holds every frame it asked for, and is written
-    /// now rather than as the run finishes.
+    /// Whether this capture holds every frame it asked for, or a frame went
+    /// over its budget, and is written now rather than as the run finishes.
     ///
     /// Counted in CPU frames: the GPU's arrive frames latent, so the GPU half
     /// holds those resolved by then, a few frames behind.
     pub(crate) fn is_complete(&self) -> bool {
-        self.frames
-            .is_some_and(|frames| self.recorder.cpu_frames >= frames)
+        self.trigger.is_some()
+            || self
+                .frames
+                .is_some_and(|frames| self.recorder.cpu_frames >= frames)
     }
 
     /// Writes the capture to its file, and says in the log where it went or
@@ -145,6 +201,11 @@ impl Requested {
         environment
             .entries
             .extend(enabled(crcbl_render::timing::statistics_requested()));
+        if let Some(trigger) = &self.trigger {
+            environment
+                .entries
+                .push(("trigger".to_string(), trigger.clone()));
+        }
         let capture = self.recorder.capture(environment);
         let written = capture
             .encode()
@@ -441,10 +502,104 @@ mod tests {
             frames: None,
             trace_was_off: false,
             partial_frame: false,
+            budget: None,
+            trigger: None,
         };
         run_long.recorder.record_cpu(&Snapshot::default());
         run_long.recorder.record_cpu(&Snapshot::default());
         assert!(!run_long.is_complete(), "written as the run finishes");
+    }
+
+    /// A snapshot holding one whole frame of `millis` milliseconds.
+    fn frame_of(millis: u64) -> Snapshot {
+        let span = |kind, nanos| Record {
+            name: crate::perf::FRAME_SPAN,
+            kind,
+            depth: 0,
+            nanos,
+        };
+        Snapshot {
+            threads: vec![ThreadTrace {
+                track: ThreadTrack::new(0),
+                name: Some("main".to_string()),
+                records: vec![
+                    span(RecordKind::SpanBegin, 0),
+                    span(RecordKind::SpanEnd, millis * 1_000_000),
+                ],
+                dropped: 0,
+            }],
+            refused_tracks: 0,
+        }
+    }
+
+    /// **The first frame over the budget completes the run-long capture**,
+    /// holding the frames before it and ending with it, and the capture says
+    /// which frame it was. A frame at the budget is within it.
+    #[test]
+    fn a_frame_over_the_budget_completes_the_capture_with_the_frames_before_it() {
+        let path = std::env::temp_dir().join(format!(
+            "crcbl-profile-budget-{}.crcblprof",
+            std::process::id()
+        ));
+        let mut requested = Requested {
+            recorder: Recorder::new(DEFAULT_FRAME_WINDOW),
+            path: path.clone(),
+            frames: None,
+            trace_was_off: false,
+            partial_frame: false,
+            budget: Some(Duration::from_millis(16)),
+            trigger: None,
+        };
+        for millis in [8, 16, 12] {
+            requested.record_cpu(&frame_of(millis));
+            assert!(!requested.is_complete(), "{millis} ms is within the budget");
+        }
+        requested.record_cpu(&frame_of(40));
+        assert!(requested.is_complete());
+        assert_eq!(
+            requested.trigger.as_deref(),
+            Some("CPU frame 3 took 40.000 ms, over the 16.000 ms budget")
+        );
+        requested.record_cpu(&frame_of(50));
+        assert!(
+            requested
+                .trigger
+                .as_deref()
+                .is_some_and(|trigger| trigger.contains("frame 3")),
+            "the first frame over is the one named"
+        );
+
+        requested.write(None);
+        let written = Capture::decode(&std::fs::read(&path).unwrap()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let numbers: Vec<u64> = written.cpu.iter().map(|frame| frame.number).collect();
+        assert_eq!(numbers, [0, 1, 2, 3, 4], "the frames before it are held");
+        let trigger = written
+            .environment
+            .entries
+            .iter()
+            .find(|(key, _)| key == "trigger")
+            .map(|(_, value)| value.as_str());
+        assert_eq!(
+            trigger,
+            Some("CPU frame 3 took 40.000 ms, over the 16.000 ms budget")
+        );
+    }
+
+    /// **`CRCBL_PROFILE_BUDGET_MS` takes positive milliseconds**, fractions
+    /// too, and says what is wrong with anything else.
+    #[test]
+    fn a_budget_is_a_positive_number_of_milliseconds() {
+        assert_eq!(budget(None), Ok(None));
+        assert_eq!(budget(Some("")), Ok(None));
+        assert_eq!(budget(Some("16")), Ok(Some(Duration::from_millis(16))));
+        assert_eq!(
+            budget(Some("16.6")),
+            Ok(Some(Duration::from_micros(16_600)))
+        );
+        for refused in ["0", "-1", "fast", "inf", "NaN"] {
+            assert!(budget(Some(refused)).is_err(), "{refused}");
+        }
     }
 
     /// **A capture says what it turned on**, and marks counted passes as

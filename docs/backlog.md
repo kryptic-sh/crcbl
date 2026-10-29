@@ -19647,17 +19647,19 @@ desktop counts the task stage.
   (`crcbl-profile`), `crcbl profile report` with Chrome Trace export, and the
   first producer, `CRCBL_PROFILE_CAPTURE=<path>` writing the last frames as the
   run finishes (`crcbl::profile`), and the console's
-  `profile_capture <frames> <path>` writing the next frames. Left: the other
-  triggers (a key, the CLI, a frame over budget, the frames before a trigger
-  rather than after); the calibrated CPU/GPU clock pair that puts the two on one
-  timeline (Vulkan already enables `VK_KHR_calibrated_timestamps` for present
-  timing, D3D12 has `GetClockCalibration`); and the capture recording its own
-  cost (what it enabled is in its environment entries). Not tested: the loop's
-  own recording and write, which runs checked by hand (a lantern run's 120 CPU
-  and 120 GPU frames; an asteroids run's `profile_capture 10` through `--exec`,
-  10 CPU and 7 GPU frames, decoded back) and no test runs. The D3D12 runs here
-  had the debug layer off (none installed); CI's WARP job is the first validated
-  run of `BeginQuery` on a statistics heap.
+  `profile_capture <frames> <path>` writing the next frames, and
+  `CRCBL_PROFILE_BUDGET_MS` writing the frames up to the first one over a CPU
+  budget. Left: the other triggers (a key, the CLI, a GPU frame over budget,
+  which arrives frames latent and so needs the ring to keep going past it); the
+  calibrated CPU/GPU clock pair that puts the two on one timeline (Vulkan
+  already enables `VK_KHR_calibrated_timestamps` for present timing, D3D12 has
+  `GetClockCalibration`); and the capture recording its own cost (what it
+  enabled is in its environment entries). Not tested: the loop's own recording
+  and write, which runs checked by hand (a lantern run's 120 CPU and 120 GPU
+  frames; an asteroids run's `profile_capture 10` through `--exec`, 10 CPU and 7
+  GPU frames, decoded back) and no test runs. The D3D12 runs here had the debug
+  layer off (none installed); CI's WARP job is the first validated run of
+  `BeginQuery` on a statistics heap.
 
 **Surprising, worked around:** AMD's D3D12 driver (RX 7900 XTX on 25.10.36,
 Raphael iGPU on 25.10.42) resolves every statistics query begun after a draw

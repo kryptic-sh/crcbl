@@ -13,6 +13,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`CRCBL_PROFILE_BUDGET_MS` captures the frames before a hitch.** Set beside
+  `CRCBL_PROFILE_CAPTURE`, it writes the capture as the first frame whose CPU
+  time exceeds that many milliseconds is recorded, rather than as the run
+  finishes: the window of frames leading up to it, ending with it. The file's
+  environment names the frame and its time under `trigger`; a value that is not
+  a positive number of milliseconds is logged and the capture is written at the
+  end as before. (`crcbl::profile::BUDGET_VAR`)
+
 ## [0.13.0] - 2026-10-29
 
 ### Breaking
