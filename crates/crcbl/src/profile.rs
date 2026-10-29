@@ -48,7 +48,11 @@ impl Requested {
     /// Writes the capture to its file, and says in the log where it went or
     /// why it did not: the run's own outcome does not hang on it.
     pub(crate) fn write(&self, adapter: Option<&crcbl_hal::AdapterInfo>) {
-        let capture = self.recorder.capture(environment(adapter));
+        let mut environment = environment(adapter);
+        environment
+            .entries
+            .extend(enabled(crcbl_render::timing::statistics_requested()));
+        let capture = self.recorder.capture(environment);
         let written = capture
             .encode()
             .map_err(|error| error.to_string())
@@ -201,6 +205,27 @@ const fn statistics(counted: crcbl_hal::PipelineStatistics) -> Statistics {
     }
 }
 
+/// What a capture turned on to be taken, as environment entries: the CPU
+/// trace, which it always enables, and whether the passes were asked to be
+/// counted, which perturbs the GPU timings it holds.
+///
+/// Statistics asked for are not statistics measured: a device that cannot count
+/// times the passes only, and its passes carry no counts.
+fn enabled(statistics_requested: bool) -> [(String, String); 2] {
+    [
+        ("cpu trace".to_string(), "on".to_string()),
+        (
+            "pass statistics".to_string(),
+            if statistics_requested {
+                "requested (statistics queries perturb the GPU timings)"
+            } else {
+                "off"
+            }
+            .to_string(),
+        ),
+    ]
+}
+
 /// What a capture says it was taken on: the adapter, when the loop has one,
 /// and the build.
 #[must_use]
@@ -248,6 +273,25 @@ mod tests {
                 }),
             }],
         }
+    }
+
+    /// **A capture says what it turned on**, and marks counted passes as
+    /// perturbing the timings beside them.
+    #[test]
+    fn a_capture_says_what_it_turned_on() {
+        let entry = |requested: bool, name: &str| {
+            enabled(requested)
+                .into_iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value)
+        };
+        assert_eq!(entry(false, "cpu trace").as_deref(), Some("on"));
+        assert_eq!(entry(false, "pass statistics").as_deref(), Some("off"));
+        let counted = entry(true, "pass statistics").expect("named either way");
+        assert!(
+            counted.starts_with("requested") && counted.contains("perturb"),
+            "{counted}"
+        );
     }
 
     /// **The rings keep the newest frames**, each its own number: the CPU's

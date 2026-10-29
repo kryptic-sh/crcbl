@@ -120,6 +120,13 @@ fn statistics_wanted(value: Option<&str>) -> bool {
     value.map(str::trim) == Some("1")
 }
 
+/// Whether this process's [`STATISTICS_VAR`] asks [`PassTimers::new`] to count
+/// each pass's work; a device that cannot count still only times them.
+#[must_use]
+pub fn statistics_requested() -> bool {
+    statistics_wanted(std::env::var(STATISTICS_VAR).ok().as_deref())
+}
+
 /// A pass's counts as report columns: each stage the device counted, by a
 /// short name, and nothing for a stage it could not.
 ///
@@ -318,8 +325,7 @@ impl PassTimers {
     /// [`PassTimers::counting`].
     #[must_use]
     pub fn new(device: &dyn Device, frames_in_flight: usize, max_passes: u32) -> Option<Self> {
-        let counted = statistics_wanted(std::env::var(STATISTICS_VAR).ok().as_deref());
-        Self::create(device, frames_in_flight, max_passes, counted)
+        Self::create(device, frames_in_flight, max_passes, statistics_requested())
     }
 
     /// [`PassTimers::new`], counting each timed pass's work whatever

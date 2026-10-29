@@ -101,8 +101,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`CRCBL_PROFILE_CAPTURE=<path>` writes a capture of the run's last frames.**
   The loop turns the CPU trace on, keeps the last 120 frames of CPU spans and
   GPU passes in a `crcbl::profile::Recorder`, and writes them to the path as it
-  finishes, with the adapter, driver and build in the environment. `PassTiming`
-  gains `begin_nanos`, the pass's start on the GPU clock.
+  finishes, with the adapter, driver and build in the environment, and what the
+  capture turned on: the CPU trace, and whether `CRCBL_PASS_STATISTICS` asked
+  for counts, marked as perturbing the GPU timings
+  (`timing::statistics_requested`). `PassTiming` gains `begin_nanos`, the pass's
+  start on the GPU clock.
 - **The pass timers count each pass's work when asked.**
   `CRCBL_PASS_STATISTICS=1`, or `PassTimers::counting` in place of
   `PassTimers::new`, gives every timed pass a statistics query, and `PassTiming`

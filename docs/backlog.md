@@ -19646,11 +19646,12 @@ desktop counts the task stage.
   (a key, `profile.capture <frames>`, a frame over budget); the calibrated
   CPU/GPU clock pair that puts the two on one timeline (Vulkan already enables
   `VK_KHR_calibrated_timestamps` for present timing, D3D12 has
-  `GetClockCalibration`); and the capture recording what it enabled and its own
-  cost. Not tested: the loop's own recording and write, which a lantern run
-  checked by hand (120 CPU and 120 GPU frames, decoded back) and no test runs.
-  The D3D12 runs here had the debug layer off (none installed); CI's WARP job is
-  the first validated run of `BeginQuery` on a statistics heap.
+  `GetClockCalibration`); and the capture recording its own cost (what it
+  enabled is in its environment entries). Not tested: the loop's own recording
+  and write, which a lantern run checked by hand (120 CPU and 120 GPU frames,
+  decoded back) and no test runs. The D3D12 runs here had the debug layer off
+  (none installed); CI's WARP job is the first validated run of `BeginQuery` on
+  a statistics heap.
 
 **Surprising, worked around:** AMD's D3D12 driver (RX 7900 XTX on 25.10.36,
 Raphael iGPU on 25.10.42) resolves every statistics query begun after a draw
