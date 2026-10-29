@@ -15,6 +15,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::settings::presets::{starting_tier, choose_once}`: start a new player
+  on the tier their GPU suits.** `starting_tier` maps the device type to a tier
+  (discrete → high, integrated → low, software → potato, unknown → medium);
+  `choose_once` selects it on the first launch and writes
+  `engine.starting_quality` (`STARTING_QUALITY_KEY`), so later launches leave
+  the player's own choice alone. Ported from EW.
 - **`crcbl_store::run_marker`: tell the next run this one did not close
   normally.** `begin(app)` writes a marker in the app's data folder as a run
   starts, `finish(app)` deletes it on a clean exit, `record(app, message)` puts

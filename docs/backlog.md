@@ -3444,18 +3444,13 @@ lands.
 **EW's port proposal of 2026-10-29, queued in this order** (EW keeps its copies
 until each ships in a release):
 
-1. **Starting quality tier by GPU type** (EW `starting_quality`, Discrete→High,
-   Integrated→Low, Cpu→Potato, else Medium, chosen once on the first windowed
-   launch). EW measured the Raphael iGPU at 45 fps at 720p on the default and
-   105 on the low tier. Shape: `settings::presets::{starting_tier, choose_once}`
-   with its own marker key.
-2. **Linux release packaging, as knowledge**:
+1. **Linux release packaging, as knowledge**:
    `cargo zigbuild --target x86_64-unknown-linux-gnu.2.31`,
    `-C link-arg=-Wl,--allow-shlib-undefined` because `alsa-sys` links the host's
    newer `libasound`, and an `objdump -T` gate of max GLIBC ≤ 2.31 (EW:
    GLIBC_2.30, runs on Debian 11 and Ubuntu 22.04). No code until crcbl packages
    games.
-3. **The query layers and the ground speed multiplier stay in EW** (the owner's
+2. **The query layers and the ground speed multiplier stay in EW** (the owner's
    decision, relayed by EW 2026-10-29): the mechanism is `QueryFilter::within`,
    and what remains is game meaning used by generated maps alone. Revisit when a
    second game wants terrain slowdown.

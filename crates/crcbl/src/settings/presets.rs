@@ -84,6 +84,7 @@
 //! assertion.
 
 use crcbl_console::{Fault, Value};
+use crcbl_hal::DeviceType;
 use crcbl_render::{Antialiasing, RenderEffects, shadow::Filter};
 use crcbl_store::settings::SettingsStack;
 
@@ -376,6 +377,55 @@ pub fn select(
     Ok(reached)
 }
 
+/// The settings key saying a starting tier was chosen for this player, so
+/// [`choose_once`] picks one once and never over the player's own choice. It
+/// holds the tier's [`name`](QualityPreset::name), as a record of what was
+/// picked; nothing reads it as the current tier, which [`selected`] derives.
+pub const STARTING_QUALITY_KEY: &str = "engine.starting_quality";
+
+/// The tier a new player starts on, by the kind of GPU the game opened on: low
+/// on one integrated with the CPU, high on a separate card, the cheapest on a
+/// software rasteriser, and the middle tier where the backend cannot say.
+///
+/// EW's choice, from measuring a Raphael iGPU at 45 fps at 720p on the default
+/// keys and 105 on `low`.
+#[must_use]
+pub const fn starting_tier(device: Option<DeviceType>) -> QualityPreset {
+    match device {
+        Some(DeviceType::Discrete) => QualityPreset::High,
+        Some(DeviceType::Integrated) => QualityPreset::Low,
+        Some(DeviceType::Cpu) => QualityPreset::Potato,
+        Some(DeviceType::Virtual | DeviceType::Other) | None => QualityPreset::Medium,
+    }
+}
+
+/// On a player's first launch, [`select`]s the tier `device` suits
+/// ([`starting_tier`]) and writes [`STARTING_QUALITY_KEY`], so it happens
+/// once: a stack that already holds the key is left alone and answers `None`.
+///
+/// `Some` with the tier and where its keys reached. Saving the stack is the
+/// caller's, as after any other [`select`].
+///
+/// # Errors
+///
+/// [`select`]'s, or the marker's write failing; either way the marker is not
+/// written, so the next launch tries again.
+pub fn choose_once(
+    stack: &mut SettingsStack,
+    device: Option<DeviceType>,
+    stage: &mut dyn Stage,
+) -> Result<Option<(QualityPreset, Applied)>, Fault> {
+    if stack.contains(STARTING_QUALITY_KEY) {
+        return Ok(None);
+    }
+    let tier = starting_tier(device);
+    let reached = select(stack, tier, stage)?;
+    stack
+        .set(STARTING_QUALITY_KEY, &tier.name())
+        .map_err(|error| Fault::new(format!("{STARTING_QUALITY_KEY}: {error}")))?;
+    Ok(Some((tier, reached)))
+}
+
 /// One line describing what the covered keys hold.
 fn values_line(values: QualityValues) -> String {
     format!(
@@ -457,6 +507,54 @@ mod tests {
     /// reached.
     fn empty() -> (SettingsStack, Deferred) {
         (stack_from(""), Deferred::new())
+    }
+
+    /// **Each kind of GPU starts on its tier**, and an unknown one on the
+    /// middle tier.
+    #[test]
+    fn each_kind_of_gpu_starts_on_its_tier() {
+        assert_eq!(
+            starting_tier(Some(DeviceType::Discrete)),
+            QualityPreset::High
+        );
+        assert_eq!(
+            starting_tier(Some(DeviceType::Integrated)),
+            QualityPreset::Low
+        );
+        assert_eq!(starting_tier(Some(DeviceType::Cpu)), QualityPreset::Potato);
+        assert_eq!(
+            starting_tier(Some(DeviceType::Virtual)),
+            QualityPreset::Medium
+        );
+        assert_eq!(
+            starting_tier(Some(DeviceType::Other)),
+            QualityPreset::Medium
+        );
+        assert_eq!(starting_tier(None), QualityPreset::Medium);
+    }
+
+    /// **The starting tier is chosen once, and never over the player's own
+    /// choice**: the first launch writes the tier and the marker, and a later
+    /// one on another GPU leaves what the player set since alone.
+    #[test]
+    fn the_starting_tier_is_chosen_once() {
+        let (mut stack, mut stage) = empty();
+        let chosen = choose_once(&mut stack, Some(DeviceType::Integrated), &mut stage).unwrap();
+        assert_eq!(chosen.map(|(tier, _)| tier), Some(QualityPreset::Low));
+        assert_eq!(selected(&stack), Some(QualityPreset::Low));
+        assert_eq!(
+            stack.get::<String>(STARTING_QUALITY_KEY).as_deref(),
+            Some("low")
+        );
+
+        select(&mut stack, QualityPreset::Medium, &mut stage).unwrap();
+        let again = choose_once(&mut stack, Some(DeviceType::Discrete), &mut stage).unwrap();
+        assert_eq!(again, None, "chosen already");
+        assert_eq!(
+            selected(&stack),
+            Some(QualityPreset::Medium),
+            "the player's"
+        );
     }
 
     /// **The tiers a person can type are the tiers that have values**, both
