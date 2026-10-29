@@ -19649,17 +19649,26 @@ desktop counts the task stage.
   run finishes (`crcbl::profile`), and the console's
   `profile_capture <frames> <path>` writing the next frames, and
   `CRCBL_PROFILE_BUDGET_MS` writing the frames up to the first one over a CPU
-  budget. Left: the other triggers (a key, the CLI, a GPU frame over budget,
-  which arrives frames latent and so needs the ring to keep going past it); the
-  clock pair on Metal (`Capability::GpuClock`'s `Unwritten` row:
-  `sampleTimestamps:gpuTimestamp:` unbound, with the Mac work); and the capture
-  recording its own cost (what it enabled is in its environment entries). The
-  clock pair is read once, as the capture is written, and assumes the two clocks
-  keep one rate over the capture; a second pair at its start would measure the
-  drift, and nothing has. Not tested: the loop's own recording and write, which
-  runs checked by hand (a lantern run's 120 CPU and 120 GPU frames; an asteroids
-  run's `profile_capture 10` through `--exec`, 10 CPU and 7 GPU frames, decoded
-  back) and no test runs. The D3D12 runs here had the debug layer off (none
+  budget. The CLI's trigger is `--exec "profile_capture <frames> <path>"`, which
+  runs before the first frame. A capture's environment says what it enabled and
+  what copying frames into its recorder cost a frame (`recording cost`); not
+  what the CPU trace's spans or the GPU timers' queries cost, which nothing
+  measures, and the accumulation itself is untested (a frame's copy can fall
+  under one tick of `Instant`). Left: a GPU frame over budget, which arrives
+  frames latent and so needs the ring to keep going past it; the clock pair on
+  Metal (`Capability::GpuClock`'s `Unwritten` row:
+  `sampleTimestamps:gpuTimestamp:` unbound, with the Mac work); and **a key,
+  which needs the owner's call**: the loop already keeps F3, F11, Escape and the
+  backquote from every game, and a capture key would take one more (F12 is the
+  obvious one, and it is also Steam's default screenshot key), or live behind
+  the console as `bind`-able only once binds can run console lines, which today
+  they cannot (`apply_bind` maps game actions). The clock pair is read once, as
+  the capture is written, and assumes the two clocks keep one rate over the
+  capture; a second pair at its start would measure the drift, and nothing has.
+  Not tested: the loop's own recording and write, which runs checked by hand (a
+  lantern run's 120 CPU and 120 GPU frames; an asteroids run's
+  `profile_capture 10` through `--exec`, 10 CPU and 7 GPU frames, decoded back)
+  and no test runs. The D3D12 runs here had the debug layer off (none
   installed); CI's WARP job is the first validated run of `BeginQuery` on a
   statistics heap.
 

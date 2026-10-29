@@ -41,6 +41,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   no call for it; both refuse, each with its parity row. The engine asks for the
   flag by default.
 
+- **A capture says what recording it cost**: its environment's `recording cost`
+  entry is the loop's time copying frames into the recorder, a frame on average.
+  It does not cover the CPU trace's spans or the GPU timers' queries.
+
 - **`CRCBL_PROFILE_BUDGET_MS` captures the frames before a hitch.** Set beside
   `CRCBL_PROFILE_CAPTURE`, it writes the capture as the first frame whose CPU
   time exceeds that many milliseconds is recorded, rather than as the run

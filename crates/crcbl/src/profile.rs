@@ -23,7 +23,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crcbl_core::trace::{RecordKind, Snapshot};
 use crcbl_profile::{
@@ -117,6 +117,10 @@ pub(crate) struct Requested {
     /// What completed the capture early, when a frame went over the budget,
     /// as the capture's environment says it.
     trigger: Option<String>,
+    /// The loop's time spent copying frames into the recorder, and how many
+    /// CPU frames it was spent over: the capture's own cost, as its
+    /// environment says it.
+    recording: Duration,
 }
 
 impl Requested {
@@ -140,6 +144,7 @@ impl Requested {
             partial_frame: false,
             budget,
             trigger: None,
+            recording: Duration::ZERO,
         })
     }
 
@@ -156,6 +161,7 @@ impl Requested {
             partial_frame: trace_was_off,
             budget: None,
             trigger: None,
+            recording: Duration::ZERO,
         }
     }
 
@@ -166,7 +172,9 @@ impl Requested {
             return;
         }
         let number = self.recorder.cpu_frames;
+        let began = Instant::now();
         self.recorder.record_cpu(snapshot);
+        self.recording += began.elapsed();
         if let Some(budget) = self.budget
             && self.trigger.is_none()
             && let Some(cpu) = crate::perf::frame_cpu_time(snapshot)
@@ -178,6 +186,14 @@ impl Requested {
                 budget.as_secs_f64() * 1_000.0
             ));
         }
+    }
+
+    /// Records the GPU passes of the newest frame the timers resolved, as
+    /// [`Recorder::record_gpu`] does, and counts the time it took.
+    pub(crate) fn record_gpu(&mut self, timings: &FrameTimings) {
+        let began = Instant::now();
+        self.recorder.record_gpu(timings);
+        self.recording += began.elapsed();
     }
 
     /// Whether this capture holds every frame it asked for, or a frame went
@@ -209,6 +225,9 @@ impl Requested {
                 .entries
                 .push(("trigger".to_string(), trigger.clone()));
         }
+        environment
+            .entries
+            .push(recording_cost(self.recording, self.recorder.cpu_frames));
         let mut capture = self.recorder.capture(environment);
         capture.clock = clock;
         let written = capture
@@ -390,6 +409,23 @@ const fn statistics(counted: crcbl_hal::PipelineStatistics) -> Statistics {
     }
 }
 
+/// The capture's own cost as an environment entry: the loop's time copying
+/// frames into the recorder, a frame on average over the CPU frames it
+/// recorded.
+///
+/// Only that copy: the CPU trace the capture turned on costs its spans, and
+/// the GPU timers cost their queries, which no number here measures.
+fn recording_cost(recording: Duration, frames: u64) -> (String, String) {
+    let value = if frames == 0 {
+        "no frames recorded".to_string()
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        let micros = recording.as_secs_f64() * 1e6 / frames as f64;
+        format!("{micros:.1} us a frame copying into the recorder, over {frames} frames")
+    };
+    ("recording cost".to_string(), value)
+}
+
 /// What a capture turned on to be taken, as environment entries: the CPU
 /// trace, which it always enables, and whether the passes were asked to be
 /// counted, which perturbs the GPU timings it holds.
@@ -535,6 +571,7 @@ mod tests {
             partial_frame: false,
             budget: None,
             trigger: None,
+            recording: Duration::ZERO,
         };
         run_long.recorder.record_cpu(&Snapshot::default());
         run_long.recorder.record_cpu(&Snapshot::default());
@@ -612,6 +649,7 @@ mod tests {
             partial_frame: false,
             budget: Some(Duration::from_millis(16)),
             trigger: None,
+            recording: Duration::ZERO,
         };
         for millis in [8, 16, 12] {
             requested.record_cpu(&frame_of(millis));
@@ -657,6 +695,11 @@ mod tests {
             trigger,
             Some("CPU frame 3 took 40.000 ms, over the 16.000 ms budget")
         );
+        let cost = written
+            .environment
+            .get("recording cost")
+            .unwrap_or_default();
+        assert!(cost.ends_with("over 5 frames"), "{cost}");
     }
 
     /// **`CRCBL_PROFILE_BUDGET_MS` takes positive milliseconds**, fractions
@@ -673,6 +716,20 @@ mod tests {
         for refused in ["0", "-1", "fast", "inf", "NaN"] {
             assert!(budget(Some(refused)).is_err(), "{refused}");
         }
+    }
+
+    /// **A capture says what recording it cost**, a frame on average, and
+    /// says so rather than dividing by zero when it recorded none.
+    #[test]
+    fn a_capture_says_what_recording_it_cost_a_frame() {
+        assert_eq!(
+            recording_cost(Duration::from_micros(300), 120),
+            (
+                "recording cost".to_string(),
+                "2.5 us a frame copying into the recorder, over 120 frames".to_string()
+            )
+        );
+        assert_eq!(recording_cost(Duration::ZERO, 0).1, "no frames recorded");
     }
 
     /// **A capture says what it turned on**, and marks counted passes as

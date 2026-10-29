@@ -7112,7 +7112,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             }
             self.passes.record(timings);
             if let Some(profile) = self.profile.as_mut() {
-                profile.recorder.record_gpu(timings);
+                profile.record_gpu(timings);
             }
         }
     }
