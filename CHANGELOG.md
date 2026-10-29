@@ -182,10 +182,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   steered the walker to, so a walker braking to that distance could rest a
   rounding error outside it and never arrive (EW: an AI frozen 0.25 m from
   cover). `FollowDistances` gains `last_reach_m`, the stop distance plus
-  `REACH_BEYOND_STOP_M` (the slack the waypoints short of the last already had),
-  which `reach_for` and `RouteFollower::advance` now end the route by;
-  `FollowDistances::new` and `RouteFollower::set_last_stop_m` set it. A struct
-  literal of `FollowDistances` must name the new field.
+  `LAST_REACH_SLACK_M` (a centimetre, so no caller's arrival point moves
+  noticeably), which `reach_for` and `RouteFollower::advance` now end the route
+  by; `FollowDistances::new` and `RouteFollower::set_last_stop_m` set it. A
+  struct literal of `FollowDistances` must name the new field.
 - **A Wayland key release is never stamped before the repeat it ended.**
   Synthesised repeats carry the nanosecond they came due and a compositor's key
   event whole milliseconds, truncated, so the last repeat of a held key could be

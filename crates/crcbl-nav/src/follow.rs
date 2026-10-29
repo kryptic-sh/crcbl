@@ -40,17 +40,22 @@ pub const WAYPOINT_REACH_M: f64 = 0.4;
 /// has reached the waypoint. EW's value.
 pub const WAYPOINT_STOP_M: f64 = 0.2;
 
-/// How much farther than a walker's stop distance a waypoint counts as
-/// reached: the slack between [`WAYPOINT_REACH_M`] and [`WAYPOINT_STOP_M`],
-/// applied to the route's last waypoint as well.
+/// How much farther than a walker's stop distance the route's last waypoint
+/// counts as reached: a centimetre.
 ///
 /// **A reach equal to the stop distance is a tie the walker can lose.** A
 /// walker braking to stop at its stop distance comes to rest a rounding error
 /// either side of it, and on the far side the waypoint is never reached: EW
-/// saw an AI stand 0.25 m from cover for good, on Linux only. So the last
-/// waypoint is reached within [`FollowDistances::last_reach_m`], this much
-/// beyond the stop distance, as every other waypoint already was.
-pub const REACH_BEYOND_STOP_M: f64 = WAYPOINT_REACH_M - WAYPOINT_STOP_M;
+/// saw an AI stand 0.25 m from cover for good, on Linux only, a nanometre past
+/// its stop. So the last waypoint is reached within
+/// [`FollowDistances::last_reach_m`], this much beyond the stop distance.
+///
+/// **Small on purpose.** It only has to win the tie, and every caller's arrival
+/// moves out by it: the 0.2 m the waypoints short of the last keep would end a
+/// pursuit that far short of where its walker stops (EW, 2026-10-29). A
+/// centimetre is far above any rounding error and below anything a walker or
+/// a cover spot can tell apart.
+pub const LAST_REACH_SLACK_M: f64 = 0.01;
 
 /// How far a walk must get from where it last made headway to have made some
 /// again: far enough that jostling in place never counts. EW's value.
@@ -78,20 +83,20 @@ pub struct FollowDistances {
     pub last_stop_m: f64,
     /// How near the feet come to the route's last waypoint for the route to
     /// be done, in metres; above `last_stop_m`, or a walker that stops at it
-    /// never arrives. See [`REACH_BEYOND_STOP_M`].
+    /// never arrives. See [`LAST_REACH_SLACK_M`].
     ///
     /// **Arrival can come this far out, not only at `last_stop_m`.** A caller
     /// whose spot only works within some tolerance — cover that protects
     /// within so many metres of it — passes a stop distance of that tolerance
-    /// less [`REACH_BEYOND_STOP_M`], so the route is never done outside it.
+    /// less [`LAST_REACH_SLACK_M`], so the route is never done outside it.
     pub last_reach_m: f64,
 }
 
 impl FollowDistances {
     /// [`WAYPOINT_REACH_M`] and [`WAYPOINT_STOP_M`] on the way, and
-    /// `last_stop_m` at the end, reached [`REACH_BEYOND_STOP_M`] beyond it —
+    /// `last_stop_m` at the end, reached [`LAST_REACH_SLACK_M`] beyond it —
     /// so for an end that must be reached within a tolerance, pass the
-    /// tolerance less [`REACH_BEYOND_STOP_M`]; see
+    /// tolerance less [`LAST_REACH_SLACK_M`]; see
     /// [`last_reach_m`](Self::last_reach_m).
     #[must_use]
     pub const fn new(last_stop_m: f64) -> Self {
@@ -99,7 +104,7 @@ impl FollowDistances {
             waypoint_reach_m: WAYPOINT_REACH_M,
             waypoint_stop_m: WAYPOINT_STOP_M,
             last_stop_m,
-            last_reach_m: last_stop_m + REACH_BEYOND_STOP_M,
+            last_reach_m: last_stop_m + LAST_REACH_SLACK_M,
         }
     }
 
@@ -206,7 +211,7 @@ impl RouteFollower {
 
     /// Changes the stop distance for the route's last waypoint, from the next
     /// [`advance`](Self::advance) on, and its reach with it:
-    /// [`REACH_BEYOND_STOP_M`] beyond the stop, as
+    /// [`LAST_REACH_SLACK_M`] beyond the stop, as
     /// [`FollowDistances::new`] sets it.
     ///
     /// For a walker whose stop distance at the end depends on what it is doing
@@ -218,7 +223,7 @@ impl RouteFollower {
     /// affected.
     pub fn set_last_stop_m(&mut self, last_stop_m: f64) {
         self.distances.last_stop_m = last_stop_m;
-        self.distances.last_reach_m = last_stop_m + REACH_BEYOND_STOP_M;
+        self.distances.last_reach_m = last_stop_m + LAST_REACH_SLACK_M;
     }
 }
 
@@ -416,7 +421,7 @@ mod tests {
     }
 
     /// **The last waypoint is walked to with the caller's stop distance, and
-    /// reached [`REACH_BEYOND_STOP_M`] beyond it.**
+    /// reached [`LAST_REACH_SLACK_M`] beyond it.**
     #[test]
     fn the_last_waypoint_uses_the_callers_stop_distance() {
         let stop = 1.0;
@@ -436,7 +441,7 @@ mod tests {
             Steer {
                 waypoint: last,
                 stop_distance_m: stop,
-                reach_m: stop + REACH_BEYOND_STOP_M,
+                reach_m: stop + LAST_REACH_SLACK_M,
                 is_last: true,
             }
         );
@@ -479,7 +484,7 @@ mod tests {
         let steer = follower.advance(feet).unwrap();
         assert_eq!(
             (steer.stop_distance_m, steer.reach_m),
-            (0.25, 0.25 + REACH_BEYOND_STOP_M)
+            (0.25, 0.25 + LAST_REACH_SLACK_M)
         );
 
         follower.set_last_stop_m(2.0);
@@ -522,15 +527,15 @@ mod tests {
         let distances = FollowDistances::new(1.5);
         assert_eq!(distances.reach_for(0, 3), WAYPOINT_REACH_M);
         assert_eq!(distances.reach_for(1, 3), WAYPOINT_REACH_M);
-        assert_eq!(distances.reach_for(2, 3), 1.5 + REACH_BEYOND_STOP_M);
-        assert_eq!(distances.reach_for(0, 1), 1.5 + REACH_BEYOND_STOP_M);
+        assert_eq!(distances.reach_for(2, 3), 1.5 + LAST_REACH_SLACK_M);
+        assert_eq!(distances.reach_for(0, 1), 1.5 + LAST_REACH_SLACK_M);
         assert_eq!(
             distances,
             FollowDistances {
                 waypoint_reach_m: 0.4,
                 waypoint_stop_m: 0.2,
                 last_stop_m: 1.5,
-                last_reach_m: 1.7,
+                last_reach_m: 1.51,
             },
             "EW's values"
         );
