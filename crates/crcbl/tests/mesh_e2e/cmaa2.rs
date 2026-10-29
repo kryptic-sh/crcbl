@@ -424,6 +424,168 @@ fn a_dense_edge_frame_resolves_to_the_same_bytes_every_time() {
     );
 }
 
+/// How wide [`long_edge_frame`]'s slab is, in the world units its camera's
+/// [`DENSE_HALF_HEIGHT`] measures.
+///
+/// Most of the frame's width, so its top edge is long enough to hold whole
+/// runs of the longer slope between two steps rather than only the partial ones
+/// at its corners.
+const SLAB_WIDTH: f32 = 2.4;
+
+/// How tall that slab is — half the frame, so its top edge sits well inside
+/// it.
+const SLAB_HEIGHT: f32 = 1.0;
+
+/// How deep it is, which nothing measures: inside the camera's slab, and that
+/// is all.
+const SLAB_DEPTH: f32 = 0.5;
+
+/// How many columns at each end of a run are left out of what
+/// [`a_run_longer_than_the_walk_keeps_its_colour`] compares.
+///
+/// The step between two runs is itself a one-pixel run of west boundaries, and
+/// it is classified and blended whatever length the runs either side of it
+/// have — so the columns beside a step move in both frames, and only the
+/// columns past them say anything about the long run.
+const RUN_END_MARGIN: u32 = 2;
+
+/// **A slab whose top edge climbs one pixel every `run` columns**, drawn face
+/// on through [`dense_frame`]'s orthographic camera and resolved as `effects`
+/// asks.
+///
+/// The cube scaled into a wide slab and turned about the view axis by the angle
+/// whose tangent is `1 / run`, so its top silhouette is a staircase of
+/// horizontal runs about `run` pixels long, one row apart. Face on, the front
+/// face is one flat colour and the runs are the only thing in that part of the
+/// frame for the resolve to see.
+fn long_edge_frame(run: f32, effects: EffectOverride) -> Image {
+    let headless = Headless::open_for_mesh();
+    let mut pool = TransientPool::new();
+    let mut renderer =
+        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the forward renderer builds");
+    renderer.set_effect_request(EffectRequest {
+        programmatic: effects,
+        ..EffectRequest::default()
+    });
+    place(
+        &mut renderer,
+        DEMO_CUBE,
+        DEMO_UNTINTED,
+        Mat4::from_rotation_z((1.0 / run).atan())
+            * Mat4::from_scale(Vec3::new(SLAB_WIDTH, SLAB_HEIGHT, SLAB_DEPTH)),
+    );
+    let camera = Camera {
+        eye: Vec3::new(0.0, 0.0, DENSE_CAMERA_DISTANCE),
+        target: Vec3::ZERO,
+        up: Vec3::Y,
+        projection: Projection::Orthographic {
+            half_height: DENSE_HALF_HEIGHT,
+            near: DENSE_NEAR,
+            far: DENSE_FAR,
+        },
+    };
+    render_mesh(&headless, &mut renderer, &mut pool, &camera, None)
+}
+
+/// One horizontal run of a silhouette's top edge: its first column, how many
+/// columns it spans, and the row of the first pixel under it.
+#[derive(Debug, Clone, Copy)]
+struct Run {
+    start: u32,
+    len: u32,
+    row: u32,
+}
+
+/// The runs of `image`'s top silhouette that **both** neighbours step one row
+/// away from.
+///
+/// Column by column, the silhouette is the first row whose luma has left the
+/// top row's by [`EDGE_LUMA_STEP`]. Consecutive columns on the same row are a
+/// run. A run at a corner has a side of the slab, not a one-row step, beside
+/// it, and a run is only whole between two steps — so only those count.
+fn interior_runs(image: &Image) -> Vec<Run> {
+    let edge_row = |x: u32| {
+        let background = luma(image.pixel(x, 0).expect("inside the image"));
+        (0..image.height()).find(|&y| {
+            (luma(image.pixel(x, y).expect("inside the image")) - background).abs()
+                >= EDGE_LUMA_STEP
+        })
+    };
+    let mut runs: Vec<Option<Run>> = Vec::new();
+    for x in 0..image.width() {
+        match (edge_row(x), runs.last_mut()) {
+            (Some(row), Some(Some(run))) if run.row == row => run.len += 1,
+            (row, _) => runs.push(row.map(|row| Run {
+                start: x,
+                len: 1,
+                row,
+            })),
+        }
+    }
+    runs.windows(3)
+        .filter_map(|three| match three {
+            [Some(before), Some(run), Some(after)]
+                if before.row.abs_diff(run.row) == 1 && after.row.abs_diff(run.row) == 1 =>
+            {
+                Some(*run)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many pixels on either side of `run`'s boundary differ between `base`
+/// and `frame`, past [`RUN_END_MARGIN`] at each end.
+fn changed_along(run: Run, base: &Image, frame: &Image) -> usize {
+    (run.start + RUN_END_MARGIN..(run.start + run.len).saturating_sub(RUN_END_MARGIN))
+        .flat_map(|x| [(x, run.row - 1), (x, run.row)])
+        .filter(|&(x, y)| base.pixel(x, y) != frame.pixel(x, y))
+        .count()
+}
+
+/// **A run longer than the walk keeps its unresolved colour.**
+///
+/// `cmaa2_shapes.slang` walks a run for at most
+/// [`MAX_LINE_LENGTH`](crcbl::shaders::cmaa2::MAX_LINE_LENGTH) pixels and
+/// classifies nothing it could not walk to the end of, because a truncated
+/// run's ends are not its ends and the shape derived from them is not in the
+/// frame. So the same staircase is drawn twice: once with runs half that bound,
+/// where the resolve must move every whole run, and once with runs half again
+/// past it, where it must move none. The first is what says the second is not
+/// vacuous — a resolve that moved nothing at all would pass the long frame
+/// alone.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_run_longer_than_the_walk_keeps_its_colour() {
+    let bound = crcbl::shaders::cmaa2::MAX_LINE_LENGTH;
+    for (run, long) in [(bound as f32 * 0.5, false), (bound as f32 * 1.5, true)] {
+        let none = long_edge_frame(run, tier(false, false));
+        let cmaa2 = long_edge_frame(run, tier(false, true));
+        let runs = interior_runs(&none);
+        let changed: Vec<usize> = runs
+            .iter()
+            .map(|r| changed_along(*r, &none, &cmaa2))
+            .collect();
+        eprintln!("crcbl mesh e2e: cmaa2 runs of about {run} — {runs:?}, changed {changed:?}");
+
+        assert!(
+            !runs.is_empty() && runs.iter().all(|r| (r.len > bound) == long),
+            "the slab drawn for runs of {run} has whole runs {runs:?}, so the \
+             fixture is not on the side of the {bound}-pixel walk it is for"
+        );
+        for (r, changed) in runs.iter().zip(changed) {
+            assert_eq!(
+                changed > 0,
+                !long,
+                "cmaa2 moved {changed} pixels along the run {r:?} with a walk of \
+                 {bound}: a run inside the walk is classified and blended, and a \
+                 run past it is left as it was drawn"
+            );
+        }
+    }
+}
+
 /// **CMAA2 softens the silhouettes and leaves the rest of the frame alone.**
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]

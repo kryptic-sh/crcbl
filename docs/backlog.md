@@ -13283,13 +13283,6 @@ which is where the re-bless was spent. What the slice did not do:
   radv under a second. A single device resolving the same frame eight times
   would be a cheaper test of a weaker claim, and nobody has decided the suite
   needs the cheaper one.
-- **A run longer than `MAX_LINE_LENGTH` is left unclassified, and no test
-  observes that branch.** `cmaa2_shapes.slang` walks a run of like boundaries to
-  at most `crcbl_shaders::cmaa2::MAX_LINE_LENGTH` pixels and emits nothing for a
-  run that reaches it; no test names the constant, so nothing asserts that such
-  a run keeps its unresolved colour rather than being truncated and blended. A
-  fixture with one straight silhouette longer than the bound is the missing
-  observer.
 
 ### What auto-exposure left owed (2026-08-29)
 
