@@ -13457,28 +13457,6 @@ goes red on the arm (`taskset -c 0,1` and `-c 0,1,2,3`, breaking on the
 observation rather than on the thread count) and that the whole gate, four red
 checks included, still passes.
 
-### The torch sampler's gap is the one budget nothing scales (2026-08-28)
-
-`BACKDROP_INTERVAL_MS`'s doc comment in `web/tools/browser-e2e.mjs` says it is
-"scaled by the measured slowdown at the call site, like every other budget
-here", and `await pause(TORCH_SAMPLE_GAP_MS)` in `sampleWindow` is the call site
-that is not. On a runner at 100x the four samples therefore span under a
-millisecond of simulated time rather than the two thirds of a flicker cycle
-`TORCH_SAMPLES`' own comment says they were measured over.
-
-**It is not causing a failure and was ruled out as the cause of one.** The
-doused-torch check that failed three Pages runs failed on its frame count, not
-its swing, and the fix was to stop asking shard's whole zone to hold still; the
-sampler read the same numbers at 78.0x and 102.0x throughout, which is what
-ruled the gap out. So this is a stated convention with one exception to it
-rather than a defect — worth closing because the next person to read that doc
-comment will believe it.
-
-Scaling it widens the lit window, which is the one that needs a cycle in it; the
-doused window would be unaffected, since `106d71f` measured it at 10.573,
-10.573, 10.568, 10.568 — a single step of 0.005 against a `TORCH_STILL_LUMA` of
-0.01, then flat.
-
 ### shard runs at 98x in a browser and nothing has profiled it (2026-08-28)
 
 The record behind this — the argument, the options and the measurements — is in

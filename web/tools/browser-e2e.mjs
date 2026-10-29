@@ -2552,7 +2552,8 @@ const BACKDROP_SAMPLES = 8;
  *
  * Without it the eight `toDataURL` calls span a few milliseconds and are eight
  * looks at **one** frame, which is no better than a single sample. Scaled by the
- * measured slowdown at the call site, like every other budget here.
+ * measured slowdown at the call site, like every budget here except
+ * [`TORCH_SAMPLE_GAP_MS`], which says why it is not.
  */
 const BACKDROP_INTERVAL_MS = 120;
 
@@ -2856,6 +2857,20 @@ const BLEND_IDLE_MAX = 0.05;
 const TORCH_INSET = 0.25;
 
 const TORCH_SAMPLES = 4;
+
+/**
+ * How long the torch sampler waits between two of [`TORCH_SAMPLES`], in wall
+ * clock and **not scaled by the measured slowdown**, unlike every other budget
+ * here.
+ *
+ * So on a runner at 100x the samples span under a millisecond of simulated
+ * time, not a flicker cycle. Left so on purpose: [`TORCH_FLICKER_LUMA`] and
+ * [`TORCH_STILL_LUMA`] were measured on SwiftShader with this gap as it is, and
+ * a scaled gap would cost each window its gaps times shard's slowdown, and move
+ * what the lit window's swing measures. The sampler read the same numbers at
+ * 78x and 102x in August 2026, which is what ruled this gap out as the cause of
+ * the doused-torch failures.
+ */
 const TORCH_SAMPLE_GAP_MS = 80;
 
 /**
