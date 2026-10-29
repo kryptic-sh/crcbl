@@ -38,7 +38,8 @@
 //! and stop there, a word move starts from that edge, and Home and End go to
 //! the ends of the line wherever the selection was. A move that selects moves
 //! the caret and leaves the anchor where it is. Inserting replaces the
-//! selection, and Backspace and Delete delete it instead of a character.
+//! selection, and Backspace and Delete delete it instead of a character, or
+//! with a word modifier instead of a word.
 //!
 //! # Words
 //!
@@ -50,7 +51,7 @@
 //! start of the word before the caret and a move right at the end of the word
 //! after it — the macOS `Option`+arrow and GTK `Ctrl`+arrow convention,
 //! rather than Windows', where a move right ends at the start of the next
-//! word.
+//! word. A word delete takes what the word move on its side would pass over.
 //!
 //! # Newlines
 //!
@@ -102,6 +103,12 @@ pub enum Edit {
     Backspace,
     /// Deletes the selection, or else the cluster after the caret.
     Delete,
+    /// Deletes the selection, or else back to where [`Motion::WordLeft`]
+    /// would take the caret.
+    BackspaceWord,
+    /// Deletes the selection, or else on to where [`Motion::WordRight`] would
+    /// take the caret.
+    DeleteWord,
     /// Selects the whole line, the caret at its end.
     SelectAll,
     /// Puts the selection on the clipboard.
@@ -119,8 +126,8 @@ impl Edit {
     /// the console's paste key accepts them.
     pub const SHORTCUT: Modifiers = Modifiers::CTRL.union(Modifiers::SUPER);
 
-    /// The modifiers a word move is read under: `Ctrl`, or `Alt` for the
-    /// `Option` key a Mac keyboard sends.
+    /// The modifiers a word move or a word delete is read under: `Ctrl`, or
+    /// `Alt` for the `Option` key a Mac keyboard sends.
     pub const WORD: Modifiers = Modifiers::CTRL.union(Modifiers::ALT);
 
     /// The edit `key` makes when pressed with `modifiers` held, or `None` for
@@ -128,7 +135,8 @@ impl Edit {
     ///
     /// The arrows move by a character, by a word with [`Self::WORD`], and to
     /// the line's end with `Super` (a Mac's `Command`+arrow); Home and End go
-    /// to the ends; `Shift` makes any move select. With [`Self::SHORTCUT`] and
+    /// to the ends; `Shift` makes any move select. Backspace and Delete delete
+    /// a word with [`Self::WORD`]. With [`Self::SHORTCUT`] and
     /// no `Alt`, `A` selects all, `C` copies, `X` cuts and `V` pastes — `Alt`
     /// excluded because Windows reports `AltGr`, which types characters on
     /// many layouts, as `Ctrl`+`Alt`. Every character a key types arrives as
@@ -148,6 +156,7 @@ impl Edit {
             Some(Self::Move { motion, select })
         };
         let shortcut = modifiers.intersects(Self::SHORTCUT) && !modifiers.contains(Modifiers::ALT);
+        let word = modifiers.intersects(Self::WORD);
         match key {
             KeyCode::ArrowLeft => arrow(Motion::Left, Motion::WordLeft, Motion::Home),
             KeyCode::ArrowRight => arrow(Motion::Right, Motion::WordRight, Motion::End),
@@ -159,6 +168,8 @@ impl Edit {
                 motion: Motion::End,
                 select,
             }),
+            KeyCode::Backspace if word => Some(Self::BackspaceWord),
+            KeyCode::Delete if word => Some(Self::DeleteWord),
             KeyCode::Backspace => Some(Self::Backspace),
             KeyCode::Delete => Some(Self::Delete),
             KeyCode::KeyA if shortcut => Some(Self::SelectAll),
@@ -357,6 +368,16 @@ impl LineEdit {
         true
     }
 
+    /// Deletes the selection, or else the text a `motion` from the caret
+    /// passes over. Returns whether anything was deleted.
+    fn delete_to(&mut self, motion: Motion) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        self.move_caret(motion, true);
+        self.delete_selection()
+    }
+
     /// Moves the caret as `motion` says; see the module docs for what a move
     /// does to a selection. Returns whether the caret or the anchor moved.
     pub fn move_caret(&mut self, motion: Motion, select: bool) -> bool {
@@ -400,6 +421,8 @@ impl LineEdit {
             }
             Edit::Backspace => applied.text = self.backspace(),
             Edit::Delete => applied.text = self.delete(),
+            Edit::BackspaceWord => applied.text = self.delete_to(Motion::WordLeft),
+            Edit::DeleteWord => applied.text = self.delete_to(Motion::WordRight),
             Edit::SelectAll => {
                 self.select(0..self.len());
             }

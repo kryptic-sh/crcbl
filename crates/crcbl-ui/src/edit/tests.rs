@@ -145,6 +145,16 @@ fn every_edit_against_every_selection_state() {
             [None, None, None],
         ),
         (
+            Edit::BackspaceWord,
+            ["one |wo", "o|wo", "o|wo"],
+            [None, None, None],
+        ),
+        (
+            Edit::DeleteWord,
+            ["one t|", "o|wo", "o|wo"],
+            [None, None, None],
+        ),
+        (
             Edit::SelectAll,
             ["[one two|", "[one two|", "[one two|"],
             [None, None, None],
@@ -192,6 +202,24 @@ fn every_edit_against_every_selection_state() {
     }
 }
 
+/// **A word delete takes what the word move on its side passes over**: the
+/// whitespace next to the caret and the whole run of one class beyond it,
+/// and no further.
+#[test]
+fn a_word_delete_takes_the_run_a_word_move_passes() {
+    for (state, edit, want) in [
+        ("foo_1.bar  baz|", Edit::BackspaceWord, "foo_1.bar  |"),
+        ("foo_1.bar  |baz", Edit::BackspaceWord, "foo_1.|baz"),
+        ("foo_1|.bar", Edit::BackspaceWord, "|.bar"),
+        ("|foo_1  bar", Edit::DeleteWord, "|  bar"),
+        ("foo|  -- bar", Edit::DeleteWord, "foo| bar"),
+    ] {
+        let mut model = line(state);
+        assert!(model.apply(&edit).text, "{edit:?} on `{state}`");
+        assert_eq!(marked(&model), want, "{edit:?} on `{state}`");
+    }
+}
+
 /// **The ends of the line stop every move**, and a deletion with nothing on
 /// its side deletes nothing.
 #[test]
@@ -202,6 +230,7 @@ fn moves_and_deletions_stop_at_the_ends_of_the_line() {
         mv(Motion::WordLeft),
         mv(Motion::Home),
         Edit::Backspace,
+        Edit::BackspaceWord,
     ] {
         let applied = start.apply(&edit);
         assert_eq!(marked(&start), "|ab", "{edit:?} at the start");
@@ -213,6 +242,7 @@ fn moves_and_deletions_stop_at_the_ends_of_the_line() {
         mv(Motion::WordRight),
         mv(Motion::End),
         Edit::Delete,
+        Edit::DeleteWord,
     ] {
         let applied = end.apply(&edit);
         assert_eq!(marked(&end), "ab|", "{edit:?} at the end");
@@ -358,6 +388,16 @@ fn keys_become_edits() {
         Some(Edit::Backspace)
     );
     assert_eq!(Edit::for_key(KeyCode::Delete, none), Some(Edit::Delete));
+    for word in [Modifiers::CTRL, Modifiers::ALT] {
+        assert_eq!(
+            Edit::for_key(KeyCode::Backspace, word),
+            Some(Edit::BackspaceWord)
+        );
+        assert_eq!(
+            Edit::for_key(KeyCode::Delete, word | shift),
+            Some(Edit::DeleteWord)
+        );
+    }
     for shortcut in [Modifiers::CTRL, Modifiers::SUPER] {
         assert_eq!(
             Edit::for_key(KeyCode::KeyA, shortcut),

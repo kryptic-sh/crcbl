@@ -21,8 +21,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   read, as captures with no clock pair.
 - **`crcbl_hal::Capability` has a new variant, `GpuClock`**, so a backend
   outside the workspace matching on it must answer for it.
+- **`crcbl_ui::edit::Edit` has two new variants, `BackspaceWord` and
+  `DeleteWord`**, so code matching on it must answer for them.
 
 ### Added
+
+- **Text inputs delete a word at a time**: `Ctrl`+Backspace and `Ctrl`+Delete
+  (`Option` on a Mac keyboard) delete the selection, or else what the word move
+  on that side would pass over. Every field built on `crcbl_ui::edit::LineEdit`
+  has it, the console's prompt included.
 
 - **A capture can carry a calibrated CPU/GPU clock pair**
   (`crcbl_profile::ClockPair`: one instant on both clocks and how far apart the
