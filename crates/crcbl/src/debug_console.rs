@@ -847,8 +847,6 @@ impl Console {
         for ask in std::mem::take(&mut self.line_asks) {
             self.apply(ask);
         }
-        self.last_line.clear();
-        self.last_line.push_str(self.panel.line());
         let produced = {
             let Self { panel, ui, .. } = self;
             panel.point(&layout, ui, pointer)
@@ -861,7 +859,12 @@ impl Console {
                 self.clear_cycle();
             }
             ConsoleInput::Key(cap) => self.tapped(cap),
+            ConsoleInput::Picked(index) => self.pick(index),
         }
+        // After the pointer's turn as well as the deferred keys', so a picked
+        // row's fill is not read on the next frame as an edit that drops it.
+        self.last_line.clear();
+        self.last_line.push_str(self.panel.line());
         // **A second pull, for whatever the lines above printed.** The spans
         // were built before any of them ran, so the panel *draws* a command's
         // answer on the next frame; the view holds it now, which is what a
@@ -1128,6 +1131,21 @@ impl Console {
             Vec::new()
         };
         self.cycle_at = None;
+        self.show_candidates();
+    }
+
+    /// A completion row picked: the cycle lands on that candidate, as `Tab`
+    /// would by stepping to it, and the list stays up for the next pick.
+    ///
+    /// The panel shows rows only while the cycle holds candidates, and shows
+    /// them in the cycle's order, so the index is the cycle's.
+    fn pick(&mut self, index: usize) {
+        let Some(candidate) = self.cycle.get(index) else {
+            return;
+        };
+        let filled = format!("{}{candidate}", self.cycle_stem);
+        self.panel.set_line(&filled);
+        self.cycle_at = Some(index);
         self.show_candidates();
     }
 

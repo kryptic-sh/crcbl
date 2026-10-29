@@ -26,9 +26,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`crcbl_ui::tree::TextInput` has a new field, `extend: bool`**, so code
   building one field by field must name it (`false` keeps the old meaning).
   `TextPump::frame` fills it.
+- **`crcbl_ui::console::ConsoleInput` has a new variant, `Picked(usize)`**, so
+  code matching on it must answer for it.
 
 ### Added
 
+- **The console's completion rows can be clicked or tapped**: a picked row fills
+  that candidate in and leaves the list up, as stepping to it with `Tab` would.
+  It is how a finger completes, the on-screen keyboard having no `Tab`.
+  `ConsolePanel::point` reports the row as `ConsoleInput::Picked`.
 - **`apps/breach`'s loadout panel takes a keyboard drag back with `Backspace`**,
   as shard's inventory panel does: `Escape` is the loop's pause key and never
   reaches the panel.

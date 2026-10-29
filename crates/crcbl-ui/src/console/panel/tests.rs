@@ -935,6 +935,40 @@ fn the_completion_rows_highlight_the_matched_head() {
     }
 }
 
+/// **A click on a completion row reports that row**, on the release, and a
+/// press released off it reports nothing — **Send**'s rule.
+#[test]
+fn a_clicked_completion_row_is_reported_by_its_index() {
+    let extent = (960, 720);
+    let mut content = panel(&[], "r_a");
+    content.set_completion("r_a", &["r_ao_view", "r_ambient"]);
+    let mut ui = UiState::new();
+    let layout = still(&mut content, extent);
+    let row = layout.completion()[1];
+    let on_row = (row.0 + row.1) * 0.5;
+    let elsewhere = layout.log().0 + Vec2::splat(1.0);
+
+    let layout = frame(&mut content, extent, press_at(on_row), quiet());
+    assert_eq!(
+        content.point(&layout, &mut ui, press_at(on_row)),
+        ConsoleInput::Nothing,
+    );
+    let layout = frame(&mut content, extent, release_at(on_row), quiet());
+    assert_eq!(
+        content.point(&layout, &mut ui, release_at(on_row)),
+        ConsoleInput::Picked(1),
+    );
+    assert_eq!(content.line(), "r_a", "the panel filled the line itself");
+
+    let layout = frame(&mut content, extent, press_at(on_row), quiet());
+    content.point(&layout, &mut ui, press_at(on_row));
+    let layout = frame(&mut content, extent, release_at(elsewhere), quiet());
+    assert_eq!(
+        content.point(&layout, &mut ui, release_at(elsewhere)),
+        ConsoleInput::Nothing,
+    );
+}
+
 /// The list is capped, and it is capped by the frame as well as by
 /// [`COMPLETION_ROWS`] — a row that would hang off the bottom is not built,
 /// because nothing clips it.

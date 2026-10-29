@@ -16377,6 +16377,50 @@ mod tests {
         );
     }
 
+    /// **A completion row clicked fills that candidate in**, with no `Tab` —
+    /// the way a finger completes, having no `Tab` to press — and leaves the
+    /// list up, as stepping to it with `Tab` would.
+    #[test]
+    fn a_clicked_completion_row_fills_in_that_candidate() {
+        let mut engine = with_console_open();
+        typed(&mut engine, "an");
+        tap(&mut engine, crcbl_core::input::KeyCode::Tab);
+        step(&mut engine);
+        let offered = engine.console().panel().candidates().to_vec();
+        // The first row, so the `Tab` after the pick has a row after it to
+        // step to that a cycle starting over would not reach first.
+        let index = 0;
+        assert!(offered.len() >= 2, "nothing to pick between: {offered:?}");
+        // The `Tab` was applied after its frame's build, so the rows are laid
+        // out from the next one.
+        step(&mut engine);
+        let (min, max) = engine
+            .console()
+            .layout()
+            .expect("the console has been through a frame")
+            .completion()[index];
+
+        click(&mut engine, (min + max) * 0.5);
+        // A frame past the pick, which is where a fill read as an edit would
+        // drop the list.
+        step(&mut engine);
+
+        assert_eq!(engine.console().panel().line(), offered[index]);
+        assert_eq!(
+            engine.console().panel().candidates(),
+            offered.as_slice(),
+            "the pick dropped the list it was picked from"
+        );
+
+        tap(&mut engine, crcbl_core::input::KeyCode::Tab);
+        step(&mut engine);
+        assert_eq!(
+            engine.console().panel().line(),
+            offered[(index + 1) % offered.len()],
+            "`Tab` after a pick steps on from the picked row"
+        );
+    }
+
     /// **The up arrow puts the last submitted line back**, with the field
     /// cleared by the submit that preceded it.
     #[test]

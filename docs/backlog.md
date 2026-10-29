@@ -15271,12 +15271,6 @@ desktop click on the corner still reaches the game.
 
 ### What the touch keyboard does not offer (2026-08-31)
 
-- **No `Tab`, so completion is unreachable by finger.** The keyboard offers
-  characters, shift, the layer key, space, backspace and return. Completion is
-  the console's most useful affordance. The fix is either a `TAB` cap in the
-  control row or making the panel's candidate rows tappable, and the second is
-  better because the candidates are already drawn and already have rectangles
-  (`ConsoleLayout::completion`).
 - **No clipboard key.** `CONSOLE_PASTE_KEY` is `Ctrl`/`Meta`+`V` and a drawn
   keyboard has no modifier to spell that with. It would want a `PASTE` cap of
   its own, and it would be inert on the web anyway —

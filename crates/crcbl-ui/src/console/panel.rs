@@ -121,6 +121,14 @@ pub enum ConsoleInput {
     /// [`TouchKeyboard::point`](super::TouchKeyboard::point), and never
     /// [`KeyCap::Enter`], which comes back as [`ConsoleInput::Submitted`].
     Key(KeyCap),
+    /// The completion row at this index into
+    /// [`ConsolePanel::candidates`] was clicked or tapped.
+    ///
+    /// Handed back rather than filled in, for [`ConsoleInput::Key`]'s reason:
+    /// the caller owns the completion cycle, and a row picked is that cycle
+    /// landing on one candidate — what `Tab` would reach by stepping to it, and
+    /// the only way a finger has to reach it at all.
+    Picked(usize),
 }
 
 /// The console's widgets and the state that outlives a frame.
@@ -156,6 +164,8 @@ pub struct ConsolePanel {
     /// Whether that build latched a click on **Send**, for
     /// [`ConsolePanel::point`] to report.
     send_clicked: bool,
+    /// The completion row that build latched a click on, likewise.
+    picked: Option<usize>,
     /// The field's node, for engaging it and for reading its box back. `None`
     /// until the first build.
     field_key: Option<NodeKey>,
@@ -203,6 +213,7 @@ impl ConsolePanel {
             queued: Vec::new(),
             send: ButtonState::Idle,
             send_clicked: false,
+            picked: None,
             field_key: None,
             editing: false,
             sheet,
@@ -401,12 +412,13 @@ impl ConsolePanel {
     }
 
     /// What this frame's pointer produced: a line **Send** or the on-screen
-    /// keyboard's return key submitted, or a key the keyboard was tapped on.
-    /// Call it after [`ConsolePanel::layout`], with the same pointer.
+    /// keyboard's return key submitted, a completion row picked, or a key the
+    /// keyboard was tapped on. Call it after [`ConsolePanel::layout`], with the
+    /// same pointer.
     ///
-    /// The **Send** button's click was resolved by the build — the tree
-    /// hit-tests its own nodes — so this reports it rather than testing a
-    /// rectangle a second time. The on-screen keyboard keeps its own hit test
+    /// The **Send** button's click and a completion row's were resolved by the
+    /// build — the tree hit-tests its own nodes — so this reports them rather
+    /// than testing a rectangle a second time. The on-screen keyboard keeps its own hit test
     /// and its own [`UiState`] capture, which is what `ui` is for.
     ///
     /// The keyboard's key is handed back rather than applied here, so that a
@@ -423,6 +435,9 @@ impl ConsolePanel {
             return self
                 .submit()
                 .map_or(ConsoleInput::Nothing, ConsoleInput::Submitted);
+        }
+        if let Some(index) = self.picked.take() {
+            return ConsoleInput::Picked(index);
         }
         // Only when it is showing: a keyboard that hit-tested while hidden
         // would claim taps over a rectangle nothing is drawn in.
@@ -551,6 +566,7 @@ impl ConsolePanel {
         self.editing = self.ui.text_editing();
         self.send = built.send_state;
         self.send_clicked = built.send_clicked;
+        self.picked = built.picked;
 
         let rect = |key| self.ui.rect(key).expect("laid out this frame");
         // Laid out only when it is showing, so a hidden keyboard claims no
@@ -617,6 +633,8 @@ struct Built {
     candidates: Vec<NodeKey>,
     send_state: ButtonState,
     send_clicked: bool,
+    /// The candidate row a click was latched on.
+    picked: Option<usize>,
 }
 
 /// Builds the panel into `ui` at `style`: the tree [`ConsolePanel::layout_with`]
@@ -711,6 +729,7 @@ fn build(
     let mut rows_built = Vec::new();
     let mut send_state = ButtonState::Idle;
     let mut send_clicked = false;
+    let mut picked = None;
 
     ui.block("console-screen", &screen_style, |ui| {
         panel_key = Some(
@@ -796,8 +815,12 @@ fn build(
             for (index, candidate) in candidates[..count].iter().enumerate() {
                 let head: String = candidate.chars().take(matched).collect();
                 let tail: String = candidate.chars().skip(matched).collect();
-                rows_built.push(
-                    ui.block_keyed(index, ".console-candidate", &candidate_style, |ui| {
+                let candidate_row = ui.block_keyed_with(
+                    index,
+                    ".console-candidate",
+                    &candidate_style,
+                    Behavior::BUTTON,
+                    |ui| {
                         if !head.is_empty() {
                             ui.span(
                                 ".console-match",
@@ -812,9 +835,12 @@ fn build(
                                 &[D::Color(style.candidate_color)],
                             );
                         }
-                    })
-                    .key,
+                    },
                 );
+                if candidate_row.clicked {
+                    picked = Some(index);
+                }
+                rows_built.push(candidate_row.key);
             }
         });
     });
@@ -828,6 +854,7 @@ fn build(
         candidates: rows_built,
         send_state,
         send_clicked,
+        picked,
     }
 }
 
