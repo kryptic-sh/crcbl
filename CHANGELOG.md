@@ -13,6 +13,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-29
+
+### Breaking
+
+- **`crcbl_nav::follow::FollowDistances` has a new field, `last_reach_m`**, and
+  **`crcbl_render::PassTiming` has two, `begin_nanos` and `statistics`**: a
+  struct literal of either names the new fields. `FollowDistances::new` sets
+  `last_reach_m` for you.
+
 ### Added
 
 - **`crcbl::settings::presets::{starting_tier, choose_once}`: start a new player
@@ -21877,7 +21886,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/kryptic-sh/crcbl/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/kryptic-sh/crcbl/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/kryptic-sh/crcbl/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/kryptic-sh/crcbl/compare/v0.10.0...v0.11.0
