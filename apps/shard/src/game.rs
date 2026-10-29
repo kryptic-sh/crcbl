@@ -1344,18 +1344,7 @@ mod tests {
     /// the run and nothing reddens.
     #[test]
     fn the_browser_gates_beat_is_this_samples_heartbeat() {
-        let millis = HEARTBEAT_TICKS * 1_000;
-        let hz = u64::from(DEFAULT_TICK_HZ);
-        assert_eq!(
-            millis % hz,
-            0,
-            "the heartbeat is not a whole number of milliseconds, which `beatMs` cannot spell"
-        );
-        assert_eq!(
-            crcbl_sample_test::browser_gate_demo_expectation("shard", &["beatMs"]),
-            (millis / hz).to_string(),
-            "the browser gate's shard beatMs is not HEARTBEAT_TICKS at DEFAULT_TICK_HZ"
-        );
+        crcbl_sample_test::assert_browser_gate_beat("shard", HEARTBEAT_TICKS, DEFAULT_TICK_HZ);
     }
 
     /// A stage that has already found the floor.

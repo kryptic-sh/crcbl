@@ -73,6 +73,11 @@ const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
 /// process.
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
+/// How often the `[HUD]` heartbeat logs, in ticks: a second at
+/// [`DEFAULT_TICK_HZ`]. `web/tools/browser-e2e.mjs` watches it to tell a paused
+/// demo from a running one, and its `beatMs` row is this period.
+pub const HEARTBEAT_TICKS: u64 = 60;
+
 /// Downward acceleration on the bird, in world units per second squared.
 ///
 /// Not Earth's 9.81: the world is measured in screen-fulls rather than metres,
@@ -1210,7 +1215,7 @@ impl Game {
 
         let state_changed = self.state != self.prev_log_state;
         self.prev_log_state = self.state;
-        if state_changed || self.ticks_run.is_multiple_of(60) {
+        if state_changed || self.ticks_run.is_multiple_of(HEARTBEAT_TICKS) {
             crcbl::log::info!(
                 "[HUD] {:?}  score: {}  x: {:.1}  y: {:.1}  vy: {:+.1}",
                 self.state,
@@ -1307,6 +1312,13 @@ mod tests {
     use super::*;
     use crcbl::core::TickId;
     use crcbl::core::time::{ManualTime, TimeSource as _};
+
+    /// **The beat `web/tools/browser-e2e.mjs` divides by is this sample's
+    /// heartbeat**: [`HEARTBEAT_TICKS`] at [`DEFAULT_TICK_HZ`], in milliseconds.
+    #[test]
+    fn the_browser_gates_beat_is_this_samples_heartbeat() {
+        crcbl_sample_test::assert_browser_gate_beat("flappy", HEARTBEAT_TICKS, DEFAULT_TICK_HZ);
+    }
 
     /// One entry of a script: `(tick index, key, pressed)`.
     type Script = [(u64, KeyCode, bool)];

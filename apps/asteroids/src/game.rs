@@ -90,6 +90,11 @@ const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
 /// process.
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
+/// How often the `[HUD]` heartbeat logs, in ticks: a second at
+/// [`DEFAULT_TICK_HZ`]. `web/tools/browser-e2e.mjs` watches it to tell a paused
+/// demo from a running one, and its `beatMs` row is this period.
+pub const HEARTBEAT_TICKS: u64 = 60;
+
 // ---------------------------------------------------------------------------
 // The playfield
 // ---------------------------------------------------------------------------
@@ -2194,12 +2199,12 @@ impl Game {
 
         let state_changed = self.state != self.prev_log_state;
         self.prev_log_state = self.state;
-        // **Every sixty ticks, which is a second of simulated time, and the same
+        // **Every [`HEARTBEAT_TICKS`], a second of simulated time, and the same
         // cadence breakout and flappy use.** `web/tools/browser-e2e.mjs` watches
         // for this heartbeat to tell a paused demo from a running one, and its
         // window is written against a second rather than the two this used to
         // take.
-        if state_changed || self.ticks_run.is_multiple_of(60) {
+        if state_changed || self.ticks_run.is_multiple_of(HEARTBEAT_TICKS) {
             // `rock x` is here for that gate too, and it is the honest choice:
             // it is the one number in this game that moves on its own. The ship
             // is stationary unless the player thrusts, the score changes only on
@@ -2424,6 +2429,13 @@ mod tests {
     use super::*;
     use crcbl::core::TickId;
     use crcbl::core::time::{ManualTime, TimeSource as _};
+
+    /// **The beat `web/tools/browser-e2e.mjs` divides by is this sample's
+    /// heartbeat**: [`HEARTBEAT_TICKS`] at [`DEFAULT_TICK_HZ`], in milliseconds.
+    #[test]
+    fn the_browser_gates_beat_is_this_samples_heartbeat() {
+        crcbl_sample_test::assert_browser_gate_beat("asteroids", HEARTBEAT_TICKS, DEFAULT_TICK_HZ);
+    }
 
     /// One entry of a script: `(tick index, key, pressed)`.
     type Script = [(u64, KeyCode, bool)];

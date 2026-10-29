@@ -383,6 +383,35 @@ pub fn browser_gate_demo_expectation(demo: &str, path: &[&str]) -> String {
     demo_expectation_in(BROWSER_E2E_MJS, demo, path)
 }
 
+/// Asserts that `demo`'s `beatMs` row in the browser gate is its heartbeat:
+/// `heartbeat_ticks` at `tick_hz`, in milliseconds.
+///
+/// Not an assertion in the gate but its denominator. Group B reads the
+/// observed beat against `beatMs` to work out how far behind real time the
+/// machine is running the demo, and scales every later budget by that, so a
+/// period changed in the sample and not in the gate stretches or shrinks every
+/// timeout in the run and nothing reddens.
+///
+/// # Panics
+///
+/// When the heartbeat is not a whole number of milliseconds, which `beatMs`
+/// cannot spell, when the row differs, or as
+/// [`browser_gate_demo_expectation`] does when it is missing.
+pub fn assert_browser_gate_beat(demo: &str, heartbeat_ticks: u64, tick_hz: u32) {
+    let millis = heartbeat_ticks * 1_000;
+    let hz = u64::from(tick_hz);
+    assert_eq!(
+        millis % hz,
+        0,
+        "{demo}'s heartbeat is not a whole number of milliseconds, which `beatMs` cannot spell"
+    );
+    assert_eq!(
+        browser_gate_demo_expectation(demo, &["beatMs"]),
+        (millis / hz).to_string(),
+        "the browser gate's {demo} beatMs is not {heartbeat_ticks} ticks at {tick_hz} Hz"
+    );
+}
+
 /// [`browser_gate_demo_expectation`] over any text, so its bounds can be held
 /// against a driver written for the purpose.
 fn demo_expectation_in(driver: &str, demo: &str, path: &[&str]) -> String {

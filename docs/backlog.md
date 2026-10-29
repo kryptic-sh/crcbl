@@ -22490,14 +22490,17 @@ once a frame can be driven. Three hand-written lines, per the
 ### Demos with no `beatMs` row are assumed to beat once a second (2026-09-25)
 
 Every demo whose `web/tools/browser-e2e.mjs` block has no `beatMs` row is
-assumed to log its heartbeat once a second, and nothing holds any of them to it.
-shard, breach and sparks pin theirs (each app's
-`the_browser_gates_beat_is_this_samples_heartbeat`, reading the row through
-`crcbl_sample_test::browser_gate_demo_expectation`). A grep for
-`HEARTBEAT_TICKS` on 2026-09-25 found every other declaring sample at 60 ticks,
-but breakout, flappy, asteroids and horde declare no such constant and were not
-read, and a grep is a reading, not a guard. A sweep would pin each demo's period
-the same way, or give every block a `beatMs` row and a test.
+assumed to log its heartbeat once a second, and nothing holds it to that.
+Pinned, each by its own `the_browser_gates_beat_is_this_samples_heartbeat`
+calling `crcbl_sample_test::assert_browser_gate_beat`: shard, breach, sparks,
+breakout, flappy, asteroids and horde. **Still unpinned**, read 2026-10-29: hud,
+lantern, alcove, sundial, tide, quarry, viewer, bracket, puppet, orbit, options,
+towers and tumble, every one declaring `HEARTBEAT_TICKS` at 60 ticks and no row,
+so each agrees with the gate's assumed second today and nothing fails if one
+changes. Each wants a `beatMs` row, a test calling the helper with its own tick
+rate, and `crcbl-sample-test` as a dev-dependency where it lacks one. Pinned or
+not, a test holds the constant and not its use: a heartbeat line gated on a
+literal instead of `HEARTBEAT_TICKS` passes.
 
 ## The sample plans — what they still owe
 

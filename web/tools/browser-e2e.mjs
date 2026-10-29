@@ -642,6 +642,10 @@ function riggedPairGlb() {
 const EXPECTATIONS = {
   breakout: {
     key: 'Space',
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/breakout/src/game.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     waiting: (line) => line.includes('WAITING'),
     started: (line) => line.includes('PLAYING'),
     startedLabel: 'Space launches the ball',
@@ -707,6 +711,10 @@ const EXPECTATIONS = {
   },
   flappy: {
     key: 'Space',
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/flappy/src/game.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     waiting: (line) => line.includes('WaitingToStart'),
     started: (line) => line.includes('Playing'),
     startedLabel: 'Space starts the run',
@@ -737,6 +745,10 @@ const EXPECTATIONS = {
   // else. `apps/asteroids/src/game.rs` logs it for exactly this reason.
   asteroids: {
     key: 'Space',
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/asteroids/src/game.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     waiting: (line) => line.includes('WaitingToStart'),
     started: (line) => line.includes('Playing'),
     startedLabel: 'Space starts the game',
@@ -756,6 +768,10 @@ const EXPECTATIONS = {
   // says the demo booted a fresh run rather than a restarted one.
   horde: {
     key: 'Space',
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/horde/src/game.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     waiting: (line) =>
       line.includes('WaitingToStart') && line.includes('run: 1'),
     started: (line) => line.includes('Playing'),

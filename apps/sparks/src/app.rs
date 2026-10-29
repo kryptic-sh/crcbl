@@ -407,17 +407,10 @@ mod tests {
     /// the run and nothing reddens.
     #[test]
     fn the_browser_gates_beat_is_this_samples_heartbeat() {
-        let millis = HEARTBEAT_TICKS * 1_000;
-        let hz = u64::from(crate::show::TICK_HZ);
-        assert_eq!(
-            millis % hz,
-            0,
-            "the heartbeat is not a whole number of milliseconds, which `beatMs` cannot spell"
-        );
-        assert_eq!(
-            crcbl_sample_test::browser_gate_demo_expectation("sparks", &["beatMs"]),
-            (millis / hz).to_string(),
-            "the browser gate's sparks beatMs is not HEARTBEAT_TICKS at TICK_HZ"
+        crcbl_sample_test::assert_browser_gate_beat(
+            "sparks",
+            HEARTBEAT_TICKS,
+            crate::show::TICK_HZ,
         );
     }
 }

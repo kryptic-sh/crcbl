@@ -130,6 +130,11 @@ const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
 /// process.
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
+/// How often the `[HUD]` heartbeat logs, in ticks: a second at
+/// [`DEFAULT_TICK_HZ`]. `web/tools/browser-e2e.mjs` watches it to tell a paused
+/// demo from a running one, and its `beatMs` row is this period.
+pub const HEARTBEAT_TICKS: u64 = 60;
+
 // ---------------------------------------------------------------------------
 // The arena
 // ---------------------------------------------------------------------------
@@ -3691,7 +3696,7 @@ impl Game {
 
         let state_changed = self.state != self.prev_log_state;
         self.prev_log_state = self.state;
-        // **Every sixty ticks, which is a second of simulated time, and the same
+        // **Every [`HEARTBEAT_TICKS`], a second of simulated time, and the same
         // cadence breakout, flappy and asteroids use.** `web/tools/browser-e2e.mjs`
         // watches for this heartbeat to tell a paused demo from a running one.
         //
@@ -3706,7 +3711,7 @@ impl Game {
         // in this game moves the player, so a position that differs between two
         // heartbeats is the player having walked and cannot be anything else.
         // `web/tools/browser-e2e.mjs` reads it to see a finger drive the stick.
-        if state_changed || self.ticks_run.is_multiple_of(60) {
+        if state_changed || self.ticks_run.is_multiple_of(HEARTBEAT_TICKS) {
             crcbl::log::info!(
                 "[HUD] {:?}  run: {}  time: {:.1}  x: {:.2}  y: {:.2}  best: {}  kills: {}  \
                  hp: {:.0}  lvl: {}  enemies: {}  bolts: {}  gems: {}",
