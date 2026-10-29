@@ -8460,8 +8460,7 @@ scene menu with the gaps below.
   `crcbl-image`'s SVG filters, which do not depend on `crcbl-core` and would
   need the edge, and `crcbl-golden`'s, which depends on nothing by design (see
   its `srgb` module docs).
-- **Untested**: trimming the definition cache at its cap, and a stylesheet write
-  caught half-finished that happens to parse.
+- **Untested**: a stylesheet write caught half-finished that happens to parse.
 - **A block left open at the end of a file is not reported**: `cssparser` closes
   it silently.
 - **An invalid `var()` warns again** every time its definition is recomputed

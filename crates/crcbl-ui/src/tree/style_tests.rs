@@ -9,7 +9,7 @@ use glam::Vec2;
 use super::tests::{cache_is_empty, frame, idle};
 use super::*;
 use crate::draw_list::DrawList;
-use crate::style::{Declaration, STYLESHEET_POLL_INTERVAL, Severity, StyleStats};
+use crate::style::{CACHE_CAPACITY, Declaration, STYLESHEET_POLL_INTERVAL, Severity, StyleStats};
 
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
@@ -468,6 +468,70 @@ fn a_paint_only_hover_keeps_every_layout_cache_and_a_size_change_clears_only_its
         110.0,
         "the sibling did not move"
     );
+}
+
+/// A child under each of `parents` blocks, every parent in a colour of its own
+/// so each is an inherited identity, and each child's merged rules a
+/// definition, of their own; built last to first when `reversed`. Returns each
+/// child's key with its parent's colour.
+fn coloured_parents(ui: &mut Ui, parents: usize, reversed: bool) -> Vec<(NodeKey, [f32; 4])> {
+    let mut children = Vec::with_capacity(parents);
+    let order: Box<dyn Iterator<Item = usize>> = if reversed {
+        Box::new((0..parents).rev())
+    } else {
+        Box::new(0..parents)
+    };
+    for at in order {
+        let colour = [at as f32 / parents as f32, 0.0, 0.0, 1.0];
+        ui.block_keyed(at, ".parent", &[Declaration::Color(colour)], |ui| {
+            children.push((ui.block(".child", &[], |_| {}).key, colour));
+        });
+    }
+    children
+}
+
+/// **A tree that outgrows [`CACHE_CAPACITY`] has the caches dropped at the
+/// next frame's start, and every node re-resolves to the style it had** — each
+/// child still inheriting its own parent's colour although building in the
+/// other order hands the parents each other's old ids — against a control under
+/// the cap whose unchanged frame resolves nothing.
+#[test]
+fn outgrowing_the_cache_re_resolves_every_node_to_the_same_style() {
+    // More than the identities and definitions the tree adds of its own.
+    const MARGIN: usize = 8;
+    let mut under = Ui::new();
+    frame(&mut under, idle(), |ui| {
+        coloured_parents(ui, CACHE_CAPACITY - MARGIN, false);
+    });
+    frame(&mut under, idle(), |ui| {
+        coloured_parents(ui, CACHE_CAPACITY - MARGIN, false);
+    });
+    assert_eq!(
+        under.style_stats().resolves,
+        0,
+        "a tree under the cap re-resolved"
+    );
+
+    let mut over = Ui::new();
+    frame(&mut over, idle(), |ui| {
+        coloured_parents(ui, CACHE_CAPACITY, false);
+    });
+    let mut children = Vec::new();
+    frame(&mut over, idle(), |ui| {
+        children = coloured_parents(ui, CACHE_CAPACITY, true);
+    });
+    let stats = over.style_stats();
+    assert_eq!(
+        stats.resolves, stats.nodes,
+        "outgrowing the cache did not re-resolve everything"
+    );
+    for (child, colour) in children {
+        assert_eq!(
+            style_of(&over, child).color,
+            colour,
+            "a child inherited another parent's colour after the trim"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

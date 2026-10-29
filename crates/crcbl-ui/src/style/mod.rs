@@ -48,6 +48,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
+#[cfg(test)]
+pub(crate) use cascade::CACHE_CAPACITY;
 pub(crate) use cascade::{Candidates, InheritedId, Origin, Resolver, RuleIndex};
 pub use property::from_srgb8;
 pub(crate) use selector::{Element, NodeSelector};
