@@ -11233,13 +11233,14 @@ The sun disc half is done too — `sky.slang`'s `sun_disc` and
   had none of, and `crcbl_shaders::probe`'s literature tests cover all three on
   the host.
 
-- **Nothing reflects a ray downward, `Scene::GradientMirror` included.** Every
-  ray in that fixture leaves the plate upward, so
-  `crcbl_shaders::sky_prefilter`'s ground band reaches the frame only through
-  the tail of the kernel — the gap
-  `a_missed_reflection_falls_back_to_the_sky_along_its_own_ray` already names
-  for `Scene::Ssr`, now with a second fixture that does not close it. What would
-  is a reflector facing down: a ceiling, or a camera under the plate.
+- **`Scene::GradientMirror` reflects nothing downward.** Every ray in that
+  fixture leaves the plate upward, so `crcbl_shaders::sky_prefilter`'s ground
+  band reaches its per-texel comparison only through the tail of the kernel.
+  `sky_prefiltered`'s arm below the horizon is held by
+  `crcbl::screenshot::ssr_ceiling_forward` in
+  `a_missed_reflection_falls_back_to_the_sky_along_its_own_ray`, which compares
+  bands rather than texels; a per-texel check of that arm would need this
+  fixture's plate facing down, or a camera under it.
 
 - **Not measured on Metal or D3D12.** The device path was run on `vk` only, on
   radv and on lavapipe. The `msl` and `dxil` artifacts are committed and
@@ -14128,39 +14129,6 @@ order:
   since it existed, and no golden has moved on it, so the odds are low — but a
   256-entry decode table and an exact encode would make the chain bit-identical
   everywhere and is the fix if a re-bless ever disagrees across hosts by one.
-
-### No fixture reflects a ray downward, so the SSR fallback's ground arm is untested (2026-08-27)
-
-`ssr.slang`'s `sky_prefiltered` (until 2026-08-29 `sky_radiance`) picks between
-the gradient's zenith and its ground on the sign of the ray's `y`. Every
-reflective surface in this tree is a floor whose normal is `+Y`, so every
-reflected ray leaves it upward and the ground arm is never the right answer for
-any pixel in any suite.
-
-**Measured, not suspected**, on `sky_radiance`; the selection moved into
-`sky_prefiltered` unchanged. Replacing the branch with `far = camera.sky[0].rgb`
-outright — the zenith always, the ground band read by nothing — leaves the whole
-render e2e suite green,
-`a_missed_reflection_falls_back_to_the_sky_along_its_own_ray` included. Three
-other sabotages of the same function do fail it: dropping the sky from the
-environment sum, swapping the two poles, and collapsing the gradient to the mean
-of its bands.
-
-**What covers it today.** `crcbl_shaders::sky`'s host-side
-`the_three_bands_are_returned_exactly_at_their_own_directions` pins all three
-bands including the ground, and — since the background pass landed — `crcbl`'s
-`mesh_e2e` `the_background_is_the_gradient_the_ray_through_it_sees` draws the
-ground band on a GPU and compares it per texel: that scene camera looks down, so
-every one of its background rays leaves below the horizon. So the gradient's
-ground arm is now covered where it is _drawn_. What is still uncovered is the
-same arm where it is _reflected_, which is a different copy of the arithmetic in
-`ssr.slang` and the one the sabotage above left green.
-
-**What would close it:** a reflective surface facing down — an underside, or a
-ceiling above the floor — in `screenshot`'s `ssr_forward` scene or a new one
-beside it. `Scene::Ssr` is deliberately one floor and one pyramid, so this is a
-second fixture rather than a change to that one, and it would also give the
-march its first downward ray, which nothing else in the suite has either.
 
 ### Fog is composited before the reflections, so a reflection is unfogged (2026-08-27)
 

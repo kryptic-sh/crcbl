@@ -3270,15 +3270,14 @@ const ROUGH_SKY_BELOW_CEILING: f32 = 35.0;
 /// says by how much. A pass that scaled by Schlick again passes the floor and
 /// fails the ceiling.
 ///
-/// **What this scene cannot see, stated rather than implied:** every reflected
-/// ray in it leaves the floor *upward*, so the branch that picks the ground
-/// below the horizon is never the right answer for any pixel here. A shader
-/// that dropped that branch and always took the zenith renders this frame
-/// correctly — it was run, and it passes. What covers that arm is
-/// `crcbl_shaders::sky`'s own
-/// `the_three_bands_are_returned_exactly_at_their_own_directions` on the host
-/// side, and `docs/backlog.md` carries the gap: no fixture in this tree
-/// reflects a ray downward.
+/// **And the same mirror turned into a ceiling is what sees the ground arm.**
+/// Every ray the floor reflects leaves it upward, so the branch that picks the
+/// ground below the horizon is never the right answer for any pixel of it — a
+/// shader that dropped that branch and always took the zenith renders all four
+/// floor pairs correctly. `crcbl::screenshot::ssr_ceiling_forward` is the same
+/// frame turned half a turn about the view axis, so the bands land on the same
+/// pixels and the two skies swap roles: there the sky lit below must arrive and
+/// the sky lit above must not.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
 fn a_missed_reflection_falls_back_to_the_sky_along_its_own_ray() {
@@ -3346,10 +3345,14 @@ fn a_missed_reflection_falls_back_to_the_sky_along_its_own_ray() {
     let rough_unlit = contribution(rough, crcbl::render::Sky::NONE);
     let rough_from_above = contribution(rough, above);
     let rough_from_below = contribution(rough, below);
+    let ceiling: Build = crcbl::screenshot::ssr_ceiling_forward;
+    let ceiling_from_above = contribution(ceiling, above);
+    let ceiling_from_below = contribution(ceiling, below);
     eprintln!(
         "crcbl render e2e: ssr sky fallback — no sky {unlit:.1}, bright above {from_above:.1}, \
          bright below {from_below:.1}; rough floor: no sky {rough_unlit:.1}, bright above \
-         {rough_from_above:.1}, bright below {rough_from_below:.1}"
+         {rough_from_above:.1}, bright below {rough_from_below:.1}; ceiling: bright above \
+         {ceiling_from_above:.1}, bright below {ceiling_from_below:.1}"
     );
 
     assert!(
@@ -3391,6 +3394,19 @@ fn a_missed_reflection_falls_back_to_the_sky_along_its_own_ray() {
          more than the `DFG` pair at a grazing N·V on the roughest row allows; the environment \
          is being scaled by Schlick along one direction, or by the pair's roughness-zero row, \
          which is the same number"
+    );
+
+    // The ceiling: the mirror pairs with the poles' roles swapped.
+    assert!(
+        ceiling_from_below >= SKY_FALLBACK_FLOOR,
+        "a sky bright below added only {ceiling_from_below:.1} to a ceiling whose rays leave it \
+         downward, so the fallback's arm below the horizon is not reading the ground"
+    );
+    assert!(
+        ceiling_from_below > ceiling_from_above + SKY_FALLBACK_FLOOR,
+        "a sky bright below added {ceiling_from_below:.1} to the ceiling and the same sky turned \
+         upside down added {ceiling_from_above:.1}; these rays look down, so a fallback that read \
+         its direction would not confuse the two"
     );
 }
 

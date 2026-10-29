@@ -336,6 +336,7 @@ impl SceneState {
                     RenderEffects::DEFAULT_STACK,
                     &crate::render::scene::demo(),
                     DEMO_TINTED,
+                    glam::Mat4::IDENTITY,
                     path,
                 )?
                 .into()

@@ -1767,6 +1767,7 @@ pub fn ssr_forward(
         effects,
         &crate::render::scene::demo(),
         DEMO_TINTED,
+        glam::Mat4::IDENTITY,
         device.preferred_geometry_path(),
     )
 }
@@ -2467,13 +2468,52 @@ pub fn ssr_rough_floor_forward(
         effects,
         &scene,
         rough,
+        glam::Mat4::IDENTITY,
+        device.preferred_geometry_path(),
+    )
+}
+
+/// [`ssr_forward`] **turned half a turn about the view axis**, so its floor is
+/// a ceiling and every ray it reflects leaves it downward.
+///
+/// The floor, the pyramid, the camera and the sun all turn together, so the
+/// frame is the one [`ssr_forward`] draws, pixel for pixel, in everything but
+/// what depends on which way is up in the world: the sky. A missed ray that
+/// looked up off the floor looks down off the ceiling, which is the half of
+/// `ssr.slang`'s `sky_prefiltered` the floor never reaches —
+/// `tests/render_e2e.rs` holds this scene to the sky lit below on the same
+/// bands it holds the floor to the sky lit above.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built.
+pub fn ssr_ceiling_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    sky: crcbl_render::Sky,
+    effects: crcbl_render::RenderEffects,
+) -> Result<ForwardScene, OffscreenError> {
+    ssr_forward_on(
+        device,
+        queue,
+        format,
+        sky,
+        effects,
+        &crate::render::scene::demo(),
+        DEMO_TINTED,
+        // Half a turn about `Z`, spelled as the exact matrix rather than as
+        // `from_rotation_z(PI)`, whose sine is not quite zero in `f32`. Its
+        // determinant is one, so no triangle's winding flips.
+        glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0)),
         device.preferred_geometry_path(),
     )
 }
 
 /// The ssr scene over `scene`, with its floor shaded through material row
-/// `floor`: [`ssr_forward`] and [`ssr_rough_floor_forward`] differ in nothing
-/// else.
+/// `floor` and the whole of it — geometry, camera and sun — carried by `turn`:
+/// [`ssr_forward`], [`ssr_rough_floor_forward`] and [`ssr_ceiling_forward`]
+/// differ in nothing else.
 #[allow(clippy::too_many_arguments)]
 fn ssr_forward_on(
     device: &dyn Device,
@@ -2483,6 +2523,7 @@ fn ssr_forward_on(
     effects: crcbl_render::RenderEffects,
     scene: &crate::render::scene::SceneDesc<'_>,
     floor: usize,
+    turn: glam::Mat4,
     path: crate::hal::GeometryPath,
 ) -> Result<ForwardScene, OffscreenError> {
     let mut renderer = ForwardRenderer::with_scene_on_path(device, queue, format, scene, path)?;
@@ -2491,11 +2532,26 @@ fn ssr_forward_on(
         ..EffectRequest::default()
     });
     renderer.set_sky(sky);
-    place(&mut renderer, DEMO_CUBE, floor, spot_floor());
-    place(&mut renderer, DEMO_PYRAMID, DEMO_UNTINTED, ssr_pyramid());
+    place(&mut renderer, DEMO_CUBE, floor, turn * spot_floor());
+    place(
+        &mut renderer,
+        DEMO_PYRAMID,
+        DEMO_UNTINTED,
+        turn * ssr_pyramid(),
+    );
+    let camera = ssr_camera();
+    let sun = ssr_sun();
     Ok(ForwardScene {
-        camera: ssr_camera(),
-        sun: ssr_sun(),
+        camera: Camera {
+            eye: turn.transform_point3(camera.eye),
+            target: turn.transform_point3(camera.target),
+            up: turn.transform_vector3(camera.up),
+            ..camera
+        },
+        sun: crcbl_render::DirectionalLight {
+            direction: turn.transform_vector3(sun.direction),
+            ..sun
+        },
         renderer: Box::new(renderer),
     })
 }
