@@ -1257,4 +1257,15 @@ mod tests {
             "the sky did not move with the clock"
         );
     }
+
+    /// **The beat `web/tools/browser-e2e.mjs` divides by is this sample's
+    /// heartbeat**: [`HEARTBEAT_TICKS`] at [`crate::args::DEFAULT_TICK_HZ`], in milliseconds.
+    #[test]
+    fn the_browser_gates_beat_is_this_samples_heartbeat() {
+        crcbl_sample_test::assert_browser_gate_beat(
+            "sundial",
+            HEARTBEAT_TICKS,
+            crate::args::DEFAULT_TICK_HZ,
+        );
+    }
 }

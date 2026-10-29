@@ -2101,6 +2101,7 @@ name = "options"
 version = "0.13.0"
 dependencies = [
  "crcbl",
+ "crcbl-sample-test",
 ]
 
 [[package]]
@@ -2769,6 +2770,7 @@ version = "0.13.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
+ "crcbl-sample-test",
 ]
 
 [[package]]
@@ -2868,6 +2870,7 @@ name = "tumble"
 version = "0.13.0"
 dependencies = [
  "crcbl",
+ "crcbl-sample-test",
 ]
 
 [[package]]

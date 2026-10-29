@@ -37,6 +37,7 @@ crcbl = { workspace = true, features = ["scene"] }
 # The golden suite's image I/O. A dev-dependency, which is the whole of
 # `crcbl-golden`'s own manifest rule: it reaches no shipped binary.
 [dev-dependencies]
+crcbl-sample-test = { workspace = true }
 crcbl-golden = { workspace = true }
 
 [lints]

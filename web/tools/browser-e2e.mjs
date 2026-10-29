@@ -807,6 +807,10 @@ const EXPECTATIONS = {
   // but doing nothing would leave it standing still, and a frame counter,
   // a wall clock or the heartbeat's own cadence cannot move it.
   hud: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/hud/src/game.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     key: null,
     waiting: (line) => line.includes('[HUD] tick: 1  wave: 1'),
     moving: /rolls: (\d+)/,
@@ -848,6 +852,10 @@ const EXPECTATIONS = {
   // and still quick enough that consecutive heartbeats differ far above the two
   // decimal places the line prints them to.
   lantern: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/lantern/src/app.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     // **One of the two demos that draw mesh instances**, so one of the two whose
     // cull pass has anything to count — quarry is the other. Every demo builds a
     // `ForwardRenderer`, and the rest fill their frames with sprites and text,
@@ -900,6 +908,10 @@ const EXPECTATIONS = {
   // them, and they are the control for the page's own controls: a boot that had
   // already moved a knob would report it here.
   alcove: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/alcove/src/app.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     // The seventh demo that draws mesh instances, so the seventh whose cull pass
     // has something to count. See lantern's row and group D.
     culls: true,
@@ -1083,6 +1095,10 @@ const EXPECTATIONS = {
   // `FIXTURE_TICK` and steps once per fixed step, so the sixtieth heartbeat is
   // at tick 120 on every machine and every adapter or the two have come apart.
   sundial: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/sundial/src/app.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     // The eighth demo that draws mesh instances, so the eighth whose cull pass
     // has something to count. See lantern's row and group D.
     culls: true,
@@ -1247,6 +1263,10 @@ const EXPECTATIONS = {
   // it is not asserted here: a browser with no `timestamp-query` draws the same
   // pool and says so in that field, which is a report rather than a failure.
   tide: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/tide/src/app.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     // A demo that draws mesh instances, so its cull pass has something to
     // count. See lantern's row and group D.
     culls: true,
@@ -1315,6 +1335,10 @@ const EXPECTATIONS = {
   // and still moves the eye three metres between consecutive heartbeats, which
   // is far above the two decimal places the line prints it to.
   quarry: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/quarry/src/app.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     // The other demo whose cull pass has something to count — see lantern's row
     // and group D. This one is the sample that pass exists for.
     culls: true,
@@ -1436,6 +1460,10 @@ const EXPECTATIONS = {
   // that angle on the debug panel. It stops the moment anyone drags or scrolls,
   // so this gate reads it before group F touches the canvas.
   viewer: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/viewer/src/app.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     key: null,
     // The only demo that overrides `HostedGame::cursor`: the whole canvas is a
     // turntable, so it shows the open hand every model viewer shows, and the
@@ -1529,6 +1557,10 @@ const EXPECTATIONS = {
   // key a visitor presses ends the script for good. Group C reads it before
   // group F touches anything.
   bracket: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/bracket/src/app.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     key: null,
     // Read off the *first* line, and what it asks is that `error:` is a number.
     // That readout is the sample's entire claim — how far the ladder is from
@@ -1552,6 +1584,10 @@ const EXPECTATIONS = {
   // touching a key, and the first movement key ends the circuit for good. Group
   // C reads `moving` before the `walk` block below presses anything.
   puppet: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/puppet/src/game.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     // The third demo that draws mesh instances, so the third whose cull pass
     // has something to count. See lantern's row and group D.
     culls: true,
@@ -2143,6 +2179,10 @@ const EXPECTATIONS = {
     wasmHeap: true,
   },
   orbit: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/orbit/src/game.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     key: null,
     // Read off the *first* line, which is the ship still on the pad — so it
     // cannot ask about the ascent. What it asks instead is that `apo:` is a
@@ -2165,6 +2205,10 @@ const EXPECTATIONS = {
   // check to fail on a demo doing exactly what it was built to do. See group D
   // for the pair it swaps in.
   options: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/options/src/app.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     still: true,
     // No start key and no waiting state: the screen is what the visitor came
     // for and it is up from the first frame. The arrows and ENTER do reach it —
@@ -2253,6 +2297,10 @@ const EXPECTATIONS = {
   // build *refused*, and a wave the key brought forward against the tick it was
   // due on anyway.
   towers: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/towers/src/game.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     // The seventh demo that draws mesh instances, so the seventh whose cull
     // pass has something to count: the ground slab, the lane, five build pads,
     // a box per creep and a tower per plot are all `crcbl::greybox` primitives.
@@ -2412,6 +2460,10 @@ const EXPECTATIONS = {
   // test in `apps/tumble/src/scene.rs` pins. The page logs both, so the
   // constant lives in one place.
   tumble: {
+    // A second, as `NOMINAL_BEAT_MS` assumes, and said rather than assumed:
+    // `apps/tumble/src/app.rs`'s `HEARTBEAT_TICKS` is the period, and
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds this row to it.
+    beatMs: 1000,
     // A demo that draws mesh instances — floors, boards, pegs and balls — so
     // its cull pass has something to count. See lantern's row and group D.
     culls: true,

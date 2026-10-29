@@ -867,4 +867,15 @@ mod tests {
             "N put the bent direction up and the heartbeat still names another picture: {bent}"
         );
     }
+
+    /// **The beat `web/tools/browser-e2e.mjs` divides by is this sample's
+    /// heartbeat**: [`HEARTBEAT_TICKS`] at [`crate::args::DEFAULT_TICK_HZ`], in milliseconds.
+    #[test]
+    fn the_browser_gates_beat_is_this_samples_heartbeat() {
+        crcbl_sample_test::assert_browser_gate_beat(
+            "alcove",
+            HEARTBEAT_TICKS,
+            crate::args::DEFAULT_TICK_HZ,
+        );
+    }
 }

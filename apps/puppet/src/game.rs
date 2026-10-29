@@ -1448,4 +1448,11 @@ mod tests {
             "it went the long way: {stepped}",
         );
     }
+
+    /// **The beat `web/tools/browser-e2e.mjs` divides by is this sample's
+    /// heartbeat**: [`HEARTBEAT_TICKS`] at [`DEFAULT_TICK_HZ`], in milliseconds.
+    #[test]
+    fn the_browser_gates_beat_is_this_samples_heartbeat() {
+        crcbl_sample_test::assert_browser_gate_beat("puppet", HEARTBEAT_TICKS, DEFAULT_TICK_HZ);
+    }
 }

@@ -75,3 +75,10 @@ fn d_toggles_the_debug_view() {
     game.key_event(DEBUG_VIEW_KEY, true);
     assert!(!game.scenes().debug_view());
 }
+
+/// **The beat `web/tools/browser-e2e.mjs` divides by is this sample's
+/// heartbeat**: [`HEARTBEAT_TICKS`] at [`crate::scene::TICK_HZ`], in milliseconds.
+#[test]
+fn the_browser_gates_beat_is_this_samples_heartbeat() {
+    crcbl_sample_test::assert_browser_gate_beat("tumble", HEARTBEAT_TICKS, crate::scene::TICK_HZ);
+}

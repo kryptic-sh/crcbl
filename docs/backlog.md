@@ -22487,20 +22487,14 @@ settings screen's menu is up on every frame, so the assertion itself is one line
 once a frame can be driven. Three hand-written lines, per the
 `scripted`/`headless` decision recorded in `docs/notes/samples.md`.
 
-### Demos with no `beatMs` row are assumed to beat once a second (2026-09-25)
+### A demo's beat test holds its constant, not its use (2026-10-29)
 
-Every demo whose `web/tools/browser-e2e.mjs` block has no `beatMs` row is
-assumed to log its heartbeat once a second, and nothing holds it to that.
-Pinned, each by its own `the_browser_gates_beat_is_this_samples_heartbeat`
-calling `crcbl_sample_test::assert_browser_gate_beat`: shard, breach, sparks,
-breakout, flappy, asteroids and horde. **Still unpinned**, read 2026-10-29: hud,
-lantern, alcove, sundial, tide, quarry, viewer, bracket, puppet, orbit, options,
-towers and tumble, every one declaring `HEARTBEAT_TICKS` at 60 ticks and no row,
-so each agrees with the gate's assumed second today and nothing fails if one
-changes. Each wants a `beatMs` row, a test calling the helper with its own tick
-rate, and `crcbl-sample-test` as a dev-dependency where it lacks one. Pinned or
-not, a test holds the constant and not its use: a heartbeat line gated on a
-literal instead of `HEARTBEAT_TICKS` passes.
+Every demo block in `web/tools/browser-e2e.mjs` has a `beatMs` row, and each
+demo's `the_browser_gates_beat_is_this_samples_heartbeat` holds it to that
+demo's `HEARTBEAT_TICKS` through `crcbl_sample_test::assert_browser_gate_beat`.
+What none of them checks is that the heartbeat line is gated on that constant: a
+line switched back to a literal period passes. Not covered; closing it would
+need each demo's heartbeat counted over a run of known length.
 
 ## The sample plans — what they still owe
 
