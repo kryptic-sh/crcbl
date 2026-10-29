@@ -8343,8 +8343,7 @@ pending.
 - **Untested**: the `…` glyph in a registered font (the synthetic fixed-pitch
   font maps nothing past Latin-1, so the registered path is covered with the
   `...` fallback and the `…` path only in the committed font); a real TTF
-  registered; the pixels of a cut span (no golden); right-to-left text, whose
-  lines are reordered since 2026-10-19 but which no ellipsis test cuts.
+  registered; the pixels of a cut span (no golden).
 
 ## What the fitted, scrolled menu left open (2026-09-25)
 

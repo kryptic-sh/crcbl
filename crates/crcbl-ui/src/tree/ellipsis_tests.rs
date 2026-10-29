@@ -231,6 +231,56 @@ fn a_line_is_cut_between_clusters() {
     }
 }
 
+/// **A right-to-left line is cut at its logical end, which is its left**: a
+/// Hebrew line keeps its first words, as left-to-right text does, and the
+/// ellipsis after them draws left of every glyph it kept, where the line's
+/// reading ends.
+#[test]
+fn a_right_to_left_line_is_cut_at_its_left() {
+    let words = [
+        "\u{5E9}\u{5DC}\u{5D5}\u{5DD}",
+        "\u{5E2}\u{5D5}\u{5DC}\u{5DD}",
+        "\u{5D8}\u{5D5}\u{5D1}",
+        "\u{5D1}\u{5D5}\u{5E7}\u{5E8}",
+        "\u{5DC}\u{5D9}\u{5DC}\u{5D4}",
+    ];
+    let text = words.join(" ");
+    let mut ui = tree();
+    let (key, list) = card(&mut ui, 100.0, ".line.sans", &text);
+    let shown = ui.text(key).expect("a text span");
+    let kept = shown
+        .strip_suffix(ELLIPSIS)
+        .unwrap_or_else(|| panic!("{shown:?} does not end in the ellipsis"));
+    assert!(
+        !kept.is_empty() && text.starts_with(kept),
+        "{shown:?} is not a prefix"
+    );
+    assert!(Family::Sans.width(shown) <= content_width(&ui, key));
+
+    let ellipsis = Font::sans().glyph_id('\u{2026}');
+    let glyphs = list
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            DrawCommand::Glyphs { glyphs, .. } => Some(glyphs),
+            _ => None,
+        })
+        .expect("the span drew its glyphs");
+    let at = glyphs
+        .iter()
+        .find(|glyph| glyph.glyph == ellipsis)
+        .expect("the ellipsis was drawn")
+        .offset
+        .x;
+    assert!(
+        glyphs
+            .iter()
+            .filter(|glyph| glyph.glyph != ellipsis)
+            .all(|glyph| glyph.offset.x > at),
+        "the ellipsis is not left of the letters it follows"
+    );
+}
+
 /// **Text that fits is left whole**, and emits the same text command as the
 /// span without the rule, independently of its overflow clip.
 #[test]
