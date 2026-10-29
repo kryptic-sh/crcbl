@@ -279,6 +279,7 @@ impl Recorder {
     pub fn capture(&self, environment: Environment) -> Capture {
         Capture {
             environment,
+            clock: None,
             cpu: self.cpu.iter().cloned().collect(),
             gpu: self.gpu.iter().cloned().collect(),
         }

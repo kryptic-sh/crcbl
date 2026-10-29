@@ -13,7 +13,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`crcbl_profile::Capture` has a new field, `clock: Option<ClockPair>`**, so
+  code building one field by field must name it (`None` keeps the old meaning).
+  `.crcblprof` is format version 2, which carries it; version-1 files still
+  read, as captures with no clock pair.
+
 ### Added
+
+- **A capture can carry a calibrated CPU/GPU clock pair**
+  (`crcbl_profile::ClockPair`: one instant on both clocks and how far apart the
+  readings may be), and `ClockPair::to_cpu` places a GPU time on the CPU's
+  timeline. `crcbl profile report` uses it: the Chrome trace puts every pass on
+  the CPU's timeline and names the GPU process with the pair's uncertainty, or,
+  when the pair cannot place every pass, leaves them on the GPU's own clock as
+  before. The engine does not measure a pair yet, so its captures carry none.
 
 - **`CRCBL_PROFILE_BUDGET_MS` captures the frames before a hitch.** Set beside
   `CRCBL_PROFILE_CAPTURE`, it writes the capture as the first frame whose CPU

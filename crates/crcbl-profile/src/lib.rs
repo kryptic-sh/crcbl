@@ -22,8 +22,8 @@
 //! number need not be the same frame; and CPU events are nanoseconds since the
 //! trace epoch where GPU passes are nanoseconds on the GPU's timestamp clock.
 //! Nothing here pretends either pair agrees. Putting the two on one timeline
-//! takes a calibrated clock pair, which a capture will carry when the producer
-//! can measure one.
+//! takes a [`ClockPair`]: one instant read on both clocks, which a capture
+//! carries when its producer could measure one.
 //!
 //! # Reading and writing
 //!
@@ -39,6 +39,9 @@ pub use format::{FORMAT_VERSION, FormatError, MAGIC};
 pub struct Capture {
     /// What the run was taken on.
     pub environment: Environment,
+    /// The CPU's and the GPU's clocks read at one instant, which puts passes
+    /// on the CPU's timeline; `None` when the producer could not read both.
+    pub clock: Option<ClockPair>,
     /// The CPU's frames, oldest first.
     pub cpu: Vec<CpuFrame>,
     /// The GPU's frames, oldest first.
@@ -67,6 +70,33 @@ impl Environment {
             .iter()
             .find(|(entry, _)| entry == name)
             .map(|(_, value)| value.as_str())
+    }
+}
+
+/// One instant read on the CPU's clock and on the GPU's timestamp clock.
+///
+/// One pair per capture assumes the two clocks run at the same rate over it;
+/// a capture is seconds long, where crystal drift is microseconds at most.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClockPair {
+    /// The instant on the CPU's clock: nanoseconds since the trace epoch, as
+    /// [`Event::nanos`] is.
+    pub cpu_nanos: u64,
+    /// The same instant on the GPU's timestamp clock, as [`Pass::begin_nanos`]
+    /// is.
+    pub gpu_nanos: u64,
+    /// How far apart the two readings may be, either way: a GPU time placed on
+    /// the CPU's clock is within this of where it happened.
+    pub uncertainty_nanos: u64,
+}
+
+impl ClockPair {
+    /// The GPU time `gpu_nanos` on the CPU's clock, or `None` when that falls
+    /// before the trace epoch or past what a `u64` holds.
+    #[must_use]
+    pub fn to_cpu(&self, gpu_nanos: u64) -> Option<u64> {
+        let since = i128::from(gpu_nanos) - i128::from(self.gpu_nanos);
+        u64::try_from(i128::from(self.cpu_nanos) + since).ok()
     }
 }
 

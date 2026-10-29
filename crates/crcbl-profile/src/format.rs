@@ -1,6 +1,6 @@
 //! The `.crcblprof` file: layout, writer and reader.
 //!
-//! # Layout (format version 1)
+//! # Layout (format version 2)
 //!
 //! Little-endian throughout, as every format this workspace writes.
 //!
@@ -8,6 +8,7 @@
 //! magic:        b"CRCBLPRF"
 //! version:      u16
 //! environment:  u32 count, then count × (string name, string value)
+//! clock:        optional (u64 cpu, u64 gpu, u64 uncertainty); version 2 on
 //! cpu:          u32 count, then count × CpuFrame
 //! gpu:          u32 count, then count × GpuFrame
 //!
@@ -25,6 +26,8 @@
 //! optional: u8 0 for none, 1 then the value
 //! ```
 //!
+//! Version 1 is the same without the clock, and reads as a capture with none.
+//!
 //! # What the reader refuses
 //!
 //! Anything that is not exactly a capture this build can read: another file's
@@ -34,13 +37,18 @@
 //! at a time, so a count larger than the file runs out of bytes and says so
 //! rather than reserving memory for it.
 
-use crate::{Capture, CpuFrame, Environment, Event, EventKind, GpuFrame, Pass, Statistics, Thread};
+use crate::{
+    Capture, ClockPair, CpuFrame, Environment, Event, EventKind, GpuFrame, Pass, Statistics, Thread,
+};
 
 /// The first eight bytes of every capture.
 pub const MAGIC: &[u8; 8] = b"CRCBLPRF";
 
 /// The layout version this build writes, and the newest it reads.
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
+
+/// The first version whose captures carry a clock pair.
+const CLOCK_VERSION: u16 = 2;
 
 /// The statistics counters a capture can carry, which is how many mask bits
 /// are defined.
@@ -99,6 +107,15 @@ impl Capture {
             out.text(name, "an environment name")?;
             out.text(value, "an environment value")?;
         }
+        match &self.clock {
+            None => out.u8(0),
+            Some(clock) => {
+                out.u8(1);
+                out.u64(clock.cpu_nanos);
+                out.u64(clock.gpu_nanos);
+                out.u64(clock.uncertainty_nanos);
+            }
+        }
         out.count(self.cpu.len(), "the CPU frames")?;
         for frame in &self.cpu {
             out.cpu_frame(frame)?;
@@ -133,6 +150,15 @@ impl Capture {
             let value = reader.text("an environment value")?;
             environment.entries.push((name, value));
         }
+        let clock = if version >= CLOCK_VERSION && reader.present("the clock pair")? {
+            Some(ClockPair {
+                cpu_nanos: reader.u64("the clock pair's CPU time")?,
+                gpu_nanos: reader.u64("the clock pair's GPU time")?,
+                uncertainty_nanos: reader.u64("the clock pair's uncertainty")?,
+            })
+        } else {
+            None
+        };
         let mut cpu = Vec::new();
         for _ in 0..reader.u32("the CPU frame count")? {
             cpu.push(reader.cpu_frame()?);
@@ -146,6 +172,7 @@ impl Capture {
         }
         Ok(Self {
             environment,
+            clock,
             cpu,
             gpu,
         })
@@ -385,9 +412,9 @@ mod tests {
     use super::*;
 
     /// A capture that uses every part of the layout: two environment entries,
-    /// a named and an unnamed thread, all three event kinds, a pass with
-    /// statistics (some counters absent) and one without, and a second frame of
-    /// each kind.
+    /// a clock pair, a named and an unnamed thread, all three event kinds, a
+    /// pass with statistics (some counters absent) and one without, and a
+    /// second frame of each kind.
     fn every_field() -> Capture {
         Capture {
             environment: Environment {
@@ -396,6 +423,11 @@ mod tests {
                     ("backend".to_string(), "vulkan".to_string()),
                 ],
             },
+            clock: Some(ClockPair {
+                cpu_nanos: 2_000,
+                gpu_nanos: 450_000,
+                uncertainty_nanos: 3_000,
+            }),
             cpu: vec![
                 CpuFrame {
                     number: 41,
@@ -471,8 +503,12 @@ mod tests {
         }
     }
 
-    /// The committed version-1 capture: the bytes [`every_field`] encodes to.
-    const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/every-field-v1.crcblprof");
+    /// The committed version-2 capture: the bytes [`every_field`] encodes to.
+    const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/every-field-v2.crcblprof");
+
+    /// The committed version-1 capture: [`every_field`] as version 1 wrote it,
+    /// without the clock pair that version had no room for.
+    const FIXTURE_V1: &[u8] = include_bytes!("../tests/fixtures/every-field-v1.crcblprof");
 
     /// **What is written reads back as what was written**, every field of it.
     #[test]
@@ -483,15 +519,45 @@ mod tests {
     }
 
     /// **The layout is pinned by a committed file.** A change to what this
-    /// build writes, or to how it reads version 1, fails here rather than
+    /// build writes, or to how it reads version 2, fails here rather than
     /// leaving every capture recorded before it unreadable: the round trip
     /// above passes for any pair of a writer and a reader that agree with each
     /// other.
     #[test]
-    fn the_committed_version_1_capture_reads_and_is_what_this_build_writes() {
+    fn the_committed_version_2_capture_reads_and_is_what_this_build_writes() {
         assert_eq!(Capture::decode(FIXTURE).expect("decodes"), every_field());
         assert_eq!(every_field().encode().expect("encodes"), FIXTURE);
         assert_eq!(&FIXTURE[..MAGIC.len()], MAGIC);
+    }
+
+    /// **A version-1 capture still reads**, as the same capture with no clock
+    /// pair: captures recorded before the clock was added stay openable.
+    #[test]
+    fn a_version_1_capture_reads_without_a_clock_pair() {
+        assert_eq!(
+            Capture::decode(FIXTURE_V1).expect("decodes"),
+            Capture {
+                clock: None,
+                ..every_field()
+            }
+        );
+    }
+
+    /// **A GPU time lands on the CPU's clock at its distance from the pair**,
+    /// before the pair's GPU reading as well as after it, and a time that
+    /// would fall before the trace epoch has no place.
+    #[test]
+    fn a_clock_pair_places_gpu_times_on_the_cpu_clock() {
+        let clock = ClockPair {
+            cpu_nanos: 10_000,
+            gpu_nanos: 500_000,
+            uncertainty_nanos: 0,
+        };
+        assert_eq!(clock.to_cpu(500_000), Some(10_000));
+        assert_eq!(clock.to_cpu(503_000), Some(13_000));
+        assert_eq!(clock.to_cpu(496_000), Some(6_000));
+        assert_eq!(clock.to_cpu(490_000), Some(0));
+        assert_eq!(clock.to_cpu(489_999), None);
     }
 
     /// **Every prefix of a capture is refused as truncated**, and none panics:
@@ -515,6 +581,7 @@ mod tests {
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
         bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.push(0);
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(
             Capture::decode(&bytes),
@@ -548,15 +615,15 @@ mod tests {
         );
 
         // The first thread's name tag: after the magic, the version, the
-        // environment and the CPU frame count, the frame number, the thread
-        // count and the track.
+        // environment, the clock pair's tag and its three times, and the CPU
+        // frame count, the frame number, the thread count and the track.
         let environment: usize = every_field()
             .environment
             .entries
             .iter()
             .map(|(name, value)| 4 + name.len() + 4 + value.len())
             .sum();
-        let tag_at = MAGIC.len() + 2 + 4 + environment + 4 + 8 + 4 + 4;
+        let tag_at = MAGIC.len() + 2 + 4 + environment + 1 + 3 * 8 + 4 + 8 + 4 + 4;
         assert_eq!(FIXTURE[tag_at], 1, "the offset names the name tag");
         let mut tag = FIXTURE.to_vec();
         tag[tag_at] = 2;

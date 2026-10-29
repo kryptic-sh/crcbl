@@ -20,15 +20,16 @@
 //! export the profiling decisions of 2026-08-13 chose. The CPU is one process,
 //! a thread per track, spans as begin/end events and counters as counter
 //! events; the GPU is a second process whose passes are complete events with
-//! their statistics as arguments. **The two processes are on different clocks**,
-//! and the GPU's is named so: a capture carries no calibrated clock pair yet, so
-//! nothing places a GPU pass against a CPU span, and the trace does not pretend
-//! to.
+//! their statistics as arguments. **The GPU's passes are on the CPU's timeline
+//! only when the capture carries a clock pair** that places every one of them,
+//! and the GPU's process says which it is: aligned, within the pair's
+//! uncertainty, or on its own clock, where nothing places a pass against a CPU
+//! span and the trace does not pretend to.
 
 use std::path::Path;
 
 use crcbl::core::stats::percentile_of;
-use crcbl_profile::{Capture, EventKind, Statistics};
+use crcbl_profile::{Capture, ClockPair, EventKind, Statistics};
 
 use crate::args::ProfileArgs;
 use crate::json::Json;
@@ -40,8 +41,8 @@ const CPU_PROCESS: u64 = 1;
 /// The Chrome trace's process for the GPU's passes.
 const GPU_PROCESS: u64 = 2;
 
-/// What the GPU's process is called in a viewer: it says the clock is not the
-/// CPU's.
+/// What the GPU's process is called in a viewer when its passes are not
+/// aligned: it says the clock is not the CPU's.
 const GPU_PROCESS_NAME: &str = "GPU (its own clock, not aligned with the CPU)";
 
 /// Nanoseconds in the microsecond a Chrome trace's times are written in.
@@ -174,8 +175,12 @@ fn summarise(capture: &Capture, file: &Path, chrome: Option<&Path>) -> Outcome {
     ));
     describe(&mut human, &cpu);
     human.push_str(&format!(
-        "\ngpu: {} frames (on the GPU's own clock)",
-        capture.gpu.len()
+        "\ngpu: {} frames ({})",
+        capture.gpu.len(),
+        match aligned(capture) {
+            Some(clock) => format!("on the CPU's clock, within {} ns", clock.uncertainty_nanos),
+            None => "on the GPU's own clock".to_string(),
+        }
     ));
     describe(&mut human, &gpu);
     if let Some(chrome) = chrome {
@@ -283,11 +288,34 @@ fn statistics_args(statistics: &Statistics) -> Json {
     )
 }
 
+/// The capture's clock pair, when it places every pass on the CPU's clock: a
+/// timeline with some passes aligned and others not would put the rest
+/// somewhere false.
+fn aligned(capture: &Capture) -> Option<ClockPair> {
+    capture.clock.filter(|clock| {
+        capture
+            .gpu
+            .iter()
+            .flat_map(|frame| &frame.passes)
+            .all(|pass| clock.to_cpu(pass.begin_nanos).is_some())
+    })
+}
+
 /// The capture as one Chrome Trace Event JSON document.
 fn chrome_trace(capture: &Capture) -> Json {
+    let clock = aligned(capture);
+    let gpu_process_name = clock.map_or_else(
+        || GPU_PROCESS_NAME.to_string(),
+        |clock| {
+            format!(
+                "GPU (on the CPU's clock, within {} ns)",
+                clock.uncertainty_nanos
+            )
+        },
+    );
     let mut events = vec![
         metadata("process_name", CPU_PROCESS, 0, "CPU"),
-        metadata("process_name", GPU_PROCESS, 0, GPU_PROCESS_NAME),
+        metadata("process_name", GPU_PROCESS, 0, &gpu_process_name),
         metadata("thread_name", GPU_PROCESS, 0, "passes"),
     ];
     let mut named: Vec<u32> = Vec::new();
@@ -328,7 +356,14 @@ fn chrome_trace(capture: &Capture) -> Json {
                 ("ph", Json::string("X")),
                 ("pid", Json::Unsigned(GPU_PROCESS)),
                 ("tid", Json::Unsigned(0)),
-                ("ts", micros(pass.begin_nanos)),
+                (
+                    "ts",
+                    micros(
+                        clock
+                            .and_then(|clock| clock.to_cpu(pass.begin_nanos))
+                            .unwrap_or(pass.begin_nanos),
+                    ),
+                ),
                 ("dur", micros(pass.nanos())),
             ];
             if let Some(statistics) = &pass.statistics {
@@ -402,6 +437,7 @@ mod tests {
             environment: Environment {
                 entries: vec![("adapter".to_string(), "test".to_string())],
             },
+            clock: None,
             cpu: vec![cpu_frame(0, 4_000), cpu_frame(1, 6_000)],
             gpu: vec![gpu_frame(7, 100_000), gpu_frame(8, 300_000)],
         }
@@ -480,5 +516,43 @@ mod tests {
         let ends = trace.matches(r#""ph":"E""#).count();
         assert_eq!((begins, ends), (4, 4), "every span has its pair: {trace}");
         assert_eq!(trace.matches(r#""ph":"X""#).count(), 6, "{trace}");
+    }
+
+    /// **A clock pair puts the passes on the CPU's timeline**, and the GPU's
+    /// process says so with the pair's uncertainty; a pair that cannot place
+    /// every pass leaves them all on the GPU's own clock.
+    #[test]
+    fn a_clock_pair_aligns_the_passes_with_the_cpu() {
+        let mut capture = capture();
+        capture.clock = Some(ClockPair {
+            cpu_nanos: 70_000,
+            gpu_nanos: 60_000,
+            uncertainty_nanos: 500,
+        });
+        let trace = chrome_trace(&capture).to_string();
+        assert!(
+            trace.contains(r#""args":{"name":"GPU (on the CPU's clock, within 500 ns)"}"#),
+            "{trace}"
+        );
+        assert!(!trace.contains(GPU_PROCESS_NAME), "{trace}");
+        assert!(
+            trace.contains(r#"{"name":"forward","ph":"X","pid":2,"tid":0,"ts":70.0,"dur":100.0"#),
+            "{trace}"
+        );
+
+        capture.clock = Some(ClockPair {
+            cpu_nanos: 0,
+            gpu_nanos: 10_000,
+            uncertainty_nanos: 500,
+        });
+        let trace = chrome_trace(&capture).to_string();
+        assert!(
+            trace.contains(GPU_PROCESS_NAME),
+            "the first shadow pass falls before the trace epoch: {trace}"
+        );
+        assert!(
+            trace.contains(r#"{"name":"forward","ph":"X","pid":2,"tid":0,"ts":60.0,"#),
+            "{trace}"
+        );
     }
 }
