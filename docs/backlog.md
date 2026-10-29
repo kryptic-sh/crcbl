@@ -1974,7 +1974,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `WAYLAND_DEBUG`, whose logging is inside each figure.
     - Tried and dropped, still binding: describing adapters on parallel threads
       (no gain; D3D12 serialises device creation), and DRED as the cost (the
-      open measured the same without `dred::enable`).
+      open measured the same without `dred::enable`; re-measured 2026-10-29 on
+      the RX 7900 XTX in a quiet window at 2–10% CPU, 20 mirrored pairs of one
+      `D3D12CreateDevice` per process: median 287.6 ms without DRED's settings,
+      284.4 ms with them, ranges overlapping. The ~300 ms pikr sees on Windows
+      is AMD's driver).
     - S26, checked 2026-10-15. With no usable GPU, `crcbl::backend::open`
       returns `GpuError::NoBackend` naming every backend it tried and the last
       error, not a panic, and never falls to the Null backend. Windows now falls
