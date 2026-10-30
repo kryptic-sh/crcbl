@@ -19,6 +19,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   code building one field by field must name it (`None` keeps the old meaning).
   `.crcblprof` is format version 2, which carries it; version-1 files still
   read, as captures with no clock pair.
+- **`crcbl_render::draw_gen::DrawGen::new` takes a `&mut UploadBatch` in place
+  of its `QueueHandle`**: the copy zeroing its LOD hysteresis state is recorded
+  into the batch, and no frame may run its passes until the caller's
+  `UploadBatch::submit` has returned `Ok`.
 - **`crcbl_hal::Capability` has a new variant, `GpuClock`**, so a backend
   outside the workspace matching on it must answer for it.
 - **`crcbl_ui::edit::Edit` has two new variants, `BackspaceWord` and
@@ -31,6 +35,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_frame::texture::UploadBatch` is public**, re-exported as
+  `crcbl_render::UploadBatch`: start-up texture uploads recorded into one
+  command buffer and submitted with one wait. It gains `UploadBatch::fill`, the
+  same staging copy into a device-local buffer with its barriers, and
+  `UploadBatch::abandon`, which makes the batch refuse to submit once a caller
+  has rolled back something recorded into it.
 - **`crcbl-notify`, a new crate: the desktop's notifications, read and
   dismissed.** `Notifications::open` reaches the platform's store,
   `Notifications::list` returns a snapshot of what other apps have shown (each
@@ -89,6 +99,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   environment names the frame and its time under `trigger`; a value that is not
   a positive number of milliseconds is logged and the capture is written at the
   end as before. (`crcbl::profile::BUDGET_VAR`)
+
+### Changed
+
+- **`ForwardRenderer`'s build submits its small start-up uploads once**: the
+  occlusion, contact-shadow and probe-visibility placeholders, the DFG and LTC
+  tables, every view's reflection sky table and exposure fills, each view's and
+  shadow cull's `DrawGen` state and the calm wind layers now share one
+  `UploadBatch` and one `Device::wait_idle`, where each was its own submit and
+  wait. On the null backend the build's waits went from 23 to 6 and
+  `ForwardRenderer::create_view`'s from 5 to 1; the build's remaining submits
+  are the geometry pools, the pages and the probe table.
+- **A view's reflection march reads the renderer's DFG table** instead of
+  uploading its own identical `"dfg pair table"` per view.
 
 ### Fixed
 

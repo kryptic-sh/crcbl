@@ -174,12 +174,11 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crcbl_hal::{
-    Barriers, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
-    BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
-    BufferBarrier, BufferCopy, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc,
-    ComputePipelineDesc, ComputePipelineHandle, Device, HalError, ImageViewType, MemoryLocation,
-    PipelineLayoutDesc, PipelineLayoutHandle, QueueHandle, ResourceState, SampleType, ShaderEntry,
-    ShaderModuleDesc, ShaderStages, SubmitInfo, check_portable_storage_buffers,
+    BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
+    BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
+    BufferUsage, ComputePipelineDesc, ComputePipelineHandle, Device, HalError, ImageViewType,
+    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, ResourceState, SampleType,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, check_portable_storage_buffers,
 };
 use crcbl_shaders::draw_gen::DrawMode;
 use crcbl_shaders::{
@@ -189,6 +188,7 @@ use glam::Mat4;
 
 use crate::cull::{FacePlanes, Frustum};
 use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
+use crate::texture::UploadBatch;
 
 // `startsMain` is one workgroup of this size on every device, so it has to fit
 // the smallest workgroup any backend promises.
@@ -488,7 +488,8 @@ pub struct DrawGen {
     /// `ShaderReadWrite` both the writing and the reading pass declare on it.
     ///
     /// Zeroed at build and never again, which is where the monotonicity
-    /// induction starts — by the start-up copy [`fill_at_start_up`] submits,
+    /// induction starts — by the start-up copy [`DrawGen::new`] records into
+    /// its caller's [`UploadBatch`],
     /// because a shader writes this and a buffer a shader writes cannot be
     /// host-visible. A second zero anywhere would erase the history rather than
     /// establish it, so there is deliberately no per-frame clear of it.
@@ -569,15 +570,18 @@ impl DrawGen {
     /// Builds both pipelines, both bind groups per frame, and every buffer
     /// between them.
     ///
-    /// `queue` carries the one start-up submit this makes: the copy that zeroes
-    /// the hysteresis state, described on
-    /// [`group_state`](Self::group_state) and blocked on before this returns.
+    /// `uploads` carries the one start-up copy this makes: the one that zeroes
+    /// the hysteresis state, described on [`group_state`](Self::group_state).
+    /// It is recorded, not submitted, so **no frame may run these passes until
+    /// the caller's [`UploadBatch::submit`] has returned `Ok`** — a renderer
+    /// building several of these submits all of their copies with one wait.
     ///
     /// # Errors
     ///
     /// [`HalError`] from any seam call. A failure part-way through releases
     /// everything already created, so a caller that gives up leaves nothing
-    /// behind.
+    /// behind — and [abandons](UploadBatch::abandon) `uploads`, which by then
+    /// may hold a copy into a buffer that release destroyed.
     ///
     /// # Panics
     ///
@@ -585,7 +589,7 @@ impl DrawGen {
     /// nothing to bind, and a table with no buckets generates no draws at all.
     pub fn new(
         device: &dyn Device,
-        queue: QueueHandle,
+        uploads: &mut UploadBatch<'_>,
         desc: &DrawGenDesc<'_>,
     ) -> Result<Self, HalError> {
         assert!(
@@ -616,9 +620,10 @@ impl DrawGen {
              in one call reading a cluster base that belongs to another bucket, or to nothing"
         );
         let mut rollback = Rollback::default();
-        match Self::build(device, queue, desc, &mut rollback) {
+        match Self::build(device, uploads, desc, &mut rollback) {
             Ok(built) => Ok(built),
             Err(error) => {
+                uploads.abandon();
                 rollback.run(device);
                 Err(error)
             }
@@ -627,7 +632,7 @@ impl DrawGen {
 
     fn build(
         device: &dyn Device,
-        queue: QueueHandle,
+        uploads: &mut UploadBatch<'_>,
         desc: &DrawGenDesc<'_>,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
@@ -713,7 +718,9 @@ impl DrawGen {
         // copy** rather than a `write_buffer` — and not by the clearing
         // dispatch, which runs inside every frame. Running it twice would erase
         // exactly the history this buffer exists to carry, and once is what a
-        // copy submitted before the first frame is.
+        // copy submitted before the first frame is. It joins the caller's
+        // batch, whose `submit` is that before; `UploadBatch::fill` is where
+        // the copy and its barriers are.
         //
         // At least one word per instance even when nothing resident has a
         // hierarchy, because a zero-length buffer is not a descriptor any
@@ -728,9 +735,7 @@ impl DrawGen {
             BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
             MemoryLocation::DeviceLocal,
         )?;
-        fill_at_start_up(
-            device,
-            queue,
+        uploads.fill(
             &format!("{stem} lod group state"),
             group_state,
             &vec![
@@ -1978,7 +1983,7 @@ impl DrawGen {
         // what carries a decision from the previous frame into this one. It
         // arrives in `ShaderReadWrite` because that is what the last frame left
         // it in — and on the very first frame because that is what
-        // `fill_at_start_up` left it in, which is why that copy ends with a
+        // the start-up fill left it in, which is why that copy ends with a
         // barrier rather than in `TransferDst`. `ResourceState::needs_barrier`
         // answers `true` for any
         // transition touching a write — so the first barrier of this frame
@@ -2310,107 +2315,6 @@ pub(crate) fn compute_pipeline_entry_with_workgroup(
     pipeline
 }
 
-/// Writes `contents` over `buffer` once, before any frame exists, and blocks
-/// until the copy has run, leaving it in `final_state`.
-///
-/// A start-up staging copy on [`crate::mesh_pool`]'s and [`crate::texture`]'s
-/// terms, and it joins them on the crate docs' list of named exceptions to the
-/// no-manual-barriers rule. It is *not* a `write_buffer`, because the
-/// destination is device-local; not [`crcbl_hal::CommandEncoder::clear_buffer`],
-/// which `crcbl-dx12` refuses outright and the module docs argue about at
-/// length; and not the clearing dispatch, which runs inside every frame rather
-/// than once.
-///
-/// `final_state` is the state the buffer's first importer declares as its
-/// initial one, so the graph's first barrier on it names a state the buffer is
-/// really in: [`ResourceState::ShaderReadWrite`] for the LOD state below, and
-/// [`ResourceState::ShaderRead`] for [`crate::exposure`]'s ring.
-///
-/// # Errors
-///
-/// [`HalError`] from any seam call, and from a `contents` too long to be a
-/// buffer size on this host.
-pub(crate) fn fill_at_start_up(
-    device: &dyn Device,
-    queue: QueueHandle,
-    label: &str,
-    buffer: BufferHandle,
-    contents: &[u8],
-    final_state: ResourceState,
-) -> Result<(), HalError> {
-    let size = u64::try_from(contents.len()).map_err(|_| {
-        HalError::InvalidDescriptor(format!(
-            "{label} is {} bytes, which does not fit a buffer size",
-            contents.len()
-        ))
-    })?;
-    let staging = device.create_buffer(&BufferDesc {
-        label: Some(&format!("{label} staging")),
-        size,
-        usage: BufferUsage::TRANSFER_SRC,
-        memory: MemoryLocation::HostUpload,
-    })?;
-    let filled = record_fill(device, queue, label, buffer, staging, contents, final_state);
-    device.destroy_buffer(staging);
-    filled
-}
-
-/// The half of [`fill_at_start_up`] the staging buffer is live across, so the
-/// caller releases it on every path out.
-fn record_fill(
-    device: &dyn Device,
-    queue: QueueHandle,
-    label: &str,
-    buffer: BufferHandle,
-    staging: BufferHandle,
-    contents: &[u8],
-    final_state: ResourceState,
-) -> Result<(), HalError> {
-    device.write_buffer(staging, 0, contents)?;
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some(&format!("{label} zero")),
-        queue,
-    });
-    // `Undefined` as the source, unlike [`crate::mesh_pool`]'s pools: this
-    // buffer was created a few statements ago and has never held anything, so
-    // there is no state to preserve and its contents are discarded rather than
-    // transitioned.
-    encoder.pipeline_barrier(&Barriers {
-        buffers: &[BufferBarrier::new(
-            buffer,
-            ResourceState::Undefined,
-            ResourceState::TransferDst,
-        )],
-        ..Barriers::default()
-    });
-    encoder.copy_buffer_to_buffer(&BufferCopy {
-        src: staging,
-        src_offset: 0,
-        dst: buffer,
-        dst_offset: 0,
-        size: contents.len() as u64,
-    });
-    encoder.pipeline_barrier(&Barriers {
-        buffers: &[BufferBarrier::new(
-            buffer,
-            ResourceState::TransferDst,
-            final_state,
-        )],
-        ..Barriers::default()
-    });
-    let commands = encoder.finish()?;
-
-    // Blocking is what makes this a start-up path: the staging buffer dies with
-    // the caller's next statement, and a frame that read the state before the
-    // copy landed would read whatever the allocation came with.
-    let submitted = device
-        .submit(queue, &SubmitInfo::new(&[commands]))
-        .and_then(|()| device.wait_idle());
-    device.destroy_command_buffer(commands);
-    submitted
-}
-
 /// What a partly-built [`DrawGen`] has to give back.
 ///
 /// `build` creates two dozen objects with `?` between them and the seam's
@@ -2458,7 +2362,7 @@ impl Rollback {
 mod tests {
     use super::*;
     use crcbl_hal::null::{NullInstance, Recorder};
-    use crcbl_hal::{DeviceDesc, Instance, QueueKind};
+    use crcbl_hal::{DeviceDesc, Instance, QueueHandle, QueueKind};
     use crcbl_shaders::level_select::MeshLevels;
 
     fn open() -> (Recorder, Box<dyn Device>, QueueHandle) {
@@ -2508,9 +2412,10 @@ mod tests {
                 ..MeshLevels::FLAT
             })
             .collect();
-        DrawGen::new(
+        let mut uploads = UploadBatch::new(device, queue, "draw gen test");
+        let draws = DrawGen::new(
             device,
-            queue,
+            &mut uploads,
             &DrawGenDesc {
                 label: Some("draw gen test"),
                 instances: &instances,
@@ -2528,7 +2433,9 @@ mod tests {
                 task_lanes: 0,
             },
         )
-        .expect("the null backend builds a generator")
+        .expect("the null backend builds a generator");
+        uploads.submit().expect("the hysteresis state fills");
+        draws
     }
 
     /// **The runs buffer costs two words per bucket per draw region — its run

@@ -897,6 +897,12 @@ impl View {
     /// hands every handle to the returned [`View`] — none of them is left in a
     /// rollback the caller might run later.
     ///
+    /// Its start-up uploads and fills are recorded into `uploads` rather than
+    /// submitted one by one, so **the view draws nothing until the caller's
+    /// [`UploadBatch::submit`] has returned `Ok`**; a failure
+    /// [abandons](UploadBatch::abandon) the batch, because the rollback has
+    /// destroyed what it recorded into.
+    ///
     /// `service` is called after each subsystem is built, and between the
     /// grass pass's pipelines — see
     /// [`ForwardRenderer::with_scene_serviced`], which is where the reason and
@@ -907,13 +913,14 @@ impl View {
     /// [`HalError`] if any buffer, group or pipeline could not be created.
     pub(super) fn build(
         device: &dyn Device,
-        queue: QueueHandle,
+        uploads: &mut UploadBatch<'_>,
         inputs: &ViewInputs<'_>,
         service: &mut dyn FnMut(),
     ) -> Result<Self, HalError> {
         let mut rollback = Rollback::default();
-        let built = Self::build_into(device, queue, inputs, &mut rollback, service);
+        let built = Self::build_into(device, uploads, inputs, &mut rollback, service);
         if built.is_err() {
+            uploads.abandon();
             rollback.run(device);
         }
         built
@@ -923,7 +930,7 @@ impl View {
     /// `rollback` until the view is whole.
     fn build_into(
         device: &dyn Device,
-        queue: QueueHandle,
+        uploads: &mut UploadBatch<'_>,
         inputs: &ViewInputs<'_>,
         rollback: &mut Rollback,
         service: &mut dyn FnMut(),
@@ -931,7 +938,7 @@ impl View {
         let frames = inputs.instances.len();
         let draws = DrawGen::new(
             device,
-            queue,
+            uploads,
             &DrawGenDesc {
                 label: Some("forward"),
                 instances: inputs.instances,
@@ -1206,7 +1213,8 @@ impl View {
         // `Rollback::run` releases in the reverse order of construction.
         rollback.ssr = Some(Ssr::new(
             device,
-            queue,
+            uploads,
+            inputs.specular_dfg,
             frames,
             ForwardRenderer::build_fullscreen,
         )?);
@@ -1259,7 +1267,7 @@ impl View {
         // between the chain and the tonemap in the frame as well: it bins the
         // picture the tonemap is about to read, which is the one with the lens
         // already on it — see [`crate::exposure`].
-        rollback.exposure = Some(Exposure::new(device, queue, frames)?);
+        rollback.exposure = Some(Exposure::new(device, uploads, frames)?);
         service();
 
         // --- the bloom chain ---
@@ -3294,9 +3302,13 @@ impl ForwardRenderer {
             .map(|frame| self.probes.buffer(frame))
             .collect();
         let probe_visibility = self.probe_visibility_placeholder.view;
+        // Its own batch, submitted before this returns: a view created after
+        // the build has no build's batch to join, and the caller may draw it
+        // on the next frame.
+        let mut uploads = UploadBatch::new(device, queue, "view");
         let view = View::build(
             device,
-            queue,
+            &mut uploads,
             &ViewInputs {
                 id,
                 effects: desc.effects,
@@ -3337,6 +3349,10 @@ impl ForwardRenderer {
             },
             &mut || {},
         )?;
+        if let Err(error) = uploads.submit() {
+            view.destroy(device);
+            return Err(error);
+        }
         if self.views.len() <= free {
             self.views.resize_with(free + 1, || None);
         }

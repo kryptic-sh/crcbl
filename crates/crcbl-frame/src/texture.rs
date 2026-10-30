@@ -36,6 +36,15 @@
 //! staged from the host. See that function for why the difference is the wasm
 //! heap's.
 //!
+//! # Several at once
+//!
+//! Each function above is a batch of one: it records its copies, submits them
+//! and waits. A caller with many uploads to make before its first frame records
+//! them all into one [`UploadBatch`] instead, and pays for one submission and
+//! one wait. The batch also carries [`UploadBatch::fill`], the same staging
+//! copy into a device-local *buffer*, so a renderer's start-up state rides the
+//! same submission as its textures.
+//!
 //! This is a **startup** path, not a frame path: it records its own barriers
 //! and blocks on [`Device::wait_idle`], which is only legal because no graph
 //! is being recorded while it runs. See this crate's docs on the one rule — the
@@ -56,10 +65,11 @@
 //! **bytes** and converted back to texels exactly once, at the copy.
 
 use crcbl_hal::{
-    BufferDesc, BufferImageCopy, BufferUsage, CommandEncoder, CommandEncoderDesc, Device, Extent3d,
-    Format, HalError, ImageAspect, ImageDesc, ImageHandle, ImageSubresourceLayers,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
-    MemoryLocation, Offset3d, QueueHandle, ResourceState, SubmitInfo,
+    BufferCopy, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoder, CommandEncoderDesc,
+    Device, Extent3d, Format, HalError, ImageAspect, ImageDesc, ImageHandle,
+    ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewHandle, ImageViewType, MemoryLocation, Offset3d, QueueHandle, ResourceState,
+    SubmitInfo,
 };
 
 use crate::mip::level_extent;
@@ -828,45 +838,76 @@ struct UploadArgs<'a> {
 /// wait.
 ///
 /// Each texture added is created at once, and its copies are recorded behind
-/// the ones before it; nothing reaches the device until
-/// [`submit`](Self::submit). One submission rather than one per texture is the
-/// point: on Mesa's ANV a submit and its [`Device::wait_idle`] cost more than
-/// the copies of an empty page, and [`crate::ui_pass`]'s renderer uploads
-/// several pages before its first frame.
+/// the ones before it; each buffer [`fill`](Self::fill)ed is the caller's
+/// already, and its copy joins them. Nothing reaches the device until
+/// [`submit`](Self::submit). One submission rather than one per upload is the
+/// point: on Mesa's ANV the first submit on a fresh device costs several
+/// milliseconds and every later round trip through [`Device::wait_idle`] costs
+/// more than the copies of an empty page, and a renderer's start-up — this
+/// crate's [`crate::ui_pass`], and `crcbl_render`'s forward renderer with its
+/// views — makes many small uploads before its first frame.
 ///
-/// The textures are the caller's from the moment they are returned, and must
-/// not be sampled until `submit` has returned `Ok`. The staging and zero
-/// buffers are the batch's, released when it drops: after the wait if it was
-/// submitted, and before any submission if an add or the caller failed first.
-pub(crate) struct UploadBatch<'a> {
+/// The textures are the caller's from the moment they are returned, and
+/// neither they nor a filled buffer may be read until `submit` has returned
+/// `Ok`. Binding one into a bind group before then is fine: a descriptor names
+/// a resource, it does not read it. The staging and zero buffers are the
+/// batch's, released when it drops: after the wait if it was submitted, and
+/// before any submission if an add or the caller failed first.
+///
+/// # A failed build abandons the batch
+///
+/// A caller building several objects into one batch destroys what it had
+/// created when a later step fails, and the batch still holds copies into
+/// those objects. Submitting them would be a copy into a destroyed image, so a
+/// caller that rolls back something it added calls [`abandon`](Self::abandon),
+/// and every later add and the submit itself refuse. Dropping the batch
+/// unsubmitted is the other way out, and the ordinary one: a build that fails
+/// returns its error past the batch, and nothing is submitted.
+#[derive(Debug)]
+pub struct UploadBatch<'a> {
     device: &'a dyn Device,
     queue: QueueHandle,
+    /// The encoder's name, so a refusal after [`UploadBatch::abandon`] says
+    /// which batch it was.
+    label: String,
+    /// [`None`] once abandoned, which is what every add and the submit check.
     encoder: Option<Box<dyn CommandEncoder>>,
     buffers: Vec<crcbl_hal::BufferHandle>,
 }
 
 impl<'a> UploadBatch<'a> {
     /// An empty batch; `label` is the stem of its encoder's name.
-    pub(crate) fn new(device: &'a dyn Device, queue: QueueHandle, label: &str) -> Self {
-        let encoder_label = format!("{label} upload");
+    pub fn new(device: &'a dyn Device, queue: QueueHandle, label: &str) -> Self {
+        let label = format!("{label} upload");
         let encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some(&encoder_label),
+            label: Some(&label),
             queue,
         });
         Self {
             device,
             queue,
+            label,
             encoder: Some(encoder),
             buffers: Vec::new(),
         }
     }
 
-    /// [`upload_texture_mip_layers`], recorded into this batch.
+    /// The queue the batch submits to, for a builder that holds the batch and
+    /// still submits some work of its own.
+    pub fn queue(&self) -> QueueHandle {
+        self.queue
+    }
+
+    /// [`upload_texture_mip_layers`], recorded into this batch:
+    /// `layers[layer][level]` at `extent`, viewed as `view_type`.
+    /// [`upload_texture`]'s one image is `&[&[pixels]]` and
+    /// [`ImageViewType::D2`].
     ///
     /// # Errors
     ///
-    /// As [`upload_texture_mip_layers`], before anything is recorded.
-    pub(crate) fn texture(
+    /// As [`upload_texture_mip_layers`], before anything is recorded, and
+    /// [`HalError::InvalidDescriptor`] once the batch is abandoned.
+    pub fn texture(
         &mut self,
         label: &str,
         format: Format,
@@ -874,6 +915,7 @@ impl<'a> UploadBatch<'a> {
         layers: &[&[&[u8]]],
         view_type: ImageViewType,
     ) -> Result<UploadedTexture, HalError> {
+        self.recording(label)?;
         stage_texture(self, label, format, extent, layers, view_type)
     }
 
@@ -881,24 +923,98 @@ impl<'a> UploadBatch<'a> {
     ///
     /// # Errors
     ///
-    /// As [`upload_cleared_texture`], before anything is recorded.
-    pub(crate) fn cleared_texture(
+    /// As [`upload_cleared_texture`], before anything is recorded, and
+    /// [`HalError::InvalidDescriptor`] once the batch is abandoned.
+    pub fn cleared_texture(
         &mut self,
         desc: &ClearedTextureDesc<'_>,
     ) -> Result<UploadedTexture, HalError> {
+        self.recording(desc.label)?;
         stage_cleared_texture(self, desc)
     }
 
-    /// Submits every recorded copy and waits for the device, leaving every
-    /// texture in [`ResourceState::ShaderRead`].
+    /// Writes `contents` over the start of `buffer` once, before any frame
+    /// exists, leaving it in `final_state` once submitted.
+    ///
+    /// For a **device-local** buffer whose first frame reads something real —
+    /// a host write cannot reach one, and a clear cannot say anything but zero
+    /// and `crcbl-dx12` refuses one outright. `buffer` must carry
+    /// [`BufferUsage::TRANSFER_DST`] and must never have held anything: its
+    /// contents are discarded rather than transitioned, so a buffer a frame has
+    /// already written is the wrong thing to hand this.
+    ///
+    /// `final_state` is the state the buffer's first importer declares as its
+    /// initial one, so the graph's first barrier on it names a state the buffer
+    /// is really in. `label` names the staging buffer, `"{label} staging"`.
     ///
     /// # Errors
     ///
-    /// [`HalError`] from finishing, submitting or waiting. The textures stay
-    /// the caller's to destroy.
-    pub(crate) fn submit(mut self) -> Result<(), HalError> {
+    /// [`HalError`] from creating or writing the staging buffer, which is
+    /// destroyed again if the write fails, and [`HalError::InvalidDescriptor`]
+    /// once the batch is abandoned. Nothing is recorded on either.
+    pub fn fill(
+        &mut self,
+        label: &str,
+        buffer: crcbl_hal::BufferHandle,
+        contents: &[u8],
+        final_state: ResourceState,
+    ) -> Result<(), HalError> {
+        self.recording(label)?;
+        let staging = create_staging(self.device, label, contents)?;
+        self.buffers.push(staging);
+        let encoder = self
+            .encoder
+            .as_deref_mut()
+            .expect("checked by `recording` above, and nothing between abandons");
+        // `Undefined` as the source: the buffer has never held anything, so
+        // there is no state to preserve and its contents are discarded rather
+        // than transitioned.
+        encoder.pipeline_barrier(&crcbl_hal::Barriers {
+            buffers: &[crcbl_hal::BufferBarrier::new(
+                buffer,
+                ResourceState::Undefined,
+                ResourceState::TransferDst,
+            )],
+            ..Default::default()
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: staging,
+            src_offset: 0,
+            dst: buffer,
+            dst_offset: 0,
+            size: contents.len() as u64,
+        });
+        encoder.pipeline_barrier(&crcbl_hal::Barriers {
+            buffers: &[crcbl_hal::BufferBarrier::new(
+                buffer,
+                ResourceState::TransferDst,
+                final_state,
+            )],
+            ..Default::default()
+        });
+        Ok(())
+    }
+
+    /// Throws away everything recorded, because the caller is about to destroy
+    /// something it added — see the type's docs. Every later add and
+    /// [`submit`](Self::submit) refuse; the staging buffers are still released
+    /// when the batch drops.
+    pub fn abandon(&mut self) {
+        self.encoder = None;
+    }
+
+    /// Submits every recorded copy and waits for the device, leaving every
+    /// texture in [`ResourceState::ShaderRead`] and every filled buffer in the
+    /// state its [`fill`](Self::fill) named.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from finishing, submitting or waiting, and
+    /// [`HalError::InvalidDescriptor`] for an abandoned batch, which submits
+    /// nothing. The textures and buffers stay the caller's to destroy.
+    pub fn submit(mut self) -> Result<(), HalError> {
         let Some(encoder) = self.encoder.take() else {
-            return Ok(());
+            return Err(self.abandoned(&self.label));
         };
         let commands = encoder.finish()?;
         let submitted = self
@@ -907,6 +1023,23 @@ impl<'a> UploadBatch<'a> {
             .and_then(|()| self.device.wait_idle());
         self.device.destroy_command_buffer(commands);
         submitted
+    }
+
+    /// `Ok` while the batch is still recording; the refusal naming `label`
+    /// once it is abandoned.
+    fn recording(&self, label: &str) -> Result<(), HalError> {
+        match self.encoder {
+            Some(_) => Ok(()),
+            None => Err(self.abandoned(label)),
+        }
+    }
+
+    fn abandoned(&self, what: &str) -> HalError {
+        HalError::InvalidDescriptor(format!(
+            "{what}: the batch {:?} was abandoned, because something recorded into it was \
+             destroyed, so nothing in it may reach the device",
+            self.label
+        ))
     }
 
     /// [`submit`](Self::submit) for a batch of the one `texture`, which is
@@ -962,7 +1095,7 @@ impl<'a> UploadBatch<'a> {
         let encoder = self
             .encoder
             .as_deref_mut()
-            .expect("a batch records until it is submitted, which consumes it");
+            .expect("every add checks `recording` before it creates anything");
         record_copies(encoder, args, image);
         Ok(UploadedTexture { image, view })
     }
@@ -1988,6 +2121,200 @@ mod tests {
             recorder.total_live_objects(),
             before,
             "the zeroed and the staging buffer must both be destroyed"
+        );
+    }
+
+    /// A device-local buffer of `size` bytes a fill can copy into.
+    fn fill_target(device: &dyn Device, size: u64) -> crcbl_hal::BufferHandle {
+        device
+            .create_buffer(&BufferDesc {
+                label: Some("fill target"),
+                size,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("the null backend allocates")
+    }
+
+    /// **A fill is a copy between two barriers on the buffer, and nothing
+    /// else**: in from `Undefined`, out to the state the caller named. Neither
+    /// the null backend nor the Vulkan validation layer tracks a buffer's state
+    /// across submissions, so a fill that left its buffer in `TransferDst`
+    /// draws correctly behind the batch's `wait_idle` and only this sees it.
+    #[test]
+    fn a_fill_copies_its_bytes_between_its_two_barriers() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let contents = ramp(12);
+        let buffer = fill_target(device.as_ref(), contents.len() as u64);
+        let before = recorder.total_live_objects();
+
+        let mut batch = UploadBatch::new(device.as_ref(), queue, "fill");
+        batch
+            .fill("state", buffer, &contents, ResourceState::ShaderReadWrite)
+            .expect("the null backend accepts this");
+        // Read before the submit, which releases it: the bytes the copy will
+        // read are the caller's, exactly.
+        let [staging] = batch.buffers[..] else {
+            panic!("one fill stages one buffer, got {:?}", batch.buffers);
+        };
+        assert_eq!(
+            recorder.buffer_bytes(staging).as_deref(),
+            Some(&contents[..])
+        );
+        batch.submit().expect("the null backend submits");
+
+        let commands = recorder.commands();
+        let [
+            Command::Barrier {
+                buffers: into,
+                images: into_images,
+                ..
+            },
+            Command::CopyBufferToBuffer(copy),
+            Command::Barrier {
+                buffers: out,
+                images: out_images,
+                ..
+            },
+        ] = &commands[..]
+        else {
+            panic!("expected a barrier, a copy and a barrier, got {commands:?}");
+        };
+        assert!(into_images.is_empty() && out_images.is_empty());
+        assert_eq!(
+            into[..],
+            [crcbl_hal::BufferBarrier::new(
+                buffer,
+                ResourceState::Undefined,
+                ResourceState::TransferDst
+            )]
+        );
+        assert_eq!(
+            out[..],
+            [crcbl_hal::BufferBarrier::new(
+                buffer,
+                ResourceState::TransferDst,
+                ResourceState::ShaderReadWrite
+            )]
+        );
+        assert_eq!((copy.src, copy.src_offset), (staging, 0));
+        assert_eq!((copy.dst, copy.dst_offset), (buffer, 0));
+        assert_eq!(copy.size, contents.len() as u64);
+        assert_eq!(
+            recorder.buffer_bytes(copy.src).as_deref(),
+            None,
+            "the staging buffer is released once the batch has waited"
+        );
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "the staging buffer, the encoder and the command buffer are all released"
+        );
+        recorder.assert_valid();
+        device.destroy_buffer(buffer);
+    }
+
+    /// **Several uploads, one submission and one wait** — the batch's point.
+    #[test]
+    fn a_batch_submits_every_upload_once() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let buffer = fill_target(device.as_ref(), 4);
+
+        let mut batch = UploadBatch::new(device.as_ref(), queue, "several");
+        let first = batch
+            .texture(
+                "one",
+                Format::R8Unorm,
+                (1, 1),
+                &[&[&[1]]],
+                ImageViewType::D2,
+            )
+            .expect("recorded");
+        let second = batch
+            .texture(
+                "two",
+                Format::R8Unorm,
+                (1, 1),
+                &[&[&[2]]],
+                ImageViewType::D2,
+            )
+            .expect("recorded");
+        batch
+            .fill("state", buffer, &[0; 4], ResourceState::ShaderRead)
+            .expect("recorded");
+        batch.submit().expect("submitted");
+
+        let events = recorder.events();
+        let submits = events
+            .iter()
+            .filter(|event| matches!(event, Event::Submitted { .. }))
+            .count();
+        let waits = events
+            .iter()
+            .filter(|event| matches!(event, Event::WaitedIdle))
+            .count();
+        assert_eq!((submits, waits), (1, 1));
+        recorder.assert_valid();
+        first.destroy(device.as_ref());
+        second.destroy(device.as_ref());
+        device.destroy_buffer(buffer);
+    }
+
+    /// **An abandoned batch refuses everything and submits nothing**, so a
+    /// caller that rolled back an image it had added cannot then submit a copy
+    /// into it.
+    #[test]
+    fn an_abandoned_batch_refuses_to_record_or_submit() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let before = recorder.total_live_objects();
+        let buffer = fill_target(device.as_ref(), 4);
+
+        let mut batch = UploadBatch::new(device.as_ref(), queue, "rolled back");
+        let texture = batch
+            .texture(
+                "gone",
+                Format::R8Unorm,
+                (1, 1),
+                &[&[&[1]]],
+                ImageViewType::D2,
+            )
+            .expect("recorded");
+        batch.abandon();
+        texture.destroy(device.as_ref());
+
+        let refused = batch
+            .texture(
+                "late",
+                Format::R8Unorm,
+                (1, 1),
+                &[&[&[1]]],
+                ImageViewType::D2,
+            )
+            .expect_err("an abandoned batch records nothing");
+        assert!(refused.to_string().contains("abandoned"), "{refused}");
+        batch
+            .fill("late", buffer, &[0; 4], ResourceState::ShaderRead)
+            .expect_err("nor a fill");
+        let refused = batch.submit().expect_err("and submits nothing");
+        assert!(
+            refused.to_string().contains("rolled back upload"),
+            "names the batch: {refused}"
+        );
+        assert!(
+            !recorder
+                .events()
+                .iter()
+                .any(|event| matches!(event, Event::Submitted { .. })),
+            "nothing reached the queue"
+        );
+        device.destroy_buffer(buffer);
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "the staging buffer goes with the batch"
         );
     }
 }

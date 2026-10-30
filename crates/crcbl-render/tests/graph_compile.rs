@@ -32,6 +32,7 @@ use crcbl_render::graph::{
     GraphBarriers, GraphError, ImageId, ImportField, ImportedBuffer, ImportedImage, InitialClaim,
     RenderGraph,
 };
+use crcbl_render::texture::UploadBatch;
 use crcbl_render::transient::{TransientBufferDesc, TransientImageDesc, TransientPool};
 
 const EXTENT: (u32, u32) = (256, 192);
@@ -2738,9 +2739,10 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
     let instances = [input("instances 0"), input("instances 1")];
     let mesh_table = input("mesh table");
 
+    let mut uploads = UploadBatch::new(device, harness.queue, "writable buffers");
     let draws = DrawGen::new(
         device,
-        harness.queue,
+        &mut uploads,
         &DrawGenDesc {
             label: Some("writable buffers"),
             instances: &instances,
@@ -2762,6 +2764,7 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
         },
     )
     .expect("the null backend accepts every descriptor");
+    uploads.submit().expect("the hysteresis state fills");
 
     let device_local = |label: &str, buffer: BufferHandle| {
         let bytes = harness

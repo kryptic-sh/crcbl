@@ -32,8 +32,11 @@
 //! glyph atlas and [`sprite_pass`]'s sheets), and [`draw_gen`]'s copy zeroing
 //! the LOD hysteresis state, which is device-local because a shader writes it
 //! and so cannot be zeroed by a host write. Each runs before any frame exists
-//! and has no graph to belong to; each is called out at the call site. The one
-//! that also runs later is [`texture`]'s — between two frames, never inside
+//! and has no graph to belong to; each is called out at the call site.
+//! [`ForwardRenderer`]'s build records the small ones — its placeholders and
+//! tables, every view's and shadow cull's fills, and the calm wind layers —
+//! into one [`texture::UploadBatch`], submitted with one wait. The one that also runs
+//! later is [`texture`]'s — between two frames, never inside
 //! one, on an image no frame names yet, and blocking until its copy lands — when
 //! [`ForwardRenderer::replace_page`](forward::ForwardRenderer::replace_page)
 //! reloads a material page or
@@ -283,8 +286,8 @@ pub use stack::{
     ContactShadowsPass, ReflectionsPass, ShadowsPass, StackError, VolumetricFogPass,
 };
 pub use texture::{
-    ClearedTextureDesc, TexturePatch, UploadedTexture, upload_cleared_texture, upload_texture,
-    upload_texture_layers, upload_texture_mip_layers,
+    ClearedTextureDesc, TexturePatch, UploadBatch, UploadedTexture, upload_cleared_texture,
+    upload_texture, upload_texture_layers, upload_texture_mip_layers,
 };
 pub use timing::{FrameTimings, MAX_TIMED_PASSES, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};

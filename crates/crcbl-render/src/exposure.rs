@@ -39,8 +39,8 @@ use crcbl_hal::{
     BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ComputePipelineHandle, Device, HalError, ImageViewHandle, ImageViewType,
-    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, QueueHandle, ResourceState,
-    SampleType, ShaderStages, check_portable_storage_buffers,
+    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, ResourceState, SampleType,
+    ShaderStages, check_portable_storage_buffers,
 };
 use crcbl_shaders::EXPOSURE;
 use crcbl_shaders::exposure::{
@@ -52,11 +52,12 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::draw_gen::{
-    UINT_STRIDE, bound, compute_pipeline_entry, compute_pipeline_entry_with_workgroup,
-    fill_at_start_up, storage, uniform,
+    UINT_STRIDE, bound, compute_pipeline_entry, compute_pipeline_entry_with_workgroup, storage,
+    uniform,
 };
 use crate::graph::{ImageId, ImportedBuffer, RenderGraph};
 use crate::ssao::cached_group;
+use crate::texture::UploadBatch;
 
 /// How far one frame's exposure may travel toward the one its histogram asks
 /// for.
@@ -154,7 +155,9 @@ impl Exposure {
     /// Exact rather than a ceiling: the three run or none of them do.
     pub(crate) const PASSES: u32 = 3;
 
-    /// Builds the three pipelines and the buffer rings.
+    /// Builds the three pipelines and the buffer rings, recording the start-up
+    /// fill of every measured slot into `uploads` — so no frame may run these
+    /// passes until that batch has been submitted.
     ///
     /// # Errors
     ///
@@ -163,7 +166,7 @@ impl Exposure {
     /// caller holds a rollback, and this is stored in it whole.
     pub(crate) fn new(
         device: &dyn Device,
-        queue: QueueHandle,
+        uploads: &mut UploadBatch<'_>,
         frames: usize,
     ) -> Result<Self, HalError> {
         // **Two, not one.** A frame reads the slot behind it for the exposure
@@ -280,9 +283,7 @@ impl Exposure {
             // device-local allocation carries whatever was last in that memory.
             // A garbage prior inside the legal range would be indistinguishable
             // from a measurement, and would differ between runs.
-            fill_at_start_up(
-                device,
-                queue,
+            uploads.fill(
                 &format!("exposure measured {frame}"),
                 slot,
                 &crcbl_shaders::tonemap::DEFAULT_EXPOSURE.to_le_bytes(),
@@ -582,7 +583,9 @@ mod tests {
             (limits.max_image_2d, limits.max_image_2d),
         ] {
             let normalized = (extent.0.max(1), extent.1.max(1));
-            let mut exposure = Exposure::new(device.as_ref(), queue, 2).expect("exposure");
+            let mut uploads = UploadBatch::new(device.as_ref(), queue, "exposure");
+            let mut exposure = Exposure::new(device.as_ref(), &mut uploads, 2).expect("exposure");
+            uploads.submit().expect("the measured slots fill");
             exposure
                 .begin_frame(device.as_ref(), 0, extent, None)
                 .expect("parameters");

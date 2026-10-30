@@ -198,9 +198,7 @@ use crate::sky_pass::SkyPass;
 use crate::ssao::{Ssao, cached_group};
 use crate::ssr::{Ssr, SsrEnvironment, SsrImages};
 use crate::stack::CameraStack;
-use crate::texture::{
-    UploadedTexture, upload_texture, upload_texture_layers, upload_texture_mip_layers,
-};
+use crate::texture::{UploadBatch, UploadedTexture, upload_texture_mip_layers};
 use crate::transient::TransientPool;
 use crate::upscale::Upscale;
 use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages, VolumetricReads};
@@ -3450,17 +3448,35 @@ impl ForwardRenderer {
             return Err(HalError::UnsupportedFeatures { missing });
         }
         let mut rollback = Rollback::default();
+        // **One submission and one wait for the build's small uploads**: the
+        // placeholders, the split-sum and area-light tables, and every view's
+        // and shadow cull's start-up fills are recorded into this batch as they
+        // are created, and submitted once the renderer is whole. Each used to
+        // be its own submit and `wait_idle`, and on Mesa's ANV the first submit
+        // on a fresh device costs several milliseconds and every later round
+        // trip about half of one. The geometry pools, the pages and the probe
+        // table still submit for themselves.
+        let mut uploads = UploadBatch::new(device, queue, "forward");
         match Self::build(
             device,
-            queue,
+            &mut uploads,
             target_format,
             scene,
             geometry_path,
             &mut rollback,
             service,
         ) {
-            Ok(renderer) => Ok(renderer),
+            Ok(renderer) => match uploads.submit() {
+                Ok(()) => Ok(renderer),
+                Err(error) => {
+                    renderer.destroy(device);
+                    Err(error)
+                }
+            },
             Err(error) => {
+                // The batch first, so nothing it recorded is still pending when
+                // the rollback destroys what it recorded into.
+                drop(uploads);
                 rollback.run(device);
                 Err(error)
             }
@@ -3664,9 +3680,13 @@ impl ForwardRenderer {
     /// The body of [`ForwardRenderer::with_scene`], recording what it has
     /// created into `rollback` as it goes and calling `service` where
     /// [`ForwardRenderer::with_scene_serviced`] documents.
+    ///
+    /// The small start-up uploads go into `uploads`, which the caller submits
+    /// once this has returned the renderer — nothing here may read them on the
+    /// GPU first. What still submits for itself takes the batch's queue.
     fn build(
         device: &dyn Device,
-        queue: QueueHandle,
+        uploads: &mut UploadBatch<'_>,
         target_format: Format,
         scene: &SceneDesc<'_>,
         geometry_path: GeometryPath,
@@ -3676,6 +3696,7 @@ impl ForwardRenderer {
         // Before anything exists, so a refused description leaks nothing — see
         // `check_scene`, which is where that placement is argued.
         Self::check_scene(scene)?;
+        let queue = uploads.queue();
 
         // Resolved before anything is created, because it decides the *shape*
         // of what is created — the bind group layout, which pipeline kind the
@@ -4869,14 +4890,12 @@ impl ForwardRenderer {
         // [`AMBIENT_OCCLUSION_NONE`], which is where each of them is argued.
         // Left undefined this would be a random ambient scale *and* a random
         // direction to steer it along, on any frame that fell back to it.
-        let ambient_occlusion_placeholder = upload_texture(
-            device,
-            queue,
+        let ambient_occlusion_placeholder = uploads.texture(
             "ssao placeholder",
             Format::Rgba8Unorm,
-            1,
-            1,
-            &AMBIENT_OCCLUSION_NONE,
+            (1, 1),
+            &[&[&AMBIENT_OCCLUSION_NONE]],
+            ImageViewType::D2,
         )?;
         rollback.textures.push(ambient_occlusion_placeholder);
 
@@ -4886,14 +4905,12 @@ impl ForwardRenderer {
         // has a contact-shadow image to name. `0xFF` is `1.0` through `R8Unorm`,
         // so a fragment that reads this one is a fragment the sun reaches
         // unobstructed.
-        let contact_shadow_placeholder = upload_texture(
-            device,
-            queue,
+        let contact_shadow_placeholder = uploads.texture(
             "contact shadow placeholder",
             Format::R8Unorm,
-            1,
-            1,
-            &[CONTACT_SHADOW_NONE],
+            (1, 1),
+            &[&[&[CONTACT_SHADOW_NONE]]],
+            ImageViewType::D2,
         )?;
         rollback.textures.push(contact_shadow_placeholder);
 
@@ -4902,14 +4919,12 @@ impl ForwardRenderer {
         // nothing has been captured when they are built. One texel of
         // [`probe_visibility_none`], which no surface is further away than, so a
         // probe read through it keeps all of its weight.
-        let probe_visibility_placeholder = upload_texture_layers(
-            device,
-            queue,
+        let probe_visibility_placeholder = uploads.texture(
             "probe visibility placeholder",
             Format::Rg32Float,
-            1,
-            1,
-            &[&probe_visibility_none()],
+            (1, 1),
+            &[&[&probe_visibility_none()]],
+            ImageViewType::D2Array,
         )?;
         rollback.textures.push(probe_visibility_placeholder);
 
@@ -4921,17 +4936,19 @@ impl ForwardRenderer {
         // importance-samples a lobe, which is `sin`, `cos` and a `powf`, and this
         // engine's goldens are compared across four backends with no tolerance.
         // Baking here would be four slightly different tables.
-        let specular_dfg = upload_texture(
-            device,
-            queue,
+        //
+        // **Every view's reflection march reads this same image** for its own
+        // split-sum scale and bias — see `Ssr::dfg` — rather than uploading a
+        // second copy of the same bytes per view.
+        let specular_dfg = uploads.texture(
             "dfg table",
             // Two bytes of fixed point per channel, high byte first — see
             // `crcbl_shaders::dfg::PAIR_TEXEL_BYTES`, which argues why this is
             // not the `Rg16Float` the format's own doc anticipated.
             Format::Rgba8Unorm,
-            DFG_SIZE_U32,
-            DFG_SIZE_U32,
-            &dfg::pair_texels(),
+            (DFG_SIZE_U32, DFG_SIZE_U32),
+            &[&[&dfg::pair_texels()]],
+            ImageViewType::D2,
         )?;
         rollback.textures.push(specular_dfg);
 
@@ -4939,14 +4956,12 @@ impl ForwardRenderer {
         // the same reason, and `Rgba16Float` rather than fixed point because
         // these are matrix entries rather than shares of arriving light.
         // `crcbl_shaders::ltc::LTC_TEXEL_BYTES` argues the format.
-        let ltc_table = upload_texture(
-            device,
-            queue,
+        let ltc_table = uploads.texture(
             "ltc table",
             Format::Rgba16Float,
-            LTC_SIZE_U32,
-            LTC_SIZE_U32,
-            &ltc::texels(),
+            (LTC_SIZE_U32, LTC_SIZE_U32),
+            &[&[&ltc::texels()]],
+            ImageViewType::D2,
         )?;
         rollback.textures.push(ltc_table);
         service();
@@ -4984,7 +4999,7 @@ impl ForwardRenderer {
         let slot_pages = vec![page_bindings; instance_buffers.len()];
         rollback.primary = Some(View::build(
             device,
-            queue,
+            uploads,
             &ViewInputs {
                 id: ViewId::PRIMARY,
                 effects: RenderEffects::all(),
@@ -5148,7 +5163,7 @@ impl ForwardRenderer {
             };
             let draws = DrawGen::new(
                 device,
-                queue,
+                uploads,
                 &DrawGenDesc {
                     label: Some(&label),
                     instances: &instance_buffers,
@@ -5782,7 +5797,7 @@ impl ForwardRenderer {
             // No field, so no pass: the frame every caller of this type drew
             // before grass existed. The two calm wind layers are one texel
             // each and are what makes a field with no weather set still.
-            grass: GrassScene::new(device, queue, FRAMES_IN_FLIGHT)?,
+            grass: GrassScene::new(device, uploads, FRAMES_IN_FLIGHT)?,
             wind: crcbl_shaders::wind::WindParams::default(),
             recorded_grass_draws: 0,
         })
@@ -11658,6 +11673,7 @@ mod tests {
     mod load_service;
     mod page_reload;
     mod shadow_reach;
+    mod upload_waits;
 
     use super::*;
     use crate::effects::{Antialiasing, EffectOverride};

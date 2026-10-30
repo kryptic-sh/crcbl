@@ -46,14 +46,13 @@ use crcbl_hal::{
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ClearValue, ColorTargetState, Device, Format, GraphicsPipelineHandle, HalError,
     ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc,
-    PipelineLayoutHandle, QueueHandle, SampleType, ShaderStages, StoreOp,
-    check_portable_storage_buffers,
+    PipelineLayoutHandle, SampleType, ShaderStages, StoreOp, check_portable_storage_buffers,
 };
-use crcbl_shaders::{SSR, SSR_BLUR, dfg, sky_prefilter, ssr};
+use crcbl_shaders::{SSR, SSR_BLUR, sky_prefilter, ssr};
 
 use crate::graph::{ImageId, RenderGraph};
 use crate::ssao::cached_group;
-use crate::texture::{UploadedTexture, upload_texture};
+use crate::texture::{UploadBatch, UploadedTexture};
 
 /// The binding `ssr.slang` reads [`sky_prefilter`]'s table through — after the
 /// pyramid's slots, so Metal's declaration-order argument numbering stays
@@ -63,11 +62,9 @@ const SKY_PREFILTER_BINDING: u32 = 5 + crate::hiz::MAX_LEVELS;
 /// [`sky_prefilter::PREFILTER_SIZE`] as an image extent.
 const SKY_PREFILTER_SIZE: u32 = sky_prefilter::PREFILTER_SIZE as u32;
 
-/// The binding `ssr.slang` reads [`dfg`]'s pair through, beside the sky table.
+/// The binding `ssr.slang` reads [`crcbl_shaders::dfg`]'s pair through,
+/// beside the sky table.
 const DFG_BINDING: u32 = SKY_PREFILTER_BINDING + 1;
-
-/// [`dfg::DFG_SIZE`] as an image extent.
-const DFG_SIZE: u32 = dfg::DFG_SIZE as u32;
 
 /// The binding `ssr.slang` reads the irradiance probes' per-probe
 /// visibility maps through — the image [`crate::forward`] binds to `mesh.slang`,
@@ -238,17 +235,23 @@ pub(crate) struct Ssr {
     sky_prefilter: UploadedTexture,
     /// `crcbl_shaders::dfg`'s pair as the `Rgba8Unorm` image `ssr.slang`
     /// scales its environment by — `f0 · scale + bias`, the split-sum's second
-    /// half. The same table [`crate::forward`] uploads summed to one channel
-    /// for energy compensation; this pass wants both channels, so it carries
-    /// its own image of them.
-    dfg: UploadedTexture,
+    /// half. **The renderer's own table, borrowed**: [`crate::forward`]
+    /// uploads the same pair at the same size and format for its energy
+    /// compensation, and owns and destroys it, so a view carries a handle
+    /// rather than a second image and a second upload of the same bytes.
+    dfg: ImageViewHandle,
 }
 
 impl Ssr {
     /// Passes [`Ssr::add_passes`] adds to a frame.
     pub(crate) const PASSES: u32 = 2;
 
-    /// Builds both pipelines and the uniform ring.
+    /// Builds both pipelines and the uniform ring, recording the sky table's
+    /// upload into `uploads` — so no frame may run these passes until that
+    /// batch has been submitted.
+    ///
+    /// `dfg` is the renderer's split-sum table — see [`Ssr::dfg`] — and must
+    /// outlive this.
     ///
     /// `build_fullscreen` is handed in rather than duplicated, on
     /// [`Ssao::new`](crate::ssao::Ssao::new)'s terms: it is [`crate::forward`]'s,
@@ -262,7 +265,8 @@ impl Ssr {
     /// caller holds a rollback, and this is stored in it whole.
     pub(crate) fn new(
         device: &dyn Device,
-        queue: QueueHandle,
+        uploads: &mut UploadBatch<'_>,
+        dfg: ImageViewHandle,
         frames: usize,
         build_fullscreen: impl Fn(
             &dyn Device,
@@ -276,23 +280,12 @@ impl Ssr {
         // `sky_prefilter::PREFILTER_TEXEL_BYTES`. Not baked here, for the DFG
         // table's reason in `crate::forward`: the integrator is a Monte Carlo
         // sum and four backends would bake four tables.
-        let sky_prefilter = upload_texture(
-            device,
-            queue,
+        let sky_prefilter = uploads.texture(
             "sky prefilter table",
             Format::Rgba8Unorm,
-            SKY_PREFILTER_SIZE,
-            SKY_PREFILTER_SIZE,
-            &sky_prefilter::texels(),
-        )?;
-        let dfg_pair = upload_texture(
-            device,
-            queue,
-            "dfg pair table",
-            Format::Rgba8Unorm,
-            DFG_SIZE,
-            DFG_SIZE,
-            &dfg::pair_texels(),
+            (SKY_PREFILTER_SIZE, SKY_PREFILTER_SIZE),
+            &[&[&sky_prefilter::texels()]],
+            ImageViewType::D2,
         )?;
 
         // **No sampler**, which is the whole of what reading by `Load` buys —
@@ -555,7 +548,7 @@ impl Ssr {
             blur_pipeline,
             blur_groups: vec![None; frames],
             sky_prefilter,
-            dfg: dfg_pair,
+            dfg,
         })
     }
 
@@ -641,7 +634,7 @@ impl Ssr {
         let layout = self.layout;
         let uniforms = self.uniforms[frame];
         let sky_prefilter_view = self.sky_prefilter.view;
-        let dfg_view = self.dfg.view;
+        let dfg_view = self.dfg;
         // Split so the two closures below borrow different halves of `self`, on
         // `Ssao::add_passes`' terms: one `&mut self` shared between them is what
         // the borrow checker refuses, and it would be refusing something
@@ -880,7 +873,6 @@ impl Ssr {
             device.destroy_buffer(buffer);
         }
         self.sky_prefilter.destroy(device);
-        self.dfg.destroy(device);
     }
 }
 

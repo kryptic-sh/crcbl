@@ -107,7 +107,7 @@ use crcbl_shaders::{GRASS, GRASS_GEN, Stage};
 use crate::draw_gen::compute_pipeline_entry;
 use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
 use crate::ssao::cached_group;
-use crate::texture::{UploadedTexture, upload_texture, upload_texture_mip_layers};
+use crate::texture::{UploadBatch, UploadedTexture, upload_texture, upload_texture_mip_layers};
 
 pub use field::{
     BladeLod, BladeLook, BladeNormal, BladeShape, BladeStyle, BladeType, CELLS_PER_TILE, Clumping,
@@ -345,20 +345,21 @@ enum Retired {
 }
 
 impl GrassScene {
-    /// No field, and the calm placeholder layers.
+    /// No field, and the calm placeholder layers, recorded into `uploads` —
+    /// so no frame may sample them until that batch has been submitted.
     ///
     /// # Errors
     ///
-    /// [`HalError`] from the two one-texel uploads.
+    /// [`HalError`] from recording the calm layers.
     pub(crate) fn new(
         device: &dyn Device,
-        queue: crcbl_hal::QueueHandle,
+        uploads: &mut UploadBatch<'_>,
         frames: usize,
     ) -> Result<Self, HalError> {
         Ok(Self {
             field: None,
             live: None,
-            wind: Wind::calm(device, queue)?,
+            wind: Wind::calm(device, uploads)?,
             retired: Vec::new(),
             frames: 0,
             depth: frames as u64,
@@ -412,7 +413,15 @@ impl GrassScene {
     ) -> Result<(), WindLayerError> {
         let wind = match layers {
             Some(layers) => Wind::upload(device, queue, layers)?,
-            None => Wind::calm(device, queue)?,
+            None => {
+                let mut uploads = UploadBatch::new(device, queue, "calm wind");
+                let calm = Wind::calm(device, &mut uploads)?;
+                if let Err(error) = uploads.submit() {
+                    calm.destroy(device);
+                    return Err(error.into());
+                }
+                calm
+            }
         };
         let old = core::mem::replace(&mut self.wind, wind);
         self.retired
@@ -689,9 +698,17 @@ impl Resident {
 }
 
 impl Wind {
-    fn calm(device: &dyn Device, queue: crcbl_hal::QueueHandle) -> Result<Self, HalError> {
-        let one = |label, texel: [u8; 4]| {
-            upload_texture(device, queue, label, Format::Rgba8Unorm, 1, 1, &texel)
+    /// The one-texel calm layers, recorded into `uploads`. A failure destroys
+    /// the layer already added and so abandons the batch.
+    fn calm(device: &dyn Device, uploads: &mut UploadBatch<'_>) -> Result<Self, HalError> {
+        let mut one = |label, texel: [u8; 4]| {
+            uploads.texture(
+                label,
+                Format::Rgba8Unorm,
+                (1, 1),
+                &[&[&texel]],
+                ImageViewType::D2,
+            )
         };
         let direction = one("wind direction", CALM_DIRECTION)?;
         match one("wind intensity", CALM_INTENSITY) {
@@ -700,6 +717,7 @@ impl Wind {
                 intensity,
             }),
             Err(error) => {
+                uploads.abandon();
                 direction.destroy(device);
                 Err(error)
             }

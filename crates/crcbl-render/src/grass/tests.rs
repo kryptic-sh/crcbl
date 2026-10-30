@@ -34,6 +34,14 @@ fn null() -> (Box<dyn Device>, crcbl_hal::QueueHandle) {
     (device, queue)
 }
 
+/// A scene with no field, its calm layers submitted.
+fn calm_scene(device: &dyn Device, queue: crcbl_hal::QueueHandle) -> GrassScene {
+    let mut uploads = UploadBatch::new(device, queue, "grass");
+    let scene = GrassScene::new(device, &mut uploads, 2).expect("the placeholders record");
+    uploads.submit().expect("the placeholders upload");
+    scene
+}
+
 /// [`Grass::PASSES`] is what [`crate::forward`] adds to its pass bound, so it
 /// has to be the number of `add_*_pass` calls in [`Grass::add_passes`] —
 /// `crate::water`'s test of the same name.
@@ -200,7 +208,7 @@ fn the_generation_block_carries_the_fields_numbers() {
     // The camera arrives from the view, and nothing else of the block does.
     let (device, queue) = null();
     let device = device.as_ref();
-    let mut scene = GrassScene::new(device, queue, 2).expect("the placeholders upload");
+    let mut scene = calm_scene(device, queue);
     scene
         .set(device, queue, Some(&field))
         .expect("the field uploads");
@@ -220,7 +228,7 @@ fn the_generation_block_carries_the_fields_numbers() {
 fn a_frame_draws_the_looks_its_field_has() {
     let (device, queue) = null();
     let device = device.as_ref();
-    let mut scene = GrassScene::new(device, queue, 2).expect("the placeholders upload");
+    let mut scene = calm_scene(device, queue);
     let looks = |looks: &[BladeLook], fins| {
         let rows = looks
             .iter()
@@ -265,7 +273,7 @@ fn a_frame_draws_the_looks_its_field_has() {
 fn a_scene_with_no_field_draws_nothing() {
     let (device, queue) = null();
     let device = device.as_ref();
-    let mut scene = GrassScene::new(device, queue, 2).expect("the placeholders upload");
+    let mut scene = calm_scene(device, queue);
     assert!(scene.frame().is_none(), "nothing set, nothing drawn");
     assert!(scene.field().is_none());
 
@@ -306,7 +314,7 @@ fn a_scene_with_no_field_draws_nothing() {
 fn a_replaced_field_is_held_until_the_ring_has_come_round() {
     let (device, queue) = null();
     let device = device.as_ref();
-    let mut scene = GrassScene::new(device, queue, 2).expect("the placeholders upload");
+    let mut scene = calm_scene(device, queue);
     scene
         .set(device, queue, Some(&field()))
         .expect("the field uploads");
@@ -345,7 +353,7 @@ fn the_wind_is_calm_until_it_is_set() {
 
     let (device, queue) = null();
     let device = device.as_ref();
-    let mut scene = GrassScene::new(device, queue, 2).expect("the placeholders upload");
+    let mut scene = calm_scene(device, queue);
     let calm = scene.wind.intensity.view;
     scene
         .set_wind_layers(
@@ -377,7 +385,7 @@ fn the_wind_is_calm_until_it_is_set() {
 fn a_misshapen_wind_layer_is_refused() {
     let (device, queue) = null();
     let device = device.as_ref();
-    let mut scene = GrassScene::new(device, queue, 2).expect("the placeholders upload");
+    let mut scene = calm_scene(device, queue);
     let short = WindLayers {
         direction: WindLayer {
             texels: [2, 2],

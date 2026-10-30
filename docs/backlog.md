@@ -191,30 +191,45 @@ uniform block and tables. Already recorded and not repeated: "P4" (light-slot
   or effect bit asks for them (eagerly when the builder's scene already contains
   them); keep `Ssr`'s block and tables independent of its pipeline.
 
-### Start-up: `crcbl-render`'s uploads each submit and wait
+### Start-up: what `ForwardRenderer`'s build still submits on its own
 
-"The Vulkan pipeline cache is not persisted" ends with "Batching the start-up
-fills behind one wait is the candidate". `crcbl-frame::texture::UploadBatch` now
-exists but is `pub(crate)`, so `crcbl-render` cannot use it. Each of these is
-its own `submit` plus `Device::wait_idle`:
+`ForwardRenderer::build` records its placeholders, tables, every view's and
+shadow cull's start-up fills and the calm wind layers into one
+`crcbl_frame::texture::UploadBatch` (2026-10-30). What still submits and waits
+by itself on the build path:
 
-- `ForwardRenderer::build`: five (AO, contact-shadow and probe-visibility
-  placeholders, DFG table, LTC table).
-- `Ssr::new`: two per view. `Exposure::new`: one `fill_at_start_up` per view.
-- `Wind::calm`: two one-texel layers, from `GrassScene::new`.
-- Each `DrawGen::new` through `fill_at_start_up`: primary view plus six shadow
-  ones.
+- Each `upload_page` (one per `PageKind`, each through
+  `upload_texture_mip_layers`), shared with `ForwardRenderer::replace_page`.
+  Left out on purpose: batching every page keeps every page's staging buffer
+  alive until the one submit, which raises peak host-visible memory by the size
+  of all the pages at once. Measure that before folding them in.
+- `ProbeTable::new`'s clear and `ProbeTable::fill`, through
+  `ProbeTable::upload`: a submit and wait each (the fill only for a scene with
+  probes). The fill starts from `ShaderRead`, after the clear, and writes every
+  frame's buffer from one staging buffer, which `UploadBatch::fill` (`Undefined`
+  source, one buffer) does not express; and a clear moved into the batch would
+  land after the fill, since the batch is submitted at the build's end.
+- The geometry pools, through `MeshPool`'s own staging and timeline.
+- The batch's cost: every staging buffer in it now lives until the one submit,
+  including each `DrawGen`'s zeroed LOD group state (instance capacity × the
+  resident meshes' group count, at least one, × 4 bytes) for the primary view
+  and each shadow cull. Small at the default capacity, but it grows with the
+  capacity: the same trade-off that kept the pages out, not yet measured.
+- `Ssr::new` still uploads `crcbl_shaders::sky_prefilter`'s table once per view,
+  now inside the batch; it is the same bytes for every view and could be the
+  renderer's, as the DFG table now is.
 
-At least 17 serialised GPU round trips on the primary build path. Also
-`Ssr::new`'s `"dfg pair table"` uploads the same `dfg::pair_texels()` at the
-same size and format as `ForwardRenderer::build`'s `"dfg table"`: a duplicate
-texture and round trip per view, removable by passing the renderer's handle.
+Measured with a throwaway test on the null backend: the build's `wait_idle`
+count went from 23 to 6 and `create_view`'s from 5 to 1. On an RX 7900 XTX
+(RADV, debug build, load 8–9, not a quiet window) `ForwardRenderer::new` on a
+fresh device went from a median of 65.6–66.5 ms to 62.9–63.5 ms across three
+interleaved runs.
 
-- Impact: estimated 5–20 ms on a slow first submit, 1–2 ms warm. Verified by
-  reading.
-- Fix: expose `UploadBatch` (or an equivalent buffer batch for
-  `fill_at_start_up`) to `crcbl-render` and record the renderer's start-up fills
-  into one batch with one wait.
+Also found, not fixed: `Ssr::new` and `Exposure::new` say "Nothing is released
+on the failing path … the caller holds a rollback, and this is stored in it
+whole", but a failure inside either leaves nothing stored, so whatever they
+created before the failing `?` (layouts, pipelines, the sky table, buffers)
+leaks. Verified by reading only.
 
 ### Start-up: Metal compiles MSL source per shader module
 
@@ -14508,9 +14523,9 @@ they are not re-proposed, and the two answers that named a remainder:
 Topic 44's rung 3 is built, both halves: `ssr.slang`'s miss fallback reads the
 gradient through `crcbl_shaders::sky_prefilter`'s table at the surface's
 roughness (`sky_prefiltered`), and scales its environment by
-`crcbl_shaders::dfg`'s pair — `dfg::pair_texels` as a second `Rgba8Unorm` image
-`crcbl_render::ssr::Ssr::new` uploads, `f0 · scale + bias` at `(N·V, roughness)`
-in place of Schlick. What it leaves:
+`crcbl_shaders::dfg`'s pair — the renderer's own `"dfg table"` image of
+`dfg::pair_texels`, which `crcbl_render::ssr::Ssr::new` binds,
+`f0 · scale + bias` at `(N·V, roughness)` in place of Schlick. What it leaves:
 
 - **A frame with `RenderEffects::REFLECTIONS` off keeps no ambient specular on
   metals**, as before this rung: the term lives in the reflection pass because
@@ -15652,11 +15667,9 @@ round): the six shadow `DrawGen::new` calls in the loop that pushes
 `rollback.shadow_draws` took 53 ms, about 9 ms each; the step of texture uploads
 ending with the DFG and LTC tables took 19 ms; the per-frame shadow-view bind
 groups (the loop filling `shadow_groups`) took 19 ms; and the rest was spread
-over about fifty steps of 1–10 ms. Each `DrawGen` blocks on `fill_at_start_up`,
-which submits and waits for the device to go idle, but nothing has timed that
-wait on its own. This is start-up cost, not frame cost. Batching the start-up
-fills behind one wait is the candidate if construction time ever matters. Time
-the waits first.
+over about fifty steps of 1–10 ms. Each `DrawGen` used to block on its own
+start-up fill; since 2026-10-30 they and the build's other small uploads share
+one `UploadBatch` and one wait. This is start-up cost, not frame cost.
 
 ### D3D12 is the one target still held against a golden alone (2026-08-27)
 

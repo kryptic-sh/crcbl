@@ -93,8 +93,8 @@ pub use graph::{
     InitialClaim, PassBuilder, PassContext, PassKind, RenderGraph,
 };
 pub use texture::{
-    ClearedTextureDesc, TexturePatch, UploadedTexture, upload_cleared_texture, upload_texture,
-    upload_texture_layers, upload_texture_mip_layers,
+    ClearedTextureDesc, TexturePatch, UploadBatch, UploadedTexture, upload_cleared_texture,
+    upload_texture, upload_texture_layers, upload_texture_mip_layers,
 };
 pub use timing::{FrameTimings, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};
