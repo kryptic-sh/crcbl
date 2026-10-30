@@ -94,9 +94,25 @@ pub(crate) fn create<R, const N: usize>(
 where
     R: crcbl_hal::threading::HalThreadSafe,
 {
+    create_listed(device, service, &jobs)
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("one result per job"))
+}
+
+/// [`create`] for a batch whose members are decided at run time — a build
+/// that compiles only the pipelines its scene needs. Same order, same rounds,
+/// same `service` calls, one result per job.
+pub(crate) fn create_listed<R>(
+    device: &dyn Device,
+    service: &mut dyn FnMut(),
+    jobs: &[&Job<'_, R>],
+) -> Vec<R>
+where
+    R: crcbl_hal::threading::HalThreadSafe,
+{
     #[cfg(not(target_arch = "wasm32"))]
     if concurrent(device)
-        && let Some(pool) = pool_for(crcbl_jobs::default_spawner().as_ref(), N)
+        && let Some(pool) = pool_for(crcbl_jobs::default_spawner().as_ref(), jobs.len())
     {
         return in_parallel(pool, service, jobs);
     }
@@ -147,26 +163,24 @@ fn pool_for(spawner: &dyn Spawn, jobs: usize) -> Option<Pool> {
 }
 
 /// [`create`]'s serial path.
-fn in_order<R, const N: usize>(service: &mut dyn FnMut(), jobs: [&Job<'_, R>; N]) -> [R; N] {
-    jobs.map(|job| {
-        service();
-        job()
-    })
+fn in_order<R>(service: &mut dyn FnMut(), jobs: &[&Job<'_, R>]) -> Vec<R> {
+    jobs.iter()
+        .map(|job| {
+            service();
+            job()
+        })
+        .collect()
 }
 
 /// [`create`]'s parallel path: rounds of `pool.workers() + 1` jobs, capped at
 /// `MAX_JOBS_PER_ROUND`, with `service` before each.
 #[cfg(not(target_arch = "wasm32"))]
-fn in_parallel<R, const N: usize>(
-    mut pool: Pool,
-    service: &mut dyn FnMut(),
-    jobs: [&Job<'_, R>; N],
-) -> [R; N]
+fn in_parallel<R>(mut pool: Pool, service: &mut dyn FnMut(), jobs: &[&Job<'_, R>]) -> Vec<R>
 where
     R: Send,
 {
     let round = (pool.workers() + 1).min(MAX_JOBS_PER_ROUND);
-    let mut slots: [Option<R>; N] = core::array::from_fn(|_| None);
+    let mut slots: Vec<Option<R>> = jobs.iter().map(|_| None).collect();
     for (round_jobs, round_slots) in jobs.chunks(round).zip(slots.chunks_mut(round)) {
         service();
         // A chunk of one: each job is its own unit of work, so no thread waits
@@ -175,7 +189,10 @@ where
             slot[0] = Some(round_jobs[index]());
         });
     }
-    slots.map(|slot| slot.unwrap_or_else(|| unreachable!("par_for runs every chunk once")))
+    slots
+        .into_iter()
+        .map(|slot| slot.unwrap_or_else(|| unreachable!("par_for runs every chunk once")))
+        .collect()
 }
 
 // Native only: the parallel path does not exist on `wasm32`, and the null
@@ -296,7 +313,7 @@ mod tests {
         .expect("the test's pool starts");
         assert!(pool.workers() > 0, "this test needs a threaded runtime");
         let mut services = 0;
-        let results = in_parallel(pool, &mut || services += 1, jobs);
+        let results = in_parallel(pool, &mut || services += 1, &jobs);
 
         assert_eq!(
             services,
@@ -349,7 +366,7 @@ mod tests {
             .expect("the test's pool starts");
         assert_eq!(pool.workers(), 1, "this test needs a threaded runtime");
         let mut services = 0;
-        let results = in_parallel(pool, &mut || services += 1, [&a, &b, &c, &d, &e]);
+        let results = in_parallel(pool, &mut || services += 1, &[&a, &b, &c, &d, &e]);
 
         assert_eq!(
             services, 3,

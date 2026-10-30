@@ -382,6 +382,19 @@ impl ForwardRenderer {
     /// below are what make that total, and both are exhaustive over
     /// [`super::DEPTH_MODES`] masked by their own `key`.
     ///
+    /// **A pipeline is an [`Option`]**, because `build` compiles only the ones
+    /// its scene's modes can draw with — see [`super::SidedPipelines`]. A value
+    /// whose pipeline is [`None`] has no handle to bind, so an unbuilt pipeline
+    /// cannot reach the stream; one whose partition is empty is dropped like
+    /// any other.
+    ///
+    /// # Panics
+    ///
+    /// If a partition has buckets and its pipeline is [`None`]: the bucket table
+    /// and the pipelines are both made from one scene's modes in `build`, so
+    /// that is a renderer whose two halves disagree, and a frame silently
+    /// missing those buckets would be the alternative.
+    ///
     /// `draws` is the whole table, a call per bucket in bucket order. Where the
     /// renderer draws a range of buckets per call — [`EmitTail::range_limit`] —
     /// each partition's buckets are packed into [`DrawRange`]s here, which is
@@ -401,7 +414,7 @@ impl ForwardRenderer {
         &self,
         draws: &BucketDraws,
         key: u32,
-        pipelines: &[(u32, GraphicsPipelineHandle)],
+        pipelines: &[(u32, Option<GraphicsPipelineHandle>)],
     ) -> Vec<BucketDraws> {
         pipelines
             .iter()
@@ -421,6 +434,13 @@ impl ForwardRenderer {
                 if calls.is_empty() {
                     return None;
                 }
+                let pipeline = pipeline.unwrap_or_else(|| {
+                    panic!(
+                        "buckets {buckets:?} draw material mode {mode:#x} and its pipeline was \
+                         never built: `build` made the bucket table and the pipelines from \
+                         different modes"
+                    )
+                });
                 let flat = (draws.emit.is_mesh() && self.culls_clusters).then(|| {
                     let segment =
                         crcbl_shaders::draw_gen::flat_segment(key, *mode).unwrap_or_else(|| {
@@ -437,7 +457,7 @@ impl ForwardRenderer {
                     segment
                 });
                 Some(BucketDraws {
-                    pipeline: *pipeline,
+                    pipeline,
                     layout: draws.layout,
                     indices: draws.indices,
                     emit: draws.emit,
@@ -465,6 +485,21 @@ mod tests {
     use crcbl_hal::{AdapterId, DeviceDesc, Format, Instance, QueueKind};
     use crcbl_shaders::mesh::GpuMaterial;
 
+    /// [`scene::demo`] with a material of every mode in [`super::super::DEPTH_MODES`],
+    /// so the renderer builds every mesh pipeline these tests hand
+    /// [`ForwardRenderer::partitions`] — `build` compiles only the ones its
+    /// scene's modes can draw with.
+    fn every_mode_scene() -> scene::SceneDesc<'static> {
+        let mut scene = scene::demo();
+        for mode in super::super::DEPTH_MODES {
+            scene.materials.push(GpuMaterial {
+                flags: mode,
+                ..GpuMaterial::UNTINTED
+            });
+        }
+        scene
+    }
+
     #[test]
     fn partitions_preserve_all_metadata_and_order_for_every_tail() {
         let recorder = Recorder::new();
@@ -477,7 +512,7 @@ mod tests {
             device.as_ref(),
             queue,
             Format::Rgba8UnormSrgb,
-            &scene::demo(),
+            &every_mode_scene(),
         )
         .unwrap();
         let masked = GpuMaterial::ALPHA_MODE_MASK;
@@ -494,20 +529,26 @@ mod tests {
             (307, 331, 347, 359),
             (373, 389, 401, 419),
         ];
+        let cutout = renderer
+            .depth_masked_pipeline
+            .expect("an every-mode scene builds the cutout shape");
         let opaque_pipeline = renderer.shadow_pipeline.single;
-        let masked_pipeline = renderer.depth_masked_pipeline.single;
-        let double_pipeline = renderer.shadow_pipeline.double;
-        let both_pipeline = renderer.depth_masked_pipeline.double;
+        let masked_pipeline = cutout.single;
+        let double_pipeline = renderer
+            .shadow_pipeline
+            .double
+            .expect("an every-mode scene builds the twin");
+        let both_pipeline = cutout.double.expect("an every-mode scene builds the twin");
         let unused_pipeline = renderer.tonemap_pipeline;
         let cases = [
             (
                 both,
                 vec![
-                    (both, both_pipeline),
-                    (unused, unused_pipeline),
-                    (0, opaque_pipeline),
-                    (double, double_pipeline),
-                    (masked, masked_pipeline),
+                    (both, Some(both_pipeline)),
+                    (unused, Some(unused_pipeline)),
+                    (0, Some(opaque_pipeline)),
+                    (double, Some(double_pipeline)),
+                    (masked, Some(masked_pipeline)),
                 ],
                 vec![
                     (both_pipeline, vec![3, 6], vec![(0, 1), (1, 1)]),
@@ -519,9 +560,9 @@ mod tests {
             (
                 double,
                 vec![
-                    (double, double_pipeline),
-                    (unused, unused_pipeline),
-                    (0, opaque_pipeline),
+                    (double, Some(double_pipeline)),
+                    (unused, Some(unused_pipeline)),
+                    (0, Some(opaque_pipeline)),
                 ],
                 vec![
                     (double_pipeline, vec![2, 3, 6], vec![(0, 2), (2, 1)]),
@@ -530,7 +571,7 @@ mod tests {
             ),
             (
                 0,
-                vec![(unused, unused_pipeline), (0, opaque_pipeline)],
+                vec![(unused, Some(unused_pipeline)), (0, Some(opaque_pipeline))],
                 vec![(
                     opaque_pipeline,
                     vec![0, 1, 2, 3, 4, 5, 6],
@@ -662,7 +703,7 @@ mod tests {
             device.as_ref(),
             queue,
             Format::Rgba8UnormSrgb,
-            &scene::demo(),
+            &every_mode_scene(),
         )
         .unwrap();
         let masked = GpuMaterial::ALPHA_MODE_MASK;
@@ -673,16 +714,16 @@ mod tests {
         let calls: Vec<(u32, u64, u64, u64)> = (0..7u32)
             .map(|bucket| (bucket * 256, u64::from(bucket) * 20, 0, 0))
             .collect();
+        let cutout = renderer
+            .depth_masked_pipeline
+            .expect("an every-mode scene builds the cutout shape");
         let depth = [
-            (0, renderer.shadow_pipeline.single),
-            (masked, renderer.depth_masked_pipeline.single),
+            (0, Some(renderer.shadow_pipeline.single)),
+            (masked, Some(cutout.single)),
             (double, renderer.shadow_pipeline.double),
-            (both, renderer.depth_masked_pipeline.double),
+            (both, cutout.double),
         ];
-        let sided = [
-            (0, renderer.mesh_pipeline.single),
-            (double, renderer.mesh_pipeline.double),
-        ];
+        let sided = renderer.mesh_pipeline.by_side();
         for (emit, culls_clusters, limit) in [
             (EmitTail::Mesh, true, None),
             (EmitTail::Mesh, true, Some(4096)),
@@ -783,7 +824,7 @@ mod tests {
             flat: None,
         };
         let opaque = renderer.shadow_pipeline.single;
-        let _ = renderer.partitions(&source, GpuMaterial::MODE_MASK, &[(0, opaque)]);
+        let _ = renderer.partitions(&source, GpuMaterial::MODE_MASK, &[(0, Some(opaque))]);
     }
 
     /// **Which tail draws a range of buckets per call, from the capabilities

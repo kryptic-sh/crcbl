@@ -121,6 +121,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`ForwardRenderer` builds only the mesh pipelines its scene can draw with**:
+  the `CullMode::None` twins only when a material is double-sided, the
+  alpha-mask depth pipeline only when one is masked, and the reflective shadow
+  map only when the probe volume is `ProbeUpdate::EveryFrame`. An opaque,
+  single-sided scene compiles 3 of the 9 forward mesh pipelines — about 150 ms
+  less pipeline compile CPU cold on an RX 7900 XTX (radv), about 2% less wall
+  time, since the twins already compiled in parallel.
 - **`crcbl-ui` keeps up to 16 `harfrust` shape plans per parsed face**, matched
   on direction, script, language and feature variations and dropped least
   recently used first, instead of compiling a fresh plan for every run it

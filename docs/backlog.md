@@ -185,17 +185,22 @@ Left:
   synchronised unless created externally-synchronised); persisting it is the
   separate "The Vulkan pipeline cache is not persisted" entry.
 
-### Start-up: `ForwardRenderer` still builds mesh twins, water and grass eagerly
+### Start-up: `ForwardRenderer` still builds water and grass eagerly
 
 The settings-driven post passes are built on first use (2026-10-30). Still built
 unconditionally by `ForwardRenderer::build`
 (`crates/crcbl-render/src/forward.rs`) and `View::build`
 (`crates/crcbl-render/src/forward/view.rs`):
 
-- The `MeshModules::sided` (`CullMode::None`) twins of all four mesh shapes
-  (colour, depth, depth-masked, RSM): eight mesh pipelines plus the shadow tile
-  clear, where an all-opaque single-sided scene without updating probes needs
-  three. The `with_scene` builders already know the material table.
+- Mesh twins, cutout and RSM pipelines are built per scene (2026-10-31). A
+  scene's modes are final at build, so nothing is built at runtime; if a
+  material insert or rewrite API is ever added it has to build any missing
+  variant then and re-key instances (`GpuInstance::MATERIAL_MODE_SHIFT`), and
+  the `partitions` panic reports such a gap loudly. A scene whose only masked
+  material is double-sided still compiles the unused single-sided cutout. The
+  start-up critical path is now `forward mesh` (~135 ms) and, beside it on the
+  main thread, water (~57 ms), the grass blade pipelines (~50 ms each),
+  volumetric scatter (~40 ms) and SSR (~30 ms).
 - `Water::new` and `crate::grass::Grass::new` before any body or field exists.
 - `Hiz::new`, read only by the reflection march.
 
@@ -208,8 +213,8 @@ Splitting each one's buffers from its pipelines would make the pipelines lazy.
 - Measured 2026-10-30 (RX 7900 XTX, radv, cold, load ~12): making the post
   passes lazy saved ~21 ms of a ~815 ms cold `ForwardRenderer::new`, so the
   remaining cost is mostly the mesh pipelines, the sided twins, water and grass.
-- Fix: build twins, water and grass when the first material, body or field asks
-  for them (eagerly when the builder's scene already contains them).
+- Fix: build water and grass when the first body or field asks for them (eagerly
+  when the builder's scene already contains them).
 
 ### A pass constructor that fails part way leaks what it made
 
