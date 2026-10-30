@@ -15,6 +15,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`ForwardRenderer::add_passes`, `add_skinned_passes`,
+  `add_skinned_passes_with_overlay` and `add_passes_with_views` panic when
+  handed a target extent other than the one the frame's `begin_frame` (or a
+  view's `begin_view`) was handed.** Both calls must be given the same extent.
 - **`crcbl_profile::Capture` has a new field, `clock: Option<ClockPair>`**, so
   code building one field by field must name it (`None` keeps the old meaning).
   `.crcblprof` is format version 2, which carries it; version-1 files still
@@ -111,6 +115,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`ForwardRenderer` builds its optional post passes when a frame first asks
+  for them** instead of at build: the FXAA and CMAA2 resolves (only the tier in
+  use), the render-scale upscale, bloom, contact shadows, the occlusion pair and
+  the shadow atlas viewer. The build, and `create_view`, still make the passes
+  the expected effect stack and render scale draw, so the first frame does not
+  pay for them; a frame that switches one on later builds it in `begin_frame`, a
+  one-off cost of about 13 ms cold for FXAA, bloom, contact shadows and the
+  upscale together on an RX 7900 XTX (radv). A cold build there went from about
+  815 ms to 793 ms.
+- **`ForwardRenderer::set_render_scale` now waits for the next `begin_frame`, as
+  documented**: `begin_frame` freezes the render scale and every view's internal
+  and target extents, and `add_passes` records at them, where a scale moved in
+  between used to reach `add_passes` and not the frame's blocks. The shadow
+  atlas view is likewise read once, at `begin_frame`.
 - **`crcbl-vk` no longer holds the device's state lock while the driver compiles
   a pipeline.** `create_graphics_pipeline`, `create_mesh_pipeline` and
   `create_compute_pipeline` resolve and validate under the lock, release it for

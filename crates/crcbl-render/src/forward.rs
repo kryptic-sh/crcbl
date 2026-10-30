@@ -2348,11 +2348,26 @@ pub struct ForwardRenderer {
     /// The shadow atlas viewer — see [`crate::atlas_view`]. It draws on no frame
     /// but the one [`debug_view`](Self::debug_view) resolved to
     /// [`DebugView::ShadowAtlas`], which is none until a caller calls
-    /// [`set_atlas_view`](Self::set_atlas_view).
-    atlas_viewer: AtlasView,
+    /// [`set_atlas_view`](Self::set_atlas_view) — and that frame's
+    /// [`begin_frame`](Self::begin_frame) is what builds it, so a renderer
+    /// whose atlas nobody looks at holds no pipeline for it.
+    atlas_viewer: Option<AtlasView>,
+    /// Whether the frame [`begin_frame`](Self::begin_frame) opened draws the
+    /// shadow atlas viewer: [`debug_view`](Self::debug_view) as that call
+    /// resolved it, frozen on [`frame_effects`](Self::frame_effects)' terms —
+    /// the viewer's block is written and its pipeline built there, so
+    /// [`add_passes`](Self::add_passes) has to agree with that call.
+    frame_atlas_view: bool,
     /// How large the internal render target is as a fraction of the extent a
     /// caller hands `begin_frame` — see [`set_render_scale`](Self::set_render_scale).
     render_scale: f32,
+    /// [`render_scale`](Self::render_scale) as the frame
+    /// [`begin_frame`](Self::begin_frame) opened froze it, on
+    /// [`frame_effects`](Self::frame_effects)' terms: every view's internal
+    /// extent this frame is taken at it, so a scale moved before
+    /// [`add_passes`](Self::add_passes) waits for the next frame, as
+    /// [`set_render_scale`](Self::set_render_scale) says it does.
+    frame_render_scale: f32,
 
     /// The three layers a caller supplies — see [`crate::effects`].
     effect_request: EffectRequest,
@@ -2497,12 +2512,6 @@ struct Rollback {
     /// three buffers — and which clean themselves up on their own failure path,
     /// so this only carries one that was built.
     lights: Option<LightGrid>,
-    /// Topic 46's occlusion pair, which owns two
-    /// pipelines, two layouts and a ring of blocks.
-    ssao: Option<Ssao>,
-    /// Topic 45's contact-shadow march, which owns one
-    /// pipeline, one layout and a ring of blocks.
-    contact_shadows: Option<ContactShadows>,
     /// Topic 47's depth pyramid, which owns one
     /// pipeline, one layout and a ring of blocks per level.
     hiz: Option<Hiz>,
@@ -2519,17 +2528,6 @@ struct Rollback {
     /// Topic 43 §6's auto-exposure, which owns three
     /// pipelines, one layout and three rings of buffers.
     exposure: Option<Exposure>,
-    /// Topic 48's bloom chain, which owns three
-    /// pipelines, two layouts, a sampler and a ring of blocks.
-    bloom: Option<Bloom>,
-    /// The cheap antialiasing tier, which owns one
-    /// pipeline, one layout, a sampler and a ring of blocks.
-    fxaa: Option<Fxaa>,
-    /// The higher antialiasing tier, which owns
-    /// four compute pipelines, one graphics pipeline, two layouts and a ring of
-    /// blocks.
-    cmaa2: Option<Cmaa2>,
-    upscale: Option<Upscale>,
     /// The background pass, which owns one pipeline, one layout and a ring of
     /// blocks and groups.
     sky_pass: Option<SkyPass>,
@@ -2538,9 +2536,6 @@ struct Rollback {
     /// The grass passes' pipelines, their layouts and their rings of
     /// blocks.
     grass: Option<Grass>,
-    /// The shadow atlas viewer, which owns one pipeline, one layout and a ring
-    /// of blocks and groups.
-    atlas_viewer: Option<AtlasView>,
     /// The camera, once [`View::build`] has made it whole — released as one,
     /// by [`View::destroy`].
     primary: Option<View>,
@@ -2589,9 +2584,6 @@ impl Rollback {
         if let Some(lights) = self.lights {
             lights.destroy(device);
         }
-        if let Some(atlas_viewer) = self.atlas_viewer {
-            atlas_viewer.destroy(device);
-        }
         if let Some(grass) = self.grass {
             grass.destroy(device);
         }
@@ -2600,18 +2592,6 @@ impl Rollback {
         }
         if let Some(sky_pass) = self.sky_pass {
             sky_pass.destroy(device);
-        }
-        if let Some(upscale) = self.upscale {
-            upscale.destroy(device);
-        }
-        if let Some(cmaa2) = self.cmaa2 {
-            cmaa2.destroy(device);
-        }
-        if let Some(fxaa) = self.fxaa {
-            fxaa.destroy(device);
-        }
-        if let Some(bloom) = self.bloom {
-            bloom.destroy(device);
         }
         if let Some(exposure) = self.exposure {
             exposure.destroy(device);
@@ -2627,12 +2607,6 @@ impl Rollback {
         }
         if let Some(hiz) = self.hiz {
             hiz.destroy(device);
-        }
-        if let Some(contact_shadows) = self.contact_shadows {
-            contact_shadows.destroy(device);
-        }
-        if let Some(ssao) = self.ssao {
-            ssao.destroy(device);
         }
         if let Some(draws) = self.draws {
             draws.destroy(device);
@@ -5003,6 +4977,14 @@ impl ForwardRenderer {
             &ViewInputs {
                 id: ViewId::PRIMARY,
                 effects: RenderEffects::all(),
+                // What the first frame resolves to unless a caller moves the
+                // request before it: the default request against the device
+                // effects this build hands the renderer below.
+                expected: EffectRequest::default().resolve(RenderEffects::all()),
+                // A renderer is built at full render scale; a caller that lowers
+                // it before the first frame — a saved setting — has that
+                // frame build the upscale.
+                expected_upscale: false,
                 background: ViewBackground::Scene,
                 lighting: ViewLighting::Scene,
                 target_format,
@@ -5532,21 +5514,6 @@ impl ForwardRenderer {
         })?;
         rollback.samplers.push(sampler);
 
-        // --- the shadow atlas viewer ---
-        //
-        // Built last, so `Rollback::run` releases it first. It writes the
-        // caller's target rather than a transient — it replaces the picture the
-        // tonemap put there, which is [`crate::atlas_view`]'s argument — and it
-        // records on no frame but the one that resolved
-        // [`DebugView::ShadowAtlas`].
-        rollback.atlas_viewer = Some(AtlasView::new(
-            device,
-            instance_buffers.len(),
-            target_format,
-            Self::build_fullscreen,
-        )?);
-        service();
-
         Ok(Self {
             pool: rollback
                 .pool
@@ -5767,13 +5734,13 @@ impl ForwardRenderer {
             // Empty, and unbuilt: nothing has appended a segment, so this
             // renderer records the frame it recorded before the layer existed.
             debug_draw: DebugDraw::default(),
-            atlas_viewer: rollback
-                .atlas_viewer
-                .take()
-                .unwrap_or_else(|| unreachable!("the viewer was placed in the rollback above")),
+            // Unbuilt: no frame has shown the atlas — see the field.
+            atlas_viewer: None,
+            frame_atlas_view: false,
             // Full resolution, which is the frame every caller of this type drew
             // before there was a knob — see [`Self::set_render_scale`].
             render_scale: 1.0,
+            frame_render_scale: 1.0,
             // The default stack the view wants, no quality clamp and no
             // override, which resolves to every effect this device permits but
             // the lens one — the frame every caller of this type drew before
@@ -7453,6 +7420,12 @@ impl ForwardRenderer {
     /// ([`InitialClaim::Tracked`]) one answer instead of two that drift: a frame
     /// whose `compile` fails is a frame that never ran, and a field advanced at
     /// build time would already have moved on without it.
+    ///
+    /// # Panics
+    ///
+    /// If `extent` is not the extent the [`begin_frame`](Self::begin_frame)
+    /// that opened this frame was handed: the frame's internal extent, its
+    /// blocks and the passes it builds were all decided there.
     pub fn add_passes<'a>(
         &'a mut self,
         graph: &mut RenderGraph<'a>,
@@ -7499,6 +7472,12 @@ impl ForwardRenderer {
     /// so; the skinning dispatch is [`Skinning::MAX_PASSES`], and
     /// [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES) — what a caller
     /// sizes [`PassTimers`](crate::PassTimers) with — already sums the two.
+    ///
+    /// # Panics
+    ///
+    /// If `extent` is not the extent the [`begin_skinned_frame`](Self::begin_skinned_frame)
+    /// that opened this frame was handed: the frame's internal extent, its
+    /// blocks and the passes it builds were all decided there.
     pub fn add_skinned_passes<'a>(
         &'a mut self,
         graph: &mut RenderGraph<'a>,
@@ -7524,6 +7503,10 @@ impl ForwardRenderer {
     /// sample `display` and attach `depth` read-only; it must leave both images
     /// in states its declarations name. The forward renderer continues with its
     /// existing resolve and upscale passes after the callback returns.
+    ///
+    /// # Panics
+    ///
+    /// On [`add_skinned_passes`](Self::add_skinned_passes)' terms.
     pub fn add_skinned_passes_with_overlay<'a, F>(
         &'a mut self,
         graph: &mut RenderGraph<'a>,
@@ -7561,7 +7544,9 @@ impl ForwardRenderer {
     ///
     /// If a [`ViewTarget`] in [`FrameTargets::views`] names [`ViewId::PRIMARY`],
     /// a view this renderer did not build, a view not begun this frame, or a
-    /// view twice.
+    /// view twice — or if [`FrameTargets`]' extent is not the one the frame's
+    /// [`begin_frame`](Self::begin_frame) was handed, or a view's is not the
+    /// one its [`begin_view`](Self::begin_view) was.
     pub fn add_passes_with_views<'a, F>(
         &'a mut self,
         graph: &mut RenderGraph<'a>,
@@ -7605,8 +7590,20 @@ impl ForwardRenderer {
         // itself, which is what makes it exact: a target small enough that the
         // scaled extent rounds back onto it adds no pass, because there would be
         // nothing for the pass to do.
+        //
+        // **Both are the ones `begin_frame` froze** — see
+        // [`View::frame_extent`]. A render scale moved since then is the next
+        // frame's, on [`Self::set_render_scale`]'s word, and a target of
+        // another size is refused rather than drawn out of blocks and passes
+        // decided for this one.
+        assert_eq!(
+            extent, self.primary.frame_target_extent,
+            "`add_passes` was handed a target of {extent:?}, and the `begin_frame` that \
+             opened this frame one of {:?}: hand both the same extent",
+            self.primary.frame_target_extent
+        );
         let target_extent = extent;
-        let extent = self.internal_extent(target_extent);
+        let extent = self.primary.frame_extent;
         let upscaling = extent != target_extent;
         let frame = self.frame;
         let instance_count = self.instances.slot_count();
@@ -7638,7 +7635,13 @@ impl ForwardRenderer {
                     "{:?} was named twice in one frame",
                     view.view
                 );
-                (*view, self.view_extent(built.background, view.extent))
+                assert_eq!(
+                    view.extent, built.frame_target_extent,
+                    "{:?} was handed a target of {:?} here and one of {:?} by `begin_view`: \
+                     hand both the same extent",
+                    view.view, view.extent, built.frame_target_extent
+                );
+                (*view, built.frame_extent)
             })
             .collect();
 
@@ -7765,9 +7768,9 @@ impl ForwardRenderer {
         let grass = self.grass.frame();
         // Whether this frame ends by drawing the shadow atlas over itself — the
         // resolved view rather than the switch, so a caller who left the atlas
-        // up and then asked for normals gets normals. Read here for
-        // `draws_sky`'s reason exactly: `debug_view` takes `&self`.
-        let draws_atlas_view = self.debug_view() == DebugView::ShadowAtlas;
+        // up and then asked for normals gets normals — as `begin_frame` froze
+        // it, because that call built the viewer and wrote its block.
+        let draws_atlas_view = self.frame_atlas_view;
 
         let pages = MaterialPages {
             base_color: base_color_page,
@@ -8034,7 +8037,7 @@ impl ForwardRenderer {
             Overlays {
                 debug_draw: Some(debug_draw),
                 ground_grid: ground_grid.as_ref().filter(|_| *ground_grid_on),
-                atlas_viewer: draws_atlas_view.then_some(atlas_viewer),
+                atlas_viewer: atlas_viewer.as_mut().filter(|_| draws_atlas_view),
             },
             overlay,
         );
@@ -9434,18 +9437,31 @@ impl ForwardRenderer {
         })
     }
 
-    /// The extent a frame handed `target` is actually drawn at.
+    /// The extent the next frame handed `target` is actually drawn at, at the
+    /// render scale in force.
+    ///
+    /// Test-only: a frame takes its extents at the scale its `begin_frame`
+    /// froze, through [`scaled_extent`](Self::scaled_extent), and this is the
+    /// prediction a test checks that against.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn internal_extent(&self, target: (u32, u32)) -> (u32, u32) {
+        Self::scaled_extent(self.render_scale, target)
+    }
+
+    /// The extent a frame handed `target` is drawn at under `scale` — what a
+    /// frame's own extents are taken at, with
+    /// [`frame_render_scale`](Self::frame_render_scale).
     ///
     /// Rounds rather than truncates, and floors at one texel in each dimension:
     /// a zero here would reach a transient image description, and an image of
     /// zero extent is a device error rather than a small frame. A caller who
     /// minimised the window already hands a zero extent through, and that path
     /// is unchanged — `max(1)` on a zero is one either way.
-    fn internal_extent(&self, target: (u32, u32)) -> (u32, u32) {
-        if self.render_scale >= 1.0 {
+    fn scaled_extent(scale: f32, target: (u32, u32)) -> (u32, u32) {
+        if scale >= 1.0 {
             return target;
         }
-        let scale = f64::from(self.render_scale);
+        let scale = f64::from(scale);
         (
             ((f64::from(target.0) * scale).round() as u32).max(1),
             ((f64::from(target.1) * scale).round() as u32).max(1),
@@ -10861,7 +10877,9 @@ impl ForwardRenderer {
         // Nothing to release on a renderer nobody drew a segment through — see
         // [`crate::debug_draw`], whose pipeline is built on first use.
         self.debug_draw.destroy(device);
-        self.atlas_viewer.destroy(device);
+        if let Some(atlas_viewer) = self.atlas_viewer {
+            atlas_viewer.destroy(device);
+        }
         self.ambient_occlusion_placeholder.destroy(device);
         self.contact_shadow_placeholder.destroy(device);
         self.probe_visibility_placeholder.destroy(device);
@@ -11669,7 +11687,9 @@ pub(crate) fn named_entry(
 // `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    mod frame_extents;
     mod instance_upload;
+    mod lazy_passes;
     mod load_service;
     mod page_reload;
     mod shadow_reach;
@@ -19512,7 +19532,12 @@ mod tests {
         );
         let plain = marches(&recorder, 0);
         let after = recorder.commands().len();
-        let (console, shipped) = renderer.primary.ssao.blocks(renderer.frame);
+        let (console, shipped) = renderer
+            .primary
+            .ssao
+            .as_ref()
+            .expect("the default stack builds the occlusion pair")
+            .blocks(renderer.frame);
         let (uncompared_console, uncompared_shipped) = (
             recorder.buffer_bytes(console).expect("the console's block"),
             recorder.buffer_bytes(shipped).expect("the seam's block"),
@@ -19529,7 +19554,12 @@ mod tests {
             &DirectionalLight::default(),
         );
         let compared = marches(&recorder, after);
-        let (console, shipped) = renderer.primary.ssao.blocks(renderer.frame);
+        let (console, shipped) = renderer
+            .primary
+            .ssao
+            .as_ref()
+            .expect("the default stack builds the occlusion pair")
+            .blocks(renderer.frame);
         let (compared_console, compared_shipped) = (
             recorder.buffer_bytes(console).expect("the console's block"),
             recorder.buffer_bytes(shipped).expect("the seam's block"),
@@ -19670,7 +19700,12 @@ mod tests {
         let device = device.as_ref();
         let mut renderer =
             ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
-        let (ships, cheap) = renderer.primary.ssao.gathers();
+        let (ships, cheap) = renderer
+            .primary
+            .ssao
+            .as_ref()
+            .expect("the default stack builds the occlusion pair")
+            .gathers();
         assert_ne!(
             ships, cheap,
             "the renderer built one gather pipeline for both techniques, so nothing below can \
@@ -19739,7 +19774,12 @@ mod tests {
         let device = device.as_ref();
         let mut renderer =
             ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
-        let (ships, cheap) = renderer.primary.ssao.gathers();
+        let (ships, cheap) = renderer
+            .primary
+            .ssao
+            .as_ref()
+            .expect("the default stack builds the occlusion pair")
+            .gathers();
 
         seam.set(0.5);
         let compared = frame_seen_from(

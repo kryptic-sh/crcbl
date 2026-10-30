@@ -151,32 +151,43 @@ this backlog: a forward colour pipeline at 361 ms on dx12.
   synchronised unless created externally-synchronised); persisting it is the
   separate "The Vulkan pipeline cache is not persisted" entry.
 
-### Start-up: `ForwardRenderer` builds every pass whether used or not
+### Start-up: `ForwardRenderer` still builds mesh twins, water and grass eagerly
 
-`ForwardRenderer::build` (`crates/crcbl-render/src/forward.rs`) and
-`View::build` (`crates/crcbl-render/src/forward/view.rs`) build unconditionally:
+The settings-driven post passes are built on first use (2026-10-30). Still built
+unconditionally by `ForwardRenderer::build`
+(`crates/crcbl-render/src/forward.rs`) and `View::build`
+(`crates/crcbl-render/src/forward/view.rs`):
 
 - The `MeshModules::sided` (`CullMode::None`) twins of all four mesh shapes
   (colour, depth, depth-masked, RSM): eight mesh pipelines plus the shadow tile
   clear, where an all-opaque single-sided scene without updating probes needs
   three. The `with_scene` builders already know the material table.
-- Both `Fxaa::new` and `Cmaa2::new`, though at most one is recorded.
-- `Upscale::new`, which draws nothing at render scale 1.0.
 - `Water::new` and `crate::grass::Grass::new` before any body or field exists.
-- `AtlasView::new`, drawn only under `DebugView::ShadowAtlas`.
-- `Volumetric`, `ContactShadows`, `Ssao`, `Bloom`, `Exposure`, whatever
-  `inputs.effects` says.
+- `Hiz::new`, read only by the reflection march.
 
-Some eagerness is load-bearing: `water.rs` relies on `Ssr` existing for its
-uniform block and tables. Already recorded and not repeated: "P4" (light-slot
-`DrawGen`s) and "Every view builds its own post pipelines".
+Decided eager, with reasons (2026-10-30): `Exposure` (the tonemap binds its
+measured buffer every frame; `exposure_buffers` is public), `Volumetric` (water
+binds its buffers; its composite runs for an atmosphere with the fog bit off;
+`froxel_buffers` is public), `Ssr` (water binds its block and sky prefilter).
+Splitting each one's buffers from its pipelines would make the pipelines lazy.
 
-- Impact: medium to large cold, small warm. Verified which constructors run
-  unconditionally; not measured how many of the "49 compute and 35 graphics"
-  pipelines a typical scene never binds.
-- Fix: build twins and per-feature passes when the first material, body, field
-  or effect bit asks for them (eagerly when the builder's scene already contains
-  them); keep `Ssr`'s block and tables independent of its pipeline.
+- Measured 2026-10-30 (RX 7900 XTX, radv, cold, load ~12): making the post
+  passes lazy saved ~21 ms of a ~815 ms cold `ForwardRenderer::new`, so the
+  remaining cost is mostly the mesh pipelines, the sided twins, water and grass.
+- Fix: build twins, water and grass when the first material, body or field asks
+  for them (eagerly when the builder's scene already contains them).
+
+### A pass constructor that fails part way leaks what it made
+
+`Ssao`, `ContactShadows`, `Bloom`, `Fxaa`, `Cmaa2`, `Upscale` and `AtlasView`
+`::new` return on the first failing seam call without releasing the layouts,
+samplers and pipelines already created. This was true before they became lazy
+(the rollback only held them once whole); `View::build_passes` and
+`begin_frame_body` now build them between frames with no rollback, so a failed
+late build mid-session leaks on every retry, and in the engine loop it ends the
+game where it used to fail at start-up. Not observed; only a device refusing a
+pipeline mid-constructor triggers it. Fix: release on the failing path inside
+each constructor.
 
 ### Start-up: what `ForwardRenderer`'s build still submits on its own
 

@@ -387,6 +387,12 @@ pub(super) struct ViewInputs<'a> {
     pub(super) id: ViewId,
     /// The effects it may draw — see [`ViewDesc::effects`].
     pub(super) effects: RenderEffects,
+    /// The effects its first frame is expected to draw, whose passes are built
+    /// now rather than on that frame — see [`View::build_passes`]. A guess,
+    /// and only a cost either way: one it misses is built by the frame that
+    /// asks for it, and one it names that no frame asks for is built for
+    /// nothing.
+    pub(super) expected: RenderEffects,
     /// What it draws where no geometry is — see [`ViewDesc::background`].
     pub(super) background: ViewBackground,
     /// What lights it — see [`ViewDesc::lighting`].
@@ -394,6 +400,10 @@ pub(super) struct ViewInputs<'a> {
     /// The format the caller's target has, which the resolves and the upscale
     /// write.
     pub(super) target_format: Format,
+    /// Whether its first frame is expected to be drawn below its target's
+    /// extent, which builds the upscale now on [`ViewInputs::expected`]'s
+    /// terms.
+    pub(super) expected_upscale: bool,
     /// Which call the forward pass records.
     pub(super) emit: EmitTail,
     /// The instance ring, one buffer per frame in flight.
@@ -454,6 +464,10 @@ pub(super) struct ViewFrame<'a> {
     /// The target's aspect, and the internal extent the frame is drawn at.
     pub(super) aspect: f32,
     pub(super) extent: (u32, u32),
+    /// The target's own extent: where it differs from
+    /// [`extent`](Self::extent) the frame ends in the upscale, on
+    /// [`View::add_passes`]' terms.
+    pub(super) target_extent: (u32, u32),
     /// The frame's resolved effects, before this view's own mask.
     pub(super) effects: RenderEffects,
     /// Every element the instance pool has handed out — see
@@ -661,6 +675,12 @@ fn declare_prepass_reads<'g, 'a>(
     }
 }
 
+/// Why [`View::add_passes`] may take a settings-driven pass as built: the
+/// [`View::begin_frame`] that froze [`View::frame_effects`] built every pass
+/// those effects record — see [`View::build_passes`].
+const BUILT_BY_BEGIN_FRAME: &str =
+    "`View::begin_frame` builds every pass the effects and extents it froze record";
+
 /// The primary camera's overlays — nothing for a secondary view.
 #[derive(Default)]
 pub(super) struct Overlays<'a> {
@@ -682,6 +702,9 @@ pub(super) struct View {
     pub(super) background: ViewBackground,
     /// What lights this view, as [`ViewDesc::lighting`] asked for it.
     pub(super) lighting: ViewLighting,
+    /// The format the caller's target has, which the resolves and the upscale
+    /// are built against when [`View::build_passes`] first needs them.
+    pub(super) target_format: Format,
     /// What this frame draws in this view: the frame's resolved effects under
     /// [`View::effects`], frozen by [`View::begin_frame`] so that the frame's
     /// two halves agree on it.
@@ -692,6 +715,14 @@ pub(super) struct View {
     /// reason: the block that switch writes and the composite
     /// [`View::add_passes`] adds for it have to agree.
     pub(super) frame_aerial: bool,
+    /// The internal extent this frame is drawn at in this view, and its
+    /// target's, frozen by [`View::begin_frame`] beside
+    /// [`View::frame_effects`] and for its reason: that call wrote the blocks
+    /// for these extents and built the upscale where they differ, so the
+    /// frame's passes are recorded at them and a target of any other extent is
+    /// refused — see [`ForwardRenderer::add_passes`].
+    pub(super) frame_extent: (u32, u32),
+    pub(super) frame_target_extent: (u32, u32),
     /// The extent of the image the reflection march writes this frame —
     /// [`crate::ssr::march_extent`] of the frame's extent at
     /// `crate::ssr::r_ssr_resolution` — frozen by [`View::begin_frame`] beside
@@ -840,11 +871,17 @@ pub(super) struct View {
     /// identity or a zero here would put every pixel of the first frame in
     /// motion.
     pub(super) previous_view_projection: Option<Mat4>,
-    /// Topic 46's occlusion pair — see [`crate::ssao`].
-    pub(super) ssao: Ssao,
+    /// Topic 46's occlusion pair — see [`crate::ssao`]. Built with the view
+    /// where [`ViewInputs::expected`] holds [`RenderEffects::AMBIENT_OCCLUSION`]
+    /// — the default stack does — and otherwise by the first frame that draws
+    /// it; kept either way — see [`View::build_passes`].
+    pub(super) ssao: Option<Ssao>,
     /// Topic 45's contact-shadow march — see
-    /// [`crate::contact_shadows`].
-    pub(super) contact_shadows: ContactShadows,
+    /// [`crate::contact_shadows`]. Built on [`View::ssao`]'s terms for
+    /// [`RenderEffects::CONTACT_SHADOWS`]: with the view where the expected
+    /// stack holds it — the default does not — and otherwise by the first
+    /// frame that draws it.
+    pub(super) contact_shadows: Option<ContactShadows>,
     /// Topic 47's depth pyramid, which the reflection
     /// march climbs — see [`crate::hiz`].
     pub(super) hiz: Hiz,
@@ -861,19 +898,27 @@ pub(super) struct View {
     /// [`crate::exposure`]. Named for what it owns rather than for the value:
     /// [`ForwardRenderer::exposure`] is the number a caller set.
     pub(super) auto_exposure: Exposure,
-    /// Topic 48's bloom chain — see [`crate::bloom`].
-    pub(super) bloom: Bloom,
+    /// Topic 48's bloom chain — see [`crate::bloom`]. Built on
+    /// [`View::ssao`]'s terms for [`RenderEffects::BLOOM`], which the default
+    /// stack leaves out.
+    pub(super) bloom: Option<Bloom>,
     /// The cheap antialiasing tier — see
-    /// [`crate::fxaa`].
-    pub(super) fxaa: Fxaa,
+    /// [`crate::fxaa`]. Built on [`View::ssao`]'s terms for the frames that
+    /// resolve through it — [`RenderEffects::ANTIALIASING`] without
+    /// [`RenderEffects::CMAA2`], which the default stack is not.
+    pub(super) fxaa: Option<Fxaa>,
     /// The higher antialiasing tier — see
     /// [`crate::cmaa2`]. It takes the resolve slot from [`View::fxaa`] on the
-    /// frames [`RenderEffects::CMAA2`] is set for, and neither is built per
-    /// frame: both exist, and at most one records.
-    pub(super) cmaa2: Cmaa2,
-    /// [`crate::upscale`], and it draws nothing at a
+    /// frames [`RenderEffects::CMAA2`] is set for, so at most one of the two
+    /// records; each is built on [`View::ssao`]'s terms for the frames that
+    /// record it — this one with the view under the default stack, which
+    /// carries [`RenderEffects::CMAA2`].
+    pub(super) cmaa2: Option<Cmaa2>,
+    /// [`crate::upscale`]. Built with the view where
+    /// [`ViewInputs::expected_upscale`] says its first frame is drawn below
+    /// its target, and otherwise by the first frame that is — none at a
     /// [`render_scale`](ForwardRenderer::render_scale) of `1.0`.
-    pub(super) upscale: Upscale,
+    pub(super) upscale: Option<Upscale>,
     /// Topic 43 §8's background pass — see
     /// [`crate::sky_pass`]. It draws on no frame whose sky is [`Sky::NONE`],
     /// which is every frame until a caller calls
@@ -1184,33 +1229,15 @@ impl View {
             tonemap_uniforms.push(buffer);
         }
 
-        // --- the screen-space occlusion pair ---
-        //
-        // Stored in the rollback whole, like the light grid: it owns two
-        // pipelines and a ring of buffers, and `Ssao::destroy` is the one place
-        // their release order lives.
-        rollback.ssao = Some(Ssao::new(
-            device,
-            frames,
-            ForwardRenderer::build_fullscreen,
-        )?);
-        service();
-
-        // --- the screen-space contact-shadow march ---
-        //
-        // Stored whole for the pair above's reason, and after them because
-        // `Rollback::run` releases in the reverse order of construction.
-        rollback.contact_shadows = Some(ContactShadows::new(
-            device,
-            frames,
-            ForwardRenderer::build_fullscreen,
-        )?);
-        service();
-
         // --- the screen-space reflection march ---
         //
-        // Stored whole for the pair above's reason, and after them because
-        // `Rollback::run` releases in the reverse order of construction.
+        // Stored in the rollback whole, like the light grid: it owns a
+        // pipeline and a ring of buffers, and `Ssr::destroy` is the one place
+        // their release order lives.
+        //
+        // **Built here whatever the effects say**, unlike the occlusion pair:
+        // the water surface binds this pass's block and prefiltered sky on
+        // every frame it draws — see [`crate::water`].
         rollback.ssr = Some(Ssr::new(
             device,
             uploads,
@@ -1249,6 +1276,10 @@ impl View {
         // scene content and the chain is a lens. Its volume holds the same
         // [`FROXEL_CAPACITY`] the clustering pass's grid does, because it is
         // subdivided by the same [`Grid`] — see [`crate::volumetric`].
+        //
+        // **Built whatever the effects say**: its composite also puts an
+        // atmosphere's air in front of the scene with the fog bit off, and the
+        // water surface binds its buffers on every frame it draws.
         rollback.volumetric = Some(Volumetric::new(
             device,
             frames,
@@ -1267,65 +1298,10 @@ impl View {
         // between the chain and the tonemap in the frame as well: it bins the
         // picture the tonemap is about to read, which is the one with the lens
         // already on it — see [`crate::exposure`].
+        //
+        // **Built whatever the effects say**: the tonemap binds its measured
+        // exposure on every frame, measuring or not.
         rollback.exposure = Some(Exposure::new(device, uploads, frames)?);
-        service();
-
-        // --- the bloom chain ---
-        //
-        // Stored whole for the pair above's reason, and after them because
-        // `Rollback::run` releases in the reverse order of construction. It owns
-        // a **linear** sampler of its own; the tonemap's sampler is `Nearest` on
-        // purpose and `crate::bloom` says why the chain cannot share it.
-        rollback.bloom = Some(Bloom::new(
-            device,
-            frames,
-            ForwardRenderer::build_fullscreen,
-        )?);
-        service();
-
-        // --- the antialiasing resolve ---
-        //
-        // Stored whole for the three above's reason, and after them because
-        // `Rollback::run` releases in the reverse order of construction. It is
-        // the one of the four that needs `target_format`: it writes the caller's
-        // target where the others write `Rgba16Float` transients of their own
-        // choosing — see [`crate::fxaa`]. Its sampler is **linear** for the
-        // chain's reason and not the tonemap's.
-        rollback.fxaa = Some(Fxaa::new(
-            device,
-            frames,
-            inputs.target_format,
-            ForwardRenderer::build_fullscreen,
-        )?);
-        service();
-
-        // --- the higher antialiasing tier ---
-        //
-        // The same slot, filled by CMAA2's two dispatches and one draw
-        // instead of FXAA's one draw — see [`crate::cmaa2`], which says why the
-        // two are built together and at most one recorded. It carries no lookup
-        // table, so unlike the tier it replaced it takes no `queue`: there is
-        // nothing to upload.
-        rollback.cmaa2 = Some(Cmaa2::new(
-            device,
-            frames,
-            inputs.target_format,
-            ForwardRenderer::build_fullscreen,
-        )?);
-        service();
-
-        // --- the render-scale upscale ---
-        //
-        // The second pass that writes the caller's target rather than a
-        // transient of its own. It draws on no frame at a render scale of
-        // `1.0`, which is every frame until a caller moves it — see
-        // [`crate::upscale`].
-        rollback.upscale = Some(Upscale::new(
-            device,
-            frames,
-            inputs.target_format,
-            ForwardRenderer::build_fullscreen,
-        )?);
         service();
 
         // --- the background ---
@@ -1376,17 +1352,23 @@ impl View {
 
         // Whole, so the rollback lets go of every handle: the view owns them
         // from here, and a rollback still naming one would release it twice.
-        let view =
+        let mut view =
             Self {
                 effects: inputs.effects,
                 background: inputs.background,
                 lighting: inputs.lighting,
-                // Replaced by every `begin_frame`, on `lod_params`' terms.
-                frame_effects: inputs.effects,
+                target_format: inputs.target_format,
+                // Replaced by every `begin_frame`, on `lod_params`' terms —
+                // and the effects whose passes are built below, so a frame
+                // recorded before one began asks for none that is missing.
+                frame_effects: inputs.expected,
                 // Replaced by every `begin_frame`, on `frame_effects`' terms.
                 frame_aerial: false,
                 // Replaced by every `begin_frame`, on `frame_effects`' terms.
                 frame_ssr_extent: (1, 1),
+                // Replaced by every `begin_frame`; no frame has a target yet.
+                frame_extent: (0, 0),
+                frame_target_extent: (0, 0),
                 // No frame has begun it.
                 begun: 0,
                 draws: rollback.draws.take().unwrap_or_else(|| {
@@ -1425,12 +1407,10 @@ impl View {
                 // No frame has been drawn, so there is no previous camera — see the
                 // field, which says why that is not the identity.
                 previous_view_projection: None,
-                ssao: rollback.ssao.take().unwrap_or_else(|| {
-                    unreachable!("the occlusion pair was placed in the rollback above")
-                }),
-                contact_shadows: rollback.contact_shadows.take().unwrap_or_else(|| {
-                    unreachable!("the contact march was placed in the rollback above")
-                }),
+                // Built below, for the effects the first frame is expected to
+                // draw — see [`View::build_passes`].
+                ssao: None,
+                contact_shadows: None,
                 hiz: rollback.hiz.take().unwrap_or_else(|| {
                     unreachable!("the pyramid was placed in the rollback above")
                 }),
@@ -1446,18 +1426,10 @@ impl View {
                 auto_exposure: rollback.exposure.take().unwrap_or_else(|| {
                     unreachable!("the histogram was placed in the rollback above")
                 }),
-                bloom: rollback.bloom.take().unwrap_or_else(|| {
-                    unreachable!("the bloom chain was placed in the rollback above")
-                }),
-                fxaa: rollback.fxaa.take().unwrap_or_else(|| {
-                    unreachable!("the resolve was placed in the rollback above")
-                }),
-                cmaa2: rollback.cmaa2.take().unwrap_or_else(|| {
-                    unreachable!("the higher tier was placed in the rollback above")
-                }),
-                upscale: rollback.upscale.take().unwrap_or_else(|| {
-                    unreachable!("the upscale was placed in the rollback above")
-                }),
+                bloom: None,
+                fxaa: None,
+                cmaa2: None,
+                upscale: None,
                 sky_pass: rollback
                     .sky_pass
                     .take()
@@ -1473,7 +1445,98 @@ impl View {
             };
         rollback.buffers.clear();
         rollback.bind_groups.clear();
+        // The view owns every handle from here, so a failure releases the
+        // view whole rather than through the rollback.
+        if let Err(error) =
+            view.build_passes(device, inputs.expected, inputs.expected_upscale, service)
+        {
+            view.destroy(device);
+            return Err(error);
+        }
         Ok(view)
+    }
+
+    /// What a frame that resolved `frame` draws in a view that asked for
+    /// `asked` and is lit by `lighting`.
+    ///
+    /// The shadow bit is the frame's whatever the view asked for — see
+    /// [`ViewDesc::effects`] — and the effects that bring the frame's light in
+    /// are the view's lighting's to take away — see
+    /// [`ViewLighting::SCENE_EFFECTS`].
+    pub(super) fn drawn_effects(
+        frame: RenderEffects,
+        asked: RenderEffects,
+        lighting: ViewLighting,
+    ) -> RenderEffects {
+        frame
+            .intersection(asked.union(RenderEffects::SHADOWS))
+            .difference(lighting.dropped_effects())
+    }
+
+    /// Builds every settings-driven pass a frame drawing `effects` records and
+    /// this view does not hold yet, and the upscale where `upscaling` — and
+    /// keeps them: a pass a later frame switches off stays built for the frame
+    /// that switches it back on.
+    ///
+    /// **Between frames, never inside one**: [`View::begin_frame`] calls this
+    /// before it writes a block, so a pass built here has its block written by
+    /// the same call and is whole before [`View::add_passes`] records it. None
+    /// of these passes uploads anything at creation — each constructor takes
+    /// no [`UploadBatch`], which is what lets this run without one — and every
+    /// per-frame resource each owns is a ring of `frames` blocks and groups;
+    /// nothing is sized by the extent, which the graph's transients and the
+    /// per-frame blocks carry instead, so a pass built late is the pass an
+    /// early build would have made.
+    ///
+    /// The first frame that asks for a pass pays its pipeline creation —
+    /// a hitch, cold, on the frame a setting switches it on.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the pass's constructor. The passes already held stay
+    /// held; one that failed part way leaves what it had created, on its
+    /// constructor's own terms.
+    pub(super) fn build_passes(
+        &mut self,
+        device: &dyn Device,
+        effects: RenderEffects,
+        upscaling: bool,
+        service: &mut dyn FnMut(),
+    ) -> Result<(), HalError> {
+        let frames = self.uniforms.len();
+        let fullscreen = ForwardRenderer::build_fullscreen;
+        if effects.contains(RenderEffects::AMBIENT_OCCLUSION) && self.ssao.is_none() {
+            self.ssao = Some(Ssao::new(device, frames, fullscreen)?);
+            service();
+        }
+        if effects.contains(RenderEffects::CONTACT_SHADOWS) && self.contact_shadows.is_none() {
+            self.contact_shadows = Some(ContactShadows::new(device, frames, fullscreen)?);
+            service();
+        }
+        if effects.contains(RenderEffects::BLOOM) && self.bloom.is_none() {
+            self.bloom = Some(Bloom::new(device, frames, fullscreen)?);
+            service();
+        }
+        // **One tier, never both** — the one `add_passes` resolves through.
+        if effects.contains(RenderEffects::CMAA2) {
+            if self.cmaa2.is_none() {
+                self.cmaa2 = Some(Cmaa2::new(device, frames, self.target_format, fullscreen)?);
+                service();
+            }
+        } else if effects.contains(RenderEffects::ANTIALIASING) && self.fxaa.is_none() {
+            self.fxaa = Some(Fxaa::new(device, frames, self.target_format, fullscreen)?);
+            service();
+        }
+        if upscaling && self.upscale.is_none() {
+            self.upscale = Some(Upscale::new(
+                device,
+                frames,
+                self.target_format,
+                fullscreen,
+            )?);
+            service();
+        }
+        Ok(())
     }
 
     /// Writes every per-frame block this view reads, for `camera`, into the
@@ -1506,14 +1569,16 @@ impl View {
         // disappears.
         let view_projection = camera.view_projection(frame.aspect);
         // What this frame draws here, frozen for the reason the frame's own
-        // effects are: this call and the passes have to agree. The shadow bit is
-        // the frame's whatever this view asked for — see [`ViewDesc::effects`] —
-        // and the effects that bring the frame's light in are this view's
-        // lighting's to take away — see [`ViewLighting::SCENE_EFFECTS`].
-        self.frame_effects = frame
-            .effects
-            .intersection(self.effects.union(RenderEffects::SHADOWS))
-            .difference(self.lighting.dropped_effects());
+        // effects are: this call and the passes have to agree.
+        let effects = Self::drawn_effects(frame.effects, self.effects, self.lighting);
+        // Every pass that set records and this view has not built yet, built
+        // before any block below is written — see [`View::build_passes`]. Frozen
+        // only once they exist, so a failed build leaves no frame asking for a
+        // pass that is not there.
+        self.build_passes(device, effects, extent != frame.target_extent, &mut || {})?;
+        self.frame_effects = effects;
+        self.frame_extent = extent;
+        self.frame_target_extent = frame.target_extent;
         // What lights this view: the frame's sun, rows, probes, sky, fog and
         // shadow maps, or the one constant light its description fixed and
         // nothing of the frame's. Resolved once here so every block below reads
@@ -1792,23 +1857,27 @@ impl View {
         // each other's inverse rather than two derivations that agree today.
         let projection = camera.projection.matrix(frame.aspect);
         let inv_projection = projection.inverse();
-        self.ssao.begin_frame(
-            device,
-            slot,
-            ssao::SsaoParams {
-                inv_proj: inv_projection.to_cols_array(),
-                proj: projection.to_cols_array(),
-                // View → world, for the bent direction alone: the gather works
-                // in view space and its one output has to reach `mesh.slang`'s
-                // world-space ambient term. The same expression the reflection
-                // pass's block carries, a few lines below.
-                inv_view: camera.view().inverse().to_cols_array(),
-                radius: crate::ssao::radius(),
-                slices: crate::ssao::slice_count(),
-                intensity: crate::ssao::intensity(),
-                bent_normals: crate::ssao::bent_normals(),
-            },
-        )?;
+        // Written on every frame the pass exists for, whether or not this one
+        // adds it, on every other block's terms.
+        if let Some(pass) = &self.ssao {
+            pass.begin_frame(
+                device,
+                slot,
+                ssao::SsaoParams {
+                    inv_proj: inv_projection.to_cols_array(),
+                    proj: projection.to_cols_array(),
+                    // View → world, for the bent direction alone: the gather works
+                    // in view space and its one output has to reach `mesh.slang`'s
+                    // world-space ambient term. The same expression the reflection
+                    // pass's block carries, a few lines below.
+                    inv_view: camera.view().inverse().to_cols_array(),
+                    radius: crate::ssao::radius(),
+                    slices: crate::ssao::slice_count(),
+                    intensity: crate::ssao::intensity(),
+                    bent_normals: crate::ssao::bent_normals(),
+                },
+            )?;
+        }
         // The contact march's block: the same two matrices, and the sun in view
         // space.
         //
@@ -1827,15 +1896,17 @@ impl View {
             .view()
             .transform_vector3(light.direction.normalize_or_zero())
             .normalize_or_zero();
-        self.contact_shadows.begin_frame(
-            device,
-            slot,
-            contact_shadows::ContactShadowParams {
-                inv_proj: inv_projection.to_cols_array(),
-                proj: projection.to_cols_array(),
-                to_light: to_light.to_array(),
-            },
-        )?;
+        if let Some(pass) = &self.contact_shadows {
+            pass.begin_frame(
+                device,
+                slot,
+                contact_shadows::ContactShadowParams {
+                    inv_proj: inv_projection.to_cols_array(),
+                    proj: projection.to_cols_array(),
+                    to_light: to_light.to_array(),
+                },
+            )?;
+        }
         // The reflection march's block: the same two matrices and nothing else.
         // Its own buffer rather than the pair's — see [`crate::ssr::Ssr`] — and
         // the same pair of `glam` values, so a march and an occlusion sample can
@@ -1951,23 +2022,31 @@ impl View {
         // size of the image it reads, and the chain's shape is a function of the
         // extent alone. Written whether or not the chain is in this frame, on
         // the two blocks above's terms — a row nobody reads costs sixteen bytes.
-        self.bloom.begin_frame(device, slot, extent)?;
+        if let Some(pass) = &self.bloom {
+            pass.begin_frame(device, slot, extent)?;
+        }
         // The resolve's block: the reciprocal of the extent and three constants.
         // Written on the chain's terms above — a frame that adds no resolve pays
         // for twenty bytes nobody reads, and a block written only on the frames
         // that use it is a block that is stale on the frame a caller switches
         // the effect on.
-        self.fxaa.begin_frame(device, slot, extent)?;
+        if let Some(pass) = &self.fxaa {
+            pass.begin_frame(device, slot, extent)?;
+        }
         // The higher tier's block: the extent and the two list capacities it
         // implies, written on the resolve's terms above. Sixteen bytes, and a
         // frame that resolves through the other tier pays for them and reads
         // none.
-        self.cmaa2.begin_frame(device, slot, extent)?;
+        if let Some(pass) = &mut self.cmaa2 {
+            pass.begin_frame(device, slot, extent)?;
+        }
         // The upscale's block: the internal extent and its reciprocal. Written
         // on the two above's terms — a frame at full scale adds no upscale pass
         // and pays for sixteen bytes nobody reads, and a block written only on
         // the frames that use it is stale on the frame a caller moves the knob.
-        self.upscale.begin_frame(device, slot, extent)?;
+        if let Some(pass) = &self.upscale {
+            pass.begin_frame(device, slot, extent)?;
+        }
 
         // The camera and the two selection numbers go to the cull/draw-argument
         // pair as well as into the block above, and they are handed over rather
@@ -2532,9 +2611,13 @@ impl View {
         // two depth-only passes, neither of which has a fragment stage and so
         // neither of which ever samples it.
         let occlusion = match occlusion_chain {
-            Some(images) => self
-                .ssao
-                .add_passes(graph, frame, extent, scene_depth, images),
+            Some(images) => self.ssao.as_mut().expect(BUILT_BY_BEGIN_FRAME).add_passes(
+                graph,
+                frame,
+                extent,
+                scene_depth,
+                images,
+            ),
             None => occlusion_placeholder,
         };
         // Topic 45's contact march, or the one texel that
@@ -2552,6 +2635,8 @@ impl View {
         let contact = match contact_mask {
             Some(mask) => self
                 .contact_shadows
+                .as_mut()
+                .expect(BUILT_BY_BEGIN_FRAME)
                 .add_passes(graph, frame, scene_depth, mask),
             None => contact_placeholder,
         };
@@ -2948,8 +3033,14 @@ impl View {
         // its source view, so a toggle costs one cache miss and nothing else.
         let tonemapped = match &bloomed {
             Some((mips, composited)) => {
-                self.bloom
-                    .add_passes(graph, frame, extent, tonemapped, mips, *composited);
+                self.bloom.as_mut().expect(BUILT_BY_BEGIN_FRAME).add_passes(
+                    graph,
+                    frame,
+                    extent,
+                    tonemapped,
+                    mips,
+                    *composited,
+                );
                 *composited
             }
             None => tonemapped,
@@ -3161,9 +3252,15 @@ impl View {
         // above says about the grid, the UI and the ordering holds for either.
         if display != present {
             if effects.contains(RenderEffects::CMAA2) {
-                self.cmaa2.add_passes(graph, frame, display, present);
+                self.cmaa2
+                    .as_mut()
+                    .expect(BUILT_BY_BEGIN_FRAME)
+                    .add_passes(graph, frame, display, present);
             } else {
-                self.fxaa.add_pass(graph, frame, display, present);
+                self.fxaa
+                    .as_mut()
+                    .expect(BUILT_BY_BEGIN_FRAME)
+                    .add_pass(graph, frame, display, present);
             }
         }
 
@@ -3181,8 +3278,14 @@ impl View {
         // caller after this, at native resolution. That is the whole reason a
         // render-scale knob is usable: the 3D frame gets cheap and the text does
         // not get soft.
+        //
+        // The `begin_frame` that opened this frame froze both extents and
+        // built this where they differ — see [`View::frame_extent`].
         if present != target {
-            self.upscale.add_pass(graph, frame, present, target);
+            self.upscale
+                .as_mut()
+                .expect(BUILT_BY_BEGIN_FRAME)
+                .add_pass(graph, frame, present, target);
         }
 
         tonemapped
@@ -3203,17 +3306,31 @@ impl View {
         self.grass.destroy(device);
         self.water.destroy(device);
         self.sky_pass.destroy(device);
-        self.upscale.destroy(device);
-        self.cmaa2.destroy(device);
-        self.fxaa.destroy(device);
-        self.bloom.destroy(device);
+        // The settings-driven passes a frame built, and none that no frame
+        // asked for — see [`View::build_passes`].
+        if let Some(pass) = self.upscale {
+            pass.destroy(device);
+        }
+        if let Some(pass) = self.cmaa2 {
+            pass.destroy(device);
+        }
+        if let Some(pass) = self.fxaa {
+            pass.destroy(device);
+        }
+        if let Some(pass) = self.bloom {
+            pass.destroy(device);
+        }
         self.auto_exposure.destroy(device);
         self.volumetric.destroy(device);
         self.ssr.destroy(device);
         self.hiz.destroy(device);
         self.occlusion_pyramid.destroy(device);
-        self.contact_shadows.destroy(device);
-        self.ssao.destroy(device);
+        if let Some(pass) = self.contact_shadows {
+            pass.destroy(device);
+        }
+        if let Some(pass) = self.ssao {
+            pass.destroy(device);
+        }
         for group in self
             .mesh_groups
             .into_iter()
@@ -3312,6 +3429,13 @@ impl ForwardRenderer {
             &ViewInputs {
                 id,
                 effects: desc.effects,
+                // What the last frame drew, through this view's own mask: the
+                // best guess at what its first frame will.
+                expected: View::drawn_effects(self.frame_effects, desc.effects, desc.lighting),
+                // Below full scale a view that is not transparent is drawn
+                // below its target, whatever extent that target turns out to
+                // be — see `view_extent`.
+                expected_upscale: self.render_scale < 1.0 && !desc.background.is_transparent(),
                 background: desc.background,
                 lighting: desc.lighting,
                 target_format: self.target_format,
@@ -3506,14 +3630,16 @@ impl ForwardRenderer {
     /// something — the cluster grid, the LOD metric's pixel budget, the Hi-Z
     /// pyramid's height, the bloom chain, the resolve's texel size — and every
     /// one of those wants the extent the pixels are actually at. See
-    /// [`Self::set_render_scale`].
+    /// [`Self::set_render_scale`] — and taken at the scale the frame's
+    /// `begin_frame` froze, [`Self::frame_render_scale`], so a view begun after
+    /// a scale moved is drawn at the frame's scale and not the next one's.
     pub(super) fn frame_extents(&self, target: (u32, u32)) -> (f32, (u32, u32)) {
         let aspect = if target.0 == 0 || target.1 == 0 {
             1.0
         } else {
             target.0 as f32 / target.1 as f32
         };
-        (aspect, self.internal_extent(target))
+        (aspect, Self::scaled_extent(self.frame_render_scale, target))
     }
 
     /// The internal extent a secondary view with `background` is drawn at, for
@@ -3570,6 +3696,7 @@ impl ForwardRenderer {
             serial: self.frame_serial,
             aspect,
             extent,
+            target_extent,
             effects: self.frame_effects,
             instance_count,
             selection_eye,

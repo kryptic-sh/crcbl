@@ -180,8 +180,9 @@ impl Cmaa2 {
     /// # Errors
     ///
     /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**, for the reason every other builder in this crate gives: the
-    /// caller holds a rollback, and this is stored in it whole.
+    /// path**: what this created before the failure stays alive until the
+    /// device goes. The forward renderer builds it between frames, the first
+    /// time a frame asks for it, with no rollback to hand it to.
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,

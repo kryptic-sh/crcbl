@@ -32,6 +32,10 @@ impl ForwardRenderer {
             // shadows are off, and a request changed between the two would dispatch
             // that cull against numbers nothing zeroed.
             self.frame_effects = self.resolved_effects();
+            // The render scale, frozen for the same reason: every view's
+            // internal extent this frame is taken at it — see
+            // [`ForwardRenderer::frame_render_scale`].
+            self.frame_render_scale = self.render_scale;
             // The occlusion rung's second switch, frozen here for the field's
             // reason. Its sibling — how many planes the march sweeps — needs no
             // field: it goes straight into the uniform block written below, and the
@@ -211,13 +215,29 @@ impl ForwardRenderer {
             // rectangles the frame block above carries, so the grid the viewer draws
             // is the one the sampling side reads through; a viewer that worked its
             // own out would be a diagnostic supplying its own evidence.
-            self.atlas_viewer.begin_frame(
-                device,
-                self.frame,
-                extent,
-                shadow::atlas_extent(),
-                scene.atlas_rects,
-            )?;
+            //
+            // Built by the first frame that shows it, before its block is
+            // written, and frozen only once it exists — see
+            // [`ForwardRenderer::frame_atlas_view`].
+            let shows_atlas = self.debug_view() == DebugView::ShadowAtlas;
+            if shows_atlas && self.atlas_viewer.is_none() {
+                self.atlas_viewer = Some(AtlasView::new(
+                    device,
+                    self.primary.uniforms.len(),
+                    self.target_format,
+                    Self::build_fullscreen,
+                )?);
+            }
+            self.frame_atlas_view = shows_atlas;
+            if let Some(atlas_viewer) = &self.atlas_viewer {
+                atlas_viewer.begin_frame(
+                    device,
+                    self.frame,
+                    extent,
+                    shadow::atlas_extent(),
+                    scene.atlas_rects,
+                )?;
+            }
 
             // The UI's debug item 5, the immediate-mode buffer: whatever
             // any system appended since the last frame, uploaded and cleared here.
