@@ -5,7 +5,8 @@
 //!  MeshPool ──reserve_vertices ×2──▶ SkinnedRegion { prev, current }
 //!
 //!  begin_frame ──▶ palettes[frame]      (one buffer, every range end to end)
-//!              ──▶ bindings[frame]      (one buffer, every range end to end)
+//!              ──▶ bindings[frame]      (one buffer, every range end to end,
+//!                                         rewritten only when they change)
 //!              ──▶ params[frame][slot]  (one uniform block per range)
 //!
 //!  add_pass ──── compute "skinning"  vertex pool ──▶ vertex pool
@@ -84,6 +85,11 @@
 //! skin at import time. This call does: it is handed the palette and the
 //! bindings together, and it is the last place either is a Rust value. See
 //! [`SkinningError::JointOutOfRange`].
+//!
+//! Every joint is checked when the bindings change. A frame handing over the
+//! same bindings as the one before tests each range's palette length against
+//! the highest joint that range was found to name, which refuses exactly what
+//! the full scan would — and the scan then runs to name the vertex.
 //!
 //! # The oracle
 //!
@@ -504,6 +510,89 @@ pub struct Skinning {
     /// Frames [`Skinning::begin_frame`] has accepted. Its low bit is the
     /// ping-pong.
     frames_begun: u64,
+    /// The skin bindings most recently passed validation, end to end, and what
+    /// each range of them was checked to name — see [`Bindings`]. Kept even if
+    /// a device write later fails that frame: they were valid, and the slots'
+    /// generations say which of them still need writing.
+    latest: Bindings,
+    /// `[frame]` — the [`Bindings::generation`] that slot's binding buffer
+    /// holds, or [`None`] for one it is not known to hold.
+    uploaded: Vec<Option<u64>>,
+}
+
+/// The skin bindings a [`Skinning`] last accepted, kept so a frame handing over
+/// the same ones again is neither re-checked nor re-uploaded.
+///
+/// Bindings are a mesh's own vertex data and do not move from one frame to the
+/// next, where the palette does. Comparing against this copy is one read of
+/// each; what it saves is the joint scan, the serialisation and the write into
+/// host-visible memory, every frame.
+#[derive(Debug, Default)]
+struct Bindings {
+    /// Every range's bindings, end to end, in the order they were handed over.
+    all: Vec<SkinBinding>,
+    /// Per range: how many of `all` it covers, and the highest joint index any
+    /// slot of them names — what [`SkinningError::JointOutOfRange`] tests a
+    /// palette against, so an unchanged range is checked in one comparison.
+    ranges: Vec<(usize, u32)>,
+    /// Bumped whenever `all` changes; a slot whose
+    /// [`Skinning::uploaded`] entry differs is re-uploaded.
+    generation: u64,
+}
+
+impl Bindings {
+    /// Whether `ranges` hand over exactly these bindings, range for range.
+    fn matches(&self, ranges: &[SkinRange<'_>]) -> bool {
+        if self.ranges.len() != ranges.len() {
+            return false;
+        }
+        let mut at = 0;
+        for (range, &(len, _)) in ranges.iter().zip(&self.ranges) {
+            if range.bindings.len() != len || !same_bits(range.bindings, &self.all[at..at + len]) {
+                return false;
+            }
+            at += len;
+        }
+        true
+    }
+}
+
+/// Whether two binding runs are the same **bits**, which is what the buffer
+/// holds — `f32`'s `==` calls `-0.0` and `0.0` equal and a `NaN` unequal to
+/// itself, which would skip an upload that changes the buffer and repeat one
+/// that does not.
+fn same_bits(a: &[SkinBinding], b: &[SkinBinding]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            a.joints == b.joints && a.weights.map(f32::to_bits) == b.weights.map(f32::to_bits)
+        })
+}
+
+/// The highest joint index any slot of `range`'s bindings names, or the first
+/// one past its palette, refused by name.
+///
+/// **The check the shader cannot make and `crcbl-scene` could not make
+/// either** — see [`SkinningError::JointOutOfRange`]. Every slot of every
+/// vertex, including the ones carrying zero weight: the shader reads all four
+/// matrices before it scales any of them, so a weightless slot naming a joint
+/// past the palette is the same clamped read as a weighted one.
+fn highest_joint(index: usize, range: &SkinRange<'_>) -> Result<u32, SkinningError> {
+    let mut highest = 0;
+    for (vertex, binding) in range.bindings.iter().enumerate() {
+        for (slot, joint) in binding.joints.iter().enumerate() {
+            if *joint as usize >= range.palette.len() {
+                return Err(SkinningError::JointOutOfRange {
+                    range: index,
+                    vertex,
+                    slot,
+                    joint: *joint,
+                    palette: range.palette.len(),
+                });
+            }
+            highest = highest.max(*joint);
+        }
+    }
+    Ok(highest)
 }
 
 impl Skinning {
@@ -651,6 +740,8 @@ impl Skinning {
             joint_capacity: desc.joints,
             binding_capacity: desc.bindings,
             frames_begun: 0,
+            latest: Bindings::default(),
+            uploaded: vec![None; desc.frames],
         })
     }
 
@@ -683,12 +774,24 @@ impl Skinning {
     }
 
     /// Validates `ranges`, alternates the ping-pong, and uploads the palette,
-    /// the skin bindings and one uniform block per range.
+    /// one uniform block per range, and the skin bindings **if this slot does
+    /// not already hold them**.
     ///
     /// Call once per frame, before [`Skinning::add_pass`], against the frame
     /// slot the instance pool rotated to. A frame with no skinned meshes calls
     /// it with an empty slice, which clears the slot's plan — otherwise the
     /// pass would re-dispatch the ranges of whichever frame last used it.
+    ///
+    /// # The bindings are uploaded when they change, into every slot
+    ///
+    /// A mesh's bindings are its own vertex data, so a frame normally hands
+    /// over the very ones the frame before it did. This keeps the last
+    /// accepted set and compares against it: an unchanged set is neither
+    /// re-checked joint by joint nor re-written. A changed one is checked in
+    /// full and given a new generation, and each slot's binding buffer is
+    /// rewritten the next time that slot begins a frame — once per slot, so
+    /// every frame in flight reads the set it was handed, whichever slot it
+    /// landed in.
     ///
     /// # Errors
     ///
@@ -709,7 +812,15 @@ impl Skinning {
         frame: usize,
         ranges: &[SkinRange<'_>],
     ) -> Result<(), SkinningError> {
-        self.check(ranges)?;
+        if let Some(shapes) = self.check(ranges)? {
+            let latest = &mut self.latest;
+            latest.all.clear();
+            for range in ranges {
+                latest.all.extend_from_slice(range.bindings);
+            }
+            latest.ranges = shapes;
+            latest.generation = latest.generation.wrapping_add(1);
+        }
 
         // Cleared before anything is written rather than replaced after: a
         // write that fails part-way would otherwise leave this slot dispatching
@@ -725,7 +836,7 @@ impl Skinning {
         let parity = self.parity();
 
         let mut palette_bytes = Vec::new();
-        let mut binding_bytes = Vec::new();
+        let mut binding_base = 0u32;
         let mut plan = Vec::with_capacity(ranges.len());
         for (slot, range) in ranges.iter().enumerate() {
             let vertex_count = range.region.vertex_count();
@@ -733,7 +844,7 @@ impl Skinning {
                 vertex_count,
                 input_base: range.input_base,
                 output_base: range.region.base(parity),
-                binding_base: (binding_bytes.len() / SKIN_BINDING_STRIDE) as u32,
+                binding_base,
                 joint_base: (palette_bytes.len() / JOINT_STRIDE) as u32,
                 joint_count: range.palette.len() as u32,
                 attribute_base: self.attribute_base,
@@ -749,17 +860,29 @@ impl Skinning {
                     palette_bytes.extend_from_slice(&value.to_le_bytes());
                 }
             }
-            for binding in range.bindings {
-                binding_bytes.extend_from_slice(&binding.to_bytes());
-            }
+            // `check` held the total to the binding capacity, which is a `u32`.
+            binding_base += vertex_count;
             plan.push(vertex_count.div_ceil(WORKGROUP_SIZE));
         }
 
         if !palette_bytes.is_empty() {
             device.write_buffer(self.palettes[frame], 0, &palette_bytes)?;
         }
-        if !binding_bytes.is_empty() {
-            device.write_buffer(self.bindings[frame], 0, &binding_bytes)?;
+        let generation = self.latest.generation;
+        if self.uploaded[frame] != Some(generation) {
+            // Forgotten first, so a write that fails leaves the slot due for
+            // another rather than claiming bytes it may only half hold.
+            self.uploaded[frame] = None;
+            if !self.latest.all.is_empty() {
+                let bytes: Vec<u8> = self
+                    .latest
+                    .all
+                    .iter()
+                    .flat_map(SkinBinding::to_bytes)
+                    .collect();
+                device.write_buffer(self.bindings[frame], 0, &bytes)?;
+            }
+            self.uploaded[frame] = Some(generation);
         }
         self.active[frame] = plan;
         Ok(())
@@ -767,7 +890,12 @@ impl Skinning {
 
     /// Everything [`begin_frame`](Self::begin_frame) refuses, checked before it
     /// writes anything.
-    fn check(&self, ranges: &[SkinRange<'_>]) -> Result<(), SkinningError> {
+    ///
+    /// Returns each range's binding count and highest joint when the bindings
+    /// differ from [`Skinning::latest`], and [`None`] when they are the same —
+    /// whose joints were checked when they were accepted, so only the palette
+    /// lengths, which do move, are tested against them again.
+    fn check(&self, ranges: &[SkinRange<'_>]) -> Result<Option<Vec<(usize, u32)>>, SkinningError> {
         let over = |what, capacity, asked| SkinningError::OverCapacity {
             what,
             capacity,
@@ -777,6 +905,7 @@ impl Skinning {
             return Err(over("ranges", self.range_capacity, ranges.len() as u64));
         }
 
+        let mut shapes = (!self.latest.matches(ranges)).then(|| Vec::with_capacity(ranges.len()));
         let mut joints = 0u64;
         let mut bindings = 0u64;
         for (index, range) in ranges.iter().enumerate() {
@@ -791,24 +920,15 @@ impl Skinning {
                     bindings: range.bindings.len(),
                 });
             }
-            // **The check the shader cannot make and `crcbl-scene` could not
-            // make either** — see `SkinningError::JointOutOfRange`. Every slot
-            // of every vertex, including the ones carrying zero weight: the
-            // shader reads all four matrices before it scales any of them, so a
-            // weightless slot naming a joint past the palette is the same
-            // clamped read as a weighted one.
-            for (vertex, binding) in range.bindings.iter().enumerate() {
-                for (slot, joint) in binding.joints.iter().enumerate() {
-                    if *joint as usize >= range.palette.len() {
-                        return Err(SkinningError::JointOutOfRange {
-                            range: index,
-                            vertex,
-                            slot,
-                            joint: *joint,
-                            palette: range.palette.len(),
-                        });
-                    }
+            match shapes.as_mut() {
+                Some(shapes) => shapes.push((range.bindings.len(), highest_joint(index, range)?)),
+                // The same bindings with a shorter palette still have to be
+                // refused, and by name: the scan that names the vertex runs
+                // only once the one comparison says it will find one.
+                None if self.latest.ranges[index].1 as usize >= range.palette.len() => {
+                    highest_joint(index, range)?;
                 }
+                None => {}
             }
             joints += range.palette.len() as u64;
             bindings += range.bindings.len() as u64;
@@ -819,7 +939,7 @@ impl Skinning {
         if bindings > u64::from(self.binding_capacity) {
             return Err(over("skin bindings", self.binding_capacity, bindings));
         }
-        Ok(())
+        Ok(shapes)
     }
 
     /// How many passes [`add_pass`](Self::add_pass) adds to a frame.
@@ -1069,7 +1189,7 @@ pub fn skin_vertex(palette: &[Mat4], binding: &SkinBinding, vertex: &MeshVertex)
 mod tests {
     use crcbl_shaders::vertex::UvRange;
 
-    use crcbl_hal::null::{Command, NullInstance, Recorder};
+    use crcbl_hal::null::{Command, Event, NullInstance, Recorder};
     use crcbl_hal::{CommandEncoderDesc, DeviceDesc, Instance, QueueHandle, QueueKind};
     use crcbl_shaders::mesh::VERTEX_STRIDE;
 
@@ -2012,6 +2132,221 @@ mod tests {
                 "skin binding {index} is not what the shader crate encodes"
             );
         }
+    }
+
+    /// How many host writes landed in each slot's binding buffer since the
+    /// recorder was last cleared, in slot order.
+    fn binding_writes(recorder: &Recorder, pass: &Skinning) -> Vec<usize> {
+        let events = recorder.events();
+        pass.bindings
+            .iter()
+            .map(|slot| {
+                events
+                    .iter()
+                    .filter(|event| {
+                        matches!(event, Event::BufferWritten { buffer, .. } if buffer == slot)
+                    })
+                    .count()
+            })
+            .collect()
+    }
+
+    /// Whether a slot's binding buffer starts with `bindings`, as the shader
+    /// reads them.
+    fn holds(recorder: &Recorder, pass: &Skinning, slot: usize, bindings: &[SkinBinding]) -> bool {
+        let want: Vec<u8> = bindings.iter().flat_map(SkinBinding::to_bytes).collect();
+        recorder
+            .buffer_bytes(pass.bindings[slot])
+            .is_some_and(|bytes| bytes[..want.len()] == want[..])
+    }
+
+    /// **Unchanged skin bindings are not uploaded again, and a change reaches
+    /// every frame slot exactly once.**
+    ///
+    /// The bindings are a mesh's own vertex data, so re-sending them every
+    /// frame was most of a skinned frame's host cost. More slots than the
+    /// renderer's [`crate::forward::FRAMES_IN_FLIGHT`], so "every slot" is not
+    /// satisfied by "this one and the other": a change written into only the
+    /// slot that saw it leaves the next frame in flight skinning against the
+    /// old set, which is a visible flicker every other frame and nothing else
+    /// reports it.
+    #[test]
+    fn unchanged_bindings_are_not_uploaded_again_and_a_change_reaches_every_slot_once() {
+        const FRAMES: usize = 3;
+        const { assert!(FRAMES > crate::forward::FRAMES_IN_FLIGHT) };
+        let (recorder, device, _queue) = open();
+        let mut pool = pool(device.as_ref(), 32);
+        let source = pool.reserve_vertices(4).expect("room");
+        let region = SkinnedRegion::reserve(&mut pool, 4).expect("room");
+        let mut pass = Skinning::new(
+            device.as_ref(),
+            &SkinningDesc {
+                label: Some("skinning test"),
+                frames: FRAMES,
+                ranges: 1,
+                joints: 2,
+                bindings: 4,
+                vertices: pool.vertex_buffer(),
+                attribute_base: pool.attribute_base(),
+            },
+        )
+        .expect("the null backend accepts every descriptor");
+        let palette = [Mat4::IDENTITY; 2];
+        let before = rigid(4);
+        let mut after = rigid(4);
+        after[2] = SkinBinding {
+            joints: [1, 0, 0, 0],
+            weights: [0.75, 0.25, 0.0, 0.0],
+        };
+        let mut frame = 0;
+        let mut begin = |pass: &mut Skinning, bindings: &[SkinBinding]| {
+            let slot = frame % FRAMES;
+            frame += 1;
+            pass.begin_frame(
+                device.as_ref(),
+                slot,
+                &[SkinRange {
+                    input_base: source,
+                    region: &region,
+                    palette: &palette,
+                    bindings,
+                }],
+            )
+            .expect("a legal frame");
+            slot
+        };
+
+        // The first lap fills every slot, once each.
+        for _ in 0..FRAMES {
+            begin(&mut pass, &before);
+        }
+        assert_eq!(binding_writes(&recorder, &pass), [1; FRAMES]);
+
+        // Steady frames write the palette and nothing of the bindings.
+        recorder.clear();
+        for _ in 0..2 * FRAMES {
+            begin(&mut pass, &before);
+        }
+        assert_eq!(
+            binding_writes(&recorder, &pass),
+            [0; FRAMES],
+            "a frame handing over the same bindings re-uploaded them"
+        );
+        let palette_writes = recorder
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::BufferWritten { buffer, .. } if pass.palettes.contains(buffer)
+                )
+            })
+            .count();
+        assert_eq!(
+            palette_writes,
+            2 * FRAMES,
+            "the pose still has to go up every frame, and the count above has to be able to \
+             see a write"
+        );
+
+        // A change goes into each slot as that slot comes round, and only then.
+        recorder.clear();
+        for lap in 0..2 * FRAMES {
+            let slot = begin(&mut pass, &after);
+            assert_eq!(slot, lap % FRAMES, "the change lands at the start of a lap");
+            assert!(
+                holds(&recorder, &pass, slot, &after),
+                "slot {slot} skinned frame {lap} after the change against the old bindings"
+            );
+            for later in lap + 1..FRAMES {
+                assert!(
+                    holds(&recorder, &pass, later % FRAMES, &before),
+                    "slot {later} was written before it began a frame, while the device may still \
+                     read it"
+                );
+            }
+        }
+        assert_eq!(
+            binding_writes(&recorder, &pass),
+            [1; FRAMES],
+            "a change is one write into each slot, and then none"
+        );
+    }
+
+    /// A change is a change of **bits**: a weight going from `0.0` to `-0.0`
+    /// is a different buffer, which `f32`'s `==` would call the same.
+    #[test]
+    fn a_change_to_a_bindings_sign_of_zero_is_still_uploaded() {
+        let (recorder, device, _queue) = open();
+        let mut pool = pool(device.as_ref(), 32);
+        let source = pool.reserve_vertices(1).expect("room");
+        let region = SkinnedRegion::reserve(&mut pool, 1).expect("room");
+        let mut pass = skinning(device.as_ref(), &pool, 1, 1, 1);
+        let positive = rigid(1);
+        let mut negative = rigid(1);
+        negative[0].weights[3] = -0.0;
+        for (frame, bindings) in [&positive, &negative].into_iter().enumerate() {
+            pass.begin_frame(
+                device.as_ref(),
+                frame % 2,
+                &[SkinRange {
+                    input_base: source,
+                    region: &region,
+                    palette: &[Mat4::IDENTITY],
+                    bindings,
+                }],
+            )
+            .expect("a legal frame");
+        }
+        assert!(holds(&recorder, &pass, 1, &negative));
+        assert!(holds(&recorder, &pass, 0, &positive));
+    }
+
+    /// **The joint check survives the bindings not changing.** They are
+    /// checked in full only when they differ from the last set, so the same
+    /// set handed over with a shorter palette must still be refused, and by
+    /// the vertex that names the missing joint — and the refusal must not count
+    /// as having accepted anything.
+    #[test]
+    fn unchanged_bindings_are_still_checked_against_a_shorter_palette() {
+        let (recorder, device, _queue) = open();
+        let mut pool = pool(device.as_ref(), 32);
+        let source = pool.reserve_vertices(3).expect("room");
+        let region = SkinnedRegion::reserve(&mut pool, 3).expect("room");
+        let mut pass = skinning(device.as_ref(), &pool, 1, 4, 3);
+        let mut bindings = rigid(3);
+        bindings[2].joints[1] = 3;
+        let begin = |pass: &mut Skinning, palette: &[Mat4]| {
+            pass.begin_frame(
+                device.as_ref(),
+                0,
+                &[SkinRange {
+                    input_base: source,
+                    region: &region,
+                    palette,
+                    bindings: &bindings,
+                }],
+            )
+        };
+
+        begin(&mut pass, &[Mat4::IDENTITY; 4]).expect("joint 3 of a four-joint palette");
+        match begin(&mut pass, &[Mat4::IDENTITY; 2]) {
+            Err(SkinningError::JointOutOfRange {
+                range,
+                vertex,
+                slot,
+                joint,
+                palette,
+            }) => assert_eq!((range, vertex, slot, joint, palette), (0, 2, 1, 3, 2)),
+            other => panic!("{other:?} does not name the joint that is out of range"),
+        }
+        recorder.clear();
+        begin(&mut pass, &[Mat4::IDENTITY; 4]).expect("joint 3 of a four-joint palette again");
+        assert_eq!(
+            binding_writes(&recorder, &pass),
+            [0, 0],
+            "the refused frame changed what the slot is known to hold"
+        );
     }
 
     /// **A binding naming a joint the palette has not got is refused, loudly

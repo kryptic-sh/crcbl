@@ -121,6 +121,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`Skinning::begin_frame` no longer re-checks and re-uploads every skin
+  binding each frame.** It compares the bindings it is handed against the last
+  accepted set, bit for bit, and rewrites a frame slot's binding buffer only
+  when they changed, once per slot. Palettes and per-range parameter blocks
+  still upload every frame, and out-of-range joints are still refused by name,
+  including when unchanged bindings meet a shorter palette. On 18k bindings over
+  the null backend `begin_frame` went from about 50 µs to about 19 µs a frame.
 - **`ForwardRenderer` builds only the mesh pipelines its scene can draw with**:
   the `CullMode::None` twins only when a material is double-sided, the
   alpha-mask depth pipeline only when one is masked, and the reflective shadow

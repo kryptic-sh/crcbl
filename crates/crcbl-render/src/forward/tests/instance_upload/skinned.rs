@@ -1,5 +1,5 @@
 use super::*;
-use crcbl_shaders::skinning::{JOINT_STRIDE, PARAMS_SIZE, Params, SKIN_BINDING_STRIDE};
+use crcbl_shaders::skinning::{JOINT_STRIDE, PARAMS_SIZE, Params};
 
 #[test]
 fn skinned_instance_refusal_preserves_prior_skinning_and_retries_pending_uploads() {
@@ -27,10 +27,16 @@ fn skinned_instance_refusal_preserves_prior_skinning_and_retries_pending_uploads
         for _ in 0..FRAMES_IN_FLIGHT + 1 {
             recorder.clear();
             fixture.begin(device);
-            skin_targets[fixture.renderer.frame] = buffer_writes(&recorder)[..3]
-                .iter()
-                .map(|(buffer, _, _)| *buffer)
-                .collect();
+            // A slot's first frame is the one that uploads its skin bindings;
+            // later frames handing over the same ones write only the block and
+            // the palette, so the three targets are read off that first one.
+            let targets = &mut skin_targets[fixture.renderer.frame];
+            if targets.is_empty() {
+                *targets = buffer_writes(&recorder)[..3]
+                    .iter()
+                    .map(|(buffer, _, _)| *buffer)
+                    .collect();
+            }
         }
         let indices = [
             skinned.index() as usize,
@@ -116,10 +122,11 @@ fn skinned_instance_refusal_preserves_prior_skinning_and_retries_pending_uploads
         );
         let expected = uploaded_bytes(&fixture.renderer, before.len());
         let targets = &skin_targets[slot];
+        // The bindings are the ones this slot already holds, so they are not
+        // written again; `targets[2]` still has to hold them, below.
         let mut expected_writes = vec![
             (targets[0], 0, PARAMS_SIZE),
             (targets[1], 0, fixture.palette.len() * JOINT_STRIDE),
-            (targets[2], 0, fixture.bindings.len() * SKIN_BINDING_STRIDE),
         ];
         expected_writes.extend(
             indices[..fail_at]

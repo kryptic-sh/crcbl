@@ -50,6 +50,23 @@ ssao-blur 0.55. An earlier 720p default-settings run read forward 4.85, ssao
 - Together they are about 25% of the low-tier frame on this iGPU, the class of
   device the low tier exists for. Measure in a quiet window before acting.
 
+## Skinning's per-frame CPU after the binding compare (2026-10-31)
+
+EW's callgrind put over half of its raid demo's GPU-side frame CPU in
+`Skinning::begin_frame` (`crates/crcbl-render/src/skinning.rs`) re-uploading
+~18k unchanged skin bindings. It now compares and uploads only on change. Left:
+
+- **Retained skin-binding API.** The compare still reads every binding each
+  frame. Bindings registered once and referenced through `SkinRange` would make
+  the steady frame O(ranges), but would break every `SkinRange` builder
+  (`apps/puppet`, `apps/viewer`, `apps/editor`, `crcbl-dx12`'s
+  `renderer_registers`, the `crcbl` and `crcbl-vk` e2e tests, and EW). Needs
+  that API decision.
+- **Palette serialisation** is now the largest remaining per-frame cost: one
+  `extend_from_slice` per float. Writing a `&[Mat4]` as bytes in one go (e.g.
+  through `bytemuck`, if glam's feature is enabled) would cut it. Not measured
+  separately.
+
 ## UI text is still shaped more than once a frame (2026-10-31)
 
 EW measured its stash view (180 labels, each its own `ui_tree::draw_at` tree) at
