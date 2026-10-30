@@ -92,6 +92,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A corrupt GTK icon cache no longer overflows the icon-theme lookup.**
+  `IconThemes::lookup` read `icon-theme.cache` offsets with 32-bit arithmetic,
+  so a huge bucket count or a chain offset near `u32::MAX` panicked in debug
+  builds; such a cache now answers no icon, as an out-of-bounds offset does.
+
 - **The Vulkan backend no longer offers mesh shading on radv RDNA2 GPUs.** On a
   GFX10.3 device under radv (`VkDriverId` `MESA_RADV`, families NAVI21–24,
   VANGOGH, REMBRANDT, RAPHAEL_MENDOCINO) the mesh path lost the device within

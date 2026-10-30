@@ -428,18 +428,18 @@ impl GtkCache {
             return None;
         }
         cache.hash = cache.u32_at(4)?;
-        cache.buckets = cache.u32_at(cache.hash)?;
+        cache.buckets = cache.u32_at(u64::from(cache.hash))?;
         if cache.buckets == 0 {
             return None;
         }
-        let list = cache.u32_at(8)?;
+        let list = u64::from(cache.u32_at(8)?);
         let count = cache.u32_at(list)?;
         // Each directory takes at least its four-byte offset.
         if u64::from(count) * 4 > len {
             return None;
         }
         for at in 0..count {
-            let name = cache.string_at(cache.u32_at(list + 4 + 4 * at)?)?;
+            let name = cache.string_at(u64::from(cache.u32_at(list + 4 + 4 * u64::from(at))?))?;
             cache
                 .dirs
                 .push(dirs.iter().position(|(dir, _)| dir.path.as_bytes() == name));
@@ -459,22 +459,23 @@ impl GtkCache {
             return Some(Vec::new());
         }
         let bucket = gtk_icon_name_hash(name) % self.buckets;
-        let mut entry = self.u32_at(self.hash + 4 + 4 * bucket)?;
+        let mut entry = self.u32_at(u64::from(self.hash) + 4 + 4 * u64::from(bucket))?;
         // Twelve bytes an entry: a chain longer than the file could hold has
         // a loop in it.
         for _ in 0..=self.len / 12 {
             if entry == GTK_CACHE_END {
                 return Some(Vec::new());
             }
-            if self.string_at(self.u32_at(entry + 4)?)? == name.as_bytes() {
-                let list = self.u32_at(entry + 8)?;
+            let here = u64::from(entry);
+            if self.string_at(u64::from(self.u32_at(here + 4)?))? == name.as_bytes() {
+                let list = u64::from(self.u32_at(here + 8)?);
                 let count = self.u32_at(list)?;
                 if u64::from(count) * 8 > self.len {
                     return None;
                 }
                 let mut images = Vec::new();
                 for at in 0..count {
-                    let image = list + 4 + 8 * at;
+                    let image = list + 4 + 8 * u64::from(at);
                     let dir = usize::from(self.u16_at(image)?);
                     if let Some(&Some(dir)) = self.dirs.get(dir) {
                         images.push((dir, self.u16_at(image + 2)?));
@@ -482,41 +483,43 @@ impl GtkCache {
                 }
                 return Some(images);
             }
-            entry = self.u32_at(entry)?;
+            entry = self.u32_at(here)?;
         }
         None
     }
 
-    /// `N` bytes at `offset`, or `None` past the end.
-    fn bytes_at<const N: usize>(&self, offset: u32) -> Option<[u8; N]> {
+    /// `N` bytes at `offset`, or `None` past the end. Offsets are `u64` so
+    /// arithmetic on the file's `u32` offsets cannot overflow: a corrupt
+    /// offset lands past the end instead.
+    fn bytes_at<const N: usize>(&self, offset: u64) -> Option<[u8; N]> {
         use std::io::{Read, Seek, SeekFrom};
-        if u64::from(offset) + N as u64 > self.len {
+        if offset.saturating_add(N as u64) > self.len {
             return None;
         }
         let mut bytes = [0; N];
         let mut file = &self.file;
-        file.seek(SeekFrom::Start(u64::from(offset))).ok()?;
+        file.seek(SeekFrom::Start(offset)).ok()?;
         file.read_exact(&mut bytes).ok()?;
         Some(bytes)
     }
 
-    fn u16_at(&self, offset: u32) -> Option<u16> {
+    fn u16_at(&self, offset: u64) -> Option<u16> {
         self.bytes_at(offset).map(u16::from_be_bytes)
     }
 
-    fn u32_at(&self, offset: u32) -> Option<u32> {
+    fn u32_at(&self, offset: u64) -> Option<u32> {
         self.bytes_at(offset).map(u32::from_be_bytes)
     }
 
     /// The NUL-terminated string at `offset`, without its NUL; `None` when it
     /// runs past the end or past [`GTK_CACHE_MAX_NAME`].
-    fn string_at(&self, offset: u32) -> Option<Vec<u8>> {
+    fn string_at(&self, offset: u64) -> Option<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
-        let room = self.len.checked_sub(u64::from(offset))?;
+        let room = self.len.checked_sub(offset)?;
         let wanted = room.min(GTK_CACHE_MAX_NAME as u64 + 1);
         let mut bytes = vec![0; usize::try_from(wanted).ok()?];
         let mut file = &self.file;
-        file.seek(SeekFrom::Start(u64::from(offset))).ok()?;
+        file.seek(SeekFrom::Start(offset)).ok()?;
         file.read_exact(&mut bytes).ok()?;
         let end = bytes.iter().position(|&byte| byte == 0)?;
         bytes.truncate(end);
@@ -1526,6 +1529,41 @@ Size=48
         let cut = open(&whole[..whole.len() - 8]);
         assert!(cut.is_none_or(|cache| cache.images("ghost").is_empty()));
         assert_eq!(open(&whole).expect("whole").images("ghost"), vec![(0, PNG)]);
+    }
+
+    /// **An offset the file gives that would overflow 32 bits answers
+    /// nothing**, as one past the end does: a bucket count so large that the
+    /// name's bucket slot lies past four gigabytes, and a chain entry at the
+    /// very top of the offset range.
+    #[test]
+    fn an_offset_past_32_bits_answers_nothing() {
+        let dirs = [(
+            ThemeDir {
+                path: "48x48/apps".to_owned(),
+                size: 48,
+                scale: 1,
+                kind: SizeKind::Threshold(DEFAULT_THRESHOLD),
+            },
+            Vec::new(),
+        )];
+        let scratch = Scratch::new();
+        let open = |bytes: &[u8]| {
+            std::fs::write(scratch.0.join("icon-theme.cache"), bytes).expect("cache");
+            GtkCache::open(&scratch.0, &dirs).expect("the header reads")
+        };
+        // The bucket count sits at the hash table's start.
+        let count = 12;
+        let mut huge = gtk_cache(&["48x48/apps"], &[("ghost", &[(0, PNG)])], 1);
+        huge[count..count + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        // The name lands in a bucket whose slot is past 32 bits.
+        assert!(gtk_icon_name_hash("firefox") >= 1 << 30);
+        assert_eq!(open(&huge).find("firefox"), None);
+        // The one bucket's slot, after the count, made to name an entry
+        // whose fields are past 32 bits.
+        let slot = count + 4;
+        let mut high = gtk_cache(&["48x48/apps"], &[("ghost", &[(0, PNG)])], 1);
+        high[slot..slot + 4].copy_from_slice(&(GTK_CACHE_END - 2).to_be_bytes());
+        assert_eq!(open(&high).find("ghost"), None);
     }
 
     /// **Every installed theme's cache agrees with listing it**: for each icon

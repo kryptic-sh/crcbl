@@ -80,21 +80,6 @@ whether or not the main image uses those groups.
   charge each group's alphabet size against a work budget from
   `Limits::max_bytes`.
 
-### crcbl-image: GTK icon-cache offsets overflow u32 (panic in debug builds)
-
-`GtkCache::find` in `crates/crcbl-image/src/theme.rs` computes
-`self.hash + 4 + 4 * bucket`, `entry + 4` and `entry + 8` in `u32`; `buckets`
-and every chain `entry` are read from `icon-theme.cache`. A bucket count of 2^30
-or more, or a chain offset near `u32::MAX`, overflows.
-
-- Failure: debug builds and tests panic on a corrupt or hostile cache. In
-  release the arithmetic wraps, `bytes_at`'s bounds check rejects the result,
-  and the cache answers no images, which is harmless. `~/.local/share/icons` is
-  user-writable.
-- Severity: robustness (debug-only panic). Confidence: verified by reading.
-- Fix: do the offset arithmetic in `u64` (as `bytes_at` already does) or with
-  `checked_add`/`checked_mul` returning `None`.
-
 ### crcbl-scene: glTF triangle primitives are not checked for whole triangles
 
 `read_primitive` in `crates/crcbl-scene/src/gltf_import.rs` checks every index
