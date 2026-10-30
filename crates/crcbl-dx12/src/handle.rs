@@ -51,6 +51,14 @@ pub(crate) trait Owned {
     fn owner(&self) -> u64;
 }
 
+/// A table that shares its entries, so a reader can keep one alive past the
+/// lock — see `crate::device`'s pipeline creation.
+impl<T: Owned> Owned for std::sync::Arc<T> {
+    fn owner(&self) -> u64 {
+        T::owner(self)
+    }
+}
+
 /// The device a handle belongs to: its process-wide id, and the tag it stamps.
 ///
 /// Both, because they answer different halves of the question. The **tag** is

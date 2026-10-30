@@ -127,29 +127,24 @@ Read-only review of the tree at `3edd00dc`. Nothing below was measured: every
 cost is inferred from reading the code, and each item says what to time before
 acting. Items already in this backlog are not repeated. Start-up items first.
 
-### Start-up: dx12 still holds the device lock across a pipeline compile
+### Start-up: build `ForwardRenderer`'s pipelines in parallel
 
-`crcbl-vk` releases its state lock for the driver's compile (pinned layout and
-modules, enforced by `poll_retire`). `crcbl-dx12`'s `create_graphics_pipeline`,
-`create_mesh_pipeline` and `create_compute_pipeline`
-(`crates/crcbl-dx12/src/device.rs`) still look up the layout and modules and
-call `pipeline::graphics`/`mesh`/`compute` under the lock, so dx12 serialises
-compiles and blocks every other device call behind one. Measured cold numbers in
-this backlog: a forward colour pipeline at 361 ms on dx12.
+Neither `crcbl-vk` nor `crcbl-dx12` holds its device state lock across the
+driver's pipeline compile any more, so compiles from several threads can
+overlap. Nothing does that yet: `ForwardRenderer::build` creates every pipeline
+one after another on the calling thread, so no start-up time is saved until it
+does.
 
-- Fix, simpler than vk's: under the lock clone the root signature (a COM
-  reference keeps it alive) and take the module's DXIL as owned or `Arc` bytes,
-  release the lock for `Create*PipelineState` (the D3D12 device is
-  free-threaded), retake it to insert. Verifiable only on CI's WARP adapter (no
-  Windows hardware here).
-- Then the gain itself: build `ForwardRenderer`'s independent pipelines in
-  parallel through `crcbl_jobs`. Until that lands no start-up time is saved; on
-  vk, 64 small compute pipelines from 8 threads took 2.7–3.8 ms against
-  16.2–17.2 ms with the lock held (RX 7900 XTX, load about 10). The 2.2–2.4 s
-  cold scene build has not been re-measured.
+- Build the independent pipelines through `crcbl_jobs`. On vk, 64 small compute
+  pipelines from 8 threads took 2.7–3.8 ms against 16.2–17.2 ms with the lock
+  held (RX 7900 XTX, load about 10). The 2.2–2.4 s cold scene build has not been
+  re-measured, and the dx12 change is unmeasured until CI's WARP or real
+  hardware times it.
 - A shared in-memory `VkPipelineCache` is now safe to add (internally
   synchronised unless created externally-synchronised); persisting it is the
   separate "The Vulkan pipeline cache is not persisted" entry.
+- `crcbl-dx12`'s compile-window test exercises only the compute path; graphics
+  and mesh share its shape but are untested under the hook.
 
 ### Start-up: `ForwardRenderer` still builds mesh twins, water and grass eagerly
 

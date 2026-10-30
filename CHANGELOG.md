@@ -115,6 +115,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-dx12` no longer holds the device's state lock while the driver
+  compiles a pipeline.** `create_graphics_pipeline`, `create_mesh_pipeline` and
+  `create_compute_pipeline` resolve the layout and modules under the lock, take
+  a shared reference to each, release it for `Create*PipelineState` and retake
+  it to insert, so compiles on different threads no longer run one at a time and
+  other device calls no longer wait behind a cold compile. A shader module or
+  pipeline layout destroyed while a compile reads it stays alive until that
+  compile returns. Not yet measured: CI's WARP adapter is the only D3D12 device
+  this runs on.
 - **`ForwardRenderer` builds its optional post passes when a frame first asks
   for them** instead of at build: the FXAA and CMAA2 resolves (only the tier in
   use), the render-scale upscale, bloom, contact shadows, the occlusion pair and

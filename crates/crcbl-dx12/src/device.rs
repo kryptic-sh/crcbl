@@ -40,6 +40,17 @@
 //! solve. The descriptor allocator has to be inside it either way — creating a
 //! view touches the image table and a heap in one step.
 //!
+//! **A pipeline compile runs outside it.** `Create*PipelineState` is where the
+//! driver compiles the DXIL — one forward colour pipeline was measured at
+//! 361 ms cold — and holding the lock across it serialised every compile and stalled
+//! every other device call behind one. So the `create_*_pipeline` calls resolve
+//! the layout and the modules under the lock, take a reference to each and
+//! release it, compile, and retake it to insert. The module and layout tables
+//! hold their entries in an [`Arc`] for this: the compile's clone keeps the
+//! root signature and the DXIL bytes alive however soon another thread's
+//! `destroy_*` drops the table's, so nothing has to be pinned the way
+//! `crcbl-vk` pins its raw handles.
+//!
 //! # No `unsafe` marker impl, and this time the crate docs were right
 //!
 //! `crcbl-mtl` had to add one in its device slice, because `MTLBuffer` and
@@ -517,10 +528,12 @@ pub(crate) struct DeviceState {
     readbacks: Pool<ReadbackEntry>,
     semaphores: Pool<SemaphoreEntry>,
     query_sets: Pool<QuerySetEntry>,
-    shader_modules: Pool<ShaderModuleEntry>,
+    /// Shared, as `pipeline_layouts` is, so a pipeline compile can hold the
+    /// entry it reads after releasing the lock; see the module docs.
+    shader_modules: Pool<Arc<ShaderModuleEntry>>,
     bind_group_layouts: Pool<BindGroupLayoutRecord>,
     bind_groups: Pool<BindGroupRecord>,
-    pipeline_layouts: Pool<PipelineLayoutEntry>,
+    pipeline_layouts: Pool<Arc<PipelineLayoutEntry>>,
     graphics_pipelines: Pool<GraphicsPipelineEntry>,
     compute_pipelines: Pool<ComputePipelineEntry>,
     /// Swapchains are **device**-scoped while the surfaces they present to are
@@ -1576,6 +1589,47 @@ fn label_object(object: &ID3D12Object, label: &str) {
     // copied it.
     if let Err(error) = unsafe { object.SetName(PCWSTR::from_raw(wide.as_ptr())) } {
         crcbl_core::log::debug!("crcbl-dx12: could not name an object \"{label}\": {error}");
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static DURING_NEXT_COMPILE: core::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// Runs `hook` inside the next pipeline compile this thread makes, once the
+/// state lock has been released and before the driver call — the test hook
+/// `crcbl-vk`'s `during_next_pipeline_compile` is, for this crate's own tests.
+///
+/// The hook stays armed until a compile runs it or the returned guard drops,
+/// so a create call that fails before reaching the driver cannot leave it to
+/// fire inside some later test on the same thread.
+#[cfg(test)]
+#[must_use = "dropping the guard disarms the hook"]
+fn during_next_pipeline_compile(hook: impl FnOnce() + 'static) -> CompileHookGuard {
+    DURING_NEXT_COMPILE.set(Some(Box::new(hook)));
+    CompileHookGuard(core::marker::PhantomData)
+}
+
+/// Disarms [`during_next_pipeline_compile`]'s hook on drop, if no compile has
+/// run it. Tied to the arming thread, whose thread-local it clears.
+#[cfg(test)]
+struct CompileHookGuard(core::marker::PhantomData<*const ()>);
+
+#[cfg(test)]
+impl Drop for CompileHookGuard {
+    fn drop(&mut self) {
+        drop(DURING_NEXT_COMPILE.take());
+    }
+}
+
+/// The unlocked window before a pipeline compile: where the hook
+/// `during_next_pipeline_compile` armed runs, and nothing outside tests.
+fn compile_window() {
+    #[cfg(test)]
+    if let Some(hook) = DURING_NEXT_COMPILE.take() {
+        hook();
     }
 }
 
@@ -3387,7 +3441,7 @@ impl Device for Dx12Device {
         desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
         let entry = crate::dxil::module(desc, self.inner.owner.id)?;
-        let handle = self.state().shader_modules.insert(entry);
+        let handle = self.state().shader_modules.insert(Arc::new(entry));
         Ok(handle::stamp(self.inner.owner, handle))
     }
 
@@ -3610,7 +3664,7 @@ impl Device for Dx12Device {
         if let Some(label) = desc.label {
             label_object(&entry.raw, label);
         }
-        let handle = state.pipeline_layouts.insert(entry);
+        let handle = state.pipeline_layouts.insert(Arc::new(entry));
         Ok(handle::stamp(self.inner.owner, handle))
     }
 
@@ -3631,40 +3685,51 @@ impl Device for Dx12Device {
                 desc.color_targets.len()
             )));
         }
-        let mut state = self.state();
-        let layout = handle::lookup(
-            &state.pipeline_layouts,
-            "pipeline layout",
-            desc.layout,
-            self.inner.owner,
-        )?;
-        let vertex = handle::lookup(
-            &state.shader_modules,
-            "shader module",
-            desc.vertex.module,
-            self.inner.owner,
-        )?;
-        let fragment = match desc.fragment {
-            Some(entry) => Some(handle::lookup(
+        // Under the lock: resolve, and take a reference to each entry. See the
+        // module docs on why the compile below runs without it.
+        let (layout, vertex, fragment) = {
+            let state = self.state();
+            let layout = handle::lookup(
+                &state.pipeline_layouts,
+                "pipeline layout",
+                desc.layout,
+                self.inner.owner,
+            )
+            .map(Arc::clone)?;
+            let vertex = handle::lookup(
                 &state.shader_modules,
                 "shader module",
-                entry.module,
+                desc.vertex.module,
                 self.inner.owner,
-            )?),
-            None => None,
+            )
+            .map(Arc::clone)?;
+            let fragment = match desc.fragment {
+                Some(entry) => Some(
+                    handle::lookup(
+                        &state.shader_modules,
+                        "shader module",
+                        entry.module,
+                        self.inner.owner,
+                    )
+                    .map(Arc::clone)?,
+                ),
+                None => None,
+            };
+            (layout, vertex, fragment)
         };
+        compile_window();
         let entry = pipeline::graphics(
             &self.inner.raw,
             desc,
-            layout,
-            vertex,
-            fragment,
+            &layout,
+            &vertex,
+            fragment.as_deref(),
             self.inner.owner.id,
         )?;
         if let Some(label) = desc.label {
             label_object(&entry.raw, label);
         }
-        let handle = state.graphics_pipelines.insert(entry);
+        let handle = self.state().graphics_pipelines.insert(entry);
         Ok(handle::stamp(self.inner.owner, handle))
     }
 
@@ -3702,45 +3767,37 @@ impl Device for Dx12Device {
         // descriptor that is wrong everywhere fails here too rather than only
         // on the one backend that reads it.
         desc.check_workgroup_sizes()?;
-        let mut state = self.state();
-        let layout = handle::lookup(
-            &state.pipeline_layouts,
-            "pipeline layout",
-            desc.layout,
-            self.inner.owner,
-        )?;
-        let mesh = handle::lookup(
-            &state.shader_modules,
-            "shader module",
-            desc.mesh.module,
-            self.inner.owner,
-        )?;
-        let task = match desc.task {
-            Some(entry) => Some(handle::lookup(
-                &state.shader_modules,
-                "shader module",
-                entry.module,
+        // Under the lock, as `create_graphics_pipeline`.
+        let (layout, mesh, task, fragment) = {
+            let state = self.state();
+            let module = |id| {
+                handle::lookup(&state.shader_modules, "shader module", id, self.inner.owner)
+                    .map(Arc::clone)
+            };
+            let layout = handle::lookup(
+                &state.pipeline_layouts,
+                "pipeline layout",
+                desc.layout,
                 self.inner.owner,
-            )?),
-            None => None,
+            )
+            .map(Arc::clone)?;
+            let mesh = module(desc.mesh.module)?;
+            let task = desc.task.map(|entry| module(entry.module)).transpose()?;
+            let fragment = desc
+                .fragment
+                .map(|entry| module(entry.module))
+                .transpose()?;
+            (layout, mesh, task, fragment)
         };
-        let fragment = match desc.fragment {
-            Some(entry) => Some(handle::lookup(
-                &state.shader_modules,
-                "shader module",
-                entry.module,
-                self.inner.owner,
-            )?),
-            None => None,
-        };
+        compile_window();
         let entry = pipeline::mesh(
             &self.inner.raw,
             desc,
-            layout,
+            &layout,
             &pipeline::MeshStages {
-                task,
-                mesh,
-                fragment,
+                task: task.as_deref(),
+                mesh: &mesh,
+                fragment: fragment.as_deref(),
                 null_pixel: self.inner.null_pixel.as_ref(),
             },
             self.inner.owner.id,
@@ -3748,7 +3805,7 @@ impl Device for Dx12Device {
         if let Some(label) = desc.label {
             label_object(&entry.raw, label);
         }
-        let handle = state.graphics_pipelines.insert(entry);
+        let handle = self.state().graphics_pipelines.insert(entry);
         Ok(handle::stamp(self.inner.owner, handle))
     }
 
@@ -3770,24 +3827,32 @@ impl Device for Dx12Device {
         desc: &ComputePipelineDesc<'_>,
     ) -> Result<ComputePipelineHandle, HalError> {
         desc.check_workgroup_size(&self.inner.caps.limits)?;
-        let mut state = self.state();
-        let layout = handle::lookup(
-            &state.pipeline_layouts,
-            "pipeline layout",
-            desc.layout,
-            self.inner.owner,
-        )?;
-        let module = handle::lookup(
-            &state.shader_modules,
-            "shader module",
-            desc.compute.module,
-            self.inner.owner,
-        )?;
-        let entry = pipeline::compute(&self.inner.raw, desc, layout, module, self.inner.owner.id)?;
+        // Under the lock, as `create_graphics_pipeline`.
+        let (layout, module) = {
+            let state = self.state();
+            let layout = handle::lookup(
+                &state.pipeline_layouts,
+                "pipeline layout",
+                desc.layout,
+                self.inner.owner,
+            )
+            .map(Arc::clone)?;
+            let module = handle::lookup(
+                &state.shader_modules,
+                "shader module",
+                desc.compute.module,
+                self.inner.owner,
+            )
+            .map(Arc::clone)?;
+            (layout, module)
+        };
+        compile_window();
+        let entry =
+            pipeline::compute(&self.inner.raw, desc, &layout, &module, self.inner.owner.id)?;
         if let Some(label) = desc.label {
             label_object(&entry.raw, label);
         }
-        let handle = state.compute_pipelines.insert(entry);
+        let handle = self.state().compute_pipelines.insert(entry);
         Ok(handle::stamp(self.inner.owner, handle))
     }
 
@@ -14682,6 +14747,126 @@ pub(crate) mod tests {
         device.destroy_pipeline_layout(pipeline_layout);
         device.destroy_bind_group_layout(set_layout);
         device.destroy_shader_module(module);
+        probe.destroy(&device);
+    }
+
+    /// How long the compile window waits for the other thread's device calls.
+    ///
+    /// A deadlock bound, not a measurement: once the lock is free the calls are
+    /// quick, and with the lock held across the compile they never finish
+    /// at all, because the thread holding it is the one waiting here. The bound
+    /// is what turns that hang into a failure that names the cause.
+    const COMPILE_WINDOW_BOUND: Duration = Duration::from_secs(30);
+
+    /// **A pipeline compile runs outside the device's state lock, and the
+    /// module and layout it reads survive being destroyed under it** — the
+    /// same test `crcbl-vk`'s suite makes of its own compile.
+    ///
+    /// No timing is involved. The hook runs on this thread inside the compile,
+    /// once the lock has been released and before `CreateComputePipelineState`,
+    /// and blocks there until a second thread has created and destroyed a
+    /// buffer and then destroyed the compile's own module and layout. Only then
+    /// does the driver compile, and the pipeline it made then runs the probe.
+    ///
+    /// A compile that held the lock leaves the second thread blocked on it, the
+    /// hook's wait runs out, and the assertion below fails once the compile
+    /// returns. The other half — the compile keeps its module and layout alive
+    /// — is the type system's to guarantee, through the [`Arc`] clones it
+    /// holds: a use-after-free might still read back correct squares, so the
+    /// probe's readback here confirms the pipeline works, not that half.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_pipeline_compile_releases_the_device_lock_and_keeps_what_it_reads() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+
+        let (_instance, device) = open_device();
+        let mut probe = ComputeProbe::new(&device);
+        let layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("compile window"),
+                bind_group_layouts: &[probe.set_layout],
+                push_constants: None,
+            })
+            .expect("a root signature with one descriptor table");
+        let module = device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("compute_probe.slang"),
+                dxil: &crcbl_shaders::COMPUTE_PROBE.dxil_containers(),
+                ..ShaderModuleDesc::default()
+            })
+            .expect("the committed DXIL is accepted");
+
+        let (start, started) = mpsc::channel::<()>();
+        let (done, finished) = mpsc::channel::<()>();
+        let pipeline = std::thread::scope(|scope| {
+            let device = &device;
+            scope.spawn(move || {
+                // Only a hook that never ran ends this wait unanswered —
+                // disarmed, which hangs up — and the compile has failed the
+                // test by then.
+                if started.recv_timeout(COMPILE_WINDOW_BOUND).is_err() {
+                    return;
+                }
+                let buffer = device
+                    .create_buffer(&BufferDesc {
+                        label: Some("made during a compile"),
+                        size: 256,
+                        usage: BufferUsage::STORAGE,
+                        memory: MemoryLocation::DeviceLocal,
+                    })
+                    .expect("a buffer, while another thread compiles");
+                device.destroy_buffer(buffer);
+                device.destroy_shader_module(module);
+                device.destroy_pipeline_layout(layout);
+                // The receiver is gone only if the hook already gave up.
+                let _ = done.send(());
+            });
+
+            // Recorded rather than asserted inside the hook: a panic there would
+            // unwind out of a compile that, in the regression this catches,
+            // still holds the lock, and the hang would replace the failure.
+            let overlapped = Arc::new(AtomicBool::new(false));
+            let window = Arc::clone(&overlapped);
+            // Held to the end of this closure: a create that fails before its
+            // compile window disarms the hook as this unwinds, which also hangs
+            // up on the second thread rather than leaving it waiting.
+            let _armed = during_next_pipeline_compile(move || {
+                start.send(()).expect("the second thread is waiting");
+                let answered = finished.recv_timeout(COMPILE_WINDOW_BOUND).is_ok();
+                window.store(answered, Ordering::Release);
+            });
+            let pipeline = device
+                .create_compute_pipeline(&ComputePipelineDesc {
+                    label: Some("compile window"),
+                    layout,
+                    compute: ShaderEntry {
+                        module,
+                        entry_point: PROBE_ENTRY,
+                    },
+                    workgroup_size: [crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1],
+                })
+                .expect("the compile reads a module and a layout it holds");
+            assert!(
+                overlapped.load(Ordering::Acquire),
+                "another thread's device calls must complete while a pipeline compiles; the \
+                 compile held the device's state lock across the driver call"
+            );
+            pipeline
+        });
+
+        // The pipeline built from a destroyed module and layout dispatches the
+        // probe's own work, so what the driver read was the real thing.
+        let original = core::mem::replace(&mut probe.pipeline, pipeline);
+        let values = probe.run(&device, None, None, |encoder| {
+            encoder.dispatch(PROBE_GROUPS, 1, 1);
+        });
+        assert_probe(
+            &values,
+            &probe_expected(PROBE_ELEMENTS),
+            "from a pipeline compiled while its module and layout were destroyed",
+        );
+        device.destroy_compute_pipeline(original);
         probe.destroy(&device);
     }
 
