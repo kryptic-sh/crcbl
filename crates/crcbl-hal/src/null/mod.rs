@@ -1841,7 +1841,18 @@ impl Device for NullDevice {
     // --- commands ---
 
     fn create_command_encoder(&self, desc: &CommandEncoderDesc<'_>) -> Box<dyn CommandEncoder> {
+        let serial = {
+            let mut state = self.recorder.lock();
+            let serial = state.encoders_created;
+            state.encoders_created += 1;
+            state
+                .newest_encoder
+                .insert(self.device_id, (serial, desc.label.map(ToOwned::to_owned)));
+            serial
+        };
         Box::new(NullEncoder {
+            serial,
+            overtaken: false,
             recorder: self.recorder.clone(),
             device_id: self.device_id,
             limits: self.caps.limits,
@@ -2624,6 +2635,12 @@ enum Scope {
 #[derive(Debug)]
 struct NullEncoder {
     recorder: Recorder,
+    /// Which encoder this is, against the device's newest in the recorder.
+    serial: u64,
+    /// Whether a later encoder on this device has already been reported, so
+    /// an overtaken encoder is one [`ValidationError::InterleavedEncoder`]
+    /// rather than one per command.
+    overtaken: bool,
     /// Owner id every handle a recorded command names must match.
     device_id: u64,
     /// This device's [`Limits`], copied at creation.
@@ -2648,6 +2665,7 @@ impl NullEncoder {
     /// Records `command` after checking it is legal in the current scope.
     fn record(&mut self, command: Command) {
         let name = command.name();
+        self.need_newest(name);
         match &command {
             Command::BeginRenderPass { .. } | Command::BeginComputePass { .. } => {
                 if self.scope != Scope::Outside {
@@ -2677,6 +2695,29 @@ impl NullEncoder {
 
     fn fail(&self, error: ValidationError) {
         self.recorder.push_validation(error);
+    }
+
+    /// Requires this to be the newest encoder its device created — the
+    /// one-recording-encoder rule [`Device::create_command_encoder`] states.
+    fn need_newest(&mut self, command: &'static str) {
+        if self.overtaken {
+            return;
+        }
+        let newer = {
+            let state = self.recorder.lock();
+            match state.newest_encoder.get(&self.device_id) {
+                Some((serial, label)) if *serial != self.serial => Some(label.clone()),
+                _ => None,
+            }
+        };
+        if let Some(newer) = newer {
+            self.overtaken = true;
+            self.fail(ValidationError::InterleavedEncoder {
+                command,
+                encoder: self.label.clone(),
+                newer,
+            });
+        }
     }
 
     /// Requires an open render pass.
@@ -3304,7 +3345,8 @@ impl CommandEncoder for NullEncoder {
         });
     }
 
-    fn finish(self: Box<Self>) -> Result<CommandBufferHandle, HalError> {
+    fn finish(mut self: Box<Self>) -> Result<CommandBufferHandle, HalError> {
+        self.need_newest("Finish");
         if let Some(error) = self.failed {
             return Err(error);
         }

@@ -837,11 +837,11 @@ struct UploadArgs<'a> {
 /// Startup uploads recorded into one command buffer and submitted with one
 /// wait.
 ///
-/// Each texture added is created at once, and its copies are recorded behind
-/// the ones before it; each buffer [`fill`](Self::fill)ed is the caller's
-/// already, and its copy joins them. Nothing reaches the device until
-/// [`submit`](Self::submit). One submission rather than one per upload is the
-/// point: on Mesa's ANV the first submit on a fresh device costs several
+/// Each texture added is created at once, its staging written at once, and its
+/// copies queued behind the ones before it; each buffer [`fill`](Self::fill)ed
+/// is the caller's already, and its copy joins them. Nothing reaches the device
+/// until [`submit`](Self::submit). One submission rather than one per upload
+/// is the point: on Mesa's ANV the first submit on a fresh device costs several
 /// milliseconds and every later round trip through [`Device::wait_idle`] costs
 /// more than the copies of an empty page, and a renderer's start-up — this
 /// crate's [`crate::ui_pass`], and `crcbl_render`'s forward renderer with its
@@ -853,6 +853,18 @@ struct UploadArgs<'a> {
 /// a resource, it does not read it. The staging and zero buffers are the
 /// batch's, released when it drops: after the wait if it was submitted, and
 /// before any submission if an add or the caller failed first.
+///
+/// # No encoder until the submit
+///
+/// The barriers and copies are kept as data and recorded into an encoder that
+/// [`submit`](Self::submit) creates, records, finishes and submits in one go —
+/// never one held open while the caller does other work. A batch outlives
+/// whole build steps that create, finish and submit encoders of their own, and
+/// [`Device::create_command_encoder`] says at most one encoder per device may
+/// be recording at a time: `crcbl-webgpu` streams every command into the one
+/// encoder its browser side last created, so an encoder opened here at
+/// [`new`](Self::new) lost its copies to the first encoder a caller made after
+/// it.
 ///
 /// # A failed build abandons the batch
 ///
@@ -870,24 +882,41 @@ pub struct UploadBatch<'a> {
     /// The encoder's name, so a refusal after [`UploadBatch::abandon`] says
     /// which batch it was.
     label: String,
+    /// Every upload added, in the order [`submit`](Self::submit) records them.
     /// [`None`] once abandoned, which is what every add and the submit check.
-    encoder: Option<Box<dyn CommandEncoder>>,
+    uploads: Option<Vec<Upload>>,
     buffers: Vec<crcbl_hal::BufferHandle>,
+}
+
+/// One add to an [`UploadBatch`], kept as what to record rather than recorded,
+/// so the batch holds no encoder open — see the type's docs.
+#[derive(Debug)]
+enum Upload {
+    /// A texture's barriers, its zero clear and its copies; see
+    /// [`record_texture`].
+    Texture {
+        image: ImageHandle,
+        range: ImageSubresourceRange,
+        /// A buffer the copies zero first, and how many bytes of it.
+        cleared: Option<(crcbl_hal::BufferHandle, u64)>,
+        copies: Vec<BufferImageCopy>,
+    },
+    /// A [`fill`](UploadBatch::fill): `copy` into a buffer that has never held
+    /// anything, left in `final_state`.
+    Fill {
+        copy: BufferCopy,
+        final_state: ResourceState,
+    },
 }
 
 impl<'a> UploadBatch<'a> {
     /// An empty batch; `label` is the stem of its encoder's name.
     pub fn new(device: &'a dyn Device, queue: QueueHandle, label: &str) -> Self {
-        let label = format!("{label} upload");
-        let encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some(&label),
-            queue,
-        });
         Self {
             device,
             queue,
-            label,
-            encoder: Some(encoder),
+            label: format!("{label} upload"),
+            uploads: Some(Vec::new()),
             buffers: Vec::new(),
         }
     }
@@ -962,36 +991,19 @@ impl<'a> UploadBatch<'a> {
         self.recording(label)?;
         let staging = create_staging(self.device, label, contents)?;
         self.buffers.push(staging);
-        let encoder = self
-            .encoder
-            .as_deref_mut()
-            .expect("checked by `recording` above, and nothing between abandons");
-        // `Undefined` as the source: the buffer has never held anything, so
-        // there is no state to preserve and its contents are discarded rather
-        // than transitioned.
-        encoder.pipeline_barrier(&crcbl_hal::Barriers {
-            buffers: &[crcbl_hal::BufferBarrier::new(
-                buffer,
-                ResourceState::Undefined,
-                ResourceState::TransferDst,
-            )],
-            ..Default::default()
-        });
-        encoder.copy_buffer_to_buffer(&BufferCopy {
-            src: staging,
-            src_offset: 0,
-            dst: buffer,
-            dst_offset: 0,
-            size: contents.len() as u64,
-        });
-        encoder.pipeline_barrier(&crcbl_hal::Barriers {
-            buffers: &[crcbl_hal::BufferBarrier::new(
-                buffer,
-                ResourceState::TransferDst,
+        self.uploads
+            .as_mut()
+            .expect("checked by `recording` above, and nothing between abandons")
+            .push(Upload::Fill {
+                copy: BufferCopy {
+                    src: staging,
+                    src_offset: 0,
+                    dst: buffer,
+                    dst_offset: 0,
+                    size: contents.len() as u64,
+                },
                 final_state,
-            )],
-            ..Default::default()
-        });
+            });
         Ok(())
     }
 
@@ -1000,12 +1012,13 @@ impl<'a> UploadBatch<'a> {
     /// [`submit`](Self::submit) refuse; the staging buffers are still released
     /// when the batch drops.
     pub fn abandon(&mut self) {
-        self.encoder = None;
+        self.uploads = None;
     }
 
-    /// Submits every recorded copy and waits for the device, leaving every
-    /// texture in [`ResourceState::ShaderRead`] and every filled buffer in the
-    /// state its [`fill`](Self::fill) named.
+    /// Records every queued copy into one encoder created here, submits it and
+    /// waits for the device, leaving every texture in
+    /// [`ResourceState::ShaderRead`] and every filled buffer in the state its
+    /// [`fill`](Self::fill) named.
     ///
     /// # Errors
     ///
@@ -1013,9 +1026,16 @@ impl<'a> UploadBatch<'a> {
     /// [`HalError::InvalidDescriptor`] for an abandoned batch, which submits
     /// nothing. The textures and buffers stay the caller's to destroy.
     pub fn submit(mut self) -> Result<(), HalError> {
-        let Some(encoder) = self.encoder.take() else {
+        let Some(uploads) = self.uploads.take() else {
             return Err(self.abandoned(&self.label));
         };
+        let mut encoder = self.device.create_command_encoder(&CommandEncoderDesc {
+            label: Some(&self.label),
+            queue: self.queue,
+        });
+        for upload in &uploads {
+            upload.record(encoder.as_mut());
+        }
         let commands = encoder.finish()?;
         let submitted = self
             .device
@@ -1028,7 +1048,7 @@ impl<'a> UploadBatch<'a> {
     /// `Ok` while the batch is still recording; the refusal naming `label`
     /// once it is abandoned.
     fn recording(&self, label: &str) -> Result<(), HalError> {
-        match self.encoder {
+        match self.uploads {
             Some(_) => Ok(()),
             None => Err(self.abandoned(label)),
         }
@@ -1055,7 +1075,7 @@ impl<'a> UploadBatch<'a> {
         }
     }
 
-    /// Creates the image and the view `args` describe and records its copies,
+    /// Creates the image and the view `args` describe and queues its copies,
     /// leaving it in [`ResourceState::ShaderRead`] once submitted.
     fn record(&mut self, args: &UploadArgs<'_>) -> Result<UploadedTexture, HalError> {
         let device = self.device;
@@ -1092,11 +1112,15 @@ impl<'a> UploadBatch<'a> {
                 return Err(error);
             }
         };
-        let encoder = self
-            .encoder
-            .as_deref_mut()
-            .expect("every add checks `recording` before it creates anything");
-        record_copies(encoder, args, image);
+        self.uploads
+            .as_mut()
+            .expect("every add checks `recording` before it creates anything")
+            .push(Upload::Texture {
+                image,
+                range: color_range(args.mip_levels, args.layer_count),
+                cleared: args.cleared,
+                copies: texture_copies(args, image),
+            });
         Ok(UploadedTexture { image, view })
     }
 }
@@ -1120,11 +1144,82 @@ const fn color_range(mips: u32, layers: u32) -> ImageSubresourceRange {
     }
 }
 
-/// Records `image`'s barriers and copies, leaving it in
-/// [`ResourceState::ShaderRead`]. Its barriers name only `image` and its own
-/// zero buffer, so a batch's uploads do not wait on one another.
-fn record_copies(encoder: &mut dyn CommandEncoder, args: &UploadArgs<'_>, image: ImageHandle) {
-    let range = color_range(args.mip_levels, args.layer_count);
+/// One copy per subresource region `args` stages, into `image`.
+///
+/// A region's `image_extent` is a 2D extent whatever the image is —
+/// `crcbl-dx12` refuses anything else by name, because `CopyTextureRegion`
+/// addresses one subresource — so the layer and the level are named by
+/// `base_layer` and `mip`, and the buffer offset says where that subresource's
+/// rows start.
+fn texture_copies(args: &UploadArgs<'_>, image: ImageHandle) -> Vec<BufferImageCopy> {
+    args.sources
+        .iter()
+        .flat_map(|source| source.regions.iter().map(move |region| (source, region)))
+        .map(|(source, region)| BufferImageCopy {
+            buffer: source.buffer,
+            buffer_offset: region.buffer_offset,
+            buffer_row_length: region.row_texels,
+            buffer_image_height: region.extent.height,
+            image,
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: region.mip,
+                base_layer: region.layer,
+                layer_count: 1,
+            },
+            image_offset: region.image_offset,
+            image_extent: region.extent,
+        })
+        .collect()
+}
+
+impl Upload {
+    /// Records this upload into `encoder`. A texture's barriers name only its
+    /// image and its own zero buffer, and a fill's only its buffer, so a
+    /// batch's uploads do not wait on one another.
+    fn record(&self, encoder: &mut dyn CommandEncoder) {
+        match self {
+            Self::Texture {
+                image,
+                range,
+                cleared,
+                copies,
+            } => record_texture(encoder, *image, *range, *cleared, copies),
+            Self::Fill { copy, final_state } => {
+                // `Undefined` as the source: the buffer has never held
+                // anything, so there is no state to preserve and its contents
+                // are discarded rather than transitioned.
+                encoder.pipeline_barrier(&crcbl_hal::Barriers {
+                    buffers: &[crcbl_hal::BufferBarrier::new(
+                        copy.dst,
+                        ResourceState::Undefined,
+                        ResourceState::TransferDst,
+                    )],
+                    ..Default::default()
+                });
+                encoder.copy_buffer_to_buffer(copy);
+                encoder.pipeline_barrier(&crcbl_hal::Barriers {
+                    buffers: &[crcbl_hal::BufferBarrier::new(
+                        copy.dst,
+                        ResourceState::TransferDst,
+                        *final_state,
+                    )],
+                    ..Default::default()
+                });
+            }
+        }
+    }
+}
+
+/// Records `image`'s barriers, its zero clear and `copies`, leaving it in
+/// [`ResourceState::ShaderRead`].
+fn record_texture(
+    encoder: &mut dyn CommandEncoder,
+    image: ImageHandle,
+    range: ImageSubresourceRange,
+    cleared: Option<(crcbl_hal::BufferHandle, u64)>,
+    copies: &[BufferImageCopy],
+) {
     // Undefined → TransferDst: the image has never held anything, so its old
     // contents are explicitly discarded rather than transitioned. The range
     // covers every level of every layer, so one barrier serves all the copies
@@ -1144,7 +1239,7 @@ fn record_copies(encoder: &mut dyn CommandEncoder, args: &UploadArgs<'_>, image:
     // buffer is then moved to a copy source explicitly, because the clear left
     // it a copy destination: D3D12 promotes a buffer implicitly only out of
     // `COMMON`, which a fresh one is in and this one no longer is.
-    if let Some((buffer, size)) = args.cleared {
+    if let Some((buffer, size)) = cleared {
         encoder.clear_buffer(buffer, 0, size);
         encoder.pipeline_barrier(&crcbl_hal::Barriers {
             buffers: &[crcbl_hal::BufferBarrier::new(
@@ -1156,31 +1251,8 @@ fn record_copies(encoder: &mut dyn CommandEncoder, args: &UploadArgs<'_>, image:
         });
     }
 
-    // One copy per subresource. A region's `image_extent` is a 2D extent
-    // whatever the image is — `crcbl-dx12` refuses anything else by name,
-    // because `CopyTextureRegion` addresses one subresource — so the layer and
-    // the level are named by `base_layer` and `mip`, and the buffer offset says
-    // where that subresource's rows start.
-    for (source, region) in args
-        .sources
-        .iter()
-        .flat_map(|source| source.regions.iter().map(move |region| (source, region)))
-    {
-        encoder.copy_buffer_to_image(&BufferImageCopy {
-            buffer: source.buffer,
-            buffer_offset: region.buffer_offset,
-            buffer_row_length: region.row_texels,
-            buffer_image_height: region.extent.height,
-            image,
-            image_subresource: ImageSubresourceLayers {
-                aspect: ImageAspect::COLOR,
-                mip: region.mip,
-                base_layer: region.layer,
-                layer_count: 1,
-            },
-            image_offset: region.image_offset,
-            image_extent: region.extent,
-        });
+    for copy in copies {
+        encoder.copy_buffer_to_image(copy);
     }
 
     encoder.pipeline_barrier(&crcbl_hal::Barriers {
@@ -2257,6 +2329,99 @@ mod tests {
             .count();
         assert_eq!((submits, waits), (1, 1));
         recorder.assert_valid();
+        first.destroy(device.as_ref());
+        second.destroy(device.as_ref());
+        device.destroy_buffer(buffer);
+    }
+
+    /// **A batch holds no encoder open while its caller records others.** A
+    /// build keeps one batch across steps that create, finish and submit
+    /// encoders of their own, and `crcbl-webgpu` records every command into
+    /// the encoder created last — so a batch that opened its encoder in `new`
+    /// had its copies land after that encoder was finished, and the browser
+    /// refused them. Every one of the batch's commands must be in one command
+    /// buffer, from an encoder created after the other was finished.
+    #[test]
+    fn a_batch_records_nothing_until_its_submit() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let buffer = fill_target(device.as_ref(), 4);
+
+        let mut batch = UploadBatch::new(device.as_ref(), queue, "interleaved");
+        let first = batch
+            .texture(
+                "before",
+                Format::R8Unorm,
+                (1, 1),
+                &[&[&[1]]],
+                ImageViewType::D2,
+            )
+            .expect("recorded");
+        // Another build step's own encoder, start to finish, while the batch
+        // is open.
+        let mut other = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("other step"),
+            queue,
+        });
+        other.insert_debug_marker("other step");
+        let other = other.finish().expect("finished");
+        device
+            .submit(queue, &SubmitInfo::new(&[other]))
+            .expect("submitted");
+        device.destroy_command_buffer(other);
+        let second = batch
+            .texture(
+                "after",
+                Format::R8Unorm,
+                (1, 1),
+                &[&[&[2]]],
+                ImageViewType::D2,
+            )
+            .expect("recorded");
+        batch
+            .fill("state", buffer, &[0; 4], ResourceState::ShaderRead)
+            .expect("recorded");
+        batch.submit().expect("submitted");
+
+        recorder.assert_valid();
+        let events = recorder.events();
+        let finished: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Finished {
+                    label,
+                    command_buffer,
+                } => Some((label.clone(), *command_buffer)),
+                _ => None,
+            })
+            .collect();
+        let [(other_label, other_buffer), (batch_label, batch_buffer)] = &finished[..] else {
+            panic!("expected the other step's buffer and then the batch's, got {finished:?}");
+        };
+        assert_eq!(other_label.as_deref(), Some("other step"));
+        assert_eq!(batch_label.as_deref(), Some("interleaved upload"));
+        let in_batch = |buffer| {
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(event, Event::Command { command_buffer, .. } if *command_buffer == buffer)
+                })
+                .count()
+        };
+        assert_eq!(in_batch(*other_buffer), 1, "the other step's marker alone");
+        assert_eq!(
+            in_batch(*batch_buffer),
+            recorder.commands().len() - 1,
+            "every batch command is in the batch's one command buffer"
+        );
+        assert_eq!(
+            recorder
+                .commands()
+                .iter()
+                .filter(|command| matches!(command, Command::CopyBufferToImage(_)))
+                .count(),
+            2
+        );
         first.destroy(device.as_ref());
         second.destroy(device.as_ref());
         device.destroy_buffer(buffer);

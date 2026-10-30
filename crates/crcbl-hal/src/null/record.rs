@@ -629,6 +629,28 @@ pub enum ValidationError {
         /// The seam's refusal, unchanged.
         message: String,
     },
+    /// An encoder recorded a command, or was finished, after a later encoder
+    /// was created on the same device.
+    ///
+    /// [`Device::create_command_encoder`](crate::Device::create_command_encoder)'s
+    /// one-recording-encoder rule. `crcbl-webgpu` streams every command into
+    /// the one encoder its browser side created last, because the seam's
+    /// recording methods name no encoder, so a command recorded into an
+    /// earlier one lands in the later one — or, once that is finished, in
+    /// none, and the browser refuses it. Every native API allows the overlap,
+    /// so nothing but this check sees it before a browser does.
+    #[error(
+        "`{command}` was recorded into encoder {encoder:?} after encoder {newer:?} was created \
+         on the same device; at most one encoder per device may be recording at a time"
+    )]
+    InterleavedEncoder {
+        /// Command name, from [`Command::name`], or `"Finish"`.
+        command: &'static str,
+        /// The earlier encoder's label.
+        encoder: Option<String>,
+        /// The label of the encoder created after it.
+        newer: Option<String>,
+    },
     /// A command referenced a handle that was never created or has been
     /// destroyed.
     #[error("`{command}` referenced a dead {kind} handle {bits:#x}")]
@@ -849,6 +871,13 @@ pub(super) struct State {
     /// Composite-alpha modes a surface offers on each adapter named here. See
     /// [`Recorder::offer_composite_alpha_on`].
     pub(super) composite_alpha: std::collections::BTreeMap<AdapterId, Vec<CompositeAlpha>>,
+    /// The encoder each device created last, by device id: its serial and its
+    /// label. An encoder recording under any other serial has been overtaken —
+    /// see [`ValidationError::InterleavedEncoder`].
+    pub(super) newest_encoder: std::collections::BTreeMap<u64, (u64, Option<String>)>,
+    /// How many encoders have been created, across every device: the next
+    /// serial is this one.
+    pub(super) encoders_created: u64,
     /// Why the device is lost, once it is — and never cleared, which is what
     /// separates it from `device_errors`. See [`Recorder::lose_device`].
     pub(super) lost_device: Option<String>,
@@ -875,6 +904,8 @@ impl State {
             refused_adapters: std::collections::BTreeSet::new(),
             unopenable_adapters: std::collections::BTreeSet::new(),
             composite_alpha: std::collections::BTreeMap::new(),
+            newest_encoder: std::collections::BTreeMap::new(),
+            encoders_created: 0,
             lost_device: None,
         }
     }

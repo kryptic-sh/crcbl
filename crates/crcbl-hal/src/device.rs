@@ -1270,6 +1270,19 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     // --- commands ---
 
     /// Creates a command encoder.
+    ///
+    /// # One recording encoder per device
+    ///
+    /// Once a later encoder has been created on the same device, an earlier
+    /// one may record nothing more and may not be finished — drop it instead.
+    /// Finish an encoder before creating the next, or create it at the point
+    /// it starts recording. `crcbl-webgpu` is why: the seam's recording
+    /// methods name no encoder, so its stream records every command into the
+    /// one encoder its browser side created last, and a command for an earlier
+    /// one lands in the later one or, once that is finished, in none. The
+    /// native backends allow the overlap; the null backend reports it as
+    /// [`ValidationError::InterleavedEncoder`](crate::null::ValidationError::InterleavedEncoder),
+    /// which is where a caller learns of it before a browser does.
     fn create_command_encoder(&self, desc: &CommandEncoderDesc<'_>) -> Box<dyn CommandEncoder>;
 
     /// Releases a finished command buffer's resources.

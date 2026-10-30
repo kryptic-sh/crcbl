@@ -2580,6 +2580,99 @@ fn scope_violations_are_recorded() {
     );
 }
 
+/// **An encoder overtaken by a later one records nothing more** — the rule
+/// `crcbl-webgpu`'s one implicit-current encoder imposes, reported once per
+/// encoder whether it is a command or the finish that arrives late.
+#[test]
+fn recording_into_an_overtaken_encoder_is_rejected() {
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let queue = device.queue(QueueKind::Graphics).expect("queue");
+
+    let mut early = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("early"),
+        queue,
+    });
+    early.insert_debug_marker("before the later one: fine");
+    let mut later = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("later"),
+        queue,
+    });
+    later.insert_debug_marker("the newest: fine");
+    let later = later.finish().expect("the newest encoder finishes");
+    device.destroy_command_buffer(later);
+    recorder.assert_valid();
+
+    early.insert_debug_marker("overtaken");
+    early.insert_debug_marker("reported once");
+    let early = early.finish().expect("recorded, not refused");
+    device.destroy_command_buffer(early);
+    assert_eq!(
+        recorder.validation_errors(),
+        [ValidationError::InterleavedEncoder {
+            command: "DebugMarker",
+            encoder: Some("early".to_string()),
+            newer: Some("later".to_string()),
+        }]
+    );
+
+    // A finish alone is as late as a command.
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let queue = device.queue(QueueKind::Graphics).expect("queue");
+    let early = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+    let later = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+    drop(later);
+    let early = early.finish().expect("recorded, not refused");
+    device.destroy_command_buffer(early);
+    assert_eq!(
+        recorder.validation_errors(),
+        [ValidationError::InterleavedEncoder {
+            command: "Finish",
+            encoder: None,
+            newer: None,
+        }]
+    );
+}
+
+/// **The rule is per device, and dropping an overtaken encoder is fine**: an
+/// encoder on another device does not overtake one, and an encoder abandoned
+/// unfinished records nothing for a later one to steal.
+#[test]
+fn encoders_on_two_devices_or_dropped_ones_do_not_interleave() {
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let first = open(instance.as_ref());
+    let second = open(instance.as_ref());
+    let first_queue = first.queue(QueueKind::Graphics).expect("queue");
+    let second_queue = second.queue(QueueKind::Graphics).expect("queue");
+
+    let on_first = first.create_command_encoder(&CommandEncoderDesc {
+        label: None,
+        queue: first_queue,
+    });
+    let abandoned = first.create_command_encoder(&CommandEncoderDesc {
+        label: None,
+        queue: first_queue,
+    });
+    drop(abandoned);
+    let mut on_second = second.create_command_encoder(&CommandEncoderDesc {
+        label: None,
+        queue: second_queue,
+    });
+    on_second.insert_debug_marker("second device");
+    let on_second = on_second.finish().expect("finished");
+    second.destroy_command_buffer(on_second);
+    let mut newest = first.create_command_encoder(&CommandEncoderDesc {
+        label: None,
+        queue: first_queue,
+    });
+    drop(on_first);
+    newest.insert_debug_marker("first device, newest");
+    let newest = newest.finish().expect("finished");
+    first.destroy_command_buffer(newest);
+    recorder.assert_valid();
+}
+
 #[test]
 fn nested_passes_are_rejected() {
     let (recorder, instance) = boxed(NullInstance::gpu_driven());

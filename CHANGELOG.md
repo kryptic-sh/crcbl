@@ -40,7 +40,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   command buffer and submitted with one wait. It gains `UploadBatch::fill`, the
   same staging copy into a device-local buffer with its barriers, and
   `UploadBatch::abandon`, which makes the batch refuse to submit once a caller
-  has rolled back something recorded into it.
+  has rolled back something recorded into it. It records its copies into an
+  encoder created at `UploadBatch::submit`, so it never holds one open while its
+  caller records others.
+- **The null backend reports an encoder recorded after a later one was created**
+  on the same device, as `ValidationError::InterleavedEncoder`.
+  `Device::create_command_encoder` now documents the rule: once a later encoder
+  exists, an earlier one may record nothing more and may not be finished.
+  `crcbl-webgpu` records every command into the encoder its browser side created
+  last, so the overlap every native API allows lost commands there, and this
+  check is how a native test sees it first.
 - **`crcbl-notify`, a new crate: the desktop's notifications, read and
   dismissed.** `Notifications::open` reaches the platform's store,
   `Notifications::list` returns a snapshot of what other apps have shown (each
