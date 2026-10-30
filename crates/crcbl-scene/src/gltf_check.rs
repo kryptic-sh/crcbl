@@ -1133,6 +1133,11 @@ mod tests {
                 "{ \"bufferView\": 1, \"componentType\": 5126, \"count\": 2",
                 "has 3 positions and 2 NORMAL values",
             ),
+            (
+                "{ \"bufferView\": 3, \"componentType\": 5123, \"count\": 3",
+                "{ \"bufferView\": 3, \"componentType\": 5123, \"count\": 2",
+                "has 2 indices, and a triangle list needs a multiple of three",
+            ),
         ] {
             // `mode` is not in the base fixture; the two entries that touch it
             // start from a document that has one.

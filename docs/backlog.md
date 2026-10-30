@@ -80,20 +80,16 @@ whether or not the main image uses those groups.
   charge each group's alphabet size against a work budget from
   `Limits::max_bytes`.
 
-### crcbl-scene: glTF triangle primitives are not checked for whole triangles
+### crcbl-scene: a primitive's label counts only the triangle primitives
 
-`read_primitive` in `crates/crcbl-scene/src/gltf_import.rs` checks every index
-against the vertex count, but not that `indices.len()` is a multiple of three.
-Downstream code uses `as_chunks::<3>()` (`simplify.rs`, `probe_visibility.rs`)
-and `len() / 3` (`lod.rs`), so a trailing one or two indices are dropped
-silently rather than refused.
-
-- Failure: a malformed glTF is accepted, and LOD triangle counts and the
-  uploaded index count disagree by the remainder. No crash found.
-- Severity: correctness (low). Confidence: missing check verified; downstream
-  effects read only at the callers listed.
-- Fix: refuse `indices.len() % 3 != 0` with the same `malformed` error the
-  out-of-range check uses.
+The importer skips every non-`TRIANGLES` primitive with a warning and keeps no
+placeholder, so `primitive_label` in `crates/crcbl-scene/src/gltf_render.rs`,
+and the primitive index on each mesh's origin record, give the position in the
+importer's filtered list rather than the glTF document's index: in a mesh of
+`[POINTS, TRIANGLES]` the triangle primitive is reported as primitive 0 though
+the file calls it 1. Found by reading while fixing the whole-triangles check; no
+test covers it. Fix: carry the document's primitive index through
+`read_primitive` into the record.
 
 ### Coverage
 

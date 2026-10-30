@@ -1792,6 +1792,23 @@ fn read_primitive(
             format!("{at} has index {past} and {vertices} vertices"),
         ));
     }
+    // Only `Mode::Triangles` reaches here, so the list must hold whole
+    // triangles: every reader downstream walks it three at a time and would
+    // drop a trailing one or two indices without a word.
+    if !indices.len().is_multiple_of(3) {
+        let what = if primitive.indices().is_some() {
+            "indices"
+        } else {
+            "vertices and no index accessor"
+        };
+        return Err(malformed(
+            key,
+            format!(
+                "{at} has {} {what}, and a triangle list needs a multiple of three",
+                indices.len()
+            ),
+        ));
+    }
 
     Ok(GltfPrimitive {
         positions,
@@ -1894,6 +1911,18 @@ fn flatten(document: &gltf::Document, key: &Path) -> Result<Vec<GltfInstance>, S
         stack.extend(children.into_iter().rev().map(|child| (child, world)));
     }
     Ok(instances)
+}
+
+/// A test-only way past the importer's own checks.
+#[cfg(test)]
+impl GltfScene {
+    /// Drop the last index of one primitive, leaving it a partial triangle.
+    ///
+    /// [`read_primitive`] refuses such a primitive, so this is the only way
+    /// left to hand the render conversion one its meshlet build refuses.
+    pub(crate) fn break_triangle_list(&mut self, mesh: usize, primitive: usize) {
+        self.meshes[mesh].primitives[primitive].indices.pop();
+    }
 }
 
 #[cfg(test)]

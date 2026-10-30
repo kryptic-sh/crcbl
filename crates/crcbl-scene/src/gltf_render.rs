@@ -2518,15 +2518,12 @@ mod tests {
     /// its position in the document.
     #[test]
     fn a_skipped_primitive_leaves_no_run_and_the_entry_after_it_still_names_itself() {
-        // Two indices is not a whole triangle, which the importer accepts and
-        // the meshlet build refuses — so mesh 0 is dropped by the conversion
-        // rather than a step earlier.
-        let json = replacing(
-            &skinned_pair_json(),
-            r#"{ "bufferView": 6, "componentType": 5123, "count": 3, "type": "SCALAR" }"#,
-            r#"{ "bufferView": 6, "componentType": 5123, "count": 2, "type": "SCALAR" }"#,
-        );
-        let converted = convert_pair(&json);
+        // Two indices is not a whole triangle, which the meshlet build refuses
+        // — so mesh 0 is dropped by the conversion. The importer refuses it
+        // too, so the break is made after the import rather than in the file.
+        let mut scene = import_skinned_pair_glb(&skinned_pair_json()).expect("the fixture imports");
+        scene.break_triangle_list(0, 0);
+        let converted = build_render_scene(&scene, Path::new(KEY));
 
         assert_eq!(
             converted

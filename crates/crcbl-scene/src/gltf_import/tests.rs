@@ -1388,6 +1388,32 @@ fn a_primitive_with_no_index_accessor_is_given_the_trivial_indices() {
     assert_eq!(primitive.positions().len(), 3);
 }
 
+/// Without an index accessor the vertices themselves are the triangle list,
+/// so their count must be a whole number of triangles too.
+#[test]
+fn a_primitive_with_no_index_accessor_and_a_partial_triangle_is_refused() {
+    let mut json = replacing(
+        &triangle_json(BIN_CHUNK_BUFFER),
+        "\n      \"indices\": 3,",
+        "",
+    );
+    for view in 0..3 {
+        json = replacing(
+            &json,
+            &format!("{{ \"bufferView\": {view}, \"componentType\": 5126, \"count\": 3"),
+            &format!("{{ \"bufferView\": {view}, \"componentType\": 5126, \"count\": 2"),
+        );
+    }
+    let error = import_glb(&json).expect_err("two vertices are not a triangle");
+
+    assert!(
+        error
+            .to_string()
+            .contains("has 2 vertices and no index accessor, and a triangle list"),
+        "the refusal does not name the partial triangle: {error}",
+    );
+}
+
 /// A material with no `pbrMetallicRoughness` block at all imports as the
 /// specification's defaults, and **that is no longer the engine's neutral
 /// row**.

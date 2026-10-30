@@ -115,6 +115,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **glTF import refuses a triangle list that is not whole triangles.**
+  `import_gltf` accepted a `TRIANGLES` primitive whose index count — or, with no
+  index accessor, vertex count — was not a multiple of three, and every reader
+  of `GltfPrimitive::indices` (LOD build, simplification, probe visibility)
+  silently dropped the trailing one or two indices. It is now refused as
+  malformed, naming the primitive and the count.
+
 - **A corrupt GTK icon cache no longer overflows the icon-theme lookup.**
   `IconThemes::lookup` read `icon-theme.cache` offsets with 32-bit arithmetic,
   so a huge bucket count or a chain offset near `u32::MAX` panicked in debug
