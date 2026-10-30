@@ -115,6 +115,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`ForwardRenderer`'s build compiles its independent pipelines in parallel**
+  on Vulkan, D3D12 and Metal: the forward pass's mesh pipelines, the grass draw
+  pipelines, and each `DrawGen`'s compute and occlusion pipelines run on a
+  `crcbl_jobs` pool in rounds of a few, so their driver compiles overlap; the
+  results, labels and failure rollback are as before. `with_scene_serviced`'s
+  `service` now runs before each round rather than before each pipeline. WebGPU,
+  the null backend and every `wasm32` build stay serial. Measured on an RX 7900
+  XTX (radv, cold driver cache, load 7–15): `ForwardRenderer::new` went from
+  829–851 ms to 489–508 ms; warm builds are unchanged.
 - **`crcbl-dx12` no longer holds the device's state lock while the driver
   compiles a pipeline.** `create_graphics_pipeline`, `create_mesh_pipeline` and
   `create_compute_pipeline` resolve the layout and modules under the lock, take

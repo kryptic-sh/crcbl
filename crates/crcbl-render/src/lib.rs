@@ -170,6 +170,7 @@ pub mod nine_slice;
 pub mod occlusion_cull;
 pub mod orbit;
 pub mod pass_stats;
+mod pipeline_batch;
 mod probe;
 
 /// The GPU pass that fills a probe's visibility map: a depth cube per probe,

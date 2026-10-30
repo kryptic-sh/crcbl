@@ -15,7 +15,7 @@
 //! * `GrassScene` is the **scene's**: the field a caller set, its three
 //!   textures, the blade table, the per-tile blocks and the buffers a dispatch
 //!   writes. Every view generates and draws the same field.
-//! * `Grass` is **one camera's**: the seven pipelines, its three uniform rings
+//! * `Grass` is **one camera's**: the pipelines, its three uniform rings
 //!   and the bind groups naming its own transients.
 //!
 //! # A field is content, not an effect
@@ -106,6 +106,7 @@ use crcbl_shaders::{GRASS, GRASS_GEN, Stage};
 
 use crate::draw_gen::compute_pipeline_entry;
 use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
+use crate::pipeline_batch;
 use crate::ssao::cached_group;
 use crate::texture::{UploadBatch, UploadedTexture, upload_texture, upload_texture_mip_layers};
 
@@ -1011,18 +1012,22 @@ impl Grass {
     /// Passes [`Grass::add_passes`] adds to a frame that has a field.
     pub(crate) const PASSES: u32 = 3;
 
-    /// Builds the seven pipelines — two dispatches and a card, a shell, a fin
-    /// and two mesh blade draws — the two samplers and the three uniform rings.
+    /// Builds the pipelines — the dispatches and a card, a shell, a fin and the
+    /// mesh blade draws — the two samplers and the three uniform rings.
     ///
-    /// `service` runs before each pipeline: on a cold driver cache these seven
-    /// are the longest run of compilations in a renderer's build — see
+    /// `service` runs before each dispatch pipeline and before each round of
+    /// the draw pipelines, which are one [`pipeline_batch`] compiled side by
+    /// side where the device allows it: on a cold driver cache these are the
+    /// longest run of compilations in a renderer's build — see
     /// [`ForwardRenderer::with_scene_serviced`](crate::forward::ForwardRenderer::with_scene_serviced).
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**, for the reason every other builder in this crate gives: the
-    /// caller holds a rollback, and this is stored in it whole.
+    /// [`HalError`] from any seam call. **Nothing created before the failing
+    /// call is released**, for the reason every other builder in this crate
+    /// gives: the caller holds a rollback, and this is stored in it whole. The
+    /// one exception is the draw batch's own members, which are released when
+    /// one of them is refused, because the batch runs them all regardless.
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -1161,44 +1166,44 @@ impl Grass {
             push_constants: None,
         })?;
         let list = PrimitiveTopology::TriangleList;
-        service();
-        let raster_pipeline = build_raster(
-            device,
-            raster_pipeline_layout,
-            ("vertexMain", "fragmentMain"),
-            list,
-        )?;
-        service();
-        let shell_pipeline = build_raster(
-            device,
-            raster_pipeline_layout,
-            ("shellVertexMain", "shellFragmentMain"),
-            list,
-        )?;
-        service();
-        let fin_pipeline = build_raster(
-            device,
-            raster_pipeline_layout,
-            ("finVertexMain", "shellFragmentMain"),
-            list,
-        )?;
         // **Strips**: a blade is a pair of vertices at each height and one at
         // the tip, which is decision 3's fifteen and seven only as a strip.
         let strip = PrimitiveTopology::TriangleStrip;
-        service();
-        let blade_near_pipeline = build_raster(
+        let raster =
+            |entries, topology| build_raster(device, raster_pipeline_layout, entries, topology);
+        // One [`pipeline_batch`]: each draw pipeline is a compile on the order
+        // of the forward pass's on a cold driver cache, and none needs another.
+        let results = pipeline_batch::create(
             device,
-            raster_pipeline_layout,
-            ("bladeNearVertexMain", "bladeFragmentMain"),
-            strip,
-        )?;
-        service();
-        let blade_far_pipeline = build_raster(
-            device,
-            raster_pipeline_layout,
-            ("bladeFarVertexMain", "bladeFragmentMain"),
-            strip,
-        )?;
+            service,
+            [
+                &|| raster(("vertexMain", "fragmentMain"), list),
+                &|| raster(("shellVertexMain", "shellFragmentMain"), list),
+                &|| raster(("finVertexMain", "shellFragmentMain"), list),
+                &|| raster(("bladeNearVertexMain", "bladeFragmentMain"), strip),
+                &|| raster(("bladeFarVertexMain", "bladeFragmentMain"), strip),
+            ],
+        );
+        // Every member ran whatever the others returned, so a refusal leaves
+        // the rest of the batch live: release them here, since the `?`s below
+        // return before anything else could.
+        if results.iter().any(Result::is_err) {
+            for pipeline in results.iter().flatten() {
+                device.destroy_graphics_pipeline(*pipeline);
+            }
+        }
+        let [
+            raster_pipeline,
+            shell_pipeline,
+            fin_pipeline,
+            blade_near_pipeline,
+            blade_far_pipeline,
+        ] = results;
+        let raster_pipeline = raster_pipeline?;
+        let shell_pipeline = shell_pipeline?;
+        let fin_pipeline = fin_pipeline?;
+        let blade_near_pipeline = blade_near_pipeline?;
+        let blade_far_pipeline = blade_far_pipeline?;
 
         let card_sampler = device.create_sampler(&SamplerDesc {
             label: Some("grass card"),

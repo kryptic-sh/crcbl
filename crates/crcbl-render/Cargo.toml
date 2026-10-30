@@ -61,6 +61,12 @@ thiserror = { workspace = true }
 # could not be read from a file is the field this crate already had.
 ron = { workspace = true }
 serde = { workspace = true }
+# The pool [`pipeline_batch`] compiles a build's independent pipelines on, so
+# their driver compiles overlap. Through the spawn seam rather than
+# `std::thread`, as every engine thread is; on `wasm32` the batch is serial and
+# the pool is never built. No cycle: it depends on `thiserror` and nothing of
+# this workspace.
+crcbl-jobs = { workspace = true }
 
 # `scene`'s bounds tests build a `crcbl_phys::AabbCompound` from the parts they
 # produce, which is the use those parts exist for. Test-only: the renderer hands

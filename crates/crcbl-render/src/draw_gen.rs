@@ -188,6 +188,7 @@ use glam::Mat4;
 
 use crate::cull::{FacePlanes, Frustum};
 use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
+use crate::pipeline_batch;
 use crate::texture::UploadBatch;
 
 // `startsMain` is one workgroup of this size on every device, so it has to fit
@@ -910,14 +911,6 @@ impl DrawGen {
             push_constants: None,
         })?;
         rollback.pipeline_layouts.push(clear_pipeline_layout);
-        let clear_pipeline = compute_pipeline(
-            device,
-            "clear counters",
-            &CLEAR_COUNTERS,
-            clear_pipeline_layout,
-            clear_counters::WORKGROUP_SIZE,
-        )?;
-        rollback.pipelines.push(clear_pipeline);
 
         // --- the cull pass ---
         //
@@ -949,17 +942,6 @@ impl DrawGen {
             push_constants: None,
         })?;
         rollback.pipeline_layouts.push(cull_pipeline_layout);
-        // Named rather than resolved: `cull.slang` has an entry point per
-        // occlusion phase beside this one.
-        let cull_pipeline = compute_pipeline_entry(
-            device,
-            "cull",
-            &CULL,
-            "computeMain",
-            cull_pipeline_layout,
-            cull_shader::WORKGROUP_SIZE,
-        )?;
-        rollback.pipelines.push(cull_pipeline);
 
         // --- the draw-argument pass ---
         //
@@ -1009,41 +991,80 @@ impl DrawGen {
             push_constants: None,
         })?;
         rollback.pipeline_layouts.push(gen_pipeline_layout);
-        // Three entry points of one module over the one layout above, which is
-        // why these are `compute_pipeline_entry`: the route, the prefix sum and
+
+        // --- the passes' pipelines, as one batch ---
+        //
+        // Every layout they need exists by now, so they compile side by side
+        // where the device allows it — see [`pipeline_batch`]. Each result
+        // is the rollback's before any error is propagated, so a refusal of one
+        // releases the others.
+        //
+        // `cull` is named rather than resolved: `cull.slang` has an entry point
+        // per occlusion phase beside this one. `bin`, `starts` and `scatter`
+        // are three entry points of one module over one layout, which is why
+        // they are `compute_pipeline_entry` too: the route, the prefix sum and
         // the scatter share the bucket table's accessors and shaders here have
-        // no `#include`. Each is pushed as soon as it exists, so a failure on
-        // the second releases the first.
-        let bin_pipeline = compute_pipeline_entry(
+        // no `#include`.
+        let draw_args = |label, entry_point, workgroup_size| {
+            compute_pipeline_entry(
+                device,
+                label,
+                &DRAW_GEN,
+                entry_point,
+                gen_pipeline_layout,
+                workgroup_size,
+            )
+        };
+        let results = pipeline_batch::create(
             device,
-            "draw args bin",
-            &DRAW_GEN,
-            "binMain",
-            gen_pipeline_layout,
-            draw_gen::WORKGROUP_SIZE,
-        )?;
-        rollback.pipelines.push(bin_pipeline);
-        let starts_pipeline = compute_pipeline_entry(
-            device,
-            "draw args starts",
-            &DRAW_GEN,
-            "startsMain",
-            gen_pipeline_layout,
-            // One workgroup for the whole prefix sum, dispatched once by
-            // `record_passes`: its invocations split the table into chunks
-            // and scan the chunk totals in workgroup memory.
-            draw_gen::STARTS_WORKGROUP_SIZE,
-        )?;
-        rollback.pipelines.push(starts_pipeline);
-        let scatter_pipeline = compute_pipeline_entry(
-            device,
-            "draw args scatter",
-            &DRAW_GEN,
-            "scatterMain",
-            gen_pipeline_layout,
-            draw_gen::WORKGROUP_SIZE,
-        )?;
-        rollback.pipelines.push(scatter_pipeline);
+            &mut || {},
+            [
+                &|| {
+                    compute_pipeline(
+                        device,
+                        "clear counters",
+                        &CLEAR_COUNTERS,
+                        clear_pipeline_layout,
+                        clear_counters::WORKGROUP_SIZE,
+                    )
+                },
+                &|| {
+                    compute_pipeline_entry(
+                        device,
+                        "cull",
+                        &CULL,
+                        "computeMain",
+                        cull_pipeline_layout,
+                        cull_shader::WORKGROUP_SIZE,
+                    )
+                },
+                &|| draw_args("draw args bin", "binMain", draw_gen::WORKGROUP_SIZE),
+                // One workgroup for the whole prefix sum, dispatched once by
+                // `record_passes`: its invocations split the table into chunks
+                // and scan the chunk totals in workgroup memory.
+                &|| {
+                    draw_args(
+                        "draw args starts",
+                        "startsMain",
+                        draw_gen::STARTS_WORKGROUP_SIZE,
+                    )
+                },
+                &|| draw_args("draw args scatter", "scatterMain", draw_gen::WORKGROUP_SIZE),
+            ],
+        );
+        rollback.pipelines.extend(results.iter().flatten().copied());
+        let [
+            clear_pipeline,
+            cull_pipeline,
+            bin_pipeline,
+            starts_pipeline,
+            scatter_pipeline,
+        ] = results;
+        let clear_pipeline = clear_pipeline?;
+        let cull_pipeline = cull_pipeline?;
+        let bin_pipeline = bin_pipeline?;
+        let starts_pipeline = starts_pipeline?;
+        let scatter_pipeline = scatter_pipeline?;
 
         // --- the occlusion phases, on a generator built for them ---
         let occlusion = if desc.mode == DrawMode::Occlusion {
@@ -1193,45 +1214,59 @@ impl DrawGen {
             push_constants: None,
         })?;
         rollback.pipeline_layouts.push(cull_pipeline_layout);
-        let early = compute_pipeline_entry(
+        // One batch, on the terms `build` gives for its own.
+        let entry = |label, shader, entry_point, layout, workgroup_size| {
+            compute_pipeline_entry(device, label, shader, entry_point, layout, workgroup_size)
+        };
+        let cull = cull_shader::WORKGROUP_SIZE;
+        let results = pipeline_batch::create(
             device,
-            "occlusion early cull",
-            &CULL,
-            "occlusionMain",
-            cull_pipeline_layout,
-            cull_shader::WORKGROUP_SIZE,
-        )?;
-        rollback.pipelines.push(early);
-        let late = compute_pipeline_entry(
-            device,
-            "occlusion late cull",
-            &CULL,
-            "lateMain",
-            cull_pipeline_layout,
-            cull_shader::WORKGROUP_SIZE,
-        )?;
-        rollback.pipelines.push(late);
-        let late_scatter = compute_pipeline_entry(
-            device,
-            "draw args late scatter",
-            &DRAW_GEN,
-            "lateScatterMain",
-            gen_pipeline_layout,
-            draw_gen::WORKGROUP_SIZE,
-        )?;
-        rollback.pipelines.push(late_scatter);
-        let late_finish = compute_pipeline_entry(
-            device,
-            "draw args late finish",
-            &DRAW_GEN,
-            "lateFinishMain",
-            gen_pipeline_layout,
-            // One workgroup, on `startsMain`'s terms: its invocations split
-            // the buckets into chunks and scan the two closed regions' task
-            // chunks in workgroup memory.
-            draw_gen::STARTS_WORKGROUP_SIZE,
-        )?;
-        rollback.pipelines.push(late_finish);
+            &mut || {},
+            [
+                &|| {
+                    entry(
+                        "occlusion early cull",
+                        &CULL,
+                        "occlusionMain",
+                        cull_pipeline_layout,
+                        cull,
+                    )
+                },
+                &|| {
+                    entry(
+                        "occlusion late cull",
+                        &CULL,
+                        "lateMain",
+                        cull_pipeline_layout,
+                        cull,
+                    )
+                },
+                &|| {
+                    entry(
+                        "draw args late scatter",
+                        &DRAW_GEN,
+                        "lateScatterMain",
+                        gen_pipeline_layout,
+                        draw_gen::WORKGROUP_SIZE,
+                    )
+                },
+                // One workgroup, on `startsMain`'s terms: its invocations split
+                // the buckets into chunks and scan the two closed regions' task
+                // chunks in workgroup memory.
+                &|| {
+                    entry(
+                        "draw args late finish",
+                        &DRAW_GEN,
+                        "lateFinishMain",
+                        gen_pipeline_layout,
+                        draw_gen::STARTS_WORKGROUP_SIZE,
+                    )
+                },
+            ],
+        );
+        rollback.pipelines.extend(results.iter().flatten().copied());
+        let [early, late, late_scatter, late_finish] = results;
+        let (early, late, late_scatter, late_finish) = (early?, late?, late_scatter?, late_finish?);
         Ok(OcclusionPipelines {
             pyramid_layout,
             cull_pipeline_layout,

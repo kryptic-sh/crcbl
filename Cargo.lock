@@ -1010,6 +1010,7 @@ dependencies = [
  "crcbl-core",
  "crcbl-frame",
  "crcbl-hal",
+ "crcbl-jobs",
  "crcbl-phys",
  "crcbl-shaders",
  "crcbl-sprite",

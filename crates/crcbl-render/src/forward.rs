@@ -188,6 +188,7 @@ use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDe
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshUpload};
 use crate::occlusion_cull::{OcclusionCulling, OcclusionPyramid};
+use crate::pipeline_batch;
 use crate::probe::{ProbeTable, ProbeTableDesc};
 use crate::probe_gather::{ProbeGather, ProbeGatherDesc, RsmImages, RsmTargets};
 use crate::rsm;
@@ -3340,15 +3341,27 @@ impl ForwardRenderer {
     /// mesh and page uploads took about 0.1 s either way. So `service` runs
     /// after every mesh upload (each level of a DAG), after every page layer's
     /// mip chain and each page's upload, after each of the camera's
-    /// post-processing subsystems, before every mesh-pass and grass pipeline,
-    /// and between the build's other phases.
+    /// post-processing subsystems, before every round of the mesh-pass and
+    /// grass pipelines, and between the build's other phases.
     ///
-    /// **The longest gap left is one pipeline**, and a pipeline cannot be
+    /// **The longest gap left is about one pipeline**, and a pipeline cannot be
     /// split: on that scene, cold, it was the forward pass's colour pipeline
     /// at 0.31 s on Vulkan and 0.36 s on D3D12, where the build without calls
     /// had been one gap of 2 s. Warm, the longest was about 0.04 s. A machine
     /// eight times slower under contention still calls back inside the five
     /// seconds Windows allows.
+    ///
+    /// **One condition on that bound.** The mesh-pass and grass pipelines are
+    /// each compiled as one batch on a device that can take them from several
+    /// threads, in rounds of a small fixed number of pipelines with `service`
+    /// on this thread before each — see `crate::pipeline_batch`. A driver that
+    /// compiles side by side finishes a round in about its slowest compile, so
+    /// the bound holds. One that serialises its compiles internally takes a
+    /// whole round's worth between two calls, which is still bounded — the
+    /// round is capped — but leaves about a quarter of the headroom above: a
+    /// machine twice as slow rather than eight times. On a device that cannot take
+    /// pipelines from several threads, `service` runs before each pipeline as
+    /// it always did.
     ///
     /// `service` sees nothing of the build and cannot touch the renderer or the
     /// scene. Whatever reaches the window meanwhile — input, a resize, a close
@@ -5327,70 +5340,81 @@ impl ForwardRenderer {
         // the one exception: its triangle comes out of `SV_VertexID` and it
         // already culls nothing.
         //
-        // **`service` before every one of them**: on a cold driver cache each is
-        // a shader compilation, and this batch is the build's longest run of
-        // them — see [`ForwardRenderer::with_scene_serviced`].
+        // Beside them: the cutout twin of the depth shape, which a frame whose
+        // material table masks alpha is recorded with instead (see
+        // [`MeshModules::depth_masked_pipeline`]); the one that resets a tile,
+        // which the cadence rung needs and the attachment's load operation
+        // cannot express ([`MeshModules::depth_clear_pipeline`]); and the
+        // irradiance probes' reflective shadow map ([`MeshModules::rsm_pipeline`]).
+        // The last is built on every scene rather than only on one whose probes
+        // ask to be updated: the modules are released a line below and a
+        // pipeline built later would need them back, which is a second shader
+        // compilation for a field a `ProbeGrid` decides.
+        //
+        // **They are one [`pipeline_batch`], compiled side by side** where
+        // the device allows it: on a cold driver cache each is a shader
+        // compilation, and this is the build's longest run of them. `service`
+        // runs before each round of the batch, or before each pipeline where the
+        // batch is serial — see [`ForwardRenderer::with_scene_serviced`].
         let modules = MeshModules::new(device, emit, culls_clusters)?;
-        let mesh_results = MeshModules::sided(|cull| {
-            service();
-            modules.color_pipeline(
-                device,
-                mesh_pipeline_layout,
-                PolygonMode::Fill,
-                cull,
-                "forward",
-            )
-        });
-        let shadow_results = MeshModules::sided(|cull| {
-            service();
-            modules.depth_pipeline(device, mesh_pipeline_layout, cull)
-        });
-        // And its cutout twin, which a frame whose material table masks alpha is
-        // recorded with instead — see [`MeshModules::depth_masked_pipeline`].
-        let depth_masked_results = MeshModules::sided(|cull| {
-            service();
-            modules.depth_masked_pipeline(device, mesh_pipeline_layout, cull)
-        });
-        // And the one that resets a tile, which the cadence rung needs and the
-        // attachment's load operation cannot express — see
-        // [`MeshModules::depth_clear_pipeline`].
-        service();
-        let shadow_clear_result = modules.depth_clear_pipeline(device, mesh_pipeline_layout);
-        // And the irradiance probes' reflective shadow map, built
-        // from the same modules and the same layout — see
-        // [`MeshModules::rsm_pipeline`]. Built on every scene rather than only
-        // on one whose probes ask to be updated: the modules are released a line
-        // below and a pipeline built later would need them back, which is a
-        // second shader compilation for a field a `ProbeGrid` decides.
-        let rsm_results = MeshModules::sided(|cull| {
-            service();
-            modules.rsm_pipeline(device, mesh_pipeline_layout, cull)
-        });
+        let layout = mesh_pipeline_layout;
+        let [back, none] = MeshModules::SIDES;
+        let color =
+            |cull| modules.color_pipeline(device, layout, PolygonMode::Fill, cull, "forward");
+        let depth = |cull| modules.depth_pipeline(device, layout, cull);
+        let depth_masked = |cull| modules.depth_masked_pipeline(device, layout, cull);
+        let rsm = |cull| modules.rsm_pipeline(device, layout, cull);
+        let results = pipeline_batch::create(
+            device,
+            service,
+            [
+                &|| color(back),
+                &|| color(none),
+                &|| depth(back),
+                &|| depth(none),
+                &|| depth_masked(back),
+                &|| depth_masked(none),
+                &|| modules.depth_clear_pipeline(device, layout),
+                &|| rsm(back),
+                &|| rsm(none),
+            ],
+        );
         modules.destroy(device);
         // Register every successful creation before propagating any error.
         // Results later in this batch may own pipelines even when the first
         // result failed; dropping an unvisited Result does not release a HAL
         // handle. The outer rollback owns all of them until build succeeds.
-        for pipeline in mesh_results
-            .iter()
-            .chain(&shadow_results)
-            .chain(&depth_masked_results)
-            .chain(std::iter::once(&shadow_clear_result))
-            .chain(&rsm_results)
-            .flatten()
-        {
+        for pipeline in results.iter().flatten() {
             rollback.pipelines.push(*pipeline);
         }
-        let into_sided = |results: [Result<GraphicsPipelineHandle, HalError>; 2]|
-         -> Result<SidedPipelines, HalError> {
-            let [single, double] = results;
-            Ok(SidedPipelines { single: single?, double: double? })
+        let [
+            mesh_single,
+            mesh_double,
+            shadow_single,
+            shadow_double,
+            depth_masked_single,
+            depth_masked_double,
+            shadow_clear_pipeline,
+            rsm_single,
+            rsm_double,
+        ] = results;
+        let mesh_pipeline = SidedPipelines {
+            single: mesh_single?,
+            double: mesh_double?,
         };
-        let mesh_pipeline = into_sided(mesh_results)?;
-        let shadow_pipeline = into_sided(shadow_results)?;
-        let depth_masked_pipeline = into_sided(depth_masked_results)?;
-        let shadow_clear_pipeline = shadow_clear_result?;
-        let rsm_pipeline = into_sided(rsm_results)?;
+        let shadow_pipeline = SidedPipelines {
+            single: shadow_single?,
+            double: shadow_double?,
+        };
+        let depth_masked_pipeline = SidedPipelines {
+            single: depth_masked_single?,
+            double: depth_masked_double?,
+        };
+        let shadow_clear_pipeline = shadow_clear_pipeline?;
+        let rsm_pipeline = SidedPipelines {
+            single: rsm_single?,
+            double: rsm_double?,
+        };
 
         // --- the tonemap pass ---
         let tonemap_entries = [
@@ -11083,6 +11107,11 @@ impl MeshModules {
     /// [`MESH_WORKGROUP_SIZE`](Self::MESH_WORKGROUP_SIZE)'s terms.
     const TASK_WORKGROUP_SIZE: [u32; 3] = [crcbl_shaders::meshlet::TASK_LANES, 1, 1];
 
+    /// The two cull modes a sided shape is built with, in
+    /// [`SidedPipelines`]' order: [`single`](SidedPipelines::single) culls
+    /// back faces, [`double`](SidedPipelines::double) culls nothing.
+    const SIDES: [CullMode; 2] = [CullMode::Back, CullMode::None];
+
     /// Loads whichever modules `emit` needs and resolves their entry points.
     ///
     /// # Errors
@@ -11261,7 +11290,7 @@ impl MeshModules {
     fn sided(
         mut build: impl FnMut(CullMode) -> Result<GraphicsPipelineHandle, HalError>,
     ) -> [Result<GraphicsPipelineHandle, HalError>; 2] {
-        [build(CullMode::Back), build(CullMode::None)]
+        Self::SIDES.map(&mut build)
     }
 
     /// Milestone 3's depth test, and the seam's default is already reversed-Z:

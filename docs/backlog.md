@@ -127,24 +127,35 @@ Read-only review of the tree at `3edd00dc`. Nothing below was measured: every
 cost is inferred from reading the code, and each item says what to time before
 acting. Items already in this backlog are not repeated. Start-up items first.
 
-### Start-up: build `ForwardRenderer`'s pipelines in parallel
+### Start-up: what the parallel pipeline build left
 
-Neither `crcbl-vk` nor `crcbl-dx12` holds its device state lock across the
-driver's pipeline compile any more, so compiles from several threads can
-overlap. Nothing does that yet: `ForwardRenderer::build` creates every pipeline
-one after another on the calling thread, so no start-up time is saved until it
-does.
+`crate::pipeline_batch` compiles the forward mesh batch, the grass draw
+pipelines and each `DrawGen`'s pipelines in parallel on vk, dx12 and mtl, in
+rounds capped by `MAX_JOBS_PER_ROUND` so `service` still runs often on a driver
+that serialises compiles. Measured cold on radv: 489–508 ms against 829–851 ms
+(uncapped it was 422–447 ms; the cap trades that for loading-screen headroom).
+Left:
 
-- Build the independent pipelines through `crcbl_jobs`. On vk, 64 small compute
-  pipelines from 8 threads took 2.7–3.8 ms against 16.2–17.2 ms with the lock
-  held (RX 7900 XTX, load about 10). The 2.2–2.4 s cold scene build has not been
-  re-measured, and the dx12 change is unmeasured until CI's WARP or real
-  hardware times it.
+- Still serial: `Water::new` (`water`, 52 ms cold), `Volumetric::new`
+  (`volumetric scatter`, 37 ms) and `Ssr::new` (`ssr`, 35 ms), each the one
+  costly pipeline inside its own constructor in `View::build`; overlapping them
+  means pulling their pipeline descriptions out. The mesh and grass batches also
+  run one after the other.
+- Every `DrawGen` (the primary view and each shadow cull) compiles the same
+  compute pipelines; sharing them would remove about 6 × 13 ms cold.
+- The parallel-or-serial choice is an exhaustive `match device.backend()` in
+  `pipeline_batch::concurrent`; a `Capability::ConcurrentPipelineCreation`
+  answered by each backend would be the seam-idiomatic form.
+- Metal is parallel on reading `crcbl-mtl` alone (no lock across the compile);
+  never run on Apple hardware. Its jobs run with no autoreleasepool, so anything
+  the driver autoreleases accumulates on a pool thread until the batch's pool
+  drops; wrap each job through a `crcbl-mtl` helper or a HAL hook. Not measured.
+- dx12's gain is unmeasured until CI's WARP or real hardware times it, and
+  `crcbl-dx12`'s compile-window test covers only the compute path.
+- The 2.2–2.4 s cold scene build recorded earlier has not been re-measured.
 - A shared in-memory `VkPipelineCache` is now safe to add (internally
   synchronised unless created externally-synchronised); persisting it is the
   separate "The Vulkan pipeline cache is not persisted" entry.
-- `crcbl-dx12`'s compile-window test exercises only the compute path; graphics
-  and mesh share its shape but are untested under the hook.
 
 ### Start-up: `ForwardRenderer` still builds mesh twins, water and grass eagerly
 
@@ -174,10 +185,10 @@ Splitting each one's buffers from its pipelines would make the pipelines lazy.
 
 ### A pass constructor that fails part way leaks what it made
 
-`Ssao`, `ContactShadows`, `Bloom`, `Fxaa`, `Cmaa2`, `Upscale` and `AtlasView`
-`::new` return on the first failing seam call without releasing the layouts,
-samplers and pipelines already created. This was true before they became lazy
-(the rollback only held them once whole); `View::build_passes` and
+`Ssao`, `ContactShadows`, `Bloom`, `Fxaa`, `Cmaa2`, `Upscale`, `AtlasView` and
+`Grass` `::new` return on the first failing seam call without releasing the
+layouts, samplers and pipelines already created. This was true before they
+became lazy (the rollback only held them once whole); `View::build_passes` and
 `begin_frame_body` now build them between frames with no rollback, so a failed
 late build mid-session leaks on every retry, and in the engine loop it ends the
 game where it used to fail at start-up. Not observed; only a device refusing a
