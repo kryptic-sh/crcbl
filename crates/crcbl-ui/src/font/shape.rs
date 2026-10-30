@@ -35,6 +35,9 @@ use core::ops::Range;
 
 use glam::Vec2;
 
+#[cfg(feature = "parsed-font")]
+use std::sync::{Arc, Mutex, PoisonError};
+
 use super::{Font, GlyphId, cluster, fallback};
 
 /// One glyph as [`shape`] placed it.
@@ -165,12 +168,7 @@ fn shape_run(
 /// `range` of `text` shaped by `shaper`, right to left when `rtl` says so,
 /// as the module docs say a run is: its glyphs in visual order.
 #[cfg(feature = "parsed-font")]
-fn run_shaper(
-    shaper: &harfrust::Font,
-    text: &str,
-    range: Range<usize>,
-    rtl: bool,
-) -> harfrust::Buffer {
+fn run_shaper(shaper: &Shaper, text: &str, range: Range<usize>, rtl: bool) -> harfrust::Buffer {
     let mut buffer = harfrust::Buffer::new();
     for (at, c) in text[range.clone()].char_indices() {
         let cluster = u32::try_from(range.start + at)
@@ -186,13 +184,85 @@ fn run_shaper(
     });
     buffer.guess_segment_properties();
     buffer.set_flags(harfrust::BufferFlags::REMOVE_DEFAULT_IGNORABLES);
+    let plan = shaper.plan(&buffer);
     harfrust::shape(
-        &harfrust::ShaperFont::new(shaper),
+        &harfrust::ShaperFont::new(&shaper.font),
         &mut buffer,
-        harfrust::ShapeOptions::new(),
+        harfrust::ShapeOptions::new().plan(Some(&plan)),
     )
-    .expect("a fresh buffer with its direction set is everything shaping asks for");
+    .expect("a buffer with its direction set, and a plan made for its direction and script");
     buffer
+}
+
+/// How many shape plans one face keeps: more than the scripts a face is
+/// handed in practice — fallback gives a face only the clusters it maps —
+/// times the two directions, so a steady UI compiles each plan once.
+#[cfg(feature = "parsed-font")]
+const PLANS_KEPT: usize = 16;
+
+/// A face as `harfrust` shapes with it: the font, its layout tables read
+/// once, and the shape plans compiled for it.
+///
+/// **A plan is compiled once per face and segment** rather than per run:
+/// compiling one — choosing the features and lookups a script, direction and
+/// language apply — costs more than shaping a short label with it. A plan
+/// depends on the face, the buffer's direction, script and language, the user
+/// features (none: every run is shaped with the face's defaults) and the
+/// feature variations the face's variation coordinates select (none: a face is
+/// read at its default instance). `harfrust::ShapePlanKey` is matched on all
+/// of those but the face, and the face is covered by keeping one cache per
+/// face, so a kept plan is the plan `harfrust::shape` would compile.
+/// The [`PLANS_KEPT`] most recently used plans are kept, the least recently
+/// used one dropped past that.
+#[cfg(feature = "parsed-font")]
+pub(super) struct Shaper {
+    font: harfrust::Font,
+    /// The plans kept, the most recently used first. Behind a lock, as a
+    /// [`Font`] is shared between threads; a plan is compiled under it, so two
+    /// threads never compile the same one.
+    plans: Mutex<Vec<Arc<harfrust::ShapePlan>>>,
+    /// How many plans have been compiled, for the tests to count.
+    #[cfg(test)]
+    compiled: core::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "parsed-font")]
+impl Shaper {
+    /// Shapes with `font`, no plan compiled yet.
+    pub(super) fn new(font: harfrust::Font) -> Self {
+        Self {
+            font,
+            plans: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            compiled: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The plan `buffer` — its direction, script and language set — is
+    /// shaped with in this face: a kept one, else one compiled and kept.
+    fn plan(&self, buffer: &harfrust::Buffer) -> Arc<harfrust::ShapePlan> {
+        let (direction, script, language) =
+            (buffer.direction(), buffer.script(), buffer.language());
+        let key = harfrust::ShapePlanKey::new(&self.font, script, direction).language(language);
+        let mut plans = self.plans.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = plans.iter().position(|plan| key.matches(plan)) {
+            plans[..=at].rotate_right(1);
+            return Arc::clone(&plans[0]);
+        }
+        let plan = Arc::new(harfrust::ShapePlan::new(
+            &self.font,
+            direction,
+            script,
+            language,
+            &[],
+        ));
+        #[cfg(test)]
+        self.compiled
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        plans.truncate(PLANS_KEPT - 1);
+        plans.insert(0, Arc::clone(&plan));
+        plan
+    }
 }
 
 /// Whether `face` draws any of `cluster` as a colour glyph once the cluster
@@ -427,6 +497,82 @@ mod tests {
                     .collect::<Vec<_>>()
             },
             "the direction changed nothing, so the test cannot tell it was set"
+        );
+    }
+
+    /// How many shape plans `font`'s own face has compiled.
+    fn compiled(font: &Font) -> usize {
+        font.parsed()
+            .shaper
+            .as_ref()
+            .expect("a parsed face")
+            .compiled
+            .load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// **A plan is compiled once per face, direction and script**: shaping
+    /// the same label again, or another label of the same script, compiles
+    /// none, while a new direction or script compiles its own — and the
+    /// glyphs are the same as the first shaping's.
+    #[test]
+    fn a_face_compiles_one_plan_per_direction_and_script() {
+        // A parse of its own, so no other test's shaping is counted.
+        let font = Font::parse(crate::font::SANS_TTF).expect("parses");
+        let first = shaped(&font, "Iron Sword");
+        assert_eq!(compiled(&font), 1);
+        assert_eq!(
+            shaped(&font, "Iron Sword"),
+            first,
+            "a kept plan shaped it differently"
+        );
+        shaped(&font, "Health Potion");
+        assert_eq!(compiled(&font), 1, "a second Latin label compiled a plan");
+        let mut rtl = Vec::new();
+        shape(&font, SIZE, "AVAT", 0..4, true, &mut rtl);
+        assert_eq!(
+            compiled(&font),
+            2,
+            "right to left shared left to right's plan"
+        );
+        shaped(&font, "\u{3b1}\u{3b2}");
+        assert_eq!(compiled(&font), 3, "Greek shared Latin's plan");
+        shaped(&font, "Iron Sword");
+        shape(&font, SIZE, "VA", 0..2, true, &mut rtl);
+        assert_eq!(compiled(&font), 3, "a kept plan was compiled again");
+    }
+
+    /// **Past [`PLANS_KEPT`] plans the least recently used goes**, not the
+    /// oldest compiled: with the first script's plan used again, one script
+    /// more than are kept drops the second's, and the first's stays.
+    #[test]
+    fn the_least_recently_used_plan_goes_past_the_bound() {
+        let font = Font::parse(crate::font::SANS_TTF).expect("parses");
+        // A letter of each of seventeen scripts.
+        let scripts = [
+            "a", "\u{3b1}", "\u{431}", "\u{561}", "\u{5d0}", "\u{628}", "\u{915}", "\u{995}",
+            "\u{a15}", "\u{a95}", "\u{b15}", "\u{b95}", "\u{c15}", "\u{c95}", "\u{d15}", "\u{e01}",
+            "\u{10d0}",
+        ];
+        assert_eq!(scripts.len(), PLANS_KEPT + 1);
+        let (last, kept) = scripts.split_last().expect("not empty");
+        for letter in kept {
+            shaped(&font, letter);
+        }
+        assert_eq!(compiled(&font), PLANS_KEPT, "two scripts shared a plan");
+        shaped(&font, scripts[0]);
+        shaped(&font, last);
+        assert_eq!(compiled(&font), PLANS_KEPT + 1);
+        shaped(&font, scripts[0]);
+        assert_eq!(
+            compiled(&font),
+            PLANS_KEPT + 1,
+            "the recently used plan was dropped"
+        );
+        shaped(&font, scripts[1]);
+        assert_eq!(
+            compiled(&font),
+            PLANS_KEPT + 2,
+            "the least recently used plan was kept"
         );
     }
 

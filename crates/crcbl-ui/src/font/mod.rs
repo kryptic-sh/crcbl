@@ -484,10 +484,10 @@ struct Parsed {
     latin1: [u32; LATIN1_END as usize],
     /// Every glyph's advance, in font units.
     advances: Box<[f32]>,
-    /// The font as `harfrust` shapes with it, its layout tables read once;
-    /// `None` only for a test's fixed-pitch face, which has no bytes.
+    /// The font as `harfrust` shapes with it, its layout tables read once
+    /// and its shape plans kept; `None` only for a test's fixed-pitch face, which has no bytes.
     #[cfg(feature = "parsed-font")]
-    shaper: Option<harfrust::Font>,
+    shaper: Option<shape::Shaper>,
 }
 
 impl fmt::Debug for Font {
@@ -769,7 +769,7 @@ impl Parsed {
             color,
             latin1,
             advances,
-            shaper: Some(shaper),
+            shaper: Some(shape::Shaper::new(shaper)),
         })
     }
 

@@ -281,7 +281,11 @@ impl Ui {
                             line_height,
                             Some(content_width(unrounded)),
                         ),
-                        WhiteSpace::NoWrap => TextLayout::nowrap(font, text, size, line_height),
+                        // Cutting it laid out what it shows already.
+                        WhiteSpace::NoWrap => node
+                            .shown_layout
+                            .clone()
+                            .unwrap_or_else(|| TextLayout::nowrap(font, text, size, line_height)),
                     };
                     layout.align(content_max.x - content_min.x, style.text_align);
                     let lines = layout

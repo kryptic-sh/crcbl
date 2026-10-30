@@ -52,6 +52,7 @@ impl Ui {
         self.cut.clear();
         for node in &mut self.nodes {
             node.shown = Shown::Whole;
+            node.shown_layout = None;
             let Content::Text { start, end } = node.content else {
                 continue;
             };
@@ -75,7 +76,9 @@ impl Ui {
             };
             let width = content_width(&self.store.get(node.slot).unrounded);
             let at = self.cut.len();
-            if cut(&measure, &self.text[start..end], width, &mut self.cut) {
+            let cut = cut(&measure, &self.text[start..end], width, &mut self.cut);
+            node.shown_layout = cut.layout;
+            if cut.any {
                 node.shown = Shown::Cut {
                     start: at,
                     end: self.cut.len(),
@@ -107,15 +110,19 @@ enum Measure<'a> {
 }
 
 impl Measure<'_> {
-    /// `line`'s width in pixels, measured as layout measures it.
-    fn width(&self, line: &str) -> f32 {
+    /// `line`'s width in pixels, measured as layout measures it, and in a
+    /// parsed font the layout it was measured from.
+    fn width(&self, line: &str) -> (f32, Option<TextLayout>) {
         match self {
-            Self::Bitmap { atlas, scale } => atlas.text_width(line, *scale),
+            Self::Bitmap { atlas, scale } => (atlas.text_width(line, *scale), None),
             Self::Parsed {
                 font,
                 size,
                 line_height,
-            } => TextLayout::nowrap(font, line, *size, *line_height).width(),
+            } => {
+                let layout = TextLayout::nowrap(font, line, *size, *line_height);
+                (layout.width(), Some(layout))
+            }
         }
     }
 
@@ -130,27 +137,48 @@ impl Measure<'_> {
     }
 }
 
+/// What [`cut`] did to a span's text.
+struct Cut {
+    /// Whether any line was cut.
+    any: bool,
+    /// What the text came out as, laid out unbroken in a parsed font, when it
+    /// is one line and was laid out whole: the layout of the line that fit, or
+    /// of the cut prefix and its ellipsis that did.
+    layout: Option<TextLayout>,
+}
+
 /// Appends `text` to `out` with every line too wide for `width` cut to fit, as
-/// the module docs say, and returns whether any line was cut.
-fn cut(measure: &Measure<'_>, text: &str, width: f32, out: &mut String) -> bool {
+/// the module docs say.
+fn cut(measure: &Measure<'_>, text: &str, width: f32, out: &mut String) -> Cut {
     let fit = width.max(0.0) + WRAP_EPSILON;
     let mut scratch = String::new();
     let mut cut_any = false;
+    // What the last line came out as, laid out.
+    let mut shown = None;
     for (index, line) in text.split('\n').enumerate() {
         if index > 0 {
             out.push('\n');
         }
-        if measure.width(line) <= fit {
+        let (whole, layout) = measure.width(line);
+        if whole <= fit {
             out.push_str(line);
+            shown = layout;
             continue;
         }
         cut_any = true;
         let ellipsis = measure.ellipsis();
+        // The layout of the last prefix that fit, which is the one cut to.
+        let mut fitted = None;
         let mut fits = |end: usize| {
             scratch.clear();
             scratch.push_str(line[..end].trim_end());
             scratch.push_str(ellipsis);
-            measure.width(&scratch) <= fit
+            let (width, layout) = measure.width(&scratch);
+            let fits = width <= fit;
+            if fits {
+                fitted = layout;
+            }
+            fits
         };
         // Every cluster boundary short of the whole line, which is known not
         // to fit: the first is the empty prefix.
@@ -171,6 +199,11 @@ fn cut(measure: &Measure<'_>, text: &str, width: f32, out: &mut String) -> bool 
         }
         out.push_str(line[..ends[low]].trim_end());
         out.push_str(ellipsis);
+        shown = fitted;
     }
-    cut_any
+    Cut {
+        any: cut_any,
+        // A layout of the last line is not one of the whole text.
+        layout: shown.filter(|_| !text.contains('\n')),
+    }
 }

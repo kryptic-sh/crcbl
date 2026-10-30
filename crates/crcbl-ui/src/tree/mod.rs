@@ -242,6 +242,7 @@ use crate::draw_list::ClipRect;
 #[cfg(doc)]
 use crate::draw_list::DrawList;
 use crate::font::face::select_face;
+use crate::font::layout::TextLayout;
 use crate::font::{Font, ReservedFamilyName, is_reserved_family};
 use crate::image::AtlasImage;
 use crate::style::{Declaration, InheritedId, NodeSelector, PseudoClasses, Styles};
@@ -439,6 +440,13 @@ struct FrameNode {
     /// What a text span shows; [`Shown::Whole`] for every other node once
     /// laid out.
     shown: Shown,
+    /// What a one-line `text-overflow: ellipsis` span in a parsed font shows,
+    /// laid out unbroken as cutting it measured it, so drawing it shapes
+    /// nothing again: the layout [`TextLayout::nowrap`] gives its shown text
+    /// in its font, at its size and line height — whether it was cut or fits
+    /// whole. `None` until laid out, for a span too narrow for even the
+    /// ellipsis, and for every other node.
+    shown_layout: Option<TextLayout>,
     content_hash: u64,
     /// Folded over each child's key as the child is built.
     child_hash: u64,
@@ -1001,6 +1009,7 @@ impl Ui {
             content,
             font,
             shown: Shown::Pending,
+            shown_layout: None,
             content_hash,
             child_hash: 0,
             fresh,

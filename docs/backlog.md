@@ -50,6 +50,30 @@ ssao-blur 0.55. An earlier 720p default-settings run read forward 4.85, ssao
 - Together they are about 25% of the low-tier frame on this iGPU, the class of
   device the low tier exists for. Measure in a quiet window before acting.
 
+## UI text is still shaped more than once a frame (2026-10-31)
+
+EW measured its stash view (180 labels, each its own `ui_tree::draw_at` tree) at
+about 7.5 ms CPU a frame, 6.1 ms of it label text, ~71% of that compiling
+harfrust shape plans. Plans are now cached per face (`font::shape::Shaper`) and
+an ellipsis span draws the layout its cut measured. Left:
+
+- **Text shaped by layout's measure is shaped again to draw.** `MeasureCache`
+  (`crates/crcbl-ui/src/tree/layout.rs`) keeps only a `Size`, so `emit` lays
+  every parsed-font span out again each frame, even on a measure cache hit, and
+  `cut_text` re-measures the line the measure pass just shaped. Keeping the
+  `nowrap` `TextLayout` in the measure entry would make a steady frame shape
+  nothing; the cost is memory per live span and a clone per draw for `align`.
+- **A `nowrap` span is measured once per width bucket.** `MeasureCache::text`
+  keys by min-content, max-content and definite width, but `nowrap` (and bitmap)
+  text measures the same under every width, so a fresh tree shapes it up to
+  three times in one layout. Mapping `nowrap` to one bucket would fix it.
+- After the plan cache, 180 per-label trees still cost about 7.3–7.9 ms in a
+  release bench (load 11–16), mostly outside shaping — probably stylesheet
+  parsing and layout per tree. Not profiled.
+- `Shaper::plan` has no multi-threaded test; its `Sync` bound is the compiler's
+  check only. `FrameNode::shown_layout` sits inline in every node; boxing it
+  would keep non-text nodes small if node memory ever matters.
+
 ## Whole-codebase review: bugs (2026-10-30)
 
 A read-only sweep in risk order: unsafe and FFI first, then decoders of

@@ -534,3 +534,43 @@ fn a_spans_glyph_run_carries_the_text_it_shows() {
         [DrawCommand::Glyphs { text: None, .. }]
     ));
 }
+
+/// **A one-line span in a parsed font is shaped once for cutting and
+/// drawing**: the layout its cut ended on is kept and drawn, and draws what
+/// laying its shown text out afresh draws — cut or whole, in the committed
+/// font and the registered one. Two lines, and the bitmap font, keep none.
+#[test]
+fn a_cut_spans_layout_is_the_one_drawn() {
+    let kept = |ui: &Ui, key: NodeKey| {
+        ui.nodes
+            .iter()
+            .find(|node| node.key == key)
+            .expect("built")
+            .shown_layout
+            .is_some()
+    };
+    for family in [Family::Sans, Family::Registered] {
+        for width in [60.0, 137.0, 1000.0] {
+            let mut ui = tree();
+            let selector = format!(".line{}", family.class());
+            let (key, list) = card(&mut ui, width, &selector, ACTION);
+            let what = format!("{family:?} at {width}px: {:?}", ui.text(key));
+            assert!(kept(&ui, key), "{what} kept no layout");
+            for node in &mut ui.nodes {
+                node.shown_layout = None;
+            }
+            let mut afresh = DrawList::new();
+            ui.emit(&mut afresh);
+            assert_eq!(
+                format!("{:?}", list.commands()),
+                format!("{:?}", afresh.commands()),
+                "{what} drew differently from its shown text laid out afresh"
+            );
+        }
+    }
+    let mut ui = tree();
+    let (key, _) = card(&mut ui, 60.0, ".line.sans", &format!("{ACTION}\n{ACTION}"));
+    assert!(!kept(&ui, key), "a layout of one line was kept for two");
+    let (key, _) = card(&mut ui, 60.0, ".line", ACTION);
+    assert!(!kept(&ui, key), "the bitmap font kept a layout");
+}

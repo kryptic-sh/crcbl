@@ -121,6 +121,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-ui` keeps up to 16 `harfrust` shape plans per parsed face**, matched
+  on direction, script, language and feature variations and dropped least
+  recently used first, instead of compiling a fresh plan for every run it
+  shapes. Shaping 180 short labels went from about 1.9 ms to 0.44 ms; output is
+  unchanged glyph for glyph.
+- **A one-line `text-overflow: ellipsis` span in a parsed font draws the layout
+  its cut already measured** rather than shaping its shown text again.
 - **Every `DrawGen` a `ForwardRenderer` builds shares one set of compute
   pipelines.** The camera's generator, each shadow cull's and every view made by
   `create_view` used to compile the same clear, cull and draw-argument pipelines
