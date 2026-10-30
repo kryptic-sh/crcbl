@@ -88,9 +88,29 @@ an ellipsis span draws the layout its cut measured. Left:
 - Drawing a kept layout still copies it once a frame, because
   `TextLayout::align` moves glyphs in place; aligning at layout time or drawing
   with an offset would remove the copy.
-- After the plan cache and the `nowrap` measure fix, 180 per-label trees still
-  cost about 6.9–7.1 ms in a release bench (load about 4), mostly outside
-  shaping — probably stylesheet parsing and layout per tree. Not profiled.
+- **Profiled EW's real shape (2026-10-31):** one persistent `Ui`, 180 label
+  trees a frame, each `begin_frame`/block/span/`layout`/`emit`, 140 px ellipsis
+  spans, ~80 cut, Roboto: 2.04 ms median release (load ~3.5), callgrind. ~60%
+  was the ellipsis cut (being fixed), ~25% measure-cache misses, style and
+  stylesheet work ~0. Harness kept outside the repo; the shape is
+  `ReadoutPanel::draw_in`'s. Ranked leftovers:
+  - **Measurements do not survive a cycle.** `Ui::layout` calls
+    `MeasureCache::retain` against `live_text`, which `begin_frame_with` clears,
+    so one cycle per label keeps only the last label and reshapes every label
+    every frame (EW pattern at 400 px: 750 µs against ~176 µs when the cache
+    hits). Evict by age or a size cap instead of "live this cycle".
+  - **`NodeStyle::layout_hash` runs for every node every frame** in `Ui::close`
+    even when `resolve_style` reused the stored style; the stored hash is still
+    valid then. 2.6–6.5% of the frame.
+  - **SipHash throughout the tree** (`hash_of`, `DefaultHasher` in `push`,
+    `call_site_key`, the style key) is 3–4% of the frame; a fast hasher is a new
+    dependency, so the owner's call.
+  - **Allocation per shape**: `run_shaper` creates a `harfrust::Buffer` per run
+    and `TextLayout::lay_out` allocates its vectors and copies the text; ~6% of
+    the frame, ~95 allocations a label.
+  - Labels drawn as separate cycles on one `Ui` share node keys, so they share
+    one stored node: hover, press and focus are one slot, and the hit test sees
+    only the last label. Worth documenting on `ReadoutPanel`-style drawing.
 - `Shaper::plan` has no multi-threaded test; its `Sync` bound is the compiler's
   check only.
 
@@ -205,7 +225,7 @@ Left:
   synchronised unless created externally-synchronised); persisting it is the
   separate "The Vulkan pipeline cache is not persisted" entry.
 
-### Start-up: `ForwardRenderer` still builds water and grass eagerly
+### Start-up: `ForwardRenderer` still builds `Hiz` eagerly
 
 The settings-driven post passes are built on first use (2026-10-30). Still built
 unconditionally by `ForwardRenderer::build`
@@ -217,11 +237,10 @@ unconditionally by `ForwardRenderer::build`
   material insert or rewrite API is ever added it has to build any missing
   variant then and re-key instances (`GpuInstance::MATERIAL_MODE_SHIFT`), and
   the `partitions` panic reports such a gap loudly. A scene whose only masked
-  material is double-sided still compiles the unused single-sided cutout. The
-  start-up critical path is now `forward mesh` (~135 ms) and, beside it on the
-  main thread, water (~57 ms), the grass blade pipelines (~50 ms each),
-  volumetric scatter (~40 ms) and SSR (~30 ms).
-- `Water::new` and `crate::grass::Grass::new` before any body or field exists.
+  material is double-sided still compiles the unused single-sided cutout. With
+  water and grass deferred too, a cold `ForwardRenderer::new` measured ~275 ms
+  (2026-10-31, load ~16); its critical path is `forward mesh` (~135 ms) and,
+  serial beside it, volumetric scatter (~40 ms) and SSR (~30 ms).
 - `Hiz::new`, read only by the reflection march.
 
 Decided eager, with reasons (2026-10-30): `Exposure` (the tonemap binds its
@@ -233,20 +252,25 @@ Splitting each one's buffers from its pipelines would make the pipelines lazy.
 - Measured 2026-10-30 (RX 7900 XTX, radv, cold, load ~12): making the post
   passes lazy saved ~21 ms of a ~815 ms cold `ForwardRenderer::new`, so the
   remaining cost is mostly the mesh pipelines, the sided twins, water and grass.
-- Fix: build water and grass when the first body or field asks for them (eagerly
-  when the builder's scene already contains them).
+- Water and grass are built by the first frame with a body or a field
+  (`View::build_content`, 2026-10-31). The cost moved to that frame: cold, about
+  57 ms for water and about 116 ms for grass on an RX 7900 XTX (load ~16). A
+  game that sets them while loading could pre-warm with a hidden frame, or a
+  `ForwardRenderer::prepare_content` could build them under the loading screen's
+  `service`; neither exists. `GrassScene::new` (two 1×1 calm wind textures, no
+  pipeline) stays in the build on purpose.
 
 ### A pass constructor that fails part way leaks what it made
 
-`Ssao`, `ContactShadows`, `Bloom`, `Fxaa`, `Cmaa2`, `Upscale`, `AtlasView` and
-`Grass` `::new` return on the first failing seam call without releasing the
-layouts, samplers and pipelines already created. This was true before they
-became lazy (the rollback only held them once whole); `View::build_passes` and
-`begin_frame_body` now build them between frames with no rollback, so a failed
-late build mid-session leaks on every retry, and in the engine loop it ends the
-game where it used to fail at start-up. Not observed; only a device refusing a
-pipeline mid-constructor triggers it. Fix: release on the failing path inside
-each constructor.
+`Ssao`, `ContactShadows`, `Bloom`, `Fxaa`, `Cmaa2`, `Upscale`, `AtlasView`,
+`Water` and `Grass` `::new` return on the first failing seam call without
+releasing the layouts, samplers and pipelines already created. This was true
+before they became lazy (the rollback only held them once whole);
+`View::build_passes`, `View::build_content` and `begin_frame_body` now build
+them between frames with no rollback, so a failed late build mid-session leaks
+on every retry, and in the engine loop it ends the game where it used to fail at
+start-up. Not observed; only a device refusing a pipeline mid-constructor
+triggers it. Fix: release on the failing path inside each constructor.
 
 ### Start-up: what `ForwardRenderer`'s build still submits on its own
 

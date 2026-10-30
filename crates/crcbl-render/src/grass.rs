@@ -1015,24 +1015,23 @@ impl Grass {
     /// Builds the pipelines — the dispatches and a card, a shell, a fin and the
     /// mesh blade draws — the two samplers and the three uniform rings.
     ///
-    /// `service` runs before each dispatch pipeline and before each round of
-    /// the draw pipelines, which are one [`pipeline_batch`] compiled side by
-    /// side where the device allows it: on a cold driver cache these are the
-    /// longest run of compilations in a renderer's build — see
-    /// [`ForwardRenderer::with_scene_serviced`](crate::forward::ForwardRenderer::with_scene_serviced).
+    /// The draw pipelines are one [`pipeline_batch`], compiled side by side
+    /// where the device allows it: on a cold driver cache each is a compile on
+    /// the order of the forward pass's, and this runs on the frame that first
+    /// draws a field — see `View::build_content` in [`crate::forward`].
     ///
     /// # Errors
     ///
     /// [`HalError`] from any seam call. **Nothing created before the failing
-    /// call is released**, for the reason every other builder in this crate
-    /// gives: the caller holds a rollback, and this is stored in it whole. The
-    /// one exception is the draw batch's own members, which are released when
-    /// one of them is refused, because the batch runs them all regardless.
+    /// call is released**: it stays alive until the device goes. The forward
+    /// renderer builds this between frames, the first time a frame has a
+    /// field, with no rollback to hand it to. The one exception is the draw
+    /// batch's own members, which are released when one of them is refused,
+    /// because the batch runs them all regardless.
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
         shadow_sampler: SamplerHandle,
-        service: &mut dyn FnMut(),
     ) -> Result<Self, HalError> {
         let compute = ShaderStages::COMPUTE;
         let gen_entries = [
@@ -1077,7 +1076,6 @@ impl Grass {
             bind_group_layouts: &[gen_layout],
             push_constants: None,
         })?;
-        service();
         let clear_pipeline = compute_pipeline_entry(
             device,
             "grass clear",
@@ -1086,7 +1084,6 @@ impl Grass {
             gen_pipeline_layout,
             WORKGROUP_SIZE,
         )?;
-        service();
         let generate_pipeline = compute_pipeline_entry(
             device,
             "grass generate",
@@ -1175,7 +1172,7 @@ impl Grass {
         // of the forward pass's on a cold driver cache, and none needs another.
         let results = pipeline_batch::create(
             device,
-            service,
+            &mut || {},
             [
                 &|| raster(("vertexMain", "fragmentMain"), list),
                 &|| raster(("shellVertexMain", "shellFragmentMain"), list),

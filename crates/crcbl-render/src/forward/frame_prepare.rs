@@ -200,6 +200,20 @@ impl ForwardRenderer {
             // `camera.eye`, so a pinned selection changes which cut is chosen and
             // nothing about what is culled, faced or drawn.
             let selection_eye = self.frozen_selection_eye.unwrap_or(camera.eye);
+            // The water's buffers for this slot, if the bodies changed since the
+            // slot last came round — see [`crate::water::WaterBodies`], which says
+            // why this waits for the slot rather than happening in `set_water`.
+            // **Before any view begins**: each builds its water passes off what
+            // the slot now holds — see [`View::build_content`].
+            self.water.begin_frame(device, self.frame)?;
+            // The grass field's retirements, aged by one frame — see
+            // [`crate::grass::GrassScene`], which says why a replaced field waits
+            // for the ring rather than being released where it was replaced —
+            // and the field this frame draws, frozen before any view begins on
+            // the water's terms. A field it freezes and a later `set_grass`
+            // replaces is retired, so it lives until the ring has come round.
+            self.grass.begin_frame(device);
+            self.frame_grass = self.grass.frame();
             let frame = self.view_frame(&scene, target_extent, instance_count, selection_eye);
             let uniforms =
                 self.primary
@@ -256,15 +270,6 @@ impl ForwardRenderer {
                 self.frame,
                 self.primary.camera_view_proj,
             )?;
-            // The water's buffers for this slot, if the bodies changed since the
-            // slot last came round — see [`crate::water::WaterBodies`], which says
-            // why this waits for the slot rather than happening in `set_water`.
-            self.water.begin_frame(device, self.frame)?;
-            // The grass field's retirements, aged by one frame — see
-            // [`crate::grass::GrassScene`], which says why a replaced field waits
-            // for the ring rather than being released where it was replaced.
-            self.grass.begin_frame(device);
-
             // One cull per cascade and per **occupied** light slot, against that
             // view's own frustum. The orthographic box gives
             // `Frustum::from_view_projection` six real planes — unlike the camera's

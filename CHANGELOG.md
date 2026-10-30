@@ -121,6 +121,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`ForwardRenderer` no longer builds the water and grass passes at start-up**:
+  each view builds them on the first `begin_frame` whose frame has a body of
+  water or a grass field, and keeps them. A cold build on an RX 7900 XTX (radv,
+  load ~16) went from about 444 ms to about 275 ms; the first frame with water
+  now pays about 57 ms and the first with grass about 116 ms instead.
+- **A grass field or wind layers set between `begin_frame` and `add_passes` are
+  drawn from the next frame on**, as a body of water already was: the frame
+  freezes its field and layers at `begin_frame`.
 - **`crcbl_ui::tree` shapes a `white-space: nowrap` span once per layout**
   rather than up to three times: text that measures the same under every width —
   `nowrap` text and the bitmap font — is measured once for all of them, and the

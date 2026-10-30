@@ -2483,6 +2483,13 @@ pub struct ForwardRenderer {
     /// [`set_grass`](ForwardRenderer::set_grass), and an empty field records no
     /// pass.
     grass: GrassScene,
+    /// What [`ForwardRenderer::grass`]'s field draws this frame, or [`None`]
+    /// for a frame with none, frozen by `begin_frame` so that every view's
+    /// blocks, the grass passes it builds and the passes
+    /// [`add_passes`](ForwardRenderer::add_passes) records are one field's —
+    /// a field set between the two is drawn from the next frame on, as a
+    /// body of water is.
+    frame_grass: Option<GrassFrame>,
     /// The wind block every view writes into its own ring — see
     /// [`set_wind`](ForwardRenderer::set_wind). Calm until a caller sets one.
     wind: crcbl_shaders::wind::WindParams,
@@ -2572,11 +2579,6 @@ struct Rollback {
     /// The background pass, which owns one pipeline, one layout and a ring of
     /// blocks and groups.
     sky_pass: Option<SkyPass>,
-    /// The water surface's two pipelines, their layouts and a ring of blocks.
-    water: Option<Water>,
-    /// The grass passes' pipelines, their layouts and their rings of
-    /// blocks.
-    grass: Option<Grass>,
     /// The camera, once [`View::build`] has made it whole — released as one,
     /// by [`View::destroy`].
     primary: Option<View>,
@@ -2624,12 +2626,6 @@ impl Rollback {
         }
         if let Some(lights) = self.lights {
             lights.destroy(device);
-        }
-        if let Some(grass) = self.grass {
-            grass.destroy(device);
-        }
-        if let Some(water) = self.water {
-            water.destroy(device);
         }
         if let Some(sky_pass) = self.sky_pass {
             sky_pass.destroy(device);
@@ -3387,8 +3383,10 @@ impl ForwardRenderer {
     /// mesh and page uploads took about 0.1 s either way. So `service` runs
     /// after every mesh upload (each level of a DAG), after every page layer's
     /// mip chain and each page's upload, after each of the camera's
-    /// post-processing subsystems, before every round of the mesh-pass and
-    /// grass pipelines, and between the build's other phases.
+    /// post-processing subsystems, before every round of the mesh-pass
+    /// pipelines, and between the build's other phases. The water and grass
+    /// passes are not built here: the first frame with a body or a field
+    /// builds them — see `View::build_content`.
     ///
     /// **The longest gap left is about one pipeline**, and a pipeline cannot be
     /// split: on that scene, cold, it was the forward pass's colour pipeline
@@ -3397,8 +3395,8 @@ impl ForwardRenderer {
     /// eight times slower under contention still calls back inside the five
     /// seconds Windows allows.
     ///
-    /// **One condition on that bound.** The mesh-pass and grass pipelines are
-    /// each compiled as one batch on a device that can take them from several
+    /// **One condition on that bound.** The mesh-pass pipelines are compiled
+    /// as one batch on a device that can take them from several
     /// threads, in rounds of a small fixed number of pipelines with `service`
     /// on this thread before each — see `crate::pipeline_batch`. A driver that
     /// compiles side by side finishes a round in about its slowest compile, so
@@ -5879,6 +5877,8 @@ impl ForwardRenderer {
             water: WaterBodies::new(FRAMES_IN_FLIGHT),
             recorded_water_draws: 0,
             grass,
+            // No frame has begun.
+            frame_grass: None,
             wind: crcbl_shaders::wind::WindParams::default(),
             recorded_grass_draws: 0,
         })
@@ -7876,9 +7876,9 @@ impl ForwardRenderer {
         // here for `draws_sky`'s reason, and the same value every view records
         // from.
         let water = self.water.frame(self.frame);
-        // The same, for the grass field: read here for `draws_sky`'s reason,
-        // and the same value every view records from.
-        let grass = self.grass.frame();
+        // The same, for the grass field, as `begin_frame` froze it: the value
+        // every view's passes were built and its blocks written for.
+        let grass = self.frame_grass;
         // Whether this frame ends by drawing the shadow atlas over itself — the
         // resolved view rather than the switch, so a caller who left the atlas
         // up and then asked for normals gets normals — as `begin_frame` froze
@@ -9950,7 +9950,9 @@ impl ForwardRenderer {
     /// Replaces whatever was set before. Each body is meshed here, by
     /// [`crcbl_water::surface_mesh`], and the result is uploaded to each frame
     /// slot as that slot next begins, so the call touches no device and a frame
-    /// still in flight keeps the buffers it was submitted with.
+    /// still in flight keeps the buffers it was submitted with. The first frame
+    /// with a body builds each view's water passes — a hitch, cold, on that
+    /// frame.
     ///
     /// # Off is exactly off
     ///
@@ -9985,7 +9987,9 @@ impl ForwardRenderer {
     /// table and per-tile blocks are uploaded here, and the buffers a dispatch
     /// writes are created here; a field replaced while a frame is in flight
     /// leaves its resources alive until the ring has come round, so the call is
-    /// safe at any point between frames.
+    /// safe at any point between frames. The field is drawn from the next
+    /// [`begin_frame`](Self::begin_frame) on, which builds each view's grass
+    /// passes the first time it sees one — a hitch, cold, on that frame.
     ///
     /// # Off is exactly off
     ///
@@ -10036,7 +10040,8 @@ impl ForwardRenderer {
     /// [`None`] restores the calm placeholder: one texel of no deflection and
     /// one of zero intensity, which is what makes a field with no weather set
     /// stand still. A replaced pair waits for the ring exactly as a replaced
-    /// field does.
+    /// field does, and like a field it is drawn from the next `begin_frame` on:
+    /// the frame freezes its layers with its field.
     ///
     /// # Errors
     ///
@@ -11812,6 +11817,7 @@ mod tests {
     mod draw_pipelines;
     mod frame_extents;
     mod instance_upload;
+    mod lazy_content;
     mod lazy_passes;
     mod load_service;
     mod mesh_variants;

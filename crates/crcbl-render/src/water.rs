@@ -296,6 +296,17 @@ impl WaterBodies {
         Ok(())
     }
 
+    /// Whether `frame` draws any water — [`WaterBodies::frame`]'s answer
+    /// without copying its draws.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    pub(crate) fn has_water(&self, frame: usize) -> bool {
+        let slot = &self.slots[frame];
+        !slot.draws.is_empty() && slot.buffers.is_some()
+    }
+
     /// What `frame` draws, or `None` for a frame with no water.
     ///
     /// # Panics
@@ -481,8 +492,9 @@ impl Water {
     /// # Errors
     ///
     /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**, for the reason every other builder in this crate gives: the
-    /// caller holds a rollback, and this is stored in it whole.
+    /// path**: what this created before the failure stays alive until the
+    /// device goes. The forward renderer builds it between frames, the first
+    /// time a frame has water, with no rollback to hand it to.
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
