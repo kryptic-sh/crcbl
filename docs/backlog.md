@@ -2795,6 +2795,15 @@ owner's call (it would be a new dependency for crcbl).
   nothing holds returned `Ok`.
 - **Not built: the sending app's icon** (`AppDisplayInfo::GetLogo`, a stream
   read per app). lyr said it can wait.
+- **One unreadable toast fails the whole `list`** (`Backend::list` collects
+  `Result`s), which would blank lyr's whole clock panel. lyr's review proposes
+  skipping that toast and counting or logging it, keeping the rest. Not seen to
+  happen; worth doing before lyr ships on it, with a test that feeds `read` a
+  failure, which needs the read split from the WinRT objects first.
+- **`NotificationId`'s value is private, deliberately**: an id is the
+  platform's, meaningful only to the store that issued it, so a caller keys its
+  own entries by mapping. lyr maps; make it public only if a caller needs to
+  persist one.
 
 - **Linux client:** `Notify` (app name, icon, summary, body markup, actions,
   hints such as `urgency`, `image-data` and `desktop-entry`, `replaces_id`,
