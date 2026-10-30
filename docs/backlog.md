@@ -8392,9 +8392,8 @@ scene menu with the gaps below.
   times per call (one step per `FIT_FONT_STEP` from the ceiling to the minimum),
   and a frame calls it for its hit test and its drawing. Not benchmarked.
 - **Untested**: the fit in a real TTF (the tests use a synthetic fixed-pitch
-  font); a slider dragged in a scrolled list, or scrolled away mid-drag; the
-  pixels of a scrolled menu (no golden). A menu too wide at the minimum is
-  refused, never truncated or ellipsised.
+  font); the pixels of a scrolled menu (no golden). A menu too wide at the
+  minimum is refused, never truncated or ellipsised.
 
 ## What UI rung 5 shipped without (2026-09-16)
 

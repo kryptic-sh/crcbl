@@ -3506,6 +3506,60 @@ mod tests {
         ));
     }
 
+    /// **A slider dragged in a scrolled list keeps its drag when the list
+    /// scrolls it away.** A slider at the end of [`scene_menu`] is pressed in
+    /// view and the wheel then scrolls it out of view: the handle still follows
+    /// the pointer along the groove, the release reports nothing, and a later
+    /// press where the hidden row lies does not move it.
+    #[cfg(feature = "parsed-font")]
+    #[test]
+    fn a_slider_scrolled_away_mid_drag_keeps_its_drag() {
+        let mut menu = scene_menu();
+        menu.items
+            .push(MenuItem::slider(DIAL, "EXPOSURE", "1.00", 0.5));
+        let slider = SCENES;
+        menu.select_previous();
+        assert_eq!(menu.selected(), slider);
+        let mut ui = UiState::new();
+
+        let layout = fitted(&menu, SMALL);
+        assert!(layout.shows(slider), "the selected slider is out of view");
+        let along = |layout: &MenuLayout, fraction: f32| {
+            let track = layout.items()[slider].track.expect("a groove");
+            let (start, end) = handle_travel(track, layout.style().handle_size.x);
+            Vec2::new(
+                start + (end - start) * fraction,
+                (track.0.y + track.1.y) * 0.5,
+            )
+        };
+        menu.point(&layout, &mut ui, press_at(along(&layout, 0.0)));
+        assert_eq!(menu.slider(DIAL), Some(0.0), "the press did not take it");
+
+        let (panel_min, panel_max) = layout.panel();
+        let over = (panel_min + panel_max) * 0.5;
+        assert!(menu.scroll_wheel(&layout, over, Vec2::new(0.0, -10_000.0)));
+        let top = fitted(&menu, SMALL);
+        assert!(!top.shows(slider), "the wheel left the slider in view");
+
+        menu.point(&top, &mut ui, press_at(along(&top, 0.75)));
+        let at = menu.slider(DIAL).expect("the row is a slider");
+        assert!(
+            (at - 0.75).abs() <= 1e-3,
+            "scrolling away let go of the drag at {at}"
+        );
+        assert_eq!(
+            menu.point(&top, &mut ui, release_at(along(&top, 0.75))),
+            None
+        );
+
+        menu.point(&top, &mut ui, press_at(along(&top, 0.0)));
+        let at = menu.slider(DIAL).expect("the row is a slider");
+        assert!(
+            (at - 0.75).abs() <= 1e-3,
+            "a press on the hidden row moved it to {at}"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Centred
     // -----------------------------------------------------------------------
