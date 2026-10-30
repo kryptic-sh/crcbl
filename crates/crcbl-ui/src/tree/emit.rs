@@ -281,11 +281,12 @@ impl Ui {
                             line_height,
                             Some(content_width(unrounded)),
                         ),
-                        // Cutting it laid out what it shows already.
-                        WhiteSpace::NoWrap => node
-                            .shown_layout
-                            .clone()
-                            .unwrap_or_else(|| TextLayout::nowrap(font, text, size, line_height)),
+                        // Measuring or cutting it laid out what it shows
+                        // already; a copy, as aligning moves its glyphs.
+                        WhiteSpace::NoWrap => node.shown_layout.as_deref().map_or_else(
+                            || TextLayout::nowrap(font, text, size, line_height),
+                            TextLayout::clone,
+                        ),
                     };
                     layout.align(content_max.x - content_min.x, style.text_align);
                     let lines = layout

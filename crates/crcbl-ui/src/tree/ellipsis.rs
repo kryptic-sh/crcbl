@@ -30,6 +30,8 @@
 //! The cut is taken after layout from the width the box was given, so it never
 //! moves a box: the box is sized by the whole text, as CSS sizes it.
 
+use std::sync::Arc;
+
 use super::emit::content_width;
 use super::style::{NodeStyle, TextOverflow, WhiteSpace};
 use super::{Content, Shown, Ui};
@@ -48,6 +50,10 @@ impl Ui {
     /// Decides what every node shows: a text span under the ellipsis rule its
     /// text cut to the width it was just laid out at, everything else what it
     /// was built with. See the module docs.
+    ///
+    /// A `nowrap` span in a parsed font is handed the layout its measurement
+    /// kept, when it shows its text whole, so neither this nor drawing it
+    /// shapes that text again.
     pub(super) fn cut_text(&mut self, atlas: &FontAtlas) {
         self.cut.clear();
         for node in &mut self.nodes {
@@ -57,12 +63,26 @@ impl Ui {
                 continue;
             };
             let style = &node.style;
-            if !applies(style) {
-                continue;
-            }
+            let text = &self.text[start..end];
             // A clone, so the measure borrows it rather than the node it is
             // about to cut.
             let font = node.font.clone();
+            let measured = match &font {
+                Some(font) if style.white_space == WhiteSpace::NoWrap => {
+                    self.measure.nowrap_layout(
+                        node.content_hash,
+                        font,
+                        text,
+                        style.font_size,
+                        style.text_line_height(font),
+                    )
+                }
+                _ => None,
+            };
+            if !applies(style) {
+                node.shown_layout = measured.cloned();
+                continue;
+            }
             let measure = match &font {
                 None => Measure::Bitmap {
                     atlas,
@@ -72,11 +92,12 @@ impl Ui {
                     font,
                     size: style.font_size,
                     line_height: style.text_line_height(font),
+                    measured,
                 },
             };
             let width = content_width(&self.store.get(node.slot).unrounded);
             let at = self.cut.len();
-            let cut = cut(&measure, &self.text[start..end], width, &mut self.cut);
+            let cut = cut(&measure, text, width, &mut self.cut);
             node.shown_layout = cut.layout;
             if cut.any {
                 node.shown = Shown::Cut {
@@ -106,21 +127,30 @@ enum Measure<'a> {
         font: &'a Font,
         size: f32,
         line_height: f32,
+        /// The span's whole text as layout measured it, when that kept it.
+        measured: Option<&'a Arc<TextLayout>>,
     },
 }
 
 impl Measure<'_> {
     /// `line`'s width in pixels, measured as layout measures it, and in a
-    /// parsed font the layout it was measured from.
-    fn width(&self, line: &str) -> (f32, Option<TextLayout>) {
+    /// parsed font the layout it was measured from: the one layout kept, when
+    /// `line` is the span's whole text.
+    fn width(&self, line: &str) -> (f32, Option<Arc<TextLayout>>) {
         match self {
             Self::Bitmap { atlas, scale } => (atlas.text_width(line, *scale), None),
             Self::Parsed {
                 font,
                 size,
                 line_height,
+                measured,
             } => {
-                let layout = TextLayout::nowrap(font, line, *size, *line_height);
+                let layout = measured
+                    .filter(|layout| layout.lays_out(font, line, *size, *line_height))
+                    .map_or_else(
+                        || Arc::new(TextLayout::nowrap(font, line, *size, *line_height)),
+                        Arc::clone,
+                    );
                 (layout.width(), Some(layout))
             }
         }
@@ -144,7 +174,7 @@ struct Cut {
     /// What the text came out as, laid out unbroken in a parsed font, when it
     /// is one line and was laid out whole: the layout of the line that fit, or
     /// of the cut prefix and its ellipsis that did.
-    layout: Option<TextLayout>,
+    layout: Option<Arc<TextLayout>>,
 }
 
 /// Appends `text` to `out` with every line too wide for `width` cut to fit, as

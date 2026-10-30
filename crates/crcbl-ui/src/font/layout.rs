@@ -432,6 +432,18 @@ impl TextLayout {
         }
     }
 
+    /// Whether this was laid out from `text` in `font` — the same face and the
+    /// same fallback faces, in order — at `size` and `line_height`: everything
+    /// shaping and line placement read but the wrap width and the way trailing
+    /// spaces are measured, which are the caller's to know.
+    pub(crate) fn lays_out(&self, font: &Font, text: &str, size: f32, line_height: f32) -> bool {
+        self.font == *font
+            && self.font.fallback().iter().eq(font.fallback())
+            && self.size.to_bits() == size.to_bits()
+            && self.line_height.to_bits() == line_height.to_bits()
+            && self.text == text
+    }
+
     /// The pitch between baselines.
     #[must_use]
     pub const fn line_height(&self) -> f32 {

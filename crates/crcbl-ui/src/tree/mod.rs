@@ -233,6 +233,7 @@ pub mod widgets;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::panic::Location;
+use std::sync::Arc;
 
 use crcbl_core::input::CursorIcon;
 use glam::Vec2;
@@ -440,13 +441,15 @@ struct FrameNode {
     /// What a text span shows; [`Shown::Whole`] for every other node once
     /// laid out.
     shown: Shown,
-    /// What a one-line `text-overflow: ellipsis` span in a parsed font shows,
-    /// laid out unbroken as cutting it measured it, so drawing it shapes
+    /// What a `white-space: nowrap` span in a parsed font shows, laid out
+    /// unbroken as layout measured it or cutting it did, so drawing it shapes
     /// nothing again: the layout [`TextLayout::nowrap`] gives its shown text
-    /// in its font, at its size and line height — whether it was cut or fits
-    /// whole. `None` until laid out, for a span too narrow for even the
-    /// ellipsis, and for every other node.
-    shown_layout: Option<TextLayout>,
+    /// in its font, at its size and line height — whether a one-line
+    /// `text-overflow: ellipsis` span was cut or fits whole. Shared with the
+    /// measure cache when the span shows its whole text. `None` until laid
+    /// out, for a span layout did not measure, an ellipsis span of several
+    /// lines, one too narrow for even the ellipsis, and every other node.
+    shown_layout: Option<Arc<TextLayout>>,
     content_hash: u64,
     /// Folded over each child's key as the child is built.
     child_hash: u64,

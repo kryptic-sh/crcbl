@@ -12,6 +12,7 @@
 //! without is a leaf measured by its content.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use taffy::{
     AvailableSpace, Cache, CacheTree, Layout, LayoutFlexboxContainer, LayoutInput, LayoutOutput,
@@ -36,6 +37,8 @@ enum WidthBucket {
     /// The bits of [`wrap_width`] of the width: whole pixels, the widths lines
     /// are broken at, so every width in one bucket measures exactly the same.
     Definite(u32),
+    /// Every width at once: text that measures the same under any of them.
+    Any,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -53,15 +56,20 @@ struct MeasureKey {
 /// measurement here. Entries for text no live span holds are dropped at
 /// layout.
 ///
-/// Text in the bitmap font never wraps, so it measures the same in every
-/// bucket. Text in a parsed font is laid out by [`TextLayout`]: its max-content
-/// size unbroken, its min-content size broken at every space, and at a definite
-/// width broken to fit it — unless it is `white-space: nowrap`, which measures
-/// unbroken under every width. A paragraph is measured the same way, under
-/// the hash of its runs, by its line breaker in `inline.rs`.
+/// Text in a parsed font is laid out by [`TextLayout`]: its max-content size
+/// unbroken, its min-content size broken at every space, and at a definite
+/// width broken to fit it. **Text that measures the same under every width is
+/// measured once**, in one bucket for them all: text in the bitmap font, which
+/// never wraps, and `white-space: nowrap` text, laid out unbroken under every
+/// width. A paragraph is measured the same way, under the hash of its runs, by
+/// its line breaker in `inline.rs`.
+///
+/// **A `nowrap` span's layout is kept with its size**, so cutting it to fit
+/// ([`super::ellipsis`]) and drawing it shape nothing again: one layout per
+/// live `nowrap` span in a parsed font, held as long as its text is.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MeasureCache {
-    entries: HashMap<MeasureKey, Size<f32>>,
+    entries: HashMap<MeasureKey, Measured>,
     /// Measurements answered from `entries`.
     pub hits: u64,
     /// Measurements that went to the font.
@@ -80,33 +88,72 @@ impl MeasureCache {
         style: &NodeStyle,
         width: AvailableSpace,
     ) -> Size<f32> {
-        self.cached(content_hash, width, || match font {
+        let bucket = match (font, style.white_space) {
+            (None, _) | (Some(_), WhiteSpace::NoWrap) => WidthBucket::Any,
+            (Some(_), WhiteSpace::Normal) => bucket(width),
+        };
+        let key = MeasureKey {
+            text: content_hash,
+            width: bucket,
+        };
+        self.entry(key, || match font {
             None => {
                 let scale = style.font_size / NATURAL_FONT_SIZE;
-                Size {
+                Measured::size(Size {
                     width: atlas.text_width(text, scale),
                     height: atlas.line_count(text) as f32 * LINE_HEIGHT * scale,
-                }
+                })
             }
             Some(font) => {
                 let (size, line_height) = (style.font_size, style.text_line_height(font));
                 let wrap = match (style.white_space, width) {
-                    (WhiteSpace::NoWrap, _) => None,
-                    (_, AvailableSpace::MaxContent) => Some(None),
-                    (WhiteSpace::Normal, AvailableSpace::MinContent) => Some(Some(0.0)),
-                    (WhiteSpace::Normal, AvailableSpace::Definite(width)) => Some(Some(width)),
+                    (WhiteSpace::NoWrap, _) => {
+                        let layout = TextLayout::nowrap(font, text, size, line_height);
+                        return Measured {
+                            size: size_of(&layout),
+                            layout: Some(Arc::new(layout)),
+                        };
+                    }
+                    (WhiteSpace::Normal, AvailableSpace::MaxContent) => None,
+                    (WhiteSpace::Normal, AvailableSpace::MinContent) => Some(0.0),
+                    (WhiteSpace::Normal, AvailableSpace::Definite(width)) => Some(width),
                 };
-                let measured = match wrap {
-                    Some(wrap) => TextLayout::new(font, text, size, line_height, wrap),
-                    None => TextLayout::nowrap(font, text, size, line_height),
-                }
-                .measure();
-                Size {
-                    width: measured.x,
-                    height: measured.y,
-                }
+                Measured::size(size_of(&TextLayout::new(
+                    font,
+                    text,
+                    size,
+                    line_height,
+                    wrap,
+                )))
             }
         })
+        .size
+    }
+
+    /// The layout a `white-space: nowrap` span of content `content_hash` was
+    /// measured from — `text` laid out by [`TextLayout::nowrap`] in `font` at
+    /// `size` and `line_height` — when one is held.
+    ///
+    /// The layout is checked against all four rather than trusted to the hash,
+    /// so a held one is never another text's, nor the same text's in another
+    /// font, fallback faces and all, or at another size or line height.
+    pub fn nowrap_layout(
+        &self,
+        content_hash: u64,
+        font: &Font,
+        text: &str,
+        size: f32,
+        line_height: f32,
+    ) -> Option<&Arc<TextLayout>> {
+        let key = MeasureKey {
+            text: content_hash,
+            width: WidthBucket::Any,
+        };
+        self.entries
+            .get(&key)?
+            .layout
+            .as_ref()
+            .filter(|layout| layout.lays_out(font, text, size, line_height))
     }
 
     /// The measurement held for content `content_hash` under `width`, or
@@ -119,22 +166,21 @@ impl MeasureCache {
     ) -> Size<f32> {
         let key = MeasureKey {
             text: content_hash,
-            width: match width {
-                AvailableSpace::MinContent => WidthBucket::MinContent,
-                AvailableSpace::MaxContent => WidthBucket::MaxContent,
-                AvailableSpace::Definite(width) => {
-                    WidthBucket::Definite(wrap_width(width).to_bits())
-                }
-            },
+            width: bucket(width),
         };
-        if let Some(size) = self.entries.get(&key) {
+        self.entry(key, || Measured::size(measure())).size
+    }
+
+    /// The entry held under `key`, or `measure`'s, held from now on.
+    fn entry(&mut self, key: MeasureKey, measure: impl FnOnce() -> Measured) -> &Measured {
+        // Counted before the entry is borrowed, which ends the borrow `get`
+        // would hold across the insert.
+        if self.entries.contains_key(&key) {
             self.hits += 1;
-            return *size;
+        } else {
+            self.misses += 1;
         }
-        self.misses += 1;
-        let size = measure();
-        self.entries.insert(key, size);
-        size
+        self.entries.entry(key).or_insert_with(measure)
     }
 
     /// Drops every entry for text not in `live`.
@@ -150,6 +196,41 @@ impl MeasureCache {
             .map(|key| key.text)
             .collect::<HashSet<_>>()
             .len()
+    }
+}
+
+/// One measurement held.
+#[derive(Clone, Debug)]
+struct Measured {
+    size: Size<f32>,
+    /// What a `nowrap` span in a parsed font was measured from: its text laid
+    /// out by [`TextLayout::nowrap`]. `None` for every other measurement.
+    layout: Option<Arc<TextLayout>>,
+}
+
+impl Measured {
+    /// A measurement with no layout kept.
+    const fn size(size: Size<f32>) -> Self {
+        Self { size, layout: None }
+    }
+}
+
+/// The bucket a measurement under `width` is held in, for content that
+/// measures differently under different widths.
+fn bucket(width: AvailableSpace) -> WidthBucket {
+    match width {
+        AvailableSpace::MinContent => WidthBucket::MinContent,
+        AvailableSpace::MaxContent => WidthBucket::MaxContent,
+        AvailableSpace::Definite(width) => WidthBucket::Definite(wrap_width(width).to_bits()),
+    }
+}
+
+/// The box `layout` needs, as Taffy takes a size.
+fn size_of(layout: &TextLayout) -> Size<f32> {
+    let measured = layout.measure();
+    Size {
+        width: measured.x,
+        height: measured.y,
     }
 }
 

@@ -74,22 +74,25 @@ about 7.5 ms CPU a frame, 6.1 ms of it label text, ~71% of that compiling
 harfrust shape plans. Plans are now cached per face (`font::shape::Shaper`) and
 an ellipsis span draws the layout its cut measured. Left:
 
-- **Text shaped by layout's measure is shaped again to draw.** `MeasureCache`
-  (`crates/crcbl-ui/src/tree/layout.rs`) keeps only a `Size`, so `emit` lays
-  every parsed-font span out again each frame, even on a measure cache hit, and
-  `cut_text` re-measures the line the measure pass just shaped. Keeping the
-  `nowrap` `TextLayout` in the measure entry would make a steady frame shape
-  nothing; the cost is memory per live span and a clone per draw for `align`.
-- **A `nowrap` span is measured once per width bucket.** `MeasureCache::text`
-  keys by min-content, max-content and definite width, but `nowrap` (and bitmap)
-  text measures the same under every width, so a fresh tree shapes it up to
-  three times in one layout. Mapping `nowrap` to one bucket would fix it.
-- After the plan cache, 180 per-label trees still cost about 7.3–7.9 ms in a
-  release bench (load 11–16), mostly outside shaping — probably stylesheet
-  parsing and layout per tree. Not profiled.
+- **A cut span re-cuts every frame.** `cut_text` reuses the measured layout for
+  a line's whole-text check, but a span that does not fit runs its cluster
+  binary search — one `TextLayout::nowrap` per probe — at every layout, even in
+  a kept `Ui` whose span and width did not change. Caching the cut text and its
+  layout by content hash and the exact content width's bits in the measure entry
+  would make a steady frame shape nothing there too. EW builds a fresh `Ui` per
+  label each frame, so it would not gain from that.
+- **Wrapped (`white-space: normal`) spans are still shaped again to draw.** Only
+  `nowrap` layouts are kept; `emit` lays a wrapped span out at its content width
+  every frame. Keeping the definite-width bucket's layout would cover it, at a
+  layout per width bucket held.
+- Drawing a kept layout still copies it once a frame, because
+  `TextLayout::align` moves glyphs in place; aligning at layout time or drawing
+  with an offset would remove the copy.
+- After the plan cache and the `nowrap` measure fix, 180 per-label trees still
+  cost about 6.9–7.1 ms in a release bench (load about 4), mostly outside
+  shaping — probably stylesheet parsing and layout per tree. Not profiled.
 - `Shaper::plan` has no multi-threaded test; its `Sync` bound is the compiler's
-  check only. `FrameNode::shown_layout` sits inline in every node; boxing it
-  would keep non-text nodes small if node memory ever matters.
+  check only.
 
 ## Whole-codebase review: bugs (2026-10-30)
 

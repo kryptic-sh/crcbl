@@ -138,6 +138,10 @@ fn shape_run(
         nominal(drawn, face, scale, text, range, out);
         return;
     };
+    #[cfg(test)]
+    shaper
+        .runs
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let buffer = run_shaper(shaper, text, range, rtl);
     let first = out.len();
     for (info, position) in buffer.glyph_infos().iter().zip(buffer.glyph_positions()) {
@@ -224,6 +228,9 @@ pub(super) struct Shaper {
     /// How many plans have been compiled, for the tests to count.
     #[cfg(test)]
     compiled: core::sync::atomic::AtomicUsize,
+    /// How many runs have been shaped for a layout, for the tests to count.
+    #[cfg(test)]
+    runs: core::sync::atomic::AtomicUsize,
 }
 
 #[cfg(feature = "parsed-font")]
@@ -235,6 +242,8 @@ impl Shaper {
             plans: Mutex::new(Vec::new()),
             #[cfg(test)]
             compiled: core::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            runs: core::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -313,6 +322,18 @@ fn nominal(
             unsafe_to_break: false,
         });
     }
+}
+
+/// How many runs `font`'s own face has shaped, fallback probes aside: what a
+/// test counts shaping by. A face of its own parse counts only its own runs.
+#[cfg(all(test, feature = "parsed-font"))]
+pub(crate) fn shaped_runs(font: &Font) -> usize {
+    font.parsed()
+        .shaper
+        .as_ref()
+        .expect("a parsed face")
+        .runs
+        .load(core::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(all(test, feature = "parsed-font"))]

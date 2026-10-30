@@ -121,6 +121,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl_ui::tree` shapes a `white-space: nowrap` span once per layout**
+  rather than up to three times: text that measures the same under every width —
+  `nowrap` text and the bitmap font — is measured once for all of them, and the
+  layout a `nowrap` span in a parsed font was measured from is kept, so
+  `text-overflow: ellipsis` and drawing reuse it instead of shaping again. An
+  unchanged frame of a kept `Ui` shapes no `nowrap` text at all. A kept layout
+  is checked against the span's text, font, fallback faces, size and line height
+  before it is reused.
 - **`Skinning::begin_frame` no longer re-checks and re-uploads every skin
   binding each frame.** It compares the bindings it is handed against the last
   accepted set, bit for bit, and rewrites a frame slot's binding buffer only

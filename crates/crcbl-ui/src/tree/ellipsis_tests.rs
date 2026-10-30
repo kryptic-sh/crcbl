@@ -574,3 +574,80 @@ fn a_cut_spans_layout_is_the_one_drawn() {
     let (key, _) = card(&mut ui, 60.0, ".line", ACTION);
     assert!(!kept(&ui, key), "the bitmap font kept a layout");
 }
+
+/// **A `nowrap` span is shaped once, at its first layout, and never again
+/// while it is unchanged**: layout measures it once under every width it is
+/// asked about, cutting and drawing it reuse that layout, and a second frame
+/// of the same tree shapes nothing — with and without the ellipsis rule. A
+/// span that is cut shapes its prefixes at each cut, but not its whole text
+/// again.
+#[test]
+fn a_nowrap_span_is_shaped_once() {
+    use crate::font::shape::shaped_runs;
+    const LABEL: &str = "Iron Sword";
+    for (selector, width, text) in [
+        (".clip.counted", 140.0, LABEL),
+        (".line.counted", 1000.0, LABEL),
+        (".line.counted", 60.0, ACTION),
+    ] {
+        // A parse of its own, so no other test's shaping is counted.
+        let font = Font::parse(crate::font::SANS_TTF).expect("parses");
+        let mut ui = tree();
+        ui.add_stylesheet("counted.css", ".counted { font-family: counted; }");
+        ui.register_font("counted", font.clone())
+            .expect("not reserved");
+        let what = format!("{selector} at {width}px");
+        let before = shaped_runs(&font);
+        let _ = TextLayout::nowrap(&font, text, 16.0, 20.0);
+        let once = shaped_runs(&font) - before;
+        assert!(once > 0, "laying {text:?} out shaped nothing");
+
+        let before = shaped_runs(&font);
+        card(&mut ui, width, selector, text);
+        let first = shaped_runs(&font) - before;
+        let before = shaped_runs(&font);
+        let (key, _) = card(&mut ui, width, selector, text);
+        let steady = shaped_runs(&font) - before;
+        if ui.text(key) == Some(text) {
+            assert_eq!(first, once, "{what}: a fresh tree shaped it more than once");
+            assert_eq!(steady, 0, "{what}: an unchanged frame shaped it again");
+        } else {
+            assert_eq!(
+                first,
+                once + steady,
+                "{what}: a fresh tree's cut shaped more than measuring once and cutting"
+            );
+        }
+    }
+}
+
+/// **A kept layout is only ever handed to the text it lays out**: asked under
+/// the right hash for other text, another font, size or line height, the
+/// measure cache answers none.
+#[test]
+fn a_kept_layout_is_checked_against_what_it_lays_out() {
+    let font = Font::sans();
+    let mut ui = tree();
+    let (key, _) = card(&mut ui, 1000.0, ".clip.sans", ACTION);
+    let node = ui.nodes.iter().find(|node| node.key == key).expect("built");
+    let (hash, size) = (node.content_hash, node.style.font_size);
+    let line_height = node.style.text_line_height(font);
+    let held = |font: &Font, text: &str, size: f32, line_height: f32| {
+        ui.measure
+            .nowrap_layout(hash, font, text, size, line_height)
+            .is_some()
+    };
+    assert!(held(font, ACTION, size, line_height), "no layout was kept");
+    assert!(!held(font, "Take item 19", size, line_height), "other text");
+    assert!(!held(roboto(), ACTION, size, line_height), "another font");
+    assert!(!held(font, ACTION, size + 1.0, line_height), "another size");
+    assert!(
+        !held(font, ACTION, size, line_height + 1.0),
+        "another line height"
+    );
+    let fallback = font.with_fallback(&[roboto().clone()]);
+    assert!(
+        !held(&fallback, ACTION, size, line_height),
+        "other fallback faces"
+    );
+}
