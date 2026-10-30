@@ -358,6 +358,16 @@ impl ExtensionSupport {
             && ray_tracing_pipeline.ray_tracing_pipeline == vk::TRUE;
         self
     }
+
+    /// The same support with both mesh stages withdrawn, for a driver whose
+    /// mesh shading is listed but broken — see [`crate::quirks`]. Nothing else
+    /// moves: the ray-tracing answers do not depend on the mesh ones.
+    #[must_use]
+    pub(crate) const fn without_mesh_shading(mut self) -> Self {
+        self.mesh_shader = false;
+        self.task_shader = false;
+        self
+    }
 }
 
 /// Maps a Vulkan device type onto the seam's.
@@ -937,7 +947,12 @@ fn describe(
         unsafe { instance.get_physical_device_queue_family_properties(physical) };
     let families = QueueFamilies::select(&family_properties);
 
-    let extensions = ExtensionSupport {
+    let name = properties.device_name_as_c_str().map_or_else(
+        |_| "unnamed adapter".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+
+    let mut extensions = ExtensionSupport {
         debug_utils,
         present_feedback,
         present_timing,
@@ -951,6 +966,27 @@ fn describe(
         &ray_query_features,
         &ray_pipeline_features,
     );
+    // Before anything reads `extensions`, so the features, the limits, the
+    // statistics flag below and the device `device.rs` opens all agree that
+    // this adapter has no mesh shading.
+    if extensions.mesh_shader
+        && let Some(family) = crate::quirks::radv_rdna2_family(vulkan_1_2_props.driver_id, &name)
+    {
+        if crate::quirks::mesh_on_rdna2_wanted() {
+            crcbl_core::log::warn!(
+                "crcbl-vk: adapter {name} keeps mesh shading on radv {family} (RDNA2) because \
+                 {}=1; the mesh path has hung this generation's GPU",
+                crate::quirks::MESH_ON_RDNA2_VAR
+            );
+        } else {
+            extensions = extensions.without_mesh_shading();
+            crcbl_core::log::info!(
+                "crcbl-vk: adapter {name} withholds mesh shading: radv {family} (RDNA2) loses \
+                 the device on the mesh path; set {}=1 to report it anyway",
+                crate::quirks::MESH_ON_RDNA2_VAR
+            );
+        }
+    }
     let mesh_shader_queries =
         extensions.mesh_shader && mesh_features.mesh_shader_queries == vk::TRUE;
     let features = features_of(
@@ -961,11 +997,6 @@ fn describe(
         extensions,
     ) | draw_index_of(&vulkan_1_1);
     let limits = limits_of(&properties.limits, &vulkan_1_2_props, features);
-
-    let name = properties.device_name_as_c_str().map_or_else(
-        |_| "unnamed adapter".to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
     let driver_name = vulkan_1_2_props
         .driver_name_as_c_str()
         .ok()
@@ -1880,6 +1911,42 @@ mod tests {
         assert!(neither.intersection(STAGE_FLAGS).is_empty());
         assert_eq!(caps(neither).geometry_path(), GeometryPath::IndirectCount);
         assert_eq!(caps(neither).lighting_path(), LightingPath::Rasterised);
+    }
+
+    /// **A device whose mesh shading is withdrawn selects indirect count**,
+    /// with everything else it reports unchanged: the radv RDNA2 workaround in
+    /// [`crate::quirks`] must demote the geometry path and nothing more.
+    #[test]
+    fn withdrawn_mesh_shading_falls_back_to_indirect_count() {
+        let caps = |features| DeviceCaps {
+            features,
+            limits: Limits::desktop(),
+        };
+        let report = |extensions: ExtensionSupport| {
+            features_of(
+                &vk::PhysicalDeviceFeatures::default().multi_draw_indirect(true),
+                &fully_featured_vulkan_1_2(),
+                &desktop_limits(),
+                QueueFamilies::select(&[family(GRAPHICS, 1)]),
+                extensions,
+            )
+        };
+        let listed = ExtensionSupport::default().with_stages(
+            all_stage_extensions(),
+            &mesh_features(),
+            &acceleration_features(),
+            &ray_query_features(),
+            &ray_pipeline_features(),
+        );
+        let full = report(listed);
+        let withheld = report(listed.without_mesh_shading());
+        assert_eq!(caps(full).geometry_path(), GeometryPath::MeshShader);
+        assert_eq!(caps(withheld).geometry_path(), GeometryPath::IndirectCount);
+        assert_eq!(
+            full.difference(withheld),
+            Features::MESH_SHADER | Features::TASK_SHADER
+        );
+        assert!(withheld.difference(full).is_empty());
     }
 
     /// `VK_KHR_acceleration_structure` declares

@@ -1289,14 +1289,18 @@ fn the_mesh_dispatch_extent_is_the_culled_instance_count() {
     // where this string appears zero times. A branch nothing takes is not
     // tolerance for a future driver; it is the test going quiet on the day it
     // matters, which is what the rest of this file's degrades were changed for
-    // on 2026-08-20.
+    // on 2026-08-20. The one deliberate exception is radv on RDNA2, where
+    // `crcbl-vk`'s quirks module withholds mesh shading because the mesh path
+    // loses the device; that adapter fails here by design, and
+    // `CRCBL_VK_MESH_ON_RDNA2=1` is how to run this test on it anyway.
     assert_eq!(
         renderer.geometry_path(),
         crcbl_hal::GeometryPath::MeshShader,
         "this device asked for MESH_SHADER and TASK_SHADER and still selected another \
          geometry path, so it records no indirect mesh dispatch and this test would assert \
-         nothing. Every adapter this suite has run on selects the mesh path here — see the \
-         comment above before loosening this"
+         nothing. Every adapter this suite has run on selects the mesh path here, except \
+         radv RDNA2, which withholds it (CRCBL_VK_MESH_ON_RDNA2) — see the comment above \
+         before loosening this"
     );
 
     let at = glam::Mat4::from_translation(OPEN_BOX_AT);

@@ -92,6 +92,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The Vulkan backend no longer offers mesh shading on radv RDNA2 GPUs.** On a
+  GFX10.3 device under radv (`VkDriverId` `MESA_RADV`, families NAVI21–24,
+  VANGOGH, REMBRANDT, RAPHAEL_MENDOCINO) the mesh path lost the device within
+  two frames — a compute-ring timeout with the task stage, a gfx-ring timeout
+  without it — while validation reported nothing. `crcbl-vk` now withholds
+  `Features::MESH_SHADER` and `Features::TASK_SHADER` there, so `GeometryPath`
+  falls back to `IndirectCount`, and logs why at adapter description.
+  `CRCBL_VK_MESH_ON_RDNA2=1` reports them again, for checking a newer Mesa.
+  Verified on a Ryzen 9000 iGPU (RAPHAEL_MENDOCINO, Mesa 26.2.6); RDNA3 is
+  unaffected, and the Steam Deck's VANGOGH is matched but has not been run.
+
 - **A JPEG whose scan names a Huffman table past 3 is refused as malformed
   instead of panicking.** `crcbl_image::jpeg::decode` took each scan component's
   DC and AC table selectors from the `SOS` header unchecked and indexed its four

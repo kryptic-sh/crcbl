@@ -221,6 +221,7 @@ pub(crate) mod instance;
 pub(crate) mod mem;
 pub(crate) mod pipeline;
 pub(crate) mod present_timing;
+pub(crate) mod quirks;
 pub(crate) mod shader_stats;
 pub(crate) mod spirv;
 pub(crate) mod statistics;
