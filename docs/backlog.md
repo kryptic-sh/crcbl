@@ -141,8 +141,12 @@ Left:
   costly pipeline inside its own constructor in `View::build`; overlapping them
   means pulling their pipeline descriptions out. The mesh and grass batches also
   run one after the other.
-- Every `DrawGen` (the primary view and each shadow cull) compiles the same
-  compute pipelines; sharing them would remove about 6 × 13 ms cold.
+- The null backend's `destroy_*` on a dead handle is a silent no-op, so no
+  null-backend test can catch a double destroy; `DrawGenPipelines`' exactly-once
+  release rests on `Arc::into_inner` and on vk validation in the e2e runs.
+- `ForwardRenderer::build` builds `GrassScene` before its final struct literal
+  so a grass failure is rolled back; no null-backend switch can fail its
+  one-texel calm-wind upload alone, so that ordering has no test.
 - The parallel-or-serial choice is an exhaustive `match device.backend()` in
   `pipeline_batch::concurrent`; a `Capability::ConcurrentPipelineCreation`
   answered by each backend would be the seam-idiomatic form.
@@ -34832,10 +34836,9 @@ What is left, and what it taught:
   one-sided wall. The open box's inward-facing faces therefore cast nothing. A
   two-sided caster mode needs `CullMode::None` on the shadow pipeline **and** a
   way to tell the amplification stage not to cone-cull for a light.
-- **Each cascade's `DrawGen` duplicates pipelines it does not need**, building
-  its own clear/cull/draw-argument compute pipelines and full argument buffers
-  when only the cull half is used. Sharing pipelines across instances, or a
-  cull-only constructor, is the follow-up.
+- **Each cascade's `DrawGen` builds full argument buffers** when only the cull
+  half is used. Its pipelines are shared (`DrawGenPipelines`); a cull-only
+  constructor would drop the unused buffers.
 - **The `shadow_placeholder` 1x1 depth image is forced from both sides.**
   Slang's Metal backend materialises every global into every entry point —
   `msl/mesh.metal`'s `vertexMain` really does take `shadow_atlas [[texture(1)]]`

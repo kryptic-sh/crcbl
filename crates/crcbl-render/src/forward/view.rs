@@ -410,6 +410,9 @@ pub(super) struct ViewInputs<'a> {
     pub(super) instances: &'a [BufferHandle],
     /// The mesh table's buffer.
     pub(super) mesh_table: BufferHandle,
+    /// The renderer's one set of draw-generation pipelines, which this view's
+    /// generator dispatches and does not build — see [`DrawGenPipelines`].
+    pub(super) draw_pipelines: &'a Arc<DrawGenPipelines>,
     /// The bucket and level tables every generator of the scene is built from
     /// — see [`DrawGenDesc`].
     pub(super) bucket_meshes: &'a [u32],
@@ -984,6 +987,7 @@ impl View {
         let draws = DrawGen::new(
             device,
             uploads,
+            inputs.draw_pipelines,
             &DrawGenDesc {
                 label: Some("forward"),
                 instances: inputs.instances,
@@ -3442,6 +3446,9 @@ impl ForwardRenderer {
                 emit: self.emit,
                 instances: self.instances.buffers(),
                 mesh_table: self.pool.table_buffer(),
+                // The renderer's set, not a new one: a view builds buffers and
+                // groups for its cull and compiles nothing for it.
+                draw_pipelines: &self.draw_pipelines,
                 bucket_meshes: &self.draw_tables.bucket_meshes,
                 bucket_modes: &self.bucket_modes,
                 bucket_clusters: &self.draw_tables.bucket_clusters,

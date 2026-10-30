@@ -234,7 +234,8 @@ pub use cull::{Aabb, Frustum, visible_instances};
 pub use cull_stats::{ClusterCull, CullStats, CullStatsRing, OcclusionCull};
 pub use debug_draw::{DebugDraw, DebugVertex, frustum_corners};
 pub use draw_gen::{
-    DrawGen, DrawGenDesc, FrameCull, GeneratedDraws, OcclusionFrame, PyramidInputs, Selection,
+    DrawGen, DrawGenDesc, DrawGenPipelines, FrameCull, GeneratedDraws, OcclusionFrame,
+    PyramidInputs, Selection,
 };
 pub use effects::{Antialiasing, EffectOverride, EffectRequest, RenderEffects, ray_tracing_note};
 pub use exposure::{ExposureAdaptation, ExposureBuffers};

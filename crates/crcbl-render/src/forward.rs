@@ -166,7 +166,7 @@ use crate::counters::FrameCounters;
 use crate::cull::Frustum;
 use crate::cull_stats::CullStatsRing;
 use crate::debug_draw::DebugDraw;
-use crate::draw_gen::{DrawGen, DrawGenDesc, FrameCull, GeneratedDraws};
+use crate::draw_gen::{DrawGen, DrawGenDesc, DrawGenPipelines, FrameCull, GeneratedDraws};
 use crate::effects::{EffectRequest, RenderEffects};
 use crate::graph::{
     BufferId, ImageId, ImportedBuffer, ImportedImage, InitialClaim, PassBuilder, RenderGraph,
@@ -2013,8 +2013,7 @@ pub struct ForwardRenderer {
     /// A whole [`DrawGen`] rather than just its cull half: the shadow pass emits
     /// the same indirect call the colour pass does, so it needs the same
     /// arguments, and there is no "cull only" constructor to reach for. The cost
-    /// is that each duplicates the clear and draw-argument pipelines and
-    /// [`DrawGen`]'s own per-instance state — see
+    /// is [`DrawGen`]'s own buffers and per-instance state — see
     /// [`TileBuffers::group_state`], which is where that price is written down,
     /// and [`SHADOW_CULLS`], which is why a point light has one of these rather
     /// than six.
@@ -2022,6 +2021,15 @@ pub struct ForwardRenderer {
     /// **Indexed by cull**: `0..shadow::CASCADES` are the sun's and
     /// [`shadow_cull`] is where a light slot's is.
     shadow_draws: Vec<DrawGen>,
+    /// The layouts and pipelines every [`DrawGen`] above and in each view
+    /// dispatches, compiled once and shared rather than once per generator.
+    ///
+    /// This reference is the renderer's own, held so [`create_view`] can hand
+    /// the set to a view built later; [`destroy`](Self::destroy) gives it back
+    /// after every generator, and whichever reference goes last destroys it.
+    ///
+    /// [`create_view`]: Self::create_view
+    draw_pipelines: Arc<DrawGenPipelines>,
     /// `[frame][view]`: a copy of the frame block whose `view_proj` **is** that
     /// view's matrix, so the depth-only pipeline runs the unmodified vertex and
     /// mesh stages rather than a second transform path.
@@ -2498,14 +2506,20 @@ struct Rollback {
     /// one layout and a ring of blocks — and only exists for a scene whose
     /// volume asked to be updated.
     probe_gather: Option<ProbeGather>,
-    /// The cull and draw-argument passes, which own two pipelines and a ring of
-    /// buffers each — and which clean themselves up on their own failure path,
-    /// so this only carries one that was built.
+    /// A view's cull and draw-argument passes, while [`View::build`] — which
+    /// keeps a rollback of this type of its own — is still building the rest of
+    /// that view; the renderer's own rollback never holds one. They
+    /// own a ring of buffers and dispatch
+    /// [`draw_pipelines`](Self::draw_pipelines), and clean themselves up on
+    /// their own failure path, so this only carries one that was built.
     draws: Option<DrawGen>,
     /// One more of the same per shadow-atlas tile — a `Vec` rather than an
     /// `Option`, because a failure part way through the tiles has to release the
     /// ones already built.
     shadow_draws: Vec<DrawGen>,
+    /// The draw-generation pipelines every generator shares, released after
+    /// all of them — see [`ForwardRenderer::draw_pipelines`].
+    draw_pipelines: Option<Arc<DrawGenPipelines>>,
     /// The cluster buffers, which own three buffers and are built on the
     /// mesh-shader path alone.
     clusters: Option<ClusterPool>,
@@ -2611,6 +2625,12 @@ impl Rollback {
         }
         if let Some(draws) = self.draws {
             draws.destroy(device);
+        }
+        // After every generator — the camera's above and each shadow cull's —
+        // although the reference count would hold it until the last of them
+        // anyway.
+        if let Some(pipelines) = self.draw_pipelines {
+            DrawGenPipelines::release(pipelines, device);
         }
         // Before the table, because its bind groups name that table's rows.
         if let Some(gather) = self.probe_gather {
@@ -4984,6 +5004,12 @@ impl ForwardRenderer {
         // the two is drawn. Into the rollback whole as soon as it exists, so a
         // failure further down releases it with everything else.
         let slot_pages = vec![page_bindings; instance_buffers.len()];
+        // The pipelines every generator dispatches, the camera's and each
+        // shadow cull's, compiled once here and shared — with the occlusion
+        // phases, because every camera's generator is built for them.
+        let draw_pipelines = rollback
+            .draw_pipelines
+            .insert(DrawGenPipelines::new(device, true, service)?);
         rollback.primary = Some(View::build(
             device,
             uploads,
@@ -5004,6 +5030,7 @@ impl ForwardRenderer {
                 emit,
                 instances: &instance_buffers,
                 mesh_table,
+                draw_pipelines,
                 bucket_meshes: &bucket_meshes,
                 bucket_modes: &bucket_modes,
                 bucket_clusters: &bucket_clusters,
@@ -5159,6 +5186,10 @@ impl ForwardRenderer {
             let draws = DrawGen::new(
                 device,
                 uploads,
+                rollback
+                    .draw_pipelines
+                    .as_ref()
+                    .unwrap_or_else(|| unreachable!("built ahead of the camera")),
                 &DrawGenDesc {
                     label: Some(&label),
                     instances: &instance_buffers,
@@ -5538,6 +5569,17 @@ impl ForwardRenderer {
         })?;
         rollback.samplers.push(sampler);
 
+        // No field, so no pass: the frame every caller of this type drew
+        // before grass existed. The two calm wind layers are one texel each
+        // and are what makes a field with no weather set still.
+        //
+        // **Before the literal below, not inside it**: the literal moves the
+        // camera, the shared draw pipelines and the pools out of the rollback,
+        // so a failure inside it would leak them. `GrassScene::new` releases
+        // its own half on failure, and the literal then has nothing that can
+        // fail.
+        let grass = GrassScene::new(device, uploads, FRAMES_IN_FLIGHT)?;
+
         Ok(Self {
             pool: rollback
                 .pool
@@ -5615,6 +5657,10 @@ impl ForwardRenderer {
                 .primary
                 .take()
                 .unwrap_or_else(|| unreachable!("the camera was placed in the rollback above")),
+            draw_pipelines: rollback
+                .draw_pipelines
+                .take()
+                .unwrap_or_else(|| unreachable!("built ahead of the camera")),
             views: Vec::new(),
             draw_tables: DrawTables {
                 bucket_meshes,
@@ -5785,10 +5831,7 @@ impl ForwardRenderer {
             // before water existed. Nothing is allocated until a body is set.
             water: WaterBodies::new(FRAMES_IN_FLIGHT),
             recorded_water_draws: 0,
-            // No field, so no pass: the frame every caller of this type drew
-            // before grass existed. The two calm wind layers are one texel
-            // each and are what makes a field with no weather set still.
-            grass: GrassScene::new(device, uploads, FRAMES_IN_FLIGHT)?,
+            grass,
             wind: crcbl_shaders::wind::WindParams::default(),
             recorded_grass_draws: 0,
         })
@@ -10889,6 +10932,8 @@ impl ForwardRenderer {
         for draws in self.shadow_draws {
             draws.destroy(device);
         }
+        // After every generator: the cameras' above and the shadow culls'.
+        DrawGenPipelines::release(self.draw_pipelines, device);
         device.destroy_sampler(self.shadow_sampler);
         device.destroy_image_view(self.shadow_atlas_view);
         device.destroy_image(self.shadow_atlas);
@@ -11716,6 +11761,7 @@ pub(crate) fn named_entry(
 // `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    mod draw_pipelines;
     mod frame_extents;
     mod instance_upload;
     mod lazy_passes;

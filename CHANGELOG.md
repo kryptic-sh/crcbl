@@ -15,6 +15,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_render::DrawGen::new` takes a `&Arc<DrawGenPipelines>`** between
+  `uploads` and `desc`. Build one with
+  `DrawGenPipelines::new(device, occlusion, service)`, pass it to every
+  generator, and call `DrawGenPipelines::release` once for your own reference;
+  each generator's `destroy` releases its own, and the last release destroys the
+  set.
 - **`ForwardRenderer::add_passes`, `add_skinned_passes`,
   `add_skinned_passes_with_overlay` and `add_passes_with_views` panic when
   handed a target extent other than the one the frame's `begin_frame` (or a
@@ -115,6 +121,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Every `DrawGen` a `ForwardRenderer` builds shares one set of compute
+  pipelines.** The camera's generator, each shadow cull's and every view made by
+  `create_view` used to compile the same clear, cull and draw-argument pipelines
+  apiece; they now dispatch one `DrawGenPipelines` the renderer compiles once.
+  Cold `ForwardRenderer::new` on an RX 7900 XTX (radv, load about 4) went from
+  475–510 ms to 437–471 ms.
 - **`ForwardRenderer`'s build compiles its independent pipelines in parallel**
   on Vulkan, D3D12 and Metal: the forward pass's mesh pipelines, the grass draw
   pipelines, and each `DrawGen`'s compute and occlusion pipelines run on a

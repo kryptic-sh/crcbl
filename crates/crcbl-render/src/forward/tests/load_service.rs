@@ -20,10 +20,10 @@ use super::*;
 /// a call of its own is what this is here to catch.
 ///
 /// **Compute pipelines are not counted**, and that is a measurement rather
-/// than a convenience: `DrawGen::new` builds its whole set of compute
-/// pipelines with no call between them, and on a cold cache that set cost
-/// less than the water surface's pair of raster pipelines did. Counting them
-/// would set this bound by the cheap run and let the expensive ones through.
+/// than a convenience: the draw-generation set, which `DrawGenPipelines::new`
+/// compiles once per renderer, cost less on a cold cache than the water
+/// surface's pair of raster pipelines did. Counting them would set this bound
+/// by the cheap run and let the expensive ones through.
 const MAX_PIPELINES_PER_GAP: usize = 4;
 
 /// The raster and mesh pipelines `recorder` has seen created — every one but

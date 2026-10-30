@@ -2719,7 +2719,7 @@ fn the_engine_passes_offer_every_shader_artifact_they_have() {
 #[test]
 fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
     use crcbl_hal::{BufferDesc, BufferHandle, BufferUsage, MemoryLocation};
-    use crcbl_render::{DrawGen, DrawGenDesc};
+    use crcbl_render::{DrawGen, DrawGenDesc, DrawGenPipelines};
 
     let harness = Harness::open();
     let device = harness.device.as_ref();
@@ -2740,9 +2740,12 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
     let mesh_table = input("mesh table");
 
     let mut uploads = UploadBatch::new(device, harness.queue, "writable buffers");
+    let pipelines = DrawGenPipelines::new(device, false, &mut || {})
+        .expect("the null backend builds the pipelines");
     let draws = DrawGen::new(
         device,
         &mut uploads,
+        &pipelines,
         &DrawGenDesc {
             label: Some("writable buffers"),
             instances: &instances,
@@ -2799,6 +2802,7 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
     device_local("lod group state", draws.group_state());
 
     draws.destroy(device);
+    DrawGenPipelines::release(pipelines, device);
     for buffer in instances {
         device.destroy_buffer(buffer);
     }

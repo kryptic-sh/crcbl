@@ -171,6 +171,7 @@
 //! reads the region in front of it, and the words it finds there are plausible
 //! `u32`s.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crcbl_hal::{
@@ -289,9 +290,10 @@ pub struct DrawGenDesc<'a> {
     pub hidden_view: u32,
     /// The most a frame of this generator may ask for, which decides what it
     /// allocates: [`DrawMode::Plain`] is region 0 alone, as every generator was;
-    /// [`DrawMode::Occlusion`] adds the two occlusion regions and the three
-    /// occlusion pipelines; [`DrawMode::Faces`] adds six face regions and six
-    /// capacities of face runs.
+    /// [`DrawMode::Occlusion`] adds the two occlusion regions and dispatches the
+    /// occlusion pipelines, which its [`DrawGenPipelines`] must carry;
+    /// [`DrawMode::Faces`] adds six face regions and six capacities of face
+    /// runs.
     ///
     /// A frame may always run [`DrawMode::Plain`] instead — see
     /// [`DrawGen::begin_frame_with`].
@@ -521,20 +523,9 @@ pub struct DrawGen {
     cull_groups: Vec<BindGroupHandle>,
     gen_groups: Vec<BindGroupHandle>,
 
-    clear_layout: BindGroupLayoutHandle,
-    clear_pipeline_layout: PipelineLayoutHandle,
-    clear_pipeline: ComputePipelineHandle,
-    cull_layout: BindGroupLayoutHandle,
-    cull_pipeline_layout: PipelineLayoutHandle,
-    cull_pipeline: ComputePipelineHandle,
-    gen_layout: BindGroupLayoutHandle,
-    gen_pipeline_layout: PipelineLayoutHandle,
-    /// `draw_gen.slang`'s three entry points, in the order the `draw-args` pass
-    /// dispatches them: route and count, prefix-sum the counts into starts,
-    /// scatter. One layout serves all three.
-    bin_pipeline: ComputePipelineHandle,
-    starts_pipeline: ComputePipelineHandle,
-    scatter_pipeline: ComputePipelineHandle,
+    /// The layouts and pipelines every generator of a renderer shares — this
+    /// one's reference to them, released by [`destroy`](Self::destroy).
+    pipelines: Arc<DrawGenPipelines>,
 
     bucket_count: u32,
     capacity: u32,
@@ -550,8 +541,6 @@ pub struct DrawGen {
     /// word, so the passes a frame records cannot disagree with the block its
     /// dispatches read.
     frame_modes: Vec<AtomicU32>,
-    /// The occlusion entry points, on a [`DrawMode::Occlusion`] generator.
-    occlusion: Option<OcclusionPipelines>,
 }
 
 /// The two occlusion phases' cull pipelines and the late draw-argument ones.
@@ -567,9 +556,448 @@ struct OcclusionPipelines {
     late_finish: ComputePipelineHandle,
 }
 
+/// The layouts and compute pipelines a [`DrawGen`] dispatches, built once and
+/// shared by every generator a renderer makes.
+///
+/// **None of it depends on a [`DrawGenDesc`]**: the bind-group layouts and
+/// their pipeline layouts are fixed by the shaders' declarations, and every
+/// pipeline is one fixed entry point and workgroup size of `clear_counters`,
+/// `cull` or `draw_gen`. What differs between a camera's generator and a shadow
+/// cascade's — buffers, bind groups, bucket tables, the mode — is the
+/// generator's own. So one set serves them all, and building it once instead
+/// of once per generator is the saving: measured cold on radv in 2026-10, a
+/// set was about 13 ms of driver compile.
+///
+/// **Shared by reference count.** [`DrawGen::new`] keeps an [`Arc`] of it and
+/// [`DrawGen::destroy`] gives that back through [`release`](Self::release),
+/// which destroys the set only when it was the last reference — so it cannot be
+/// destroyed while a generator still dispatches it, nor twice.
+///
+/// **Dropping an [`Arc`] of it is not releasing it.** The handles are the
+/// device's, not Rust's: a holder whose `Arc` is dropped without
+/// [`release`](Self::release) leaks every layout and pipeline in the set if it
+/// was the last holder, exactly as a [`DrawGen`] dropped without `destroy`
+/// leaks its buffers.
+#[derive(Debug)]
+pub struct DrawGenPipelines {
+    clear_layout: BindGroupLayoutHandle,
+    clear_pipeline_layout: PipelineLayoutHandle,
+    clear_pipeline: ComputePipelineHandle,
+    cull_layout: BindGroupLayoutHandle,
+    cull_pipeline_layout: PipelineLayoutHandle,
+    cull_pipeline: ComputePipelineHandle,
+    gen_layout: BindGroupLayoutHandle,
+    gen_pipeline_layout: PipelineLayoutHandle,
+    /// `draw_gen.slang`'s entry points, in the order the `draw-args` pass
+    /// dispatches them: route and count, prefix-sum the counts into starts,
+    /// scatter. One layout serves them all.
+    bin_pipeline: ComputePipelineHandle,
+    starts_pipeline: ComputePipelineHandle,
+    scatter_pipeline: ComputePipelineHandle,
+    /// The occlusion entry points, where the set was built with them.
+    occlusion: Option<OcclusionPipelines>,
+}
+
+impl DrawGenPipelines {
+    /// Builds every layout and pipeline a generator dispatches — with the
+    /// occlusion phases' too where `occlusion` is set, which a
+    /// [`DrawMode::Occlusion`] generator needs.
+    ///
+    /// The pipelines compile side by side where the device allows it, with
+    /// `service` called between rounds of them — see
+    /// [`ForwardRenderer::with_scene_serviced`](crate::ForwardRenderer::with_scene_serviced).
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created.
+    pub fn new(
+        device: &dyn Device,
+        occlusion: bool,
+        service: &mut dyn FnMut(),
+    ) -> Result<Arc<Self>, HalError> {
+        let mut rollback = Rollback::default();
+        match Self::build(device, occlusion, service, &mut rollback) {
+            Ok(built) => {
+                rollback.disarm();
+                Ok(Arc::new(built))
+            }
+            Err(error) => {
+                rollback.run(device);
+                Err(error)
+            }
+        }
+    }
+
+    /// Gives back one reference, destroying the set if it was the last.
+    ///
+    /// Every holder — each [`DrawGen`] through its [`destroy`](DrawGen::destroy),
+    /// and whoever built the set — calls this once, in any order, and the set
+    /// is destroyed exactly once, after its last user. The device must be idle
+    /// by then, as for any other `destroy`.
+    ///
+    /// **Every holder must call it**: an `Arc` that is dropped instead takes
+    /// its count down without destroying anything, so if that was the last
+    /// reference the set's layouts and pipelines leak.
+    pub fn release(pipelines: Arc<Self>, device: &dyn Device) {
+        if let Some(pipelines) = Arc::into_inner(pipelines) {
+            pipelines.destroy(device);
+        }
+    }
+
+    /// Whether this set carries the occlusion phases' pipelines.
+    #[must_use]
+    pub const fn has_occlusion(&self) -> bool {
+        self.occlusion.is_some()
+    }
+
+    fn build(
+        device: &dyn Device,
+        occlusion: bool,
+        service: &mut dyn FnMut(),
+        rollback: &mut Rollback,
+    ) -> Result<Self, HalError> {
+        // --- the clearing pass ---
+        let clear_entries = [
+            uniform(0),
+            storage(1, false, UINT_STRIDE),
+            storage(2, false, UINT_STRIDE),
+            // The draw counts and the mesh-dispatch extents, one buffer.
+            storage(3, false, UINT_STRIDE),
+        ];
+        let clear_desc = BindGroupLayoutDesc {
+            label: Some("clear counters"),
+            entries: &clear_entries,
+        };
+        check_portable_storage_buffers(clear_desc.label, &[&clear_desc])?;
+        let clear_layout = device.create_bind_group_layout(&clear_desc)?;
+        rollback.bind_group_layouts.push(clear_layout);
+        let clear_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("clear counters"),
+            bind_group_layouts: &[clear_layout],
+            push_constants: None,
+        })?;
+        rollback.pipeline_layouts.push(clear_pipeline_layout);
+
+        // --- the cull pass ---
+        //
+        // Binding order is `cull.slang`'s declaration order, which is a rule
+        // rather than a convention: Slang's Metal target hands each resource the
+        // next index in its own table, so a layout that renumbered them would
+        // bind the frustum where the instance array goes. See
+        // `crcbl_shaders`' declaration-order lint.
+        let cull_entries = [
+            uniform(0),
+            // `StructuredBuffer` in the shader, so read-only here: the cull
+            // pass decides what is visible and never edits an instance or a
+            // mesh entry.
+            storage(1, true, crcbl_shaders::mesh::INSTANCE_STRIDE as u32),
+            storage(2, true, crcbl_shaders::mesh::MESH_ENTRY_STRIDE as u32),
+            storage(3, false, UINT_STRIDE),
+            storage(4, false, UINT_STRIDE),
+        ];
+        let cull_desc = BindGroupLayoutDesc {
+            label: Some("cull"),
+            entries: &cull_entries,
+        };
+        check_portable_storage_buffers(cull_desc.label, &[&cull_desc])?;
+        let cull_layout = device.create_bind_group_layout(&cull_desc)?;
+        rollback.bind_group_layouts.push(cull_layout);
+        let cull_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("cull"),
+            bind_group_layouts: &[cull_layout],
+            push_constants: None,
+        })?;
+        rollback.pipeline_layouts.push(cull_pipeline_layout);
+
+        // --- the draw-argument pass ---
+        //
+        // **Eight storage bindings, which is every one a WebGPU device
+        // guarantees.** There is no headroom here: a ninth is a pass that cannot
+        // be created in a browser at the default limits or on SwiftShader, which
+        // is what a CI runner without a GPU has. `check_portable_storage_buffers`
+        // below is what turns a ninth into a failure here rather than into a
+        // pipeline-layout refusal on somebody else's device.
+        let gen_entries = [
+            uniform(0),
+            // The instance array and the mesh table, read only.
+            storage(1, true, crcbl_shaders::mesh::INSTANCE_STRIDE as u32),
+            storage(2, true, crcbl_shaders::mesh::MESH_ENTRY_STRIDE as u32),
+            // The culling statistics, read only: this pass clamps against the
+            // survivor count and adds to nothing.
+            storage(3, true, UINT_STRIDE),
+            // Every host-written table in one buffer, read only: the bucket
+            // table, the per-bucket cluster counts and topic 25's
+            // three selection tables were all decided when a mesh became
+            // resident.
+            storage(4, true, UINT_STRIDE),
+            // The survivor list, its routes, the per-bucket runs and their
+            // starts. Writable, and read through the same descriptor — binding
+            // one buffer read-only *and* writable in one group is a usage
+            // conflict on WebGPU.
+            storage(5, false, UINT_STRIDE),
+            // The indirect arguments.
+            storage(6, false, UINT_STRIDE),
+            // The draw counts and the mesh-dispatch extents.
+            storage(7, false, UINT_STRIDE),
+            // The hysteresis state, read *and* written: this pass is the
+            // only writer, and it reads the previous frame's answer out of
+            // the same element it then overwrites.
+            storage(8, false, UINT_STRIDE),
+        ];
+        let gen_desc = BindGroupLayoutDesc {
+            label: Some("draw args"),
+            entries: &gen_entries,
+        };
+        check_portable_storage_buffers(gen_desc.label, &[&gen_desc])?;
+        let gen_layout = device.create_bind_group_layout(&gen_desc)?;
+        rollback.bind_group_layouts.push(gen_layout);
+        let gen_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("draw args"),
+            bind_group_layouts: &[gen_layout],
+            push_constants: None,
+        })?;
+        rollback.pipeline_layouts.push(gen_pipeline_layout);
+
+        // --- the passes' pipelines, as one batch ---
+        //
+        // Every layout they need exists by now, so they compile side by side
+        // where the device allows it — see [`pipeline_batch`]. Each result
+        // is the rollback's before any error is propagated, so a refusal of one
+        // releases the others.
+        //
+        // `cull` is named rather than resolved: `cull.slang` has an entry point
+        // per occlusion phase beside this one. `bin`, `starts` and `scatter`
+        // are three entry points of one module over one layout, which is why
+        // they are `compute_pipeline_entry` too: the route, the prefix sum and
+        // the scatter share the bucket table's accessors and shaders here have
+        // no `#include`.
+        let draw_args = |label, entry_point, workgroup_size| {
+            compute_pipeline_entry(
+                device,
+                label,
+                &DRAW_GEN,
+                entry_point,
+                gen_pipeline_layout,
+                workgroup_size,
+            )
+        };
+        let results = pipeline_batch::create(
+            device,
+            service,
+            [
+                &|| {
+                    compute_pipeline(
+                        device,
+                        "clear counters",
+                        &CLEAR_COUNTERS,
+                        clear_pipeline_layout,
+                        clear_counters::WORKGROUP_SIZE,
+                    )
+                },
+                &|| {
+                    compute_pipeline_entry(
+                        device,
+                        "cull",
+                        &CULL,
+                        "computeMain",
+                        cull_pipeline_layout,
+                        cull_shader::WORKGROUP_SIZE,
+                    )
+                },
+                &|| draw_args("draw args bin", "binMain", draw_gen::WORKGROUP_SIZE),
+                // One workgroup for the whole prefix sum, dispatched once by
+                // `record_passes`: its invocations split the table into chunks
+                // and scan the chunk totals in workgroup memory.
+                &|| {
+                    draw_args(
+                        "draw args starts",
+                        "startsMain",
+                        draw_gen::STARTS_WORKGROUP_SIZE,
+                    )
+                },
+                &|| draw_args("draw args scatter", "scatterMain", draw_gen::WORKGROUP_SIZE),
+            ],
+        );
+        rollback.pipelines.extend(results.iter().flatten().copied());
+        let [
+            clear_pipeline,
+            cull_pipeline,
+            bin_pipeline,
+            starts_pipeline,
+            scatter_pipeline,
+        ] = results;
+        let clear_pipeline = clear_pipeline?;
+        let cull_pipeline = cull_pipeline?;
+        let bin_pipeline = bin_pipeline?;
+        let starts_pipeline = starts_pipeline?;
+        let scatter_pipeline = scatter_pipeline?;
+
+        // --- the occlusion phases, where they were asked for ---
+        let occlusion = if occlusion {
+            Some(Self::build_occlusion(
+                device,
+                rollback,
+                cull_layout,
+                gen_pipeline_layout,
+                service,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            clear_layout,
+            clear_pipeline_layout,
+            clear_pipeline,
+            cull_layout,
+            cull_pipeline_layout,
+            cull_pipeline,
+            gen_layout,
+            gen_pipeline_layout,
+            bin_pipeline,
+            starts_pipeline,
+            scatter_pipeline,
+            occlusion,
+        })
+    }
+
+    /// The pipelines only an occlusion generator uses: `cull.slang`'s two phases
+    /// over the cull's set 0 and the pyramid's set 1, and `draw_gen.slang`'s late
+    /// scatter and finish over the draw-argument layout.
+    fn build_occlusion(
+        device: &dyn Device,
+        rollback: &mut Rollback,
+        cull_layout: BindGroupLayoutHandle,
+        gen_pipeline_layout: PipelineLayoutHandle,
+        service: &mut dyn FnMut(),
+    ) -> Result<OcclusionPipelines, HalError> {
+        // One depth texture per level, in `cull.slang`'s declaration order —
+        // which is the order Slang's Metal target hands out texture indices in.
+        let entries: Vec<BindGroupLayoutEntry> = (0..cull_shader::OCCLUSION_MAX_LEVELS)
+            .map(|binding| BindGroupLayoutEntry {
+                binding,
+                visibility: ShaderStages::COMPUTE,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    // `Depth`, on `crate::hiz`'s terms: `DepthTexture2D` in the
+                    // shader, read with `Load` and never through a sampler.
+                    sample_type: SampleType::Depth,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            })
+            .collect();
+        let pyramid_desc = BindGroupLayoutDesc {
+            label: Some("occlusion pyramid"),
+            entries: &entries,
+        };
+        check_portable_storage_buffers(pyramid_desc.label, &[&pyramid_desc])?;
+        let pyramid_layout = device.create_bind_group_layout(&pyramid_desc)?;
+        rollback.bind_group_layouts.push(pyramid_layout);
+        let cull_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("occlusion cull"),
+            bind_group_layouts: &[cull_layout, pyramid_layout],
+            push_constants: None,
+        })?;
+        rollback.pipeline_layouts.push(cull_pipeline_layout);
+        // One batch, on the terms `build` gives for its own.
+        let entry = |label, shader, entry_point, layout, workgroup_size| {
+            compute_pipeline_entry(device, label, shader, entry_point, layout, workgroup_size)
+        };
+        let cull = cull_shader::WORKGROUP_SIZE;
+        let results = pipeline_batch::create(
+            device,
+            service,
+            [
+                &|| {
+                    entry(
+                        "occlusion early cull",
+                        &CULL,
+                        "occlusionMain",
+                        cull_pipeline_layout,
+                        cull,
+                    )
+                },
+                &|| {
+                    entry(
+                        "occlusion late cull",
+                        &CULL,
+                        "lateMain",
+                        cull_pipeline_layout,
+                        cull,
+                    )
+                },
+                &|| {
+                    entry(
+                        "draw args late scatter",
+                        &DRAW_GEN,
+                        "lateScatterMain",
+                        gen_pipeline_layout,
+                        draw_gen::WORKGROUP_SIZE,
+                    )
+                },
+                // One workgroup, on `startsMain`'s terms: its invocations split
+                // the buckets into chunks and scan the two closed regions' task
+                // chunks in workgroup memory.
+                &|| {
+                    entry(
+                        "draw args late finish",
+                        &DRAW_GEN,
+                        "lateFinishMain",
+                        gen_pipeline_layout,
+                        draw_gen::STARTS_WORKGROUP_SIZE,
+                    )
+                },
+            ],
+        );
+        rollback.pipelines.extend(results.iter().flatten().copied());
+        let [early, late, late_scatter, late_finish] = results;
+        let (early, late, late_scatter, late_finish) = (early?, late?, late_scatter?, late_finish?);
+        Ok(OcclusionPipelines {
+            pyramid_layout,
+            cull_pipeline_layout,
+            early,
+            late,
+            late_scatter,
+            late_finish,
+        })
+    }
+
+    /// Releases everything, in dependency order. Only [`release`](Self::release)
+    /// calls it, for the last reference.
+    fn destroy(self, device: &dyn Device) {
+        if let Some(occlusion) = self.occlusion {
+            for pipeline in [
+                occlusion.early,
+                occlusion.late,
+                occlusion.late_scatter,
+                occlusion.late_finish,
+            ] {
+                device.destroy_compute_pipeline(pipeline);
+            }
+            device.destroy_pipeline_layout(occlusion.cull_pipeline_layout);
+            device.destroy_bind_group_layout(occlusion.pyramid_layout);
+        }
+        device.destroy_compute_pipeline(self.scatter_pipeline);
+        device.destroy_compute_pipeline(self.starts_pipeline);
+        device.destroy_compute_pipeline(self.bin_pipeline);
+        device.destroy_pipeline_layout(self.gen_pipeline_layout);
+        device.destroy_compute_pipeline(self.cull_pipeline);
+        device.destroy_pipeline_layout(self.cull_pipeline_layout);
+        device.destroy_compute_pipeline(self.clear_pipeline);
+        device.destroy_pipeline_layout(self.clear_pipeline_layout);
+        device.destroy_bind_group_layout(self.gen_layout);
+        device.destroy_bind_group_layout(self.cull_layout);
+        device.destroy_bind_group_layout(self.clear_layout);
+    }
+}
+
 impl DrawGen {
-    /// Builds both pipelines, both bind groups per frame, and every buffer
-    /// between them.
+    /// Builds every bind group per frame and every buffer between the passes,
+    /// against `pipelines` — the layouts and pipelines it dispatches, which it
+    /// keeps a reference to and does not build. One [`DrawGenPipelines`] serves
+    /// every generator a renderer makes.
     ///
     /// `uploads` carries the one start-up copy this makes: the one that zeroes
     /// the hysteresis state, described on [`group_state`](Self::group_state).
@@ -588,11 +1016,19 @@ impl DrawGen {
     ///
     /// If `instances` is empty or `bucket_meshes` is: a ring with no buffers has
     /// nothing to bind, and a table with no buckets generates no draws at all.
+    /// Also if `desc` asks for [`DrawMode::Occlusion`] and `pipelines` was built
+    /// without the occlusion phases.
     pub fn new(
         device: &dyn Device,
         uploads: &mut UploadBatch<'_>,
+        pipelines: &Arc<DrawGenPipelines>,
         desc: &DrawGenDesc<'_>,
     ) -> Result<Self, HalError> {
+        assert!(
+            desc.mode != DrawMode::Occlusion || pipelines.has_occlusion(),
+            "an occlusion generator dispatches the occlusion phases, and these pipelines were \
+             built without them"
+        );
         assert!(
             !desc.instances.is_empty(),
             "draw generation needs at least one instance buffer to cull"
@@ -621,7 +1057,7 @@ impl DrawGen {
              in one call reading a cluster base that belongs to another bucket, or to nothing"
         );
         let mut rollback = Rollback::default();
-        match Self::build(device, uploads, desc, &mut rollback) {
+        match Self::build(device, uploads, pipelines, desc, &mut rollback) {
             Ok(built) => Ok(built),
             Err(error) => {
                 uploads.abandon();
@@ -634,6 +1070,7 @@ impl DrawGen {
     fn build(
         device: &dyn Device,
         uploads: &mut UploadBatch<'_>,
+        pipelines: &Arc<DrawGenPipelines>,
         desc: &DrawGenDesc<'_>,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
@@ -890,201 +1327,13 @@ impl DrawGen {
             )?);
         }
 
-        // --- the clearing pass ---
-        let clear_entries = [
-            uniform(0),
-            storage(1, false, UINT_STRIDE),
-            storage(2, false, UINT_STRIDE),
-            // The draw counts and the mesh-dispatch extents, one buffer.
-            storage(3, false, UINT_STRIDE),
-        ];
-        let clear_desc = BindGroupLayoutDesc {
-            label: Some("clear counters"),
-            entries: &clear_entries,
-        };
-        check_portable_storage_buffers(clear_desc.label, &[&clear_desc])?;
-        let clear_layout = device.create_bind_group_layout(&clear_desc)?;
-        rollback.bind_group_layouts.push(clear_layout);
-        let clear_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("clear counters"),
-            bind_group_layouts: &[clear_layout],
-            push_constants: None,
-        })?;
-        rollback.pipeline_layouts.push(clear_pipeline_layout);
-
-        // --- the cull pass ---
-        //
-        // Binding order is `cull.slang`'s declaration order, which is a rule
-        // rather than a convention: Slang's Metal target hands each resource the
-        // next index in its own table, so a layout that renumbered them would
-        // bind the frustum where the instance array goes. See
-        // `crcbl_shaders`' declaration-order lint.
-        let cull_entries = [
-            uniform(0),
-            // `StructuredBuffer` in the shader, so read-only here: the cull
-            // pass decides what is visible and never edits an instance or a
-            // mesh entry.
-            storage(1, true, crcbl_shaders::mesh::INSTANCE_STRIDE as u32),
-            storage(2, true, crcbl_shaders::mesh::MESH_ENTRY_STRIDE as u32),
-            storage(3, false, UINT_STRIDE),
-            storage(4, false, UINT_STRIDE),
-        ];
-        let cull_desc = BindGroupLayoutDesc {
-            label: Some("cull"),
-            entries: &cull_entries,
-        };
-        check_portable_storage_buffers(cull_desc.label, &[&cull_desc])?;
-        let cull_layout = device.create_bind_group_layout(&cull_desc)?;
-        rollback.bind_group_layouts.push(cull_layout);
-        let cull_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("cull"),
-            bind_group_layouts: &[cull_layout],
-            push_constants: None,
-        })?;
-        rollback.pipeline_layouts.push(cull_pipeline_layout);
-
-        // --- the draw-argument pass ---
-        //
-        // **Eight storage bindings, which is every one a WebGPU device
-        // guarantees.** There is no headroom here: a ninth is a pass that cannot
-        // be created in a browser at the default limits or on SwiftShader, which
-        // is what a CI runner without a GPU has. `check_portable_storage_buffers`
-        // below is what turns a ninth into a failure here rather than into a
-        // pipeline-layout refusal on somebody else's device.
-        let gen_entries = [
-            uniform(0),
-            // The instance array and the mesh table, read only.
-            storage(1, true, crcbl_shaders::mesh::INSTANCE_STRIDE as u32),
-            storage(2, true, crcbl_shaders::mesh::MESH_ENTRY_STRIDE as u32),
-            // The culling statistics, read only: this pass clamps against the
-            // survivor count and adds to nothing.
-            storage(3, true, UINT_STRIDE),
-            // Every host-written table in one buffer, read only: the bucket
-            // table, the per-bucket cluster counts and topic 25's
-            // three selection tables were all decided when a mesh became
-            // resident.
-            storage(4, true, UINT_STRIDE),
-            // The survivor list, its routes, the per-bucket runs and their
-            // starts. Writable, and read through the same descriptor — binding
-            // one buffer read-only *and* writable in one group is a usage
-            // conflict on WebGPU.
-            storage(5, false, UINT_STRIDE),
-            // The indirect arguments.
-            storage(6, false, UINT_STRIDE),
-            // The draw counts and the mesh-dispatch extents.
-            storage(7, false, UINT_STRIDE),
-            // The hysteresis state, read *and* written: this pass is the
-            // only writer, and it reads the previous frame's answer out of
-            // the same element it then overwrites.
-            storage(8, false, UINT_STRIDE),
-        ];
-        let gen_desc = BindGroupLayoutDesc {
-            label: Some("draw args"),
-            entries: &gen_entries,
-        };
-        check_portable_storage_buffers(gen_desc.label, &[&gen_desc])?;
-        let gen_layout = device.create_bind_group_layout(&gen_desc)?;
-        rollback.bind_group_layouts.push(gen_layout);
-        let gen_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("draw args"),
-            bind_group_layouts: &[gen_layout],
-            push_constants: None,
-        })?;
-        rollback.pipeline_layouts.push(gen_pipeline_layout);
-
-        // --- the passes' pipelines, as one batch ---
-        //
-        // Every layout they need exists by now, so they compile side by side
-        // where the device allows it — see [`pipeline_batch`]. Each result
-        // is the rollback's before any error is propagated, so a refusal of one
-        // releases the others.
-        //
-        // `cull` is named rather than resolved: `cull.slang` has an entry point
-        // per occlusion phase beside this one. `bin`, `starts` and `scatter`
-        // are three entry points of one module over one layout, which is why
-        // they are `compute_pipeline_entry` too: the route, the prefix sum and
-        // the scatter share the bucket table's accessors and shaders here have
-        // no `#include`.
-        let draw_args = |label, entry_point, workgroup_size| {
-            compute_pipeline_entry(
-                device,
-                label,
-                &DRAW_GEN,
-                entry_point,
-                gen_pipeline_layout,
-                workgroup_size,
-            )
-        };
-        let results = pipeline_batch::create(
-            device,
-            &mut || {},
-            [
-                &|| {
-                    compute_pipeline(
-                        device,
-                        "clear counters",
-                        &CLEAR_COUNTERS,
-                        clear_pipeline_layout,
-                        clear_counters::WORKGROUP_SIZE,
-                    )
-                },
-                &|| {
-                    compute_pipeline_entry(
-                        device,
-                        "cull",
-                        &CULL,
-                        "computeMain",
-                        cull_pipeline_layout,
-                        cull_shader::WORKGROUP_SIZE,
-                    )
-                },
-                &|| draw_args("draw args bin", "binMain", draw_gen::WORKGROUP_SIZE),
-                // One workgroup for the whole prefix sum, dispatched once by
-                // `record_passes`: its invocations split the table into chunks
-                // and scan the chunk totals in workgroup memory.
-                &|| {
-                    draw_args(
-                        "draw args starts",
-                        "startsMain",
-                        draw_gen::STARTS_WORKGROUP_SIZE,
-                    )
-                },
-                &|| draw_args("draw args scatter", "scatterMain", draw_gen::WORKGROUP_SIZE),
-            ],
-        );
-        rollback.pipelines.extend(results.iter().flatten().copied());
-        let [
-            clear_pipeline,
-            cull_pipeline,
-            bin_pipeline,
-            starts_pipeline,
-            scatter_pipeline,
-        ] = results;
-        let clear_pipeline = clear_pipeline?;
-        let cull_pipeline = cull_pipeline?;
-        let bin_pipeline = bin_pipeline?;
-        let starts_pipeline = starts_pipeline?;
-        let scatter_pipeline = scatter_pipeline?;
-
-        // --- the occlusion phases, on a generator built for them ---
-        let occlusion = if desc.mode == DrawMode::Occlusion {
-            Some(Self::build_occlusion(
-                device,
-                rollback,
-                cull_layout,
-                gen_pipeline_layout,
-            )?)
-        } else {
-            None
-        };
-
         let mut clear_groups = Vec::with_capacity(frames);
         let mut cull_groups = Vec::with_capacity(frames);
         let mut gen_groups = Vec::with_capacity(frames);
         for frame in 0..frames {
             let group = device.create_bind_group(&BindGroupDesc {
                 label: Some("clear counters"),
-                layout: clear_layout,
+                layout: pipelines.clear_layout,
                 entries: &[
                     bound(0, clear_params),
                     bound(1, visible_count[frame]),
@@ -1101,7 +1350,7 @@ impl DrawGen {
             // frame's writes where the previous frame is still reading.
             let group = device.create_bind_group(&BindGroupDesc {
                 label: Some("cull"),
-                layout: cull_layout,
+                layout: pipelines.cull_layout,
                 entries: &[
                     bound(0, cull_params[frame]),
                     bound(1, desc.instances[frame]),
@@ -1120,7 +1369,7 @@ impl DrawGen {
 
             let group = device.create_bind_group(&BindGroupDesc {
                 label: Some("draw args"),
-                layout: gen_layout,
+                layout: pipelines.gen_layout,
                 entries: &[
                     bound(0, gen_params[frame]),
                     bound(1, desc.instances[frame]),
@@ -1154,17 +1403,7 @@ impl DrawGen {
             clear_groups,
             cull_groups,
             gen_groups,
-            clear_layout,
-            clear_pipeline_layout,
-            clear_pipeline,
-            cull_layout,
-            cull_pipeline_layout,
-            cull_pipeline,
-            gen_layout,
-            gen_pipeline_layout,
-            bin_pipeline,
-            starts_pipeline,
-            scatter_pipeline,
+            pipelines: Arc::clone(pipelines),
             bucket_count,
             capacity,
             runs_words,
@@ -1172,108 +1411,6 @@ impl DrawGen {
             task_lanes: desc.task_lanes,
             mode: desc.mode,
             frame_modes: (0..frames).map(|_| AtomicU32::new(0)).collect(),
-            occlusion,
-        })
-    }
-
-    /// The pipelines only an occlusion generator has: `cull.slang`'s two phases
-    /// over the cull's set 0 and the pyramid's set 1, and `draw_gen.slang`'s late
-    /// scatter and finish over the draw-argument layout.
-    fn build_occlusion(
-        device: &dyn Device,
-        rollback: &mut Rollback,
-        cull_layout: BindGroupLayoutHandle,
-        gen_pipeline_layout: PipelineLayoutHandle,
-    ) -> Result<OcclusionPipelines, HalError> {
-        // One depth texture per level, in `cull.slang`'s declaration order —
-        // which is the order Slang's Metal target hands out texture indices in.
-        let entries: Vec<BindGroupLayoutEntry> = (0..cull_shader::OCCLUSION_MAX_LEVELS)
-            .map(|binding| BindGroupLayoutEntry {
-                binding,
-                visibility: ShaderStages::COMPUTE,
-                kind: BindingKind::SampledImage {
-                    view_type: ImageViewType::D2,
-                    // `Depth`, on `crate::hiz`'s terms: `DepthTexture2D` in the
-                    // shader, read with `Load` and never through a sampler.
-                    sample_type: SampleType::Depth,
-                },
-                count: 1,
-                flags: BindingFlags::empty(),
-            })
-            .collect();
-        let pyramid_desc = BindGroupLayoutDesc {
-            label: Some("occlusion pyramid"),
-            entries: &entries,
-        };
-        check_portable_storage_buffers(pyramid_desc.label, &[&pyramid_desc])?;
-        let pyramid_layout = device.create_bind_group_layout(&pyramid_desc)?;
-        rollback.bind_group_layouts.push(pyramid_layout);
-        let cull_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("occlusion cull"),
-            bind_group_layouts: &[cull_layout, pyramid_layout],
-            push_constants: None,
-        })?;
-        rollback.pipeline_layouts.push(cull_pipeline_layout);
-        // One batch, on the terms `build` gives for its own.
-        let entry = |label, shader, entry_point, layout, workgroup_size| {
-            compute_pipeline_entry(device, label, shader, entry_point, layout, workgroup_size)
-        };
-        let cull = cull_shader::WORKGROUP_SIZE;
-        let results = pipeline_batch::create(
-            device,
-            &mut || {},
-            [
-                &|| {
-                    entry(
-                        "occlusion early cull",
-                        &CULL,
-                        "occlusionMain",
-                        cull_pipeline_layout,
-                        cull,
-                    )
-                },
-                &|| {
-                    entry(
-                        "occlusion late cull",
-                        &CULL,
-                        "lateMain",
-                        cull_pipeline_layout,
-                        cull,
-                    )
-                },
-                &|| {
-                    entry(
-                        "draw args late scatter",
-                        &DRAW_GEN,
-                        "lateScatterMain",
-                        gen_pipeline_layout,
-                        draw_gen::WORKGROUP_SIZE,
-                    )
-                },
-                // One workgroup, on `startsMain`'s terms: its invocations split
-                // the buckets into chunks and scan the two closed regions' task
-                // chunks in workgroup memory.
-                &|| {
-                    entry(
-                        "draw args late finish",
-                        &DRAW_GEN,
-                        "lateFinishMain",
-                        gen_pipeline_layout,
-                        draw_gen::STARTS_WORKGROUP_SIZE,
-                    )
-                },
-            ],
-        );
-        rollback.pipelines.extend(results.iter().flatten().copied());
-        let [early, late, late_scatter, late_finish] = results;
-        let (early, late, late_scatter, late_finish) = (early?, late?, late_scatter?, late_finish?);
-        Ok(OcclusionPipelines {
-            pyramid_layout,
-            cull_pipeline_layout,
-            early,
-            late,
-            late_scatter,
-            late_finish,
         })
     }
 
@@ -1388,9 +1525,18 @@ impl DrawGen {
     /// generator not built for [`DrawMode::Occlusion`].
     #[must_use]
     pub fn occlusion_layout(&self) -> Option<BindGroupLayoutHandle> {
-        self.occlusion
-            .as_ref()
-            .map(|pipelines| pipelines.pyramid_layout)
+        self.occlusion().map(|pipelines| pipelines.pyramid_layout)
+    }
+
+    /// The shared occlusion pipelines, on a generator built for
+    /// [`DrawMode::Occlusion`] — `None` on any other, whatever the shared set
+    /// carries, so a plain generator never dispatches them.
+    fn occlusion(&self) -> Option<&OcclusionPipelines> {
+        if self.mode == DrawMode::Occlusion {
+            self.pipelines.occlusion.as_ref()
+        } else {
+            None
+        }
     }
 
     /// The mode `frame`'s dispatches were parametrised for by the last
@@ -1865,8 +2011,7 @@ impl DrawGen {
             "frame {frame} was not begun with the occlusion culls"
         );
         let occlusion = self
-            .occlusion
-            .as_ref()
+            .occlusion()
             .unwrap_or_else(|| unreachable!("begin_frame_with checked the generator's mode"));
         self.record_passes(
             graph,
@@ -1905,8 +2050,7 @@ impl DrawGen {
             "frame {frame} was not begun with the occlusion culls on"
         );
         let occlusion = self
-            .occlusion
-            .as_ref()
+            .occlusion()
             .unwrap_or_else(|| unreachable!("begin_frame_with checked the generator's mode"));
         let groups = instance_count.div_ceil(cull_shader::WORKGROUP_SIZE);
         if groups != 0 {
@@ -1929,7 +2073,7 @@ impl DrawGen {
                 encoder.dispatch(groups, 1, 1);
             });
         }
-        let gen_layout = self.gen_pipeline_layout;
+        let gen_layout = self.pipelines.gen_pipeline_layout;
         let gen_group = self.gen_groups[frame];
         for (label, pipeline, groups) in [
             (
@@ -2034,8 +2178,8 @@ impl DrawGen {
         // The zero every atomic below counts up from, and the first thing in the
         // frame that touches any of the three. Its barrier into the cull pass is
         // the graph's, out of the `ShaderReadWrite` declared on both sides.
-        let clear_pipeline = self.clear_pipeline;
-        let clear_layout = self.clear_pipeline_layout;
+        let clear_pipeline = self.pipelines.clear_pipeline;
+        let clear_layout = self.pipelines.clear_pipeline_layout;
         let clear_group = self.clear_groups[frame];
         // The longest of the three buffers: the arguments, one structure per
         // bucket per region, or for a small table the counts and extents with
@@ -2067,7 +2211,11 @@ impl DrawGen {
 
         let (cull_pipeline, cull_layout, pyramid_group) = match occlusion {
             Some((pipeline, layout, pyramid)) => (pipeline, layout, Some(pyramid.group)),
-            None => (self.cull_pipeline, self.cull_pipeline_layout, None),
+            None => (
+                self.pipelines.cull_pipeline,
+                self.pipelines.cull_pipeline_layout,
+                None,
+            ),
         };
         let cull_group = self.cull_groups[frame];
         let cull_groups = instance_count.div_ceil(cull_shader::WORKGROUP_SIZE);
@@ -2099,7 +2247,7 @@ impl DrawGen {
             });
         }
 
-        let gen_layout = self.gen_pipeline_layout;
+        let gen_layout = self.pipelines.gen_pipeline_layout;
         let gen_group = self.gen_groups[frame];
         // One `binMain` invocation owns bucket `i` *and* routes visible instance
         // `i`, so its dispatch covers the larger of the two — and is never empty,
@@ -2128,9 +2276,13 @@ impl DrawGen {
         // Every pass declares all four written buffers, because every pass binds
         // the one group that names them.
         let passes = [
-            ("draw-args", self.bin_pipeline, bin_groups),
-            ("draw-starts", self.starts_pipeline, 1),
-            ("draw-scatter", self.scatter_pipeline, scatter_groups),
+            ("draw-args", self.pipelines.bin_pipeline, bin_groups),
+            ("draw-starts", self.pipelines.starts_pipeline, 1),
+            (
+                "draw-scatter",
+                self.pipelines.scatter_pipeline,
+                scatter_groups,
+            ),
         ];
         for (label, pipeline, groups) in passes {
             // No instances tested is no survivors to scatter: omit that pass
@@ -2168,28 +2320,10 @@ impl DrawGen {
         }
     }
 
-    /// Releases everything, in dependency order. The device must be idle.
+    /// Releases everything it owns, in dependency order, and gives back its
+    /// reference to the shared [`DrawGenPipelines`] — which this destroys only
+    /// if it was the last. The device must be idle.
     pub fn destroy(self, device: &dyn Device) {
-        if let Some(occlusion) = self.occlusion {
-            for pipeline in [
-                occlusion.early,
-                occlusion.late,
-                occlusion.late_scatter,
-                occlusion.late_finish,
-            ] {
-                device.destroy_compute_pipeline(pipeline);
-            }
-            device.destroy_pipeline_layout(occlusion.cull_pipeline_layout);
-            device.destroy_bind_group_layout(occlusion.pyramid_layout);
-        }
-        device.destroy_compute_pipeline(self.scatter_pipeline);
-        device.destroy_compute_pipeline(self.starts_pipeline);
-        device.destroy_compute_pipeline(self.bin_pipeline);
-        device.destroy_pipeline_layout(self.gen_pipeline_layout);
-        device.destroy_compute_pipeline(self.cull_pipeline);
-        device.destroy_pipeline_layout(self.cull_pipeline_layout);
-        device.destroy_compute_pipeline(self.clear_pipeline);
-        device.destroy_pipeline_layout(self.clear_pipeline_layout);
         for group in self
             .gen_groups
             .into_iter()
@@ -2198,9 +2332,7 @@ impl DrawGen {
         {
             device.destroy_bind_group(group);
         }
-        device.destroy_bind_group_layout(self.gen_layout);
-        device.destroy_bind_group_layout(self.cull_layout);
-        device.destroy_bind_group_layout(self.clear_layout);
+        DrawGenPipelines::release(self.pipelines, device);
         for buffer in [self.tables, self.clear_params, self.group_state]
             .into_iter()
             .chain(self.gen_params)
@@ -2350,11 +2482,12 @@ pub(crate) fn compute_pipeline_entry_with_workgroup(
     pipeline
 }
 
-/// What a partly-built [`DrawGen`] has to give back.
+/// What a partly-built [`DrawGen`] or [`DrawGenPipelines`] has to give back.
 ///
-/// `build` creates two dozen objects with `?` between them and the seam's
+/// Each `build` creates its objects with `?` between them and the seam's
 /// `destroy_*` is explicit, so a failure half way through would otherwise leak
-/// everything created before it.
+/// everything created before it. A generator's holds buffers and bind groups;
+/// the shared set's holds layouts and pipelines.
 #[derive(Debug, Default)]
 struct Rollback {
     buffers: Vec<BufferHandle>,
@@ -2371,8 +2504,9 @@ impl Rollback {
         *self = Self::default();
     }
 
-    /// Releases everything, in the same dependency order as
-    /// [`DrawGen::destroy`].
+    /// Releases everything: pipelines before their layouts, bind groups before
+    /// theirs, and buffers last — the order [`DrawGen::destroy`] and
+    /// [`DrawGenPipelines`]' own release follow between them.
     fn run(self, device: &dyn Device) {
         for handle in self.pipelines {
             device.destroy_compute_pipeline(handle);
@@ -2448,9 +2582,12 @@ mod tests {
             })
             .collect();
         let mut uploads = UploadBatch::new(device, queue, "draw gen test");
+        let pipelines = DrawGenPipelines::new(device, mode == DrawMode::Occlusion, &mut || {})
+            .expect("the null backend builds the pipelines");
         let draws = DrawGen::new(
             device,
             &mut uploads,
+            &pipelines,
             &DrawGenDesc {
                 label: Some("draw gen test"),
                 instances: &instances,
@@ -2470,6 +2607,9 @@ mod tests {
         )
         .expect("the null backend builds a generator");
         uploads.submit().expect("the hysteresis state fills");
+        // The generator holds the only reference now, so its own `destroy`
+        // releases the set.
+        DrawGenPipelines::release(pipelines, device);
         draws
     }
 
