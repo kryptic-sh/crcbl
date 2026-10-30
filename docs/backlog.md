@@ -8437,12 +8437,10 @@ scene menu with the gaps below.
   there is no public font counterpart of `Menu::panel_size`; a cycler's chevrons
   hold its caption still only in a font whose `<`, `>` and space advance alike.
   The warning for a name nothing is registered under names the span's selector,
-  not the family (`FamilyName` is a hash). **Untested**: a text input's caret
-  stops in a registered font (`text_input`'s `measure` takes the resolved font,
-  but no test drives it), and the pixels a registered real TTF rasterises to —
-  the tests use a synthetic fixed-pitch `Font` that has no outlines. EW's
-  `ui_font.rs` still rewrites `DrawCommand::Text` itself; moving it to
-  `register_font` is EW's change, not made.
+  not the family (`FamilyName` is a hash). **Untested**: the pixels a registered
+  real TTF rasterises to — the tests use a synthetic fixed-pitch `Font` that has
+  no outlines. EW's `ui_font.rs` still rewrites `DrawCommand::Text` itself;
+  moving it to `register_font` is EW's change, not made.
 
 ## What UI rung 4 shipped without (2026-09-16)
 

@@ -742,6 +742,78 @@ fn the_selection_and_the_caret_sit_on_the_glyphs_they_name() {
     );
 }
 
+/// **In a registered font the selection and the caret stop on that font's
+/// advances**: a synthetic font registered by name, every glyph of which is
+/// half an em wide, puts the selection's edges and the caret on exact
+/// multiples of that half em, where neither the bitmap font nor the
+/// committed one would.
+#[cfg(feature = "parsed-font")]
+#[test]
+fn the_caret_stops_on_a_registered_fonts_advances() {
+    use crate::font::FontMetrics;
+
+    const SIZE: f32 = 30.0;
+    let font = Font::fixed_pitch(
+        FontMetrics {
+            units_per_em: 1000,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+        },
+        500.0,
+    );
+    let half_em = SIZE / 2.0;
+    let mut ui = Ui::new();
+    ui.register_font("mono", font).expect("not reserved");
+    ui.add_stylesheet(
+        "mono.css",
+        &format!("text-input {{ font-family: mono; font-size: {SIZE}px; }}"),
+    );
+    let mut values = [String::from("abcdef"), String::new()];
+    page(&mut ui, idle(), NavInput::default(), quiet(), &mut values);
+    page(&mut ui, idle(), NavInput::NAVIGATION, quiet(), &mut values);
+    page(&mut ui, idle(), NavInput::ACCEPT, quiet(), &mut values);
+    let edits = [
+        step(Motion::Home, false),
+        step(Motion::Right, false),
+        step(Motion::Right, true),
+        step(Motion::Right, true),
+    ];
+    let selected = page(
+        &mut ui,
+        idle(),
+        NavInput::NAVIGATION,
+        typed(edits),
+        &mut values,
+    );
+    let key = selected.name.key;
+    let span = part(&ui, key, ".text-input-text").expect("text");
+    let (text_min, _) = rect(&ui, span);
+    let (min, max) = rect(
+        &ui,
+        part(&ui, key, ".text-input-selection").expect("selected"),
+    );
+    assert_eq!(min.x, (text_min.x + half_em).round(), "left edge");
+    assert_eq!(max.x, (text_min.x + 3.0 * half_em).round(), "right edge");
+
+    page(
+        &mut ui,
+        idle(),
+        NavInput::NAVIGATION,
+        typed([step(Motion::End, false), insert("g")]),
+        &mut values,
+    );
+    let caret = part(&ui, key, ".text-input-caret").expect("an engaged input has a caret");
+    let typed = "abcdefg";
+    let expected = typed.len() as f32 * half_em;
+    assert_ne!(
+        bitmap_width(&ui, span, typed),
+        expected,
+        "the bitmap font is as wide, so the claim cannot tell the fonts apart"
+    );
+    assert_eq!(rect(&ui, caret).0.x, (text_min.x + expected).round());
+}
+
 /// **A selection across a change of direction is a rectangle for each
 /// side**: in `ab ` and three Hebrew letters, selecting from after `a` to
 /// after the first Hebrew letter draws one block over `b` and the space and
