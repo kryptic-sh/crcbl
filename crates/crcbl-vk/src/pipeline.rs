@@ -39,10 +39,30 @@
 //! which is what the seam requires: "a bindless array quietly downgraded to a
 //! fixed one reads garbage at index 4097". What is not here is a bindless array
 //! at scale; that is topic 03's, at P3.
+//!
+//! # The driver compiles outside the device lock
+//!
+//! `vkCreateGraphicsPipelines` and `vkCreateComputePipelines` are where the
+//! driver compiles the shaders — hundreds of milliseconds per pipeline on a
+//! cold cache — and Vulkan lets any number of threads make them at once. So
+//! every pipeline path here works in three steps: under the state lock it
+//! validates the descriptor and resolves every handle the create-info names to
+//! a raw Vulkan object, and pins those objects ([`CompilePin`]); it releases the
+//! lock for the driver call; and it retakes the lock to insert the pipeline.
+//! Another thread's `create_buffer` or `submit` therefore runs during the
+//! compile rather than after it, and so do other compiles.
+//!
+//! The pin is what makes releasing the lock sound. The modules and the layout
+//! must stay alive until the driver returns, and another thread may destroy
+//! either in the meantime. `destroy_*` parks them in the deletion queue as
+//! usual — the handle is dead at once — and `poll_retire` refuses to free a
+//! pinned object however far the timeline has run, so the `vkDestroy*` waits
+//! for the first pass after the compile has finished. See `crate::deletion`.
 
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 
 use ash::vk;
+use ash::vk::Handle as _;
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
@@ -551,7 +571,7 @@ impl VkDevice {
         desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
         let inner = Arc::clone(self.inner());
-        let mut state = inner.state();
+        let state = inner.state();
 
         let samples = validate_rendering_state(
             &inner.caps,
@@ -584,6 +604,9 @@ impl VkDevice {
             )?),
             None => None,
         };
+        let mut pinned = vec![layout_raw.as_raw(), vertex_module.as_raw()];
+        pinned.extend(fragment_name.as_ref().map(|(_, module)| module.as_raw()));
+        let pin = CompilePin::new(&inner, state, pinned);
 
         let mut stages = vec![
             vk::PipelineShaderStageCreateInfo::default()
@@ -602,7 +625,7 @@ impl VkDevice {
 
         create_rendering_pipeline(
             &inner,
-            &mut state,
+            pin,
             &RenderingState {
                 label: desc.label,
                 layout: layout_raw,
@@ -653,7 +676,7 @@ impl VkDevice {
             });
         }
 
-        let mut state = inner.state();
+        let state = inner.state();
         let samples = validate_rendering_state(
             &caps,
             desc.primitive,
@@ -714,6 +737,14 @@ impl VkDevice {
             )?),
             None => None,
         };
+        let mut pinned = vec![layout_raw.as_raw(), mesh_module.as_raw()];
+        pinned.extend(
+            [task_name.as_ref(), fragment_name.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(|(_, module)| module.as_raw()),
+        );
+        let pin = CompilePin::new(&inner, state, pinned);
 
         let mut stages = Vec::with_capacity(3);
         if let Some((name, module)) = task_name.as_ref() {
@@ -741,7 +772,7 @@ impl VkDevice {
 
         create_rendering_pipeline(
             &inner,
-            &mut state,
+            pin,
             &RenderingState {
                 label: desc.label,
                 layout: layout_raw,
@@ -764,7 +795,7 @@ impl VkDevice {
         desc: &ComputePipelineDesc<'_>,
     ) -> Result<ComputePipelineHandle, HalError> {
         let inner = Arc::clone(self.inner());
-        let mut state = inner.state();
+        let state = inner.state();
 
         let layout = lookup(
             &state.pipeline_layouts,
@@ -797,6 +828,7 @@ impl VkDevice {
         )?;
         spirv::require_workgroup_size(&entry.words, desc.compute.entry_point, desc.workgroup_size)
             .map_err(HalError::ShaderCompilation)?;
+        let pin = CompilePin::new(&inner, state, vec![layout_raw.as_raw(), module.as_raw()]);
 
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
@@ -809,12 +841,14 @@ impl VkDevice {
             info = info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR);
         }
 
-        // SAFETY: as `create_graphics_pipeline_impl`.
+        compile_window();
+        // SAFETY: as `create_rendering_pipeline`.
         let created = unsafe {
             inner
                 .raw
                 .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
         };
+        // On the error path below, `pin` drops on return and releases its hold.
         let raw = match created {
             Ok(pipelines) => pipelines[0],
             Err((pipelines, error)) => {
@@ -834,10 +868,11 @@ impl VkDevice {
             crate::shader_stats::log(ext, raw, desc.label);
         }
 
-        Ok(inner.stamp(state.pipelines.insert(PipelineEntry {
+        let handle = pin.release().pipelines.insert(PipelineEntry {
             owner: inner.id,
             raw,
-        })))
+        });
+        Ok(inner.stamp(handle))
     }
 
     pub(crate) fn create_sampler_impl(
@@ -993,12 +1028,15 @@ fn validate_rendering_state(
 /// both land in the same pool, and both are bound at
 /// `VK_PIPELINE_BIND_POINT_GRAPHICS`.
 ///
+/// Called with the state lock released: `pin` holds the modules and the layout
+/// `desc` names, and is released as soon as the driver returns.
+///
 /// # Errors
 ///
 /// [`HalError::PipelineCreation`] with the driver's result.
 fn create_rendering_pipeline(
     inner: &Arc<DeviceInner>,
-    state: &mut DeviceState,
+    pin: CompilePin<'_>,
     desc: &RenderingState<'_>,
 ) -> Result<GraphicsPipelineHandle, HalError> {
     // Empty, and it stays empty — and for a mesh pipeline it is not even
@@ -1136,14 +1174,19 @@ fn create_rendering_pipeline(
         info = info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR);
     }
 
+    compile_window();
     // SAFETY: every pointer in `info` borrows a local that outlives the
     // call; the modules and the layout were resolved against this device's
-    // tables; and the entry points were checked to exist in the modules.
+    // tables and are pinned, so no other thread's `poll_retire` can destroy
+    // them before the call returns; and the entry points were checked to
+    // exist in the modules. No pipeline cache is passed, so nothing in the
+    // call needs external synchronisation.
     let created = unsafe {
         inner
             .raw
             .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
     };
+    // On the error path below, `pin` drops on return and releases its hold.
     let raw = match created {
         Ok(pipelines) => pipelines[0],
         // `create_graphics_pipelines` returns the partial results alongside
@@ -1167,10 +1210,99 @@ fn create_rendering_pipeline(
         crate::shader_stats::log(ext, raw, desc.label);
     }
 
-    Ok(inner.stamp(state.pipelines.insert(PipelineEntry {
+    let handle = pin.release().pipelines.insert(PipelineEntry {
         owner: inner.id,
         raw,
-    })))
+    });
+    Ok(inner.stamp(handle))
+}
+
+/// The modules and the layout one pipeline compile reads, held out of the
+/// deletion queue's reach while the driver runs without the state lock.
+///
+/// [`new`](Self::new) consumes the state guard: it pins under the lock and then
+/// releases it, so no `destroy_*` can slip in between resolving a handle and
+/// pinning it, and no pin can exist while its creator still holds the guard —
+/// which is what lets [`Drop`] take the lock without deadlocking, on an unwind
+/// included. [`release`](Self::release) unpins and hands back the guard in one
+/// acquisition, for the insert; dropping a pin instead (the error paths)
+/// unpins on its own, so a compile can never leave an object pinned.
+struct CompilePin<'a> {
+    inner: &'a DeviceInner,
+    raws: Vec<u64>,
+}
+
+impl<'a> CompilePin<'a> {
+    /// Pins `raws` and releases the lock `state` holds.
+    fn new(inner: &'a DeviceInner, mut state: MutexGuard<'_, DeviceState>, raws: Vec<u64>) -> Self {
+        state.compile_pins.pin(&raws);
+        drop(state);
+        Self { inner, raws }
+    }
+
+    /// Retakes the lock, releases the hold, and returns the guard.
+    fn release(mut self) -> MutexGuard<'a, DeviceState> {
+        let mut state = self.inner.state();
+        state.compile_pins.unpin(&core::mem::take(&mut self.raws));
+        // `self` drops here holding nothing, which `Drop` skips without
+        // touching the lock this function is returning.
+        state
+    }
+}
+
+impl Drop for CompilePin<'_> {
+    fn drop(&mut self) {
+        if !self.raws.is_empty() {
+            self.inner.state().compile_pins.unpin(&self.raws);
+        }
+    }
+}
+
+#[cfg(feature = "vk-e2e")]
+thread_local! {
+    static DURING_NEXT_COMPILE: core::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// Runs `hook` inside the next pipeline compile this thread makes, at the
+/// point where the state lock has been released and the compile's modules
+/// and layout are pinned — immediately before the driver call.
+///
+/// A test hook, for `tests/vk_e2e`: it is what lets the suite show that
+/// another thread's device calls run during a compile, and that a module
+/// destroyed then survives until the driver has returned, without timing
+/// anything. Built only with the `vk-e2e` feature, and inert unless armed.
+///
+/// The hook stays armed until a compile runs it or the returned guard drops,
+/// so a create call that fails before reaching the driver cannot leave it to
+/// fire inside some later test on the same thread.
+#[cfg(feature = "vk-e2e")]
+#[must_use = "dropping the guard disarms the hook"]
+pub fn during_next_pipeline_compile(hook: impl FnOnce() + 'static) -> CompileHookGuard {
+    DURING_NEXT_COMPILE.set(Some(Box::new(hook)));
+    CompileHookGuard(core::marker::PhantomData)
+}
+
+/// Disarms [`during_next_pipeline_compile`]'s hook on drop, if no compile has
+/// run it. Tied to the arming thread, whose thread-local it clears.
+#[cfg(feature = "vk-e2e")]
+#[derive(Debug)]
+pub struct CompileHookGuard(core::marker::PhantomData<*const ()>);
+
+#[cfg(feature = "vk-e2e")]
+impl Drop for CompileHookGuard {
+    fn drop(&mut self) {
+        drop(DURING_NEXT_COMPILE.take());
+    }
+}
+
+/// The unlocked, pinned window before the driver call: where the hook
+/// `during_next_pipeline_compile` armed runs, and nothing otherwise.
+fn compile_window() {
+    #[cfg(feature = "vk-e2e")]
+    if let Some(hook) = DURING_NEXT_COMPILE.take() {
+        hook();
+    }
 }
 
 /// Resolves a stage's entry point, checking it exists in the module first.

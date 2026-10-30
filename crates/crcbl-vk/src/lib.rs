@@ -230,6 +230,12 @@ pub(crate) mod swapchain;
 pub use debug::{Severity, ValidationMessage, ValidationReport, ValidationSink};
 pub use device::VkDevice;
 pub use instance::{API_VERSION, OpenError, VkInstance};
+// Not part of the public surface above: a test hook for the e2e suite. Any
+// build with the `vk-e2e` feature compiles it in — `--all-features` ones too —
+// and it does nothing unless a caller arms it.
+#[cfg(feature = "vk-e2e")]
+#[doc(hidden)]
+pub use pipeline::{CompileHookGuard, during_next_pipeline_compile};
 
 #[cfg(test)]
 mod tests {

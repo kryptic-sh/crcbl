@@ -56,6 +56,47 @@ fn probe_source() -> Vec<u32> {
     (0..PROBE_ELEMENTS).map(|index| index + 1).collect()
 }
 
+/// The probe's bind-group layout: its parameters, its source and its
+/// destination, with `flags` on the destination binding.
+///
+/// Shared with `pipeline.rs`'s compile-window test, which needs a compute
+/// pipeline whose layout really declares what the probe's module reads.
+pub(crate) fn probe_layout_entries(
+    flags: crcbl_hal::BindingFlags,
+) -> [crcbl_hal::BindGroupLayoutEntry; 3] {
+    [
+        crcbl_hal::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: crcbl_hal::ShaderStages::COMPUTE,
+            kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+            count: 1,
+            flags: crcbl_hal::BindingFlags::empty(),
+        },
+        crcbl_hal::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: crcbl_hal::ShaderStages::COMPUTE,
+            kind: crcbl_hal::BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+                stride: size_of::<u32>() as u32,
+            },
+            count: 1,
+            flags: crcbl_hal::BindingFlags::empty(),
+        },
+        crcbl_hal::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: crcbl_hal::ShaderStages::COMPUTE,
+            kind: crcbl_hal::BindingKind::StorageBuffer {
+                read_only: false,
+                dynamic: false,
+                stride: size_of::<u32>() as u32,
+            },
+            count: 1,
+            flags,
+        },
+    ]
+}
+
 /// What the destination must hold for `elements` dispatched elements, and the
 /// sentinel beyond them.
 ///
@@ -232,37 +273,7 @@ impl ComputeProbe {
         device.destroy_command_buffer(commands);
         device.destroy_buffer(upload);
 
-        let layout_entries = [
-            crcbl_hal::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: crcbl_hal::ShaderStages::COMPUTE,
-                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
-                count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
-            },
-            crcbl_hal::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: crcbl_hal::ShaderStages::COMPUTE,
-                kind: crcbl_hal::BindingKind::StorageBuffer {
-                    read_only: true,
-                    dynamic: false,
-                    stride: size_of::<u32>() as u32,
-                },
-                count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
-            },
-            crcbl_hal::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: crcbl_hal::ShaderStages::COMPUTE,
-                kind: crcbl_hal::BindingKind::StorageBuffer {
-                    read_only: false,
-                    dynamic: false,
-                    stride: size_of::<u32>() as u32,
-                },
-                count: 1,
-                flags,
-            },
-        ];
+        let layout_entries = probe_layout_entries(flags);
         let bind_group_layout = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
                 label: Some("compute probe"),

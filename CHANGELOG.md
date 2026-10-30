@@ -102,6 +102,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-vk` no longer holds the device's state lock while the driver compiles
+  a pipeline.** `create_graphics_pipeline`, `create_mesh_pipeline` and
+  `create_compute_pipeline` resolve and validate under the lock, release it for
+  `vkCreate*Pipelines` and retake it to insert, so compiles on different threads
+  run concurrently and other device calls (`create_buffer`, `write_buffer`,
+  `submit`) no longer wait behind a cold-cache compile. A shader module or
+  pipeline layout destroyed while a compile reads it stays alive in the deletion
+  queue until that compile returns. Measured on an RX 7900 XTX (radv): 64 small
+  compute pipelines on 8 threads took 2.7–3.8 ms, against 16.2–17.2 ms with the
+  lock held.
 - **`ForwardRenderer`'s build submits its small start-up uploads once**: the
   occlusion, contact-shadow and probe-visibility placeholders, the DFG and LTC
   tables, every view's reflection sky table and exposure fills, each view's and

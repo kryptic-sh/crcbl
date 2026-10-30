@@ -40,6 +40,17 @@
 //! idle instead. Everything else — buffers, images, views, semaphores, query
 //! pools — belongs here.
 //!
+//! # Nor is a recording the only reader no timeline describes
+//!
+//! A pipeline compile reads its shader modules and its pipeline layout from
+//! inside `vkCreate*Pipelines`, and that call runs **outside** the device's
+//! state lock (see `crate::pipeline`), so another thread can destroy either
+//! while the driver is still reading it. [`Pins`] is the compile's hold: the
+//! raw handles it names are added before the lock is released and removed
+//! once the driver returns, and `poll_retire` answers `held` for every handle
+//! pinned — so a module destroyed mid-compile is parked like any other object
+//! and only freed on the first pass after the compile has finished with it.
+//!
 //! # The retirement policy is pure, so it is tested without a GPU
 //!
 //! [`RetireQueue`] is generic over its payload and knows nothing about Vulkan.
@@ -166,9 +177,75 @@ impl<T> RetireQueue<T> {
     }
 }
 
+/// Raw handles an in-flight pipeline compile is reading, as a multiset.
+///
+/// A multiset because two threads may compile against the same module at once,
+/// and the first to finish must not release the second's hold. Linear in the
+/// number of pins, which is a few handles per compile in flight.
+#[derive(Debug, Default)]
+pub struct Pins {
+    raws: Vec<u64>,
+}
+
+impl Pins {
+    /// Adds one hold on each of `raws`.
+    pub fn pin(&mut self, raws: &[u64]) {
+        self.raws.extend_from_slice(raws);
+    }
+
+    /// Removes one hold on each of `raws` — the ones a matching [`pin`] added.
+    ///
+    /// [`pin`]: Self::pin
+    pub fn unpin(&mut self, raws: &[u64]) {
+        for raw in raws {
+            let found = self.raws.iter().position(|held| held == raw);
+            debug_assert!(found.is_some(), "unpinned {raw:#x}, which nothing pinned");
+            if let Some(index) = found {
+                self.raws.swap_remove(index);
+            }
+        }
+    }
+
+    /// Whether any compile still holds `raw`.
+    #[must_use]
+    pub fn holds(&self, raw: u64) -> bool {
+        self.raws.contains(&raw)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pinned payload stays parked past its key, exactly like one a recording
+    /// holds, and frees on the first pass after the last pin is released — the
+    /// shader module another thread destroyed while a compile was reading it.
+    /// Two pins on one payload are two holds: releasing the first frees nothing.
+    #[test]
+    fn a_pinned_payload_frees_only_after_its_last_pin_is_released() {
+        let mut queue = RetireQueue::new();
+        let mut pins = Pins::default();
+        pins.pin(&[30, 40]);
+        pins.pin(&[30]);
+        queue.push(1, 30_u64);
+        queue.push(1, 50);
+
+        let mut freed = Vec::new();
+        let mut pass = |queue: &mut RetireQueue<u64>, pins: &Pins| {
+            queue.retire(9, |raw| pins.holds(*raw), |raw| freed.push(raw));
+        };
+        pass(&mut queue, &pins);
+        assert_eq!(queue.pending(), 1, "the pinned payload is still parked");
+
+        pins.unpin(&[30, 40]);
+        pass(&mut queue, &pins);
+        assert_eq!(queue.pending(), 1, "the second compile still holds it");
+
+        pins.unpin(&[30]);
+        pass(&mut queue, &pins);
+        assert_eq!(freed, vec![50, 30], "and it frees once nothing holds it");
+        assert!(!pins.holds(30) && !pins.holds(40), "every pin was released");
+    }
 
     /// Retires with nothing held, which is the steady state: every command
     /// buffer that referenced these payloads has been submitted.

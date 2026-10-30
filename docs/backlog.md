@@ -129,36 +129,29 @@ Read-only review of the tree at `3edd00dc`. Nothing below was measured: every
 cost is inferred from reading the code, and each item says what to time before
 acting. Items already in this backlog are not repeated. Start-up items first.
 
-### Start-up: every pipeline compile holds the device lock (vk, dx12)
+### Start-up: dx12 still holds the device lock across a pipeline compile
 
-In `crcbl-vk`, `create_graphics_pipeline_impl`, `create_mesh_pipeline_impl` and
-`create_compute_pipeline_impl` (`crates/crcbl-vk/src/pipeline.rs`) take
-`inner.state()` at the top and keep holding it across
-`vkCreateGraphicsPipelines` / `vkCreateComputePipelines`, the driver's shader
-compile; `create_rendering_pipeline` receives the guard as `&mut state`.
-`crcbl-dx12`'s `create_graphics_pipeline` and `create_compute_pipeline`
-(`crates/crcbl-dx12/src/device.rs`) do the same. Two costs follow:
+`crcbl-vk` releases its state lock for the driver's compile (pinned layout and
+modules, enforced by `poll_retire`). `crcbl-dx12`'s `create_graphics_pipeline`,
+`create_mesh_pipeline` and `create_compute_pipeline`
+(`crates/crcbl-dx12/src/device.rs`) still look up the layout and modules and
+call `pipeline::graphics`/`mesh`/`compute` under the lock, so dx12 serialises
+compiles and blocks every other device call behind one. Measured cold numbers in
+this backlog: a forward colour pipeline at 361 ms on dx12.
 
-- Building pipelines on worker threads cannot help: both APIs allow concurrent
-  pipeline creation, but the backend serialises it.
-- Every other device call on any thread (`create_buffer`, `write_buffer`,
-  submits) waits for the whole compile, so a background compile cannot overlap
-  the frame loop. Measured cold numbers already in this backlog: 2.2–2.4 s per
-  scene build, about 90% pipeline creation, one forward colour pipeline at 313
-  ms (vk) / 361 ms (dx12).
-
-Moving pipeline work off the main thread is recorded elsewhere here as
-"considered and declined"; that entry does not mention this lock, which is why
-no form of it would work today.
-
-- Impact: large on a cold driver cache (first launch, after a driver update);
-  small warm. Verified by reading (the parent re-read the vk path); gain needs
-  measuring.
-- Fix: resolve layout and module handles under the lock, copy out the raw
-  handles and the strides the entry-point checks need, release the lock for the
-  driver call, retake it to insert. Referenced objects must stay alive across
-  the call (refcount or deferred destruction). Then build `ForwardRenderer`'s
-  independent pipelines in parallel through `crcbl_jobs`.
+- Fix, simpler than vk's: under the lock clone the root signature (a COM
+  reference keeps it alive) and take the module's DXIL as owned or `Arc` bytes,
+  release the lock for `Create*PipelineState` (the D3D12 device is
+  free-threaded), retake it to insert. Verifiable only on CI's WARP adapter (no
+  Windows hardware here).
+- Then the gain itself: build `ForwardRenderer`'s independent pipelines in
+  parallel through `crcbl_jobs`. Until that lands no start-up time is saved; on
+  vk, 64 small compute pipelines from 8 threads took 2.7–3.8 ms against
+  16.2–17.2 ms with the lock held (RX 7900 XTX, load about 10). The 2.2–2.4 s
+  cold scene build has not been re-measured.
+- A shared in-memory `VkPipelineCache` is now safe to add (internally
+  synchronised unless created externally-synchronised); persisting it is the
+  separate "The Vulkan pipeline cache is not persisted" entry.
 
 ### Start-up: `ForwardRenderer` builds every pass whether used or not
 

@@ -510,3 +510,137 @@ fn a_writable_storage_binding_refuses_host_visible_memory() {
 
     headless.finish();
 }
+
+/// How long the compile window waits for the other thread's device calls.
+///
+/// A deadlock bound, not a measurement: the calls take milliseconds once the
+/// lock is free, and with the lock held across the compile they never finish
+/// at all, because the thread holding it is the one waiting here. The bound is
+/// what turns that hang into a failure that names the cause.
+const COMPILE_WINDOW_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A pipeline compile runs **outside** the device's state lock, and the
+/// module and layout it reads survive being destroyed under it.
+///
+/// No timing is involved. The hook runs on this thread inside the compile, at
+/// the point where the lock has been released and the driver has not yet been
+/// called, and blocks there until a second thread has made a round of device
+/// calls: `create_buffer` and `destroy_buffer`, then the compile's own module
+/// and layout destroyed, then a submission and a `wait_idle` — which passes
+/// the deletion queue's key for both and runs `poll_retire`. Only then does
+/// the driver compile against them.
+///
+/// Two ways to fail, each its own regression: a compile that held the lock
+/// leaves the second thread blocked on it, the hook's wait runs out, and the
+/// test fails once the compile returns and lets that thread go; and a
+/// `poll_retire` that freed the pinned module or layout hands the driver a
+/// destroyed object, which the validation layer reports at `finish` — or the
+/// driver crashes on.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_pipeline_compile_releases_the_device_lock_and_keeps_what_it_reads() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let queue = headless.queue;
+
+    let entries = crate::compute::probe_layout_entries(crcbl_hal::BindingFlags::empty());
+    let set_layout = device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("compile window"),
+            entries: &entries,
+        })
+        .expect("the probe's layout");
+    let layout = device
+        .create_pipeline_layout(&crcbl_hal::PipelineLayoutDesc {
+            label: Some("compile window"),
+            bind_group_layouts: &[set_layout],
+            push_constants: None,
+        })
+        .expect("a pipeline layout");
+    let module = device
+        .create_shader_module(&crcbl_hal::ShaderModuleDesc {
+            label: Some("compute_probe.slang"),
+            spirv: crcbl_shaders::COMPUTE_PROBE.spirv(),
+            wgsl: crcbl_shaders::COMPUTE_PROBE.wgsl(),
+            msl: crcbl_shaders::COMPUTE_PROBE.msl(),
+            dxil: &[],
+        })
+        .expect("the committed SPIR-V is accepted");
+    let entry_point = crcbl_shaders::COMPUTE_PROBE
+        .entry_point(crcbl_shaders::Stage::Compute)
+        .expect("the probe has exactly one compute entry point");
+
+    let (start, started) = mpsc::channel::<()>();
+    let (done, finished) = mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            // Only a hook that never ran ends this wait unanswered — disarmed,
+            // which hangs up — and the compile below has failed the test by
+            // then.
+            if started.recv_timeout(COMPILE_WINDOW_BOUND).is_err() {
+                return;
+            }
+            let buffer = device
+                .create_buffer(&crcbl_hal::BufferDesc {
+                    label: Some("made during a compile"),
+                    size: 256,
+                    usage: crcbl_hal::BufferUsage::STORAGE,
+                    memory: crcbl_hal::MemoryLocation::DeviceLocal,
+                })
+                .expect("a buffer, while another thread compiles");
+            device.destroy_buffer(buffer);
+
+            device.destroy_shader_module(module);
+            device.destroy_pipeline_layout(layout);
+            let encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("passes the retire key"),
+                queue,
+            });
+            let commands = encoder.finish().expect("an empty recording");
+            device
+                .submit(queue, &crcbl_hal::SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+            // The receiver is gone only if the hook already gave up waiting.
+            let _ = done.send(());
+        });
+
+        // Recorded rather than asserted inside the hook: a panic there would
+        // unwind out of a compile that, in the regression this catches, still
+        // holds the lock, and the hang would replace the failure.
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let window = Arc::clone(&overlapped);
+        // Held to the end of this closure: a create that fails before its
+        // compile window disarms the hook as this unwinds, which also hangs up
+        // on the second thread rather than leaving it waiting.
+        let _armed = crcbl_vk::during_next_pipeline_compile(move || {
+            start.send(()).expect("the second thread is waiting");
+            let answered = finished.recv_timeout(COMPILE_WINDOW_BOUND).is_ok();
+            window.store(answered, Ordering::Release);
+        });
+        let pipeline = device
+            .create_compute_pipeline(&crcbl_hal::ComputePipelineDesc {
+                label: Some("compile window"),
+                layout,
+                compute: crcbl_hal::ShaderEntry {
+                    module,
+                    entry_point,
+                },
+                workgroup_size: [crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1],
+            })
+            .expect("the compile reads a module and a layout it pinned");
+        device.destroy_compute_pipeline(pipeline);
+        assert!(
+            overlapped.load(Ordering::Acquire),
+            "another thread's device calls must complete while a pipeline compiles; the \
+             compile held the device's state lock across the driver call"
+        );
+    });
+
+    device.destroy_bind_group_layout(set_layout);
+    headless.finish();
+}

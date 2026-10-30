@@ -13,6 +13,15 @@
 //! that stops being true, and splitting the lock is a change confined to this
 //! file.
 //!
+//! A few driver calls are deliberately made outside it — the waits
+//! (`vkDeviceWaitIdle`, a query set's `vkWaitSemaphores`), the reset of a
+//! command pool already taken off the free list, and the driver's pipeline
+//! compile. The compile is the costly one, hundreds of milliseconds on a cold
+//! cache: holding the lock across it serialised every compile and stalled
+//! every other device call behind it. `crate::pipeline` resolves and pins what
+//! the compile reads under the lock, releases it for the driver call, and
+//! retakes it to insert.
+//!
 //! # Everything a driver owns is retired, never freed inline
 //!
 //! `destroy_*` invalidates the handle immediately and parks the driver object in
@@ -55,7 +64,7 @@ use crate::command::VkCommandEncoder;
 use crate::command_pools::PoolFreeList;
 use crate::conv;
 use crate::debug::{self, VALIDATION_LAYER};
-use crate::deletion::RetireQueue;
+use crate::deletion::{Pins, RetireQueue};
 use crate::instance::{InstanceInner, next_owner_id};
 use crate::mem::{self, MemoryRequest};
 use crate::pipeline::{
@@ -377,6 +386,10 @@ pub(crate) struct DeviceState {
     pub(crate) pipelines: Pool<PipelineEntry>,
     pub(crate) samplers: Pool<SamplerEntry>,
     trash: RetireQueue<Trash>,
+    /// The modules and layouts a pipeline compile running outside this lock is
+    /// reading; [`DeviceInner::poll_retire`] frees none of them. `pub(crate)`
+    /// for the same reason as the milestone 2 tables: `pipeline.rs` pins them.
+    pub(crate) compile_pins: Pins,
     /// Command pools whose buffers were retired, waiting to be reset for the
     /// next encoder of their queue family.
     command_pools: PoolFreeList<KeptPool>,
@@ -1384,18 +1397,25 @@ impl DeviceInner {
             .filter(|(_, entry)| entry.submitted_at.is_none())
             .flat_map(|(_, entry)| entry.references.iter().copied())
             .collect();
+        // The other reader no timeline describes: a pipeline compile running
+        // outside the lock, which still reads the modules and the layout it
+        // pinned before releasing it. See `crate::deletion`.
+        let pins = &state.compile_pins;
         let raw = &self.raw;
         let swapchain_ext = &self.swapchain_ext;
         let instance = &self.instance;
         state.trash.retire(
             completed,
-            |item| held.contains(&trash_raw(item)),
+            |item| {
+                let item = trash_raw(item);
+                held.contains(&item) || pins.holds(item)
+            },
             |item| {
                 // SAFETY: every object in the queue was created by this device
-                // and is destroyed exactly once. The timeline reaching its key
-                // and no live recording naming it are together the proof that
-                // nothing still references it — which is the whole contract of
-                // this module.
+                // and is destroyed exactly once. The timeline reaching its key,
+                // no live recording naming it, and no pipeline compile holding
+                // a pin on it are together the proof that nothing still
+                // references it — which is the whole contract of this module.
                 unsafe { destroy_trash(raw, swapchain_ext, instance, item) };
             },
         );
