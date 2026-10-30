@@ -936,6 +936,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-notify"
+version = "0.13.0"
+dependencies = [
+ "bitflags",
+ "thiserror 2.0.21",
+ "windows",
+]
+
+[[package]]
 name = "crcbl-phys"
 version = "0.13.0"
 dependencies = [

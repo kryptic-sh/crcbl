@@ -31,6 +31,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-notify`, a new crate: the desktop's notifications, read and
+  dismissed.** `Notifications::open` reaches the platform's store,
+  `Notifications::list` returns a snapshot of what other apps have shown (each
+  `Notification` with a `NotificationId` stable across snapshots, the sending
+  app's id and name, its arrival time, title and body), and
+  `Notifications::dismiss` removes one. `Notifications::caps` says which
+  operations a platform performs. Windows reads through WinRT's
+  `UserNotificationListener`, which needs no package identity; every other
+  platform answers `NotificationError::Unsupported`. There is no change stream:
+  a caller polls.
 - **The console's completion rows can be clicked or tapped**: a picked row fills
   that candidate in and leaves the list up, as stepping to it with `Tab` would.
   It is how a finger completes, the on-screen keyboard having no `Tab`.

@@ -2773,8 +2773,28 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 **1. A native notification seam, asked for by lyr's owner.** One API that lyr,
 pikr and later apps use to create, read, update and dismiss notifications, with
 a capability flag per operation so "not supported here" is never mistaken for
-"worked". Not started; it is a new crate or a `crcbl-shell` module, and taking
-`zbus` on is the owner's call (it would be a new dependency for crcbl).
+"worked". `crcbl-notify` (2026-10-30) holds the Windows read and dismiss
+(`Notifications`, `NotificationCaps::READ` and `DISMISS`); creating, updating
+and every other platform are not started, and taking `zbus` on for Linux is the
+owner's call (it would be a new dependency for crcbl).
+
+- **Polled, by necessity on Windows.** `UserNotificationListener`'s
+  `NotificationChanged` fails in an unpackaged process (`0x80070490`, "Element
+  not found", lyr's finding on Windows 11 26300), so `crcbl-notify` has no
+  change stream. A `FOLLOW` cap belongs with a follow API, if a packaged app or
+  another platform ever needs one.
+- **Unverified on Windows:** a machine where the user never allowed desktop apps
+  notification access (`open` answers `Undecided` or `Denied` there; access is
+  read, never requested, since `RequestAccessAsync` wants a UI thread); a toast
+  with no `AppInfo`, which would fail the whole `list` rather than skip the one
+  toast; the order and meaning of text elements in templates other than
+  `ToastGeneric` (title is the first line seen across all bindings). Only the
+  conversions are tested automatically;
+  `this_machines_store_lists_and_dismisses` is ignored, since it reads the real
+  store. It listed two toasts here, the same ids twice, and dismissing an id
+  nothing holds returned `Ok`.
+- **Not built: the sending app's icon** (`AppDisplayInfo::GetLogo`, a stream
+  read per app). lyr said it can wait.
 
 - **Linux client:** `Notify` (app name, icon, summary, body markup, actions,
   hints such as `urgency`, `image-data` and `desktop-entry`, `replaces_id`,
@@ -2793,9 +2813,8 @@ a capability flag per operation so "not supported here" is never mistaken for
   unpolled stream during a read that awaits replies on the same connection
   deadlocks it (lyr's lyr's `lyr-sources` crate, its `bus.rs`, `Follow`).
 - **Windows:** create through WinRT `ToastNotificationManager` (needs an
-  AppUserModelID); read and dismiss others' through `UserNotificationListener`
-  (needs the user's permission and package identity); do-not-disturb state if an
-  API exposes it.
+  AppUserModelID); do-not-disturb state if an API exposes it. Reading and
+  dismissing others' is built (above).
 - **macOS:** create through `UNUserNotificationCenter` (needs a bundle); there
   is no public API for reading other apps' notifications, so that operation
   fails loudly.

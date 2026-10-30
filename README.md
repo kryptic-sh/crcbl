@@ -309,6 +309,7 @@ crates/crcbl-greybox    greybox prototyping primitives, sized in real-world metr
 crates/crcbl-golden     golden-image comparison for the render tests
 crates/crcbl-profile    profiler captures: the `.crcblprof` file a run writes and every viewer reads
 crates/crcbl-mixer      control of the system mixer: volume, devices, streams (PipeWire, PulseAudio)
+crates/crcbl-notify     the desktop's notifications, read and dismissed (Windows so far)
 crates/crcbl-rand       the one randomness seam
 crates/crcbl-cli        the `crcbl` binary
 apps/                   the samples

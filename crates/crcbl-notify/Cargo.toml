@@ -1,0 +1,33 @@
+[package]
+name = "crcbl-notify"
+description = "Crucible system notifications: the desktop's notifications, read and dismissed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# `bitflags` and `thiserror` are vocabulary, as in `crcbl-shell`.
+[dependencies]
+bitflags = { workspace = true }
+thiserror = { workspace = true }
+
+# WinRT's notification listener (`src/windows.rs`), through the `windows` crate
+# at the version `crcbl-mixer` and `crcbl-dx12` already resolve. The features,
+# each for what it brings:
+#
+# * `UI_Notifications_Management`: `UserNotificationListener`, the read and the
+#   dismissal, and its access status.
+# * `UI_Notifications`: a listed `UserNotification`, its visual and text.
+# * `ApplicationModel`: the sending app's `AppInfo`, its id and display name.
+# * `Foundation`: `DateTime`, a notification's arrival.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+  "ApplicationModel",
+  "Foundation",
+  "UI_Notifications",
+  "UI_Notifications_Management",
+] }
