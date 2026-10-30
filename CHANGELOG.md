@@ -125,6 +125,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A lossless WebP no longer builds prefix codes its image never uses.**
+  `crcbl_image::webp::decode` read and built every prefix-code group up to the
+  largest meta-code the entropy image named — up to 65 536 groups, each five
+  codes with alphabets of up to 2 328 symbols — so a ~165 KB file naming only
+  meta-code 65 535 cost billions of steps that `Limits` did not cap. Like
+  libwebp, it now builds only the groups the entropy image references and reads
+  past the rest, still refusing a malformed code in an unused group; a crafted
+  file of that shape went from about 0.7 s to a few milliseconds. Every valid
+  image decodes to the same pixels.
+
 - **glTF import refuses a triangle list that is not whole triangles.**
   `import_gltf` accepted a `TRIANGLES` primitive whose index count — or, with no
   index accessor, vertex count — was not a multiple of three, and every reader

@@ -59,26 +59,24 @@ code read was sound throughout. Most of it encodes its invariant in the types or
 validates at the boundary, so the findings are few and sit in the hand-written
 decoders.
 
-### crcbl-image: lossless WebP reads up to 65 536 prefix-code groups
+### crcbl-image: lossless WebP leftovers from the prefix-group fix
 
-`decode_image` in `crates/crcbl-image/src/webp/lossless.rs` sets `group_count`
-to one plus the largest meta-code in the entropy image, up to 65 536, then reads
-and builds every group: five `read_prefix` calls, each allocating a lengths
-vector of the alphabet's size (green: up to 2 328 entries with an 11-bit colour
-cache), and each `Prefix::from_lengths` making 15 passes over it. It does this
-whether or not the main image uses those groups.
+`decode_image` in `crates/crcbl-image/src/webp/lossless.rs` now builds only the
+prefix-code groups its entropy image names and reads past the rest. Left open:
 
-- Failure: a 1x1 entropy image naming group 65 535 makes the decoder build 65
-  536 groups — roughly 165 KB of input for billions of inner-loop steps and
-  hundreds of thousands of small allocations. `Limits` caps pixels, not
-  prefix-code work. libwebp builds only the groups the entropy image uses.
-- Severity: robustness (CPU denial of service from small untrusted input).
-  Confidence: mechanism verified by reading; cost figures estimated, not
-  measured.
-- Fix: remap the used meta-codes to a dense range and build only those groups
-  (still reading and discarding the unused ones' bits as the RFC requires), or
-  charge each group's alphabet size against a work budget from
-  `Limits::max_bytes`.
+- No libwebp fixture in `every_fixture_decodes_to_exactly_libwebps_pixels`
+  appears to use more than one group: reversing the dense group numbering failed
+  only the synthetic `only_the_groups_in_use_are_built`, never the fixture test.
+  A real multi-group lossless fixture (an encoder at a high effort setting)
+  would pin the remap on real data.
+- `Prefix::from_lengths` is still O(code lengths × alphabet) per built code; an
+  image whose entropy image names many distinct groups pays it for each. Bounded
+  by image area through `Limits`, but a counting-sort build would make it
+  O(alphabet).
+- Possibly stricter than libwebp, unverified: a simple-form code naming a symbol
+  past a 40-symbol distance alphabet is refused here as "a symbol past its
+  alphabet", where libwebp may set it in a buffer sized for the largest alphabet
+  and ignore it. Check libwebp's `ReadHuffmanCode` before changing.
 
 ### crcbl-scene: a primitive's label counts only the triangle primitives
 

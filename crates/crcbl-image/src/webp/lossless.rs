@@ -119,7 +119,7 @@ impl Prefix {
             counts[usize::from(length)] += 1;
         }
         counts[0] = 0;
-        let used: usize = counts.iter().map(|&count| usize::from(count)).sum();
+        let used = check_counts(&counts)?;
         let mut symbols = Vec::with_capacity(used);
         for length in 1..=MAX_CODE_LENGTH {
             for (symbol, &l) in lengths.iter().enumerate() {
@@ -127,25 +127,6 @@ impl Prefix {
                     symbols.push(symbol as u16);
                 }
             }
-        }
-        match used {
-            0 => return Err(malformed("a prefix code with no symbols")),
-            1 => {
-                return Ok(Self { counts, symbols });
-            }
-            _ => {}
-        }
-        // The Kraft sum, in units of the longest code: a complete tree's is
-        // exactly one.
-        let mut space: i64 = 1;
-        for &count in &counts[1..] {
-            space = space * 2 - i64::from(count);
-            if space < 0 {
-                return Err(malformed("a prefix code with more codes than fit"));
-            }
-        }
-        if space != 0 {
-            return Err(malformed("an incomplete prefix code"));
         }
         Ok(Self { counts, symbols })
     }
@@ -171,24 +152,55 @@ impl Prefix {
     }
 }
 
-/// Reads one prefix code over an alphabet of `alphabet` symbols.
-fn read_prefix(bits: &mut Bits<'_>, alphabet: usize) -> Result<Prefix, ImageError> {
-    let mut lengths = vec![0u8; alphabet];
+/// How many symbols a code of `counts` codes of each length has, if that is
+/// a code: a tree that is not complete is refused, except the tree of one
+/// symbol. `counts[0]`, the unused symbols, is ignored.
+fn check_counts(counts: &[u16; MAX_CODE_LENGTH + 1]) -> Result<usize, ImageError> {
+    let used: usize = counts[1..].iter().map(|&count| usize::from(count)).sum();
+    match used {
+        0 => return Err(malformed("a prefix code with no symbols")),
+        1 => return Ok(used),
+        _ => {}
+    }
+    // The Kraft sum, in units of the longest code: a complete tree's is
+    // exactly one.
+    let mut space: i64 = 1;
+    for &count in &counts[1..] {
+        space = space * 2 - i64::from(count);
+        if space < 0 {
+            return Err(malformed("a prefix code with more codes than fit"));
+        }
+    }
+    if space != 0 {
+        return Err(malformed("an incomplete prefix code"));
+    }
+    Ok(used)
+}
+
+/// Reads one prefix code's lengths over an alphabet of `alphabet` symbols,
+/// handing each run of symbols that share a length to `set` as `(first
+/// symbol, run length, code length)`, every one inside the alphabet. Symbols
+/// it names no length for have none. The runs of the normal form are
+/// disjoint and ascending; the simple form's two symbols may be one.
+fn read_lengths(
+    bits: &mut Bits<'_>,
+    alphabet: usize,
+    mut set: impl FnMut(usize, usize, u8),
+) -> Result<(), ImageError> {
     if bits.flag()? {
         // The simple form: one or two symbols of length one.
         let two = bits.flag()?;
         let first_bits = if bits.flag()? { 8 } else { 1 };
-        let first = bits.read(first_bits)? as usize;
-        *lengths
-            .get_mut(first)
-            .ok_or_else(|| malformed("a symbol past its alphabet"))? = 1;
-        if two {
-            let second = bits.read(8)? as usize;
-            *lengths
-                .get_mut(second)
-                .ok_or_else(|| malformed("a symbol past its alphabet"))? = 1;
+        let mut symbol_bits = first_bits;
+        for _ in 0..=usize::from(two) {
+            let symbol = bits.read(symbol_bits)? as usize;
+            if symbol >= alphabet {
+                return Err(malformed("a symbol past its alphabet"));
+            }
+            set(symbol, 1, 1);
+            symbol_bits = 8;
         }
-        return Prefix::from_lengths(&lengths);
+        return Ok(());
     }
 
     let mut code_length_lengths = [0u8; CODE_LENGTH_ORDER.len()];
@@ -214,7 +226,7 @@ fn read_prefix(bits: &mut Bits<'_>, alphabet: usize) -> Result<Prefix, ImageErro
         let code = code_lengths.decode(bits)?;
         let (value, repeat) = match code {
             0..=15 => {
-                lengths[symbol] = code as u8;
+                set(symbol, 1, code as u8);
                 symbol += 1;
                 if code != 0 {
                     previous = code as u8;
@@ -225,14 +237,38 @@ fn read_prefix(bits: &mut Bits<'_>, alphabet: usize) -> Result<Prefix, ImageErro
             17 => (0, 3 + bits.read(3)? as usize),
             _ => (0, 11 + bits.read(7)? as usize),
         };
-        let end = symbol + repeat;
-        let run = lengths
-            .get_mut(symbol..end)
-            .ok_or_else(|| malformed("a repeated code length past the alphabet"))?;
-        run.fill(value);
-        symbol = end;
+        if symbol + repeat > alphabet {
+            return Err(malformed("a repeated code length past the alphabet"));
+        }
+        set(symbol, repeat, value);
+        symbol += repeat;
     }
+    Ok(())
+}
+
+/// Reads one prefix code over an alphabet of `alphabet` symbols.
+fn read_prefix(bits: &mut Bits<'_>, alphabet: usize) -> Result<Prefix, ImageError> {
+    let mut lengths = vec![0u8; alphabet];
+    read_lengths(bits, alphabet, |first, run, length| {
+        lengths[first..first + run].fill(length);
+    })?;
     Prefix::from_lengths(&lengths)
+}
+
+/// Reads past one prefix code over an alphabet of `alphabet` symbols that
+/// nothing will decode with, refusing it as [`read_prefix`] would but
+/// building nothing: only its count of codes of each length. The simple
+/// form's two symbols counted as two where they are one makes no
+/// difference, as either is a code.
+fn skip_prefix(bits: &mut Bits<'_>, alphabet: usize) -> Result<(), ImageError> {
+    let mut counts = [0u16; MAX_CODE_LENGTH + 1];
+    read_lengths(bits, alphabet, |_, run, length| {
+        // A run is inside an alphabet of at most `LITERALS + LENGTH_CODES +
+        // (1 << MAX_COLOR_CACHE_BITS)` symbols, so no count passes it.
+        counts[usize::from(length)] += run as u16;
+    })?;
+    counts[0] = 0;
+    check_counts(&counts).map(drop)
 }
 
 /// The five codes one block of an image is read with.
@@ -242,6 +278,70 @@ struct Group {
     blue: Prefix,
     alpha: Prefix,
     distance: Prefix,
+}
+
+/// The alphabet sizes of a group's five codes, in the order they are stored.
+fn group_alphabets(cache_size: usize) -> [usize; 5] {
+    [
+        LITERALS + LENGTH_CODES + cache_size,
+        LITERALS,
+        LITERALS,
+        LITERALS,
+        DISTANCE_CODES,
+    ]
+}
+
+/// Replaces each entropy-image pixel by the index its meta-code's group will
+/// have among the groups the image uses, numbered in meta-code order, and
+/// returns which of the meta-codes up to the largest named are used.
+fn dense_groups(entropy: &mut [u32]) -> Vec<bool> {
+    let meta = |pixel: u32| ((pixel >> 8) & 0xffff) as usize;
+    let count = entropy
+        .iter()
+        .map(|&pixel| meta(pixel))
+        .max()
+        .map_or(0, |max| max + 1);
+    let mut used = vec![false; count];
+    for &pixel in entropy.iter() {
+        used[meta(pixel)] = true;
+    }
+    let mut index = vec![0u32; count];
+    let named = (0..count).filter(|&meta_code| used[meta_code]);
+    for (dense, meta_code) in (0u32..).zip(named) {
+        index[meta_code] = dense;
+    }
+    for pixel in entropy.iter_mut() {
+        *pixel = index[meta(*pixel)];
+    }
+    used
+}
+
+/// Reads one group per entry of `used`, in order, building only those it
+/// marks: RFC 9649 stores every group up to the largest meta-code, used or
+/// not, and libwebp too reads the rest only to pass and check them.
+fn read_groups(
+    bits: &mut Bits<'_>,
+    used: &[bool],
+    cache_size: usize,
+) -> Result<Vec<Group>, ImageError> {
+    let alphabets = group_alphabets(cache_size);
+    let mut groups = Vec::with_capacity(used.iter().filter(|&&used| used).count());
+    for &used in used {
+        if used {
+            groups.push(Group {
+                green: read_prefix(bits, alphabets[0])?,
+                red: read_prefix(bits, alphabets[1])?,
+                blue: read_prefix(bits, alphabets[2])?,
+                alpha: read_prefix(bits, alphabets[3])?,
+                distance: read_prefix(bits, alphabets[4])?,
+            });
+        } else {
+            for alphabet in alphabets {
+                skip_prefix(bits, alphabet)?;
+            }
+        }
+    }
+    Ok(groups)
 }
 
 /// Turns an LZ77 prefix code and its extra bits into a length or distance.
@@ -274,32 +374,18 @@ fn decode_image(
     };
     let cache_size = cache_bits.map_or(0, |cache_bits| 1usize << cache_bits);
 
-    let (entropy, prefix_bits, group_count) = if main && bits.flag()? {
+    // The entropy image, if any, holds each block's index into `groups`.
+    let (entropy, prefix_bits, used) = if main && bits.flag()? {
         let prefix_bits = bits.read(3)? + 2;
         let entropy_width = width.div_ceil(1 << prefix_bits);
         let entropy_height = height.div_ceil(1 << prefix_bits);
-        let entropy = decode_image(bits, entropy_width, entropy_height, false)?;
-        let groups = entropy
-            .iter()
-            .map(|&pixel| ((pixel >> 8) & 0xffff) as usize)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        (Some((entropy, entropy_width)), prefix_bits, groups)
+        let mut entropy = decode_image(bits, entropy_width, entropy_height, false)?;
+        let used = dense_groups(&mut entropy);
+        (Some((entropy, entropy_width)), prefix_bits, used)
     } else {
-        (None, 0, 1)
+        (None, 0, vec![true])
     };
-
-    let mut groups = Vec::with_capacity(group_count);
-    for _ in 0..group_count {
-        groups.push(Group {
-            green: read_prefix(bits, LITERALS + LENGTH_CODES + cache_size)?,
-            red: read_prefix(bits, LITERALS)?,
-            blue: read_prefix(bits, LITERALS)?,
-            alpha: read_prefix(bits, LITERALS)?,
-            distance: read_prefix(bits, DISTANCE_CODES)?,
-        });
-    }
+    let groups = read_groups(bits, &used, cache_size)?;
 
     let total = width * height;
     let mut pixels: Vec<u32> = Vec::with_capacity(total);
@@ -320,7 +406,7 @@ fn decode_image(
             Some((entropy, entropy_width)) => {
                 let (x, y) = (at % width, at / width);
                 let index = (y >> prefix_bits) * entropy_width + (x >> prefix_bits);
-                &groups[((entropy[index] >> 8) & 0xffff) as usize]
+                &groups[entropy[index] as usize]
             }
             None => &groups[0],
         };
@@ -694,6 +780,150 @@ mod tests {
         // (0, 1) takes its top; (1, 1) its top-right, 3; (2, 1) the row's own
         // first pixel, 1.
         assert_eq!(&pixels[3..], &[0xff00_0001, 0xff00_0003, 0xff00_0001]);
+    }
+
+    /// A lossless bitstream under construction, least significant bit first.
+    #[derive(Default)]
+    struct Writer {
+        bytes: Vec<u8>,
+        acc: u64,
+        count: u32,
+    }
+
+    impl Writer {
+        fn put(&mut self, value: u32, n: u32) {
+            self.acc |= u64::from(value) << self.count;
+            self.count += n;
+            while self.count >= 8 {
+                self.bytes.push(self.acc as u8);
+                self.acc >>= 8;
+                self.count -= 8;
+            }
+        }
+
+        /// A simple prefix code of the one symbol `symbol`, which takes no
+        /// bits to decode.
+        fn simple(&mut self, symbol: u8) {
+            self.put(1, 1);
+            self.put(0, 1);
+            if symbol < 2 {
+                self.put(0, 1);
+                self.put(u32::from(symbol), 1);
+            } else {
+                self.put(1, 1);
+                self.put(u32::from(symbol), 8);
+            }
+        }
+
+        /// A group of five one-symbol codes: a literal pixel of `green`,
+        /// `red`, `blue` and `alpha`, and a distance code nothing reads.
+        fn group(&mut self, [green, red, blue, alpha]: [u8; 4]) {
+            for symbol in [green, red, blue, alpha, 0] {
+                self.simple(symbol);
+            }
+        }
+
+        fn finish(mut self) -> Vec<u8> {
+            if self.count > 0 {
+                self.bytes.push(self.acc as u8);
+            }
+            self.bytes
+        }
+    }
+
+    /// The groups after a 1x1 main image's entropy image: every meta-code up
+    /// to 65 535, which is the only one the entropy image names. Each skipped
+    /// group is one-symbol codes of zero; the last is the pixel's colour.
+    fn last_of_every_group(w: &mut Writer) {
+        for _ in 0..u16::MAX {
+            w.group([0; 4]);
+        }
+        w.group([0x80, 0x40, 0x20, 0xff]);
+    }
+
+    /// A 1x1 lossless image with an 11-bit colour cache (the largest green
+    /// alphabet) whose entropy image names meta-code 65 535, so it carries
+    /// 65 536 groups and uses one.
+    fn sparse_groups_file() -> Vec<u8> {
+        let mut w = Writer::default();
+        w.put(u32::from(VP8L_SIGNATURE), 8);
+        w.put(0, 14); // width - 1
+        w.put(0, 14); // height - 1
+        w.put(1, 1); // alpha is used
+        w.put(0, 3); // version
+        w.put(0, 1); // no transform
+        w.put(1, 1); // a colour cache...
+        w.put(MAX_COLOR_CACHE_BITS, 4); // ...of the largest size
+        w.put(1, 1); // meta prefix codes...
+        w.put(0, 3); // ...in blocks of four pixels
+        // The entropy image: no cache, one group, one pixel whose red and
+        // green name meta-code 0xffff.
+        w.put(0, 1);
+        w.group([0xff, 0xff, 0, 0]);
+        last_of_every_group(&mut w);
+        w.finish()
+    }
+
+    /// **Only the groups the entropy image names are built**: of 65 536
+    /// groups, the one meta-code 65 535 names, and every other is read past
+    /// to the end of the stream.
+    #[test]
+    fn only_the_groups_in_use_are_built() {
+        let mut entropy = vec![0xffff << 8, 0x00ff_ff00, 7 << 8];
+        let used = dense_groups(&mut entropy);
+        assert_eq!(used.len(), 0x1_0000);
+        let named: Vec<usize> = (0..used.len()).filter(|&i| used[i]).collect();
+        assert_eq!(named, [7, 0xffff]);
+        assert_eq!(entropy, [1, 1, 0]);
+
+        let mut w = Writer::default();
+        last_of_every_group(&mut w);
+        let data = w.finish();
+        let mut used = vec![false; 0x1_0000];
+        used[0xffff] = true;
+        let mut bits = Bits::new(&data);
+        let groups =
+            read_groups(&mut bits, &used, 1 << MAX_COLOR_CACHE_BITS).expect("valid groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].green.symbols, [0x80]);
+        assert_eq!(groups[0].alpha.symbols, [0xff]);
+        assert_eq!(bits.at, data.len());
+    }
+
+    /// **A skipped group is checked as a built one is**: a code with no symbols
+    /// in a group nothing uses is refused, as libwebp refuses it.
+    #[test]
+    fn an_unused_group_with_an_empty_code_is_refused() {
+        // A normal-form code whose code-length code is the one symbol 17,
+        // at length one, so every length read is a run of 3 to 10 zeros:
+        // twenty-five runs of ten and one of six zero the whole alphabet,
+        // leaving a code with no symbols.
+        let mut w = Writer::default();
+        w.put(0, 1); // the normal form
+        w.put(0, 4); // four code-length lengths stored: 17, 18, 0, 1
+        w.put(1, 3); // 17 has length one
+        w.put(0, 3);
+        w.put(0, 3);
+        w.put(0, 3);
+        w.put(0, 1); // no max_symbol
+        for _ in 0..25 {
+            w.put(7, 3); // ten zeros
+        }
+        w.put(3, 3); // six zeros
+        let data = w.finish();
+        let built = read_prefix(&mut Bits::new(&data), LITERALS).map(drop);
+        let skipped = skip_prefix(&mut Bits::new(&data), LITERALS);
+        assert_eq!(built, Err(malformed("a prefix code with no symbols")));
+        assert_eq!(skipped, built);
+    }
+
+    /// **An entropy image naming one high meta-code decodes**: RFC 9649 lets
+    /// a meta-code skip the groups below it, which are read but unused.
+    #[test]
+    fn an_image_using_one_of_many_groups_decodes() {
+        let image = decode_vp8l(&sparse_groups_file(), &Limits::DEFAULT).expect("a valid image");
+        assert_eq!((image.width(), image.height()), (1, 1));
+        assert_eq!(image.pixels(), [0x40, 0x80, 0x20, 0xff]);
     }
 
     #[test]
