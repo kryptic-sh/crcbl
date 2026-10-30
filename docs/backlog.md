@@ -6,49 +6,49 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## The mesh-shader path hangs RDNA2 iGPUs (2026-10-30)
 
 Reported by EW (its raid, range and armor-dummy scenes on crcbl 0.13.0) and
-reproduced in crcbl alone: `CRCBL_ADAPTER=integrated quarry --headless
---backend vk --frames 300 --force-geometry mesh-shader` on the 9950X3D's
-integrated Radeon (RADV RAPHAEL_MENDOCINO, RDNA2, Mesa 26.2.6) loses the device
-after two frames: the kernel reports a compute-ring timeout (`comp_1.2.0`) and
-radv a hard recovery, then `VK_ERROR_DEVICE_LOST` from `vkQueueSubmit`. The
-same command with `--force-geometry indirect-count` runs 300 frames clean, and
-the mesh path runs daily on the 7900 XTX (NAVI31). EW saw it with every video
-effect off; validation and sync validation report nothing; EW's runs hit the
-gfx ring, quarry's the compute ring.
+reproduced in crcbl alone:
+`CRCBL_ADAPTER=integrated quarry --headless --backend vk --frames 300 --force-geometry mesh-shader`
+on the 9950X3D's integrated Radeon (RADV RAPHAEL_MENDOCINO, RDNA2, Mesa 26.2.6)
+loses the device after two frames: the kernel reports a compute-ring timeout
+(`comp_1.2.0`) and radv a hard recovery, then `VK_ERROR_DEVICE_LOST` from
+`vkQueueSubmit`. The same command with `--force-geometry indirect-count` runs
+300 frames clean, and the mesh path runs daily on the 7900 XTX (NAVI31). EW saw
+it with every video effect off; validation and sync validation report nothing;
+EW's runs hit the gfx ring, quarry's the compute ring.
 
 - **Worked around, not root-caused.** `crcbl-vk`'s `quirks::radv_rdna2_family`
   withholds mesh shading on radv GFX10.3, so these devices run IndirectCount;
   `CRCBL_VK_MESH_ON_RDNA2=1` turns the workaround off. The engine's mesh and
   task usage is inside every `VkPhysicalDeviceMeshShaderPropertiesEXT` limit,
-  and both GPUs on the dev machine report identical properties. Withholding
-  only the task stage still hung (the gfx ring), per the implementing agent;
-  not re-run by the parent.
+  and both GPUs on the dev machine report identical properties. Withholding only
+  the task stage still hung (the gfx ring), per the implementing agent; not
+  re-run by the parent.
 - Still open: find the trigger with `RADV_DEBUG=hang` or a minimal repro and
   report it to Mesa; recheck with the override after each Mesa upgrade.
 - Matched but never run: NAVI21–24, VANGOGH (the Steam Deck) and REMBRANDT.
   `vk_e2e`'s mesh tests fail by design on such a device unless the override is
-  set; `vk_e2e` does not honour `CRCBL_ADAPTER`, so only
-  `MESA_VK_DEVICE_SELECT` puts the iGPU first there.
+  set; `vk_e2e` does not honour `CRCBL_ADAPTER`, so only `MESA_VK_DEVICE_SELECT`
+  puts the iGPU first there.
 
 ## Upscale and SSAO upsample are a quarter of an iGPU's low-tier frame (2026-10-30)
 
-EW's raid demo, offscreen, Raphael iGPU (RDNA2, RADV) on IndirectCount, low
-tier at 1920x1080 output (1440x810 internal), load about 12, so relative
-figures only. Pass p50s, 11.5 ms in all: forward 3.96 ms (877k fragments over
-72k triangles after a depth prepass — shader-bound at about 4.5 ns a fragment,
-not overdraw), upscale 1.87 ms, ssao 1.41, ssao-upsample 1.08, ssr 0.73, fxaa
-0.64, ssao-blur 0.55. An earlier 720p default-settings run read forward 4.85,
-ssao 1.90, ssr 1.78, ssao-upsample 0.86, 12.1 ms in all.
+EW's raid demo, offscreen, Raphael iGPU (RDNA2, RADV) on IndirectCount, low tier
+at 1920x1080 output (1440x810 internal), load about 12, so relative figures
+only. Pass p50s, 11.5 ms in all: forward 3.96 ms (877k fragments over 72k
+triangles after a depth prepass — shader-bound at about 4.5 ns a fragment, not
+overdraw), upscale 1.87 ms, ssao 1.41, ssao-upsample 1.08, ssr 0.73, fxaa 0.64,
+ssao-blur 0.55. An earlier 720p default-settings run read forward 4.85, ssao
+1.90, ssr 1.78, ssao-upsample 0.86, 12.1 ms in all.
 
 - **Upscale costs nearly half of forward** for one full-screen pass over 2.07M
-  output fragments. Check which filter the low tier selects and what it
-  samples per fragment; a bilinear or a cheaper sharpen at low tier is the
-  likely answer. Not investigated.
+  output fragments. Check which filter the low tier selects and what it samples
+  per fragment; a bilinear or a cheaper sharpen at low tier is the likely
+  answer. Not investigated.
 - **SSAO's upsample costs most of what SSAO does.** Check its tap count and
   whether a depth-aware bilateral at half the taps holds the edges. Not
   investigated.
-- Together they are about 25% of the low-tier frame on this iGPU, the class
-  of device the low tier exists for. Measure in a quiet window before acting.
+- Together they are about 25% of the low-tier frame on this iGPU, the class of
+  device the low tier exists for. Measure in a quiet window before acting.
 
 ## Whole-codebase review: bugs (2026-10-30)
 
