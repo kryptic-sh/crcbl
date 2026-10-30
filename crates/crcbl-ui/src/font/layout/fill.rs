@@ -156,6 +156,9 @@ impl Filler<'_> {
                 .map(|glyph| glyph.advance)
                 .sum::<f32>();
             self.shaped.truncate(first);
+            self.layout
+                .spaces
+                .push((self.start + piece.bytes.start, piece.advance));
         } else {
             self.push_glyphs(first);
             piece.glyphs = first..self.shaped.len();

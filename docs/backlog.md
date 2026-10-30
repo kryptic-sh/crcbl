@@ -91,9 +91,20 @@ an ellipsis span draws the layout its cut measured. Left:
 - **Profiled EW's real shape (2026-10-31):** one persistent `Ui`, 180 label
   trees a frame, each `begin_frame`/block/span/`layout`/`emit`, 140 px ellipsis
   spans, ~80 cut, Roboto: 2.04 ms median release (load ~3.5), callgrind. ~60%
-  was the ellipsis cut (being fixed), ~25% measure-cache misses, style and
-  stylesheet work ~0. Harness kept outside the repo; the shape is
-  `ReadoutPanel::draw_in`'s. Ranked leftovers:
+  was the ellipsis cut (now settled from the line's advances and cached: ~1.37
+  ms), ~25% measure-cache misses, style and stylesheet work ~0. Harness kept
+  outside the repo; the shape is `ReadoutPanel::draw_in`'s. Ranked leftovers:
+  - **The ellipsis estimate's error sources have no committed test.** `Estimate`
+    in `crates/crcbl-ui/src/tree/ellipsis.rs` lists what its margin
+    (`ELLIPSIS_KERN_EM`) must cover: a kern or contextual rule that fires only
+    when "…" follows, joining across a face change, a mirrored bracket. The
+    committed font never exceeds the margin, so removing the unsafe-point guard
+    still passes `a_cut_lands_where_a_binary_search_does`; system Roboto fails
+    it ("O…" for "Of…"). A fontTools-built fixture (as in
+    `crates/crcbl-ui/src/font/fixtures.rs`) with a kern against "…" above 0.25
+    em and a `calt` that fires only before "…" would pin it. Also: a wrongly
+    rejected probe goes unnoticed (shorter cut), and two spans with the same
+    text at different widths share one kept-cut slot and re-cut each frame.
   - **Measurements do not survive a cycle.** `Ui::layout` calls
     `MeasureCache::retain` against `live_text`, which `begin_frame_with` clears,
     so one cycle per label keeps only the last label and reshapes every label

@@ -189,6 +189,13 @@ pub struct TextLayout {
     faces: Vec<u8>,
     /// The byte offset in the text of the first char of each glyph's cluster.
     bytes: Vec<usize>,
+    /// Each glyph's advance as shaped, and whether `harfrust` said cutting
+    /// the text where its cluster starts could shape either side differently
+    /// ([`ShapedGlyph::unsafe_to_break`]).
+    advances: Vec<(f32, bool)>,
+    /// Every run of spaces, which draws no glyph: its first byte in the text
+    /// and its advance as shaped.
+    spaces: Vec<(usize, f32)>,
     lines: Vec<TextLine>,
     /// Where each line lies in the text.
     line_bytes: Vec<LineBytes>,
@@ -271,6 +278,8 @@ impl TextLayout {
             glyphs: Vec::with_capacity(text.len()),
             faces: Vec::with_capacity(text.len()),
             bytes: Vec::with_capacity(text.len()),
+            advances: Vec::new(),
+            spaces: Vec::new(),
             lines: Vec::new(),
             line_bytes: Vec::new(),
             rtl: Vec::new(),
@@ -287,6 +296,11 @@ impl TextLayout {
             keep_spaces,
             text,
         );
+
+        layout.advances = shaped
+            .iter()
+            .map(|glyph| (glyph.advance, glyph.unsafe_to_break))
+            .collect();
 
         let ascent = metrics.ascent * scale;
         let descent = metrics.descent * scale;
@@ -442,6 +456,23 @@ impl TextLayout {
             && self.size.to_bits() == size.to_bits()
             && self.line_height.to_bits() == line_height.to_bits()
             && self.text == text
+    }
+
+    /// Each glyph's shaping in logical order: the byte its cluster starts at,
+    /// its advance, and whether cutting the text there could shape either
+    /// side differently. Spaces are not among them; see
+    /// [`TextLayout::space_runs`].
+    pub(crate) fn shaped_advances(&self) -> impl Iterator<Item = (usize, f32, bool)> + '_ {
+        self.bytes
+            .iter()
+            .zip(&self.advances)
+            .map(|(&byte, &(advance, unsafe_to_break))| (byte, advance, unsafe_to_break))
+    }
+
+    /// Every run of spaces, which draws no glyph, as its first byte and its
+    /// advance.
+    pub(crate) fn space_runs(&self) -> &[(usize, f32)] {
+        &self.spaces
     }
 
     /// The pitch between baselines.

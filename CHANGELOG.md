@@ -121,6 +121,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A `text-overflow: ellipsis` span in a parsed font is cut without shaping
+  every prefix its search tries**: each probe is first settled from the advances
+  its whole line already shaped, and only the prefixes that estimate cannot
+  settle — ligatures, kerning pairs, joining scripts — and the one cut to are
+  shaped. The cut is kept beside the span's measured layout, checked against its
+  text, font, size, line height and width, so a steady frame cuts none of its
+  spans again. The cuts matched a binary search over every probe in every sweep
+  so far (over a million cuts, 18 system fonts); the estimate's margin is
+  measured, not proven. 180 cut labels in one tree went from ~1.5 ms to ~0.15 ms
+  a frame, and ~2.1 ms to ~1.37 ms built one label per cycle.
 - **`ForwardRenderer` no longer builds the water and grass passes at start-up**:
   each view builds them on the first `begin_frame` whose frame has a body of
   water or a grass field, and keeps them. A cold build on an RX 7900 XTX (radv,

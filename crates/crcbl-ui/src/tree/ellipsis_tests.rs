@@ -579,8 +579,9 @@ fn a_cut_spans_layout_is_the_one_drawn() {
 /// while it is unchanged**: layout measures it once under every width it is
 /// asked about, cutting and drawing it reuse that layout, and a second frame
 /// of the same tree shapes nothing — with and without the ellipsis rule. A
-/// span that is cut shapes its prefixes at each cut, but not its whole text
-/// again.
+/// span that is cut shapes its whole text once and then only the prefix it is
+/// cut to, with its ellipsis — its whole text and then the prefix — and keeps
+/// that cut, so an unchanged frame does not cut it again.
 #[test]
 fn a_nowrap_span_is_shaped_once() {
     use crate::font::shape::shaped_runs;
@@ -589,6 +590,7 @@ fn a_nowrap_span_is_shaped_once() {
         (".clip.counted", 140.0, LABEL),
         (".line.counted", 1000.0, LABEL),
         (".line.counted", 60.0, ACTION),
+        (".line.counted", 60.0, "Incomprehensibilities"),
     ] {
         // A parse of its own, so no other test's shaping is counted.
         let font = Font::parse(crate::font::SANS_TTF).expect("parses");
@@ -608,15 +610,22 @@ fn a_nowrap_span_is_shaped_once() {
         let before = shaped_runs(&font);
         let (key, _) = card(&mut ui, width, selector, text);
         let steady = shaped_runs(&font) - before;
-        if ui.text(key) == Some(text) {
+        assert_eq!(steady, 0, "{what}: an unchanged frame shaped it again");
+        let shown = ui.text(key).expect("a text span");
+        if shown == text {
             assert_eq!(first, once, "{what}: a fresh tree shaped it more than once");
-            assert_eq!(steady, 0, "{what}: an unchanged frame shaped it again");
         } else {
+            let before = shaped_runs(&font);
+            let _ = TextLayout::nowrap(&font, shown, 16.0, 20.0);
+            let prefix = shaped_runs(&font) - before;
             assert_eq!(
                 first,
-                once + steady,
-                "{what}: a fresh tree's cut shaped more than measuring once and cutting"
+                once + prefix,
+                "{what}: cutting it to {shown:?} shaped more than the prefix it was cut to"
             );
+            if !text.contains(' ') {
+                assert!(first <= 2, "{what}: a one-word cut shaped {first} runs");
+            }
         }
     }
 }
@@ -650,4 +659,133 @@ fn a_kept_layout_is_checked_against_what_it_lays_out() {
         !held(&fallback, ACTION, size, line_height),
         "other fallback faces"
     );
+}
+
+/// The cut as it was first written: a binary search over every cluster
+/// boundary, each probe its prefix and ellipsis shaped afresh — what
+/// [`a_cut_lands_where_a_binary_search_does`] holds the cut to. Returns the
+/// cut text, whether any line was cut, and the layout the cut kept.
+fn binary_searched(
+    measure: &super::ellipsis::Measure<'_>,
+    text: &str,
+    width: f32,
+) -> (String, bool, Option<TextLayout>) {
+    use crate::font::cluster;
+    use crate::font::layout::WRAP_EPSILON;
+    let mut out = String::new();
+    let fit = width.max(0.0) + WRAP_EPSILON;
+    let mut scratch = String::new();
+    let mut cut_any = false;
+    let mut shown = None;
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        let (whole, layout) = measure.width(line);
+        if whole <= fit {
+            out.push_str(line);
+            shown = layout;
+            continue;
+        }
+        cut_any = true;
+        let ellipsis = measure.ellipsis();
+        let mut fitted = None;
+        let mut fits = |end: usize| {
+            scratch.clear();
+            scratch.push_str(line[..end].trim_end());
+            scratch.push_str(ellipsis);
+            let (width, layout) = measure.width(&scratch);
+            let fits = width <= fit;
+            if fits {
+                fitted = layout;
+            }
+            fits
+        };
+        let ends: Vec<usize> = cluster::clusters(line).map(|range| range.start).collect();
+        if !fits(0) {
+            continue;
+        }
+        let (mut low, mut high) = (0, ends.len());
+        while high - low > 1 {
+            let mid = low + (high - low) / 2;
+            if fits(ends[mid]) {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        out.push_str(line[..ends[low]].trim_end());
+        out.push_str(ellipsis);
+        shown = fitted;
+    }
+    let layout = shown
+        .filter(|_| !text.contains('\n'))
+        .map(|layout| (*layout).clone());
+    (out, cut_any, layout)
+}
+
+/// What [`a_cut_lands_where_a_binary_search_does`] cuts: Latin kerning pairs,
+/// a ligature of three clusters, combining marks, Arabic, Hebrew and both
+/// mixed with Latin, ideographs, emoji — a ZWJ sequence, a flag, a keycap and a
+/// kerned pair, which the emoji fixture draws — trailing spaces, two lines, and
+/// a line a hard break other than a newline breaks.
+const CUT_TEXTS: [&str; 11] = [
+    "AVATAR Wavy Type To Yo Tea, LT P. F. r. y. W. V.",
+    "Office affinity fluffier \u{FB03} efficient waffle",
+    "nai\u{308}ve cafe\u{301} re\u{301}sume\u{301} a\u{301}\u{323}\u{304}b",
+    "\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645} \u{627}\u{644}\u{639}\u{631}\u{628}\u{64A}",
+    "\u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{5E2}\u{5D5}\u{5DC}\u{5DD} \u{5D8}\u{5D5}\u{5D1} \u{5D1}\u{5D5}\u{5E7}\u{5E8}",
+    "Hello \u{5E9}\u{5DC}\u{5D5}\u{5DD} world \u{645}\u{631}\u{62D}\u{628}\u{627} again",
+    "\u{65E5}\u{672C}\u{8A9E}\u{306E}\u{30C6}\u{30AD}\u{30B9}\u{30C8}\u{3092}\u{5207}\u{308B}",
+    "\u{2764}\u{2764} \u{2764}\u{200D}\u{1F525} \u{1F1FA}\u{1F1F8} 1\u{FE0F}\u{20E3} \u{2764}\u{1F525}\u{2764}",
+    "Rusty Iron Sword of the Ancient Dragon   ",
+    "Take item 18\nfrom the shelf at the back",
+    "one\u{2028}line two",
+];
+
+/// Cuts every one of [`CUT_TEXTS`] in `font` at `size` at every whole pixel
+/// from nothing to wider than it, a quarter past each, and asserts the cut
+/// keeps the text and layout [`binary_searched`] does. Returns how many of
+/// them were cut.
+fn assert_cuts_match(font: &Font, size: f32) -> usize {
+    use super::ellipsis::{Measure, cut};
+    let measure = Measure::Parsed {
+        font,
+        size,
+        line_height: size * 1.25,
+        measured: None,
+    };
+    let mut cuts = 0;
+    for text in CUT_TEXTS {
+        let widest = measure.width(text).0;
+        for step in 0..=(widest + 10.0) as u32 {
+            let width = step as f32 + 0.25;
+            let mut out = String::new();
+            let got = cut(&measure, text, width, &mut out);
+            let layout = got.layout.map(|layout| (*layout).clone());
+            let want = binary_searched(&measure, text, width);
+            assert_eq!(
+                (&out, got.any, &layout),
+                (&want.0, want.1, &want.2),
+                "{text:?} at {width}px, {size}px"
+            );
+            cuts += usize::from(got.any);
+        }
+    }
+    cuts
+}
+
+/// **The cut lands where a binary search over every cluster boundary does**,
+/// keeping the same layout, for every one of [`CUT_TEXTS`] at every width: in
+/// the committed font at two sizes, with the emoji fixture behind it, and in
+/// the fixed-pitch one.
+#[test]
+fn a_cut_lands_where_a_binary_search_does() {
+    let sans = Font::sans();
+    let emoji = sans.with_fallback(&[crate::font::fixtures::shaped()]);
+    let cuts: usize = [(sans, 16.0), (sans, 31.0), (&emoji, 16.0), (roboto(), 20.0)]
+        .into_iter()
+        .map(|(font, size)| assert_cuts_match(font, size))
+        .sum();
+    assert!(cuts > 1000, "only {cuts} cuts were compared");
 }

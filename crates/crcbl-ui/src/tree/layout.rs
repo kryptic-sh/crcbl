@@ -20,6 +20,7 @@ use taffy::{
     compute_cached_layout, compute_flexbox_layout, compute_hidden_layout, compute_leaf_layout,
 };
 
+use super::ellipsis::KeptCut;
 use super::paragraph::{inline_runs, measure_runs};
 use super::store::NodeStore;
 use super::style::{Display, NodeStyle, WhiteSpace};
@@ -66,7 +67,9 @@ struct MeasureKey {
 ///
 /// **A `nowrap` span's layout is kept with its size**, so cutting it to fit
 /// ([`super::ellipsis`]) and drawing it shape nothing again: one layout per
-/// live `nowrap` span in a parsed font, held as long as its text is.
+/// live `nowrap` span in a parsed font, held as long as its text is. **So is
+/// the cut** an ellipsis span's text was last cut to fit with, and the width it
+/// was cut at, so a steady frame cuts none of its spans again.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MeasureCache {
     entries: HashMap<MeasureKey, Measured>,
@@ -112,6 +115,7 @@ impl MeasureCache {
                         return Measured {
                             size: size_of(&layout),
                             layout: Some(Arc::new(layout)),
+                            cut: None,
                         };
                     }
                     (WhiteSpace::Normal, AvailableSpace::MaxContent) => None,
@@ -145,15 +149,69 @@ impl MeasureCache {
         size: f32,
         line_height: f32,
     ) -> Option<&Arc<TextLayout>> {
+        self.nowrap(content_hash, font, text, size, line_height)?
+            .layout
+            .as_ref()
+    }
+
+    /// The cut kept for a `white-space: nowrap` span of content
+    /// `content_hash` cut at `width`, when one is: only beside a layout of
+    /// `text` in `font` at `size` and `line_height`, checked as
+    /// [`MeasureCache::nowrap_layout`] checks it, and only at the same width,
+    /// to the bit.
+    pub fn kept_cut(
+        &self,
+        content_hash: u64,
+        font: &Font,
+        text: &str,
+        size: f32,
+        line_height: f32,
+        width: f32,
+    ) -> Option<&KeptCut> {
+        self.nowrap(content_hash, font, text, size, line_height)?
+            .cut
+            .as_ref()
+            .filter(|cut| cut.width == width.to_bits())
+    }
+
+    /// Keeps `cut` beside the layout of the `nowrap` span of content
+    /// `content_hash`, in place of any cut kept before. Does nothing when no
+    /// layout is held for it, so a cut is never kept that
+    /// [`MeasureCache::kept_cut`] could not check.
+    pub fn keep_cut(&mut self, content_hash: u64, cut: KeptCut) {
         let key = MeasureKey {
             text: content_hash,
             width: WidthBucket::Any,
         };
-        self.entries
-            .get(&key)?
-            .layout
-            .as_ref()
-            .filter(|layout| layout.lays_out(font, text, size, line_height))
+        if let Some(entry) = self.entries.get_mut(&key)
+            && entry.layout.is_some()
+        {
+            entry.cut = Some(cut);
+        }
+    }
+
+    /// The entry of the `nowrap` span of content `content_hash`, when it
+    /// holds a layout of `text` in `font` — the same fallback faces and all —
+    /// at `size` and `line_height`: checked against all four rather than
+    /// trusted to the hash, so it is never another text's.
+    fn nowrap(
+        &self,
+        content_hash: u64,
+        font: &Font,
+        text: &str,
+        size: f32,
+        line_height: f32,
+    ) -> Option<&Measured> {
+        let key = MeasureKey {
+            text: content_hash,
+            width: WidthBucket::Any,
+        };
+        self.entries.get(&key).filter(|entry| {
+            entry
+                .layout
+                .as_ref()
+                .is_some_and(|layout| layout.lays_out(font, text, size, line_height))
+        })
     }
 
     /// The measurement held for content `content_hash` under `width`, or
@@ -206,12 +264,19 @@ struct Measured {
     /// What a `nowrap` span in a parsed font was measured from: its text laid
     /// out by [`TextLayout::nowrap`]. `None` for every other measurement.
     layout: Option<Arc<TextLayout>>,
+    /// What `layout`'s text was last cut to under `text-overflow: ellipsis`;
+    /// `None` until it is cut, and for every measurement without a layout.
+    cut: Option<KeptCut>,
 }
 
 impl Measured {
     /// A measurement with no layout kept.
     const fn size(size: Size<f32>) -> Self {
-        Self { size, layout: None }
+        Self {
+            size,
+            layout: None,
+            cut: None,
+        }
     }
 }
 
