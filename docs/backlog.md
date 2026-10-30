@@ -3,6 +3,424 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## Whole-codebase review: bugs (2026-10-30)
+
+A read-only sweep in risk order: unsafe and FFI first, then decoders of
+untrusted input, then error swallowing and resource leaks. Every finding below
+was found by reading the code; none was reproduced by running it. The unsafe
+code read was sound throughout. Most of it encodes its invariant in the types or
+validates at the boundary, so the findings are few and sit in the hand-written
+decoders.
+
+### crcbl-image: JPEG scan header indexes Huffman tables unchecked (panic)
+
+`read_scan` in `crates/crcbl-image/src/jpeg.rs` takes each scan component's DC
+and AC table selectors straight from the `SOS` byte (`spec[1] >> 4` and
+`spec[1] & 0x0f`, each 0..=15). It then indexes `tables.dc[dc]` and
+`tables.ac[ac]`, which are `[Option<Huffman>; 4]`: once in the "table missing"
+check and again, unconditionally, when building `BlockContext`. `read_frame`
+validates the quantisation selector (`spec[2] > 3`), but nothing validates these
+two.
+
+- Failure: any JPEG whose SOS names table 4..=15 panics with an index out of
+  bounds instead of returning `ImageError::Malformed`. The input is untrusted:
+  `.desktop` icon paths, notification images, and `data:` images inside SVGs all
+  reach `jpeg::decode`. The decoder fuzz target in `crates/crcbl-net/fuzz` calls
+  `jpeg::decode` but has evidently not reached a valid SOF followed by an SOS
+  with a selector at or above 4.
+- Severity: robustness (panic on hostile input). Confidence: verified by reading
+  (the reviewer, then the parent re-read the indexing sites).
+- Fix: in `read_scan`, refuse `dc > 3 || ac > 3` as `malformed(...)` before
+  either array is indexed, add a unit test with a crafted SOS, and add that file
+  as a fuzz-corpus seed so the target reaches scan parsing.
+
+### crcbl-image: lossless WebP reads up to 65 536 prefix-code groups
+
+`decode_image` in `crates/crcbl-image/src/webp/lossless.rs` sets `group_count`
+to one plus the largest meta-code in the entropy image, up to 65 536, then reads
+and builds every group: five `read_prefix` calls, each allocating a lengths
+vector of the alphabet's size (green: up to 2 328 entries with an 11-bit colour
+cache), and each `Prefix::from_lengths` making 15 passes over it. It does this
+whether or not the main image uses those groups.
+
+- Failure: a 1x1 entropy image naming group 65 535 makes the decoder build 65
+  536 groups — roughly 165 KB of input for billions of inner-loop steps and
+  hundreds of thousands of small allocations. `Limits` caps pixels, not
+  prefix-code work. libwebp builds only the groups the entropy image uses.
+- Severity: robustness (CPU denial of service from small untrusted input).
+  Confidence: mechanism verified by reading; cost figures estimated, not
+  measured.
+- Fix: remap the used meta-codes to a dense range and build only those groups
+  (still reading and discarding the unused ones' bits as the RFC requires), or
+  charge each group's alphabet size against a work budget from
+  `Limits::max_bytes`.
+
+### crcbl-image: GTK icon-cache offsets overflow u32 (panic in debug builds)
+
+`GtkCache::find` in `crates/crcbl-image/src/theme.rs` computes
+`self.hash + 4 + 4 * bucket`, `entry + 4` and `entry + 8` in `u32`; `buckets`
+and every chain `entry` are read from `icon-theme.cache`. A bucket count of 2^30
+or more, or a chain offset near `u32::MAX`, overflows.
+
+- Failure: debug builds and tests panic on a corrupt or hostile cache. In
+  release the arithmetic wraps, `bytes_at`'s bounds check rejects the result,
+  and the cache answers no images, which is harmless. `~/.local/share/icons` is
+  user-writable.
+- Severity: robustness (debug-only panic). Confidence: verified by reading.
+- Fix: do the offset arithmetic in `u64` (as `bytes_at` already does) or with
+  `checked_add`/`checked_mul` returning `None`.
+
+### crcbl-scene: glTF triangle primitives are not checked for whole triangles
+
+`read_primitive` in `crates/crcbl-scene/src/gltf_import.rs` checks every index
+against the vertex count, but not that `indices.len()` is a multiple of three.
+Downstream code uses `as_chunks::<3>()` (`simplify.rs`, `probe_visibility.rs`)
+and `len() / 3` (`lod.rs`), so a trailing one or two indices are dropped
+silently rather than refused.
+
+- Failure: a malformed glTF is accepted, and LOD triangle counts and the
+  uploaded index count disagree by the remainder. No crash found.
+- Severity: correctness (low). Confidence: missing check verified; downstream
+  effects read only at the callers listed.
+- Fix: refuse `indices.len() % 3 != 0` with the same `malformed` error the
+  out-of-range check uses.
+
+### Coverage
+
+Reviewed thoroughly: crcbl-net `codec.rs` decoders, `reliable/fragment.rs`,
+`reliable/packet.rs` fragment validation, `reliable/endpoint.rs` receive, ack
+and loss paths, `edit/fetch.rs`; crcbl-image `jpeg.rs`, `webp/lossless.rs`,
+`webp/mod.rs`, `bmp.rs`, `ico.rs`, XPM header and colour parsing, `theme.rs`
+`GtkCache`; crcbl-audio `qoa.rs`; crcbl-store `write_atomic` and
+`Replay::decode`; crcbl-jobs `ring.rs` and `pool.rs`; crcbl-core `alloc.rs`
+`FrameArena`; crcbl-font `fontconfig.rs`; crcbl-steam `callbacks.rs` and
+`matchmaking.rs` lobby functions; crcbl-mixer `pipewire/pod.rs`; crcbl-vk
+`write_buffer`, `request_readback`, `poll_readback`, `create_owned_image`;
+crcbl-dx12 `poll_readback`.
+
+Skimmed: crcbl-shell X11 event copy and `get_property`, Wayland
+`Sink`/`dispatch` lifetime, Win32 clipboard, resource-name and display-config
+sites, clipboard size caps; crcbl-input `evdev` ioctls; crcbl-image `webp/vp8`
+header and partitions and the SVG caps (not the renderer); crcbl-sprite
+`crpix.rs`; crcbl-server peer command dispatch and console authorisation;
+`crates/crcbl-store/src/web/opfs.rs`; string-truncation and
+`Duration::from_secs_f64` call sites.
+
+Not reviewed: crcbl-mtl, crcbl-webgpu, most of crcbl-dx12 and crcbl-vk, the
+AppKit and most Win32 shell code, crcbl-steam outside the two files above,
+crcbl-mixer's Windows backend and PulseAudio tagstruct, crcbl-input's
+GameController and XInput FFI, crcbl-notify. On the logic side: crcbl-ecs,
+crcbl-frame, crcbl-render, crcbl-hal validation, crcbl-phys, crcbl-nav,
+crcbl-anim, crcbl-ui, crcbl-app, crcbl-client, crcbl-server snapshot and delta
+logic, crcbl-net `delta.rs` and `condition.rs`, crcbl-store settings and save
+formats, crcbl-scene outside `read_primitive`. Error swallowing was swept with a
+grep for `let _ =` and `.ok()` on I/O calls; every hit read in context was a
+deliberate best-effort cleanup.
+
+## Whole-codebase review: performance (2026-10-30)
+
+Read-only review of the tree at `3edd00dc`. Nothing below was measured: every
+cost is inferred from reading the code, and each item says what to time before
+acting. Items already in this backlog are not repeated. Start-up items first.
+
+### Start-up: every pipeline compile holds the device lock (vk, dx12)
+
+In `crcbl-vk`, `create_graphics_pipeline_impl`, `create_mesh_pipeline_impl` and
+`create_compute_pipeline_impl` (`crates/crcbl-vk/src/pipeline.rs`) take
+`inner.state()` at the top and keep holding it across
+`vkCreateGraphicsPipelines` / `vkCreateComputePipelines`, the driver's shader
+compile; `create_rendering_pipeline` receives the guard as `&mut state`.
+`crcbl-dx12`'s `create_graphics_pipeline` and `create_compute_pipeline`
+(`crates/crcbl-dx12/src/device.rs`) do the same. Two costs follow:
+
+- Building pipelines on worker threads cannot help: both APIs allow concurrent
+  pipeline creation, but the backend serialises it.
+- Every other device call on any thread (`create_buffer`, `write_buffer`,
+  submits) waits for the whole compile, so a background compile cannot overlap
+  the frame loop. Measured cold numbers already in this backlog: 2.2–2.4 s per
+  scene build, about 90% pipeline creation, one forward colour pipeline at 313
+  ms (vk) / 361 ms (dx12).
+
+Moving pipeline work off the main thread is recorded elsewhere here as
+"considered and declined"; that entry does not mention this lock, which is why
+no form of it would work today.
+
+- Impact: large on a cold driver cache (first launch, after a driver update);
+  small warm. Verified by reading (the parent re-read the vk path); gain needs
+  measuring.
+- Fix: resolve layout and module handles under the lock, copy out the raw
+  handles and the strides the entry-point checks need, release the lock for the
+  driver call, retake it to insert. Referenced objects must stay alive across
+  the call (refcount or deferred destruction). Then build `ForwardRenderer`'s
+  independent pipelines in parallel through `crcbl_jobs`.
+
+### Start-up: `ForwardRenderer` builds every pass whether used or not
+
+`ForwardRenderer::build` (`crates/crcbl-render/src/forward.rs`) and
+`View::build` (`crates/crcbl-render/src/forward/view.rs`) build unconditionally:
+
+- The `MeshModules::sided` (`CullMode::None`) twins of all four mesh shapes
+  (colour, depth, depth-masked, RSM): eight mesh pipelines plus the shadow tile
+  clear, where an all-opaque single-sided scene without updating probes needs
+  three. The `with_scene` builders already know the material table.
+- Both `Fxaa::new` and `Cmaa2::new`, though at most one is recorded.
+- `Upscale::new`, which draws nothing at render scale 1.0.
+- `Water::new` and `crate::grass::Grass::new` before any body or field exists.
+- `AtlasView::new`, drawn only under `DebugView::ShadowAtlas`.
+- `Volumetric`, `ContactShadows`, `Ssao`, `Bloom`, `Exposure`, whatever
+  `inputs.effects` says.
+
+Some eagerness is load-bearing: `water.rs` relies on `Ssr` existing for its
+uniform block and tables. Already recorded and not repeated: "P4" (light-slot
+`DrawGen`s) and "Every view builds its own post pipelines".
+
+- Impact: medium to large cold, small warm. Verified which constructors run
+  unconditionally; not measured how many of the "49 compute and 35 graphics"
+  pipelines a typical scene never binds.
+- Fix: build twins and per-feature passes when the first material, body, field
+  or effect bit asks for them (eagerly when the builder's scene already contains
+  them); keep `Ssr`'s block and tables independent of its pipeline.
+
+### Start-up: `crcbl-render`'s uploads each submit and wait
+
+"The Vulkan pipeline cache is not persisted" ends with "Batching the start-up
+fills behind one wait is the candidate". `crcbl-frame::texture::UploadBatch` now
+exists but is `pub(crate)`, so `crcbl-render` cannot use it. Each of these is
+its own `submit` plus `Device::wait_idle`:
+
+- `ForwardRenderer::build`: five (AO, contact-shadow and probe-visibility
+  placeholders, DFG table, LTC table).
+- `Ssr::new`: two per view. `Exposure::new`: one `fill_at_start_up` per view.
+- `Wind::calm`: two one-texel layers, from `GrassScene::new`.
+- Each `DrawGen::new` through `fill_at_start_up`: primary view plus six shadow
+  ones.
+
+At least 17 serialised GPU round trips on the primary build path. Also
+`Ssr::new`'s `"dfg pair table"` uploads the same `dfg::pair_texels()` at the
+same size and format as `ForwardRenderer::build`'s `"dfg table"`: a duplicate
+texture and round trip per view, removable by passing the renderer's handle.
+
+- Impact: estimated 5–20 ms on a slow first submit, 1–2 ms warm. Verified by
+  reading.
+- Fix: expose `UploadBatch` (or an equivalent buffer batch for
+  `fill_at_start_up`) to `crcbl-render` and record the renderer's start-up fills
+  into one batch with one wait.
+
+### Start-up: Metal compiles MSL source per shader module
+
+`create_shader_module_impl` (`crates/crcbl-mtl/src/pipeline.rs`) calls
+`newLibraryWithSource:options:error:` every time (documented: no offline
+`.metallib` without Xcode). The start-up cost is unrecorded; every module the
+renderer recreates (per entry point in `Exposure::new`, per-view passes) is
+another front-end compile, softened by Metal's system cache.
+
+- Impact: unknown; needs Apple hardware, which this project has none of.
+- Fix candidates: reuse modules across pipelines and views; harvest an
+  `MTLBinaryArchive` on first run; compile asynchronously via
+  `newLibraryWithSource:options:completionHandler:`.
+
+### Per frame
+
+No new per-frame finding cleared the bar; the paths read reuse their storage or
+are already priced in P11–P38. Two observations too small to act on without a
+profile: `crcbl-ecs::System<T>` maps entities to rows through a SipHash
+`HashMap` where the generational slot index could address a `Vec` (costs on
+`get`/`detach`, not iteration); `crcbl-ui`'s tree hashes already-hashed `u64`
+`NodeKey`s with SipHash in `NodeStore::index`, `call_sites`, `live_text` and
+`MeasureCache` (tens of microseconds at a few hundred nodes, estimated).
+
+### Coverage
+
+Thorough: `crcbl-app` `Presenter` start-up; `crcbl-vk` instance, adapter
+enumeration, `surface_caps`, pipeline creation; `crcbl-dx12` pipeline creation
+locking; `crcbl-frame` `UiRenderer::build`, `begin_frame`, `UploadBatch`;
+`crcbl-render` `ForwardRenderer::build`, `View::build`, `Ssr::new`,
+`Volumetric::new`, grass and wind uploads, `fill_at_start_up`; `crcbl-font` scan
+and lookup; `crcbl-ecs` `System` and `World`; `crcbl` `PolledBoot`,
+`Loop::frame`.
+
+Skimmed: `crcbl-shell` Wayland open; `crcbl-ui` tree, layout, measure cache;
+`crcbl-audio` mixer locking; `crcbl-scene` `gltf_render::pack_page`;
+`crcbl-anim`, `crcbl-vfx`, `crcbl-phys` `System::step`, `crcbl-jobs` idle;
+`crcbl-mtl` module and pipeline creation.
+
+Not reviewed: `crcbl-webgpu`; `crcbl-mtl` and `crcbl-dx12` frame and encoder
+paths; `crcbl-net`, `crcbl-server`, `crcbl-client`; `crcbl-nav`, `crcbl-water`,
+`crcbl-wind` runtime, `crcbl-sprite`, `crcbl-image` decoders, `crcbl-store`,
+`crcbl-assets` watch; shader GPU cost; samples and apps; the mixer's realtime
+body beyond its locks.
+
+## Whole-codebase review: missing features (2026-10-30)
+
+Each gap was checked against `crates/`, `apps/`, `web/` and `tools/` under
+several names, and against `docs/backlog.md`, `docs/plan/`, `docs/notes/` and
+`docs/specs/`; absence claims are scoped to those directories. Every entry is
+unrecorded or recorded only in passing, as it says. Priorities: **P1** blocks
+shipping a typical game, **P2** blocks a common genre or feature, **P3** nice to
+have.
+
+### Localisation
+
+- **No localisation layer: no string tables, no OS locale query, no plural or
+  number formatting.** Engine strings are hard-coded English
+  (`crcbl::engine::menu::pause_items` builds `"RESUME"`, `"FULLSCREEN"`,
+  `"DEBUG PANEL"`). `GetUserDefaultLocaleName`, `NSLocale.preferredLanguages`,
+  `navigator.language` and `LANG`/`LC_MESSAGES` appear nowhere; the only locale
+  reader is `crcbl-shell`'s `linux/xkb/compose.rs`, for compose tables. Needed
+  by any game sold outside one language market. Builds on
+  `crcbl_input::hint::HintLabels` (a per-string override seam), `crcbl-ui`'s
+  shaping, bidi and font fallback, and a `language` setting in `crcbl-store`.
+  Fluent or a key-to-string table through `AssetSource` are the candidates — a
+  dependency decision for the owner. Recorded only as a sub-bullet under the
+  gamepad-hint entry. Medium, P1.
+
+### Platform and shell
+
+- **Nothing stops the display sleeping or the screensaver starting.** No
+  `zwp_idle_inhibit_manager_v1` (not among
+  `crates/crcbl-shell/wayland-protocols/`), X11 `XScreenSaverSuspend`, Win32
+  `SetThreadExecutionState`, macOS `IOPMAssertionCreateWithName`, or browser
+  Screen Wake Lock (absence re-checked by the parent). A gamepad-only player or
+  a cutscene gets the screen blanked mid-game; SDL inhibits by default for this
+  reason. Builds on the `Shell` trait plus a `ShellCaps` bit, and `web/engine`.
+  Unrecorded. Small, P1.
+- **No way to open a URL in the system browser.** No `xdg-open`, portal
+  `OpenURI`, `ShellExecuteW`, `NSWorkspace openURL` or `window.open`; only
+  Steam's `Friends::open_overlay_to_web_page`. Needed for "Wishlist", Discord,
+  EULA and privacy links. Builds on `crcbl_spawn::command` and a `Shell` method.
+  Unrecorded. Small, P2.
+- **No runtime window icon on Wayland, X11 or AppKit.** `WindowDesc::app_id`
+  sets `xdg_toplevel.set_app_id` and `WM_CLASS`, so Linux shows an icon only
+  with an installed `.desktop` file (not a tarball, itch build or dev run). No
+  `_NET_WM_ICON`, `xdg-toplevel-icon-v1`, or AppKit `setApplicationIconImage`.
+  Only Win32's per-DPI icon is recorded, under _EW integration follow-ups_.
+  Small, P3.
+- **No Wayland `wp_tearing_control_v1`**, so an immediate present mode is still
+  composited tear-free and the lowest-latency pacing never applies on Wayland.
+  Unrecorded. Small, P3.
+- **iOS: neither planned nor declined.** `docs/notes/backends.md` lists Metal
+  for "macOS, iOS" and `ROADMAP.md` names iOS, but `crcbl-shell` has no UIKit
+  backend and, unlike Android (`docs/plan/54-android.md`), there is no plan.
+  Decision owed: plan it or decline it so the platform table stops implying
+  support. Large if built, P3.
+
+### Input
+
+- **Non-XInput gamepads give nothing on Windows outside Steam.** The Windows
+  backend is `crcbl_input::xinput` alone, reporting every pad as
+  `PadKind::Xbox`; DualSense, DualShock 4 and Switch Pro pads are invisible
+  unless Steam Input translates them. No Windows.Gaming.Input, GameInput or raw
+  HID path. Builds on the `GamepadEvent` seam
+  (`crates/crcbl-input/src/gamepad.rs`), `engine::PadSource`, and
+  `xinput::skip_steam_virtual_pads`'s vendor probe for de-duplication. The
+  gamepad entries elsewhere treat XInput as complete Windows coverage. Medium,
+  P2 (P1 for a game sold off Steam).
+
+### Audio
+
+- **A lost or switched output device is never recovered.** `AudioStream::open`
+  (`crates/crcbl-audio/src/lib.rs`) binds `default_output_device()` once and the
+  cpal error callback only `eprintln!`s (re-checked by the parent), so an
+  unplugged USB headset or a dropped Bluetooth link leaves the game silent for
+  good, and a change of the OS default is not followed. Builds on `AudioStream`,
+  the `Arc<dyn AudioSource>` blanket impl (the mixer survives a reopen), and the
+  planned `output_device` setting's resolve-by-name-with-fallback rule. _Audio
+  settings beyond the bus gains_ covers choosing a device, not losing one. Small
+  to medium, P1.
+
+### Scene and glTF import
+
+The importer implements only `MSFT_lod`, `KHR_materials_emissive_strength`,
+`KHR_materials_ior` and `KHR_materials_specular` (`IMPLEMENTED_EXTENSIONS` in
+`crates/crcbl-scene/src/gltf_import.rs`). Not on any backlog list:
+
+- **`KHR_mesh_quantization` and `EXT_meshopt_compression`.**
+  `gltf_check::check_attribute` requires F32 `POSITION` and `NORMAL` and fails
+  the document otherwise, rejecting every gltfpack output. P1.
+- **`COLOR_0` vertex colours are not read** (`gltf_render::vertex`'s doc says
+  so); stylised and kitbash art relies on them. P1.
+- **`KHR_materials_unlit`**: stylised and baked-lighting assets render lit. P1.
+- **`KHR_lights_punctual`**: `gltf_render::capacities_for` documents that lights
+  are not read, so a Blender level loses its lights. P2.
+- **glTF cameras** are not imported. P3.
+- **`KHR_materials_transmission`, `clearcoat`, `volume`, `sheen`**: reported
+  unsupported, no entry; transmission waits on `53-transparency.md`. P3.
+
+Builds on `gltf_check`'s accessor rules, the existing un-normalising of integer
+`TEXCOORD_0` and `WEIGHTS_0`, the reserved `uv1` lanes, and `crcbl-render`'s
+clustered light list. Medium overall; quantization, `COLOR_0` and unlit are
+small each.
+
+- **No transform hierarchy between entities, and no attachments.** `crcbl-ecs`
+  has no parent/child link and glTF hierarchies are flattened at import. Needed
+  for a weapon in a hand bone, a rider on a platform, a turret on a vehicle.
+  Builds on `crcbl::scene_rig` (joint parents) and `crcbl_ecs::System`'s arrays
+  — a parent system resolved before render extraction. Recorded only as puppet
+  milestone 3's attachment socket and editor reparenting. Medium, P2.
+- **No prefabs or entity templates.** Nothing spawns a reusable bundle
+  (components plus children) from an asset with per-instance overrides; `.scn/`
+  holds flat rows. Builds on `crcbl_scene::scn::Scene`, `crcbl::registry`,
+  `crcbl-reflect`, and the editor's id-reminting paste. Recorded only as
+  excluded from the MVP editor (`docs/plan/08-editor.md`). Medium, P2.
+
+### Rendering and content
+
+- **No video playback** (intro logos, cutscenes, menu trailers): no decoder and
+  no platform route (Media Foundation, AVFoundation, browser `<video>`). Builds
+  on `crcbl_frame::upload_texture` and a streamed voice (the recorded
+  streaming-decode work). Decision owed: platform decoders or a codec dependency
+  such as dav1d. Unrecorded. Large, P2.
+- **No 2D tilemaps and no Tiled or LDtk import.** `crcbl-sprite` stops at sheets
+  and clips. Builds on `crcbl_sprite::Sheet`, `crcbl-phys` static shapes and
+  `crcbl-nav`'s grid. Unrecorded. Medium, P2 for 2D games.
+- **No terrain topic**: no heightmap terrain with LOD (clipmap or CDLOD), splat
+  blending or streaming; only `crcbl_greybox::heightfield_tiles`. Referenced in
+  passing (`docs/plan/59-tessellation.md`, `terrain_blend` in
+  `docs/plan/37-materials.md`); no plan owns the renderer. Large, P2 for outdoor
+  games.
+- **No local split-screen**: secondary views exist
+  (`ForwardRenderer::create_view`) but nothing composites them into viewports of
+  one swapchain, the mixer has one listener (`Mixer::set_listener`), and UI has
+  no per-player root. Only the input half is recorded. Medium, P3.
+- **No cinematic tooling**: no camera shake, camera blend, or
+  timeline/sequencer. Unrecorded. Small (shake, blend) to large (sequencer), P3.
+
+### Gameplay
+
+- **No AI decision framework** (behaviour tree, utility, or agent state
+  machine); decisions are hand-written per sample (`apps/breach/src/bots.rs`).
+  Recorded only in `docs/notes/samples.md`. Medium, P3.
+
+### Possibly stale record
+
+The line "no JPEG decoder exists in the workspace" under _glTF reaches the
+renderer_ looks stale: `crates/crcbl-image/src/jpeg.rs` exists. Not re-verified.
+
+### Coverage
+
+Reviewed (lib.rs or public API plus targeted greps): `crcbl-audio`,
+`crcbl-assets`, `crcbl-input`, `crcbl-ecs`, `crcbl-font`, `crcbl-sprite`;
+`crcbl-scene`'s glTF importer, `gltf_check`, `gltf_render`; `crcbl-shell`'s
+`Shell` trait and Wayland protocol set; `crcbl-cli` `args.rs`; `crcbl`'s engine
+menu and device-loss path. Already-recorded gaps found and not repeated: rumble,
+device assignment, glyph art, compressed audio and streaming, limiter, reverb,
+accessibility items, file dialogs, transparency, decals, TAA, DoF, grading, HDR,
+KTX2/BC, GPU particles, several glTF extensions and morph targets, IK, vehicles,
+heightfield colliders, NAT traversal, async asset IO, sector streaming, shader
+hot reload, device loss, packaging, wasm modding.
+
+Skimmed: `crcbl-phys`, `crcbl-render` (cameras, views), `crcbl-nav`,
+`crcbl-steam`, `crcbl-net`, `crcbl-ui`, `crcbl-anim`, `crcbl-vfx`,
+`crcbl-spawn`.
+
+Not reviewed: `crcbl-hal`, `crcbl-vk`, `crcbl-mtl`, `crcbl-dx12`,
+`crcbl-webgpu`, `crcbl-shaders`, `crcbl-frame`, `crcbl-app`, `crcbl-console`,
+`crcbl-core`, `crcbl-jobs`, `crcbl-server`, `crcbl-client`, `crcbl-store`,
+`crcbl-image`, `crcbl-inventory`, `crcbl-ragdoll`, `crcbl-water`, `crcbl-wind`,
+`crcbl-greybox`, `crcbl-golden`, `crcbl-profile`, `crcbl-reflect`,
+`crcbl-reflect-derive`, `crcbl-rand`, `crcbl-wl-scanner`, `crcbl-mixer`,
+`crcbl-notify`, and everything under `apps/` including the editor.
+
 ## pikr's start-up: what is left after one upload batch (2026-10-29)
 
 pikr measured `UiRenderer::new` as its largest step before first paint (12.4 ms
