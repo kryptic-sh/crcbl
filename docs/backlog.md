@@ -12,28 +12,6 @@ code read was sound throughout. Most of it encodes its invariant in the types or
 validates at the boundary, so the findings are few and sit in the hand-written
 decoders.
 
-### crcbl-image: JPEG scan header indexes Huffman tables unchecked (panic)
-
-`read_scan` in `crates/crcbl-image/src/jpeg.rs` takes each scan component's DC
-and AC table selectors straight from the `SOS` byte (`spec[1] >> 4` and
-`spec[1] & 0x0f`, each 0..=15). It then indexes `tables.dc[dc]` and
-`tables.ac[ac]`, which are `[Option<Huffman>; 4]`: once in the "table missing"
-check and again, unconditionally, when building `BlockContext`. `read_frame`
-validates the quantisation selector (`spec[2] > 3`), but nothing validates these
-two.
-
-- Failure: any JPEG whose SOS names table 4..=15 panics with an index out of
-  bounds instead of returning `ImageError::Malformed`. The input is untrusted:
-  `.desktop` icon paths, notification images, and `data:` images inside SVGs all
-  reach `jpeg::decode`. The decoder fuzz target in `crates/crcbl-net/fuzz` calls
-  `jpeg::decode` but has evidently not reached a valid SOF followed by an SOS
-  with a selector at or above 4.
-- Severity: robustness (panic on hostile input). Confidence: verified by reading
-  (the reviewer, then the parent re-read the indexing sites).
-- Fix: in `read_scan`, refuse `dc > 3 || ac > 3` as `malformed(...)` before
-  either array is indexed, add a unit test with a crafted SOS, and add that file
-  as a fuzz-corpus seed so the target reaches scan parsing.
-
 ### crcbl-image: lossless WebP reads up to 65 536 prefix-code groups
 
 `decode_image` in `crates/crcbl-image/src/webp/lossless.rs` sets `group_count`

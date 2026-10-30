@@ -90,6 +90,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   a positive number of milliseconds is logged and the capture is written at the
   end as before. (`crcbl::profile::BUDGET_VAR`)
 
+### Fixed
+
+- **A JPEG whose scan names a Huffman table past 3 is refused as malformed
+  instead of panicking.** `crcbl_image::jpeg::decode` took each scan component's
+  DC and AC table selectors from the `SOS` header unchecked and indexed its four
+  tables with them, so a hostile file, from a `.desktop` icon, a notification
+  image or an SVG's `data:` image, panicked with an index out of bounds. It now
+  returns `ImageError::Malformed`.
+
 ## [0.13.0] - 2026-10-29
 
 ### Breaking

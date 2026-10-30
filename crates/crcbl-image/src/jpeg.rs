@@ -533,11 +533,11 @@ fn read_scan(
             .iter()
             .position(|c| c.id == spec[0])
             .ok_or_else(|| malformed("a scan names a component the frame has not"))?;
-        components.push((
-            index,
-            usize::from(spec[1] >> 4),
-            usize::from(spec[1] & 0x0f),
-        ));
+        let (dc, ac) = (usize::from(spec[1] >> 4), usize::from(spec[1] & 0x0f));
+        if dc > 3 || ac > 3 {
+            return Err(malformed("a scan's Huffman table is out of range"));
+        }
+        components.push((index, dc, ac));
     }
     let &[start, end, approximation] = segment
         .get(1 + count * 2..4 + count * 2)
@@ -1224,6 +1224,31 @@ mod tests {
                 ),
                 "{} bytes",
                 bytes.len()
+            );
+        }
+    }
+
+    /// A scan's table selectors are four bits each, but only tables 0 to 3
+    /// exist: one naming 4 or above is damage, not a panic.
+    #[test]
+    fn a_scan_naming_a_huffman_table_past_three_is_malformed() {
+        let (_, jpeg, _) = FIXTURES[0];
+        let sos = jpeg
+            .windows(2)
+            .position(|pair| pair == [0xff, 0xda])
+            .expect("a scan");
+        // Marker, length and component count, then the first component's
+        // id and its DC/AC selector byte.
+        let selectors = sos + 6;
+        for (byte, why) in [(0x40, "DC 4"), (0x0f, "AC 15"), (0xf0, "DC 15")] {
+            let mut bytes = jpeg.to_vec();
+            bytes[selectors] = byte;
+            assert!(
+                matches!(
+                    decode(&bytes, &Limits::DEFAULT),
+                    Err(ImageError::Malformed(_))
+                ),
+                "{why}"
             );
         }
     }

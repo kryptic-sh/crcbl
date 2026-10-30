@@ -1,7 +1,8 @@
 //! Named seeds from the fuzzer's corpus, replayed through the delta decoder,
 //! the replay file's reader and its spool's recovery, the save container's
 //! reader, the scene edit's messages, the scene fetch's, the session hello,
-//! the SVG renderer, the lossy WebP decoder and the XPM decoder.
+//! the SVG renderer, the lossy WebP decoder, the XPM decoder and the JPEG
+//! decoder.
 //!
 //! `fuzz_targets/decoder.rs` runs the decoders against bytes libFuzzer invents.
 //! This target runs three of them against bytes somebody named, and the two are
@@ -669,4 +670,20 @@ fn the_xpm_seed_decodes() {
     assert_eq!(pixels[0], [0, 0, 0, 0]);
     assert_eq!(pixels[2], [47, 79, 79, 255]);
     assert_eq!(pixels[10], [255, 136, 0, 255]);
+}
+
+/// **The JPEG seed is refused as malformed**: baseline-444 with its scan's
+/// first DC table selector set to 4, past the four tables a JPEG has. It used
+/// to index the decoder's table array out of bounds; it is also the corpus's
+/// only near-valid JPEG, so the fuzzer's mutations of it start inside the scan
+/// reader rather than at the first marker.
+#[test]
+fn the_jpeg_seed_is_malformed() {
+    assert!(matches!(
+        crcbl_image::jpeg::decode(
+            include_bytes!("../corpus/decoder/jpeg-huffman-table-past-three"),
+            &crcbl_image::Limits::DEFAULT,
+        ),
+        Err(crcbl_image::ImageError::Malformed(_))
+    ));
 }
