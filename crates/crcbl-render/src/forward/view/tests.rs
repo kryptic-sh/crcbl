@@ -72,6 +72,10 @@ fn a_view_is_released_by_destroy_view_and_by_the_renderer_and_leaks_nothing() {
     let device = device.as_ref();
     let before = recorder.total_live_objects();
     let (mut renderer, view) = renderer_with_view(device, queue);
+    // The build's and the view's staging are released by the first frame or
+    // destroy that waits for them, so they are settled before every count:
+    // what is counted is the view's own objects.
+    renderer.wait_for_uploads(device, "test");
     let with_view = recorder.total_live_objects();
 
     renderer.destroy_view(device, view);
@@ -84,6 +88,7 @@ fn a_view_is_released_by_destroy_view_and_by_the_renderer_and_leaks_nothing() {
         .create_view(device, queue, &ViewDesc::default())
         .expect("built");
     assert_eq!(again, view, "a released id is the next one handed out");
+    renderer.wait_for_uploads(device, "test");
     assert_eq!(
         recorder.total_live_objects(),
         with_view,
@@ -1155,6 +1160,8 @@ fn a_fixed_view_releases_its_probe_row() {
     let (recorder, device, queue) = open();
     let device = device.as_ref();
     let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    // The build's staging settled first, on the test above's terms.
+    renderer.wait_for_uploads(device, "test");
     let before = recorder.total_live_objects();
     let fixed = ViewDesc {
         lighting: FIXED,

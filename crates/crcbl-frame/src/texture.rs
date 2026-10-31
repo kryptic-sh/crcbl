@@ -44,7 +44,8 @@
 //! one wait. The batch also carries [`UploadBatch::fill`], the same staging
 //! copy into a device-local *buffer*, so a renderer's start-up state rides the
 //! same submission as its textures. A caller with work of its own to do before
-//! its first frame — [`crate::ui_pass`]'s renderer — submits the batch with
+//! its first frame — [`crate::ui_pass`]'s renderer, and `crcbl_render`'s
+//! forward renderer — submits the batch with
 //! [`UploadBatch::submit_deferred`] instead, which does not wait: the copies
 //! run under that work, and the [`PendingUpload`] it returns frees the staging
 //! once the GPU is past it.
@@ -74,8 +75,8 @@ use crcbl_hal::{
     BufferCopy, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoder, CommandEncoderDesc,
     Device, Extent3d, Features, Format, HalError, ImageAspect, ImageDesc, ImageHandle,
     ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewHandle, ImageViewType, MemoryLocation, Offset3d, QueueHandle, ResourceState,
-    SemaphoreDesc, SemaphoreKind, SemaphoreSignal, SubmitInfo,
+    ImageViewHandle, ImageViewType, MemoryLocation, Offset3d, QueueHandle, QueueKind,
+    ResourceState, SemaphoreDesc, SemaphoreKind, SemaphoreSignal, SubmitInfo,
 };
 
 use crate::mip::level_extent;
@@ -1211,6 +1212,33 @@ impl<'a> UploadBatch<'a> {
             });
         Ok(UploadedTexture { image, view })
     }
+}
+
+/// Refuses any `queue` but `device`'s [`QueueKind::Graphics`] queue for an
+/// upload [`UploadBatch::submit_deferred`] will not wait for: `what` names the
+/// caller, as "a UI pass" or "a forward renderer's view".
+///
+/// The rule every deferred caller shares, held in one place. Only the queue the
+/// frames are submitted to orders the copies before the frames that read them,
+/// since nothing waits on the host.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] naming both queues.
+pub fn require_frame_queue(
+    device: &dyn Device,
+    queue: QueueHandle,
+    what: &str,
+) -> Result<(), HalError> {
+    let graphics = device.queue(QueueKind::Graphics);
+    if graphics == Some(queue) {
+        return Ok(());
+    }
+    Err(HalError::InvalidDescriptor(format!(
+        "{what} must be on the device's graphics queue ({graphics:?}), the one its frames are \
+         submitted to, and was given {queue:?}: its start-up uploads are not waited for, and \
+         only that queue orders them before the frames that read them"
+    )))
 }
 
 impl Drop for UploadBatch<'_> {

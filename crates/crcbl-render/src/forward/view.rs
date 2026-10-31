@@ -961,8 +961,9 @@ impl View {
     /// rollback the caller might run later.
     ///
     /// Its start-up uploads and fills are recorded into `uploads` rather than
-    /// submitted one by one, so **the view draws nothing until the caller's
-    /// [`UploadBatch::submit`] has returned `Ok`**; a failure
+    /// submitted one by one, so **the view draws nothing until the caller has
+    /// submitted that batch** — with
+    /// [`UploadBatch::submit_deferred`], to the queue its frames go to; a failure
     /// [abandons](UploadBatch::abandon) the batch, because the rollback has
     /// destroyed what it recorded into.
     ///
@@ -3447,15 +3448,18 @@ impl ForwardRenderer {
     /// [`HalError::InvalidDescriptor`] when [`MAX_VIEWS`] views already exist,
     /// or for a [`ViewBackground::Transparent`] view whose effects name one of
     /// [`ViewBackground::REFUSED_ON_TRANSPARENT`] — a filter that would blend
-    /// its coverage edges with the empty background, see that variant. And
-    /// whatever the device refuses while building one — in which case nothing
-    /// of the view is left behind.
+    /// its coverage edges with the empty background, see that variant — or
+    /// for a `queue` that is not the device's graphics queue: the view's
+    /// start-up fills are submitted to it and not waited for, on the build's
+    /// terms. And whatever the device refuses while building one — in which
+    /// case nothing of the view is left behind.
     pub fn create_view(
         &mut self,
         device: &dyn Device,
         queue: QueueHandle,
         desc: &ViewDesc,
     ) -> Result<ViewId, HalError> {
+        crcbl_frame::require_frame_queue(device, queue, "a forward renderer's view")?;
         let refused = desc
             .effects
             .intersection(ViewBackground::REFUSED_ON_TRANSPARENT);
@@ -3482,7 +3486,9 @@ impl ForwardRenderer {
         let probe_visibility = self.probe_visibility_placeholder.view;
         // Its own batch, submitted before this returns: a view created after
         // the build has no build's batch to join, and the caller may draw it
-        // on the next frame.
+        // on the next frame. Not waited for, on the build's batch's terms —
+        // the next frame is on the same queue, after it — so a view made
+        // between frames no longer drains the device.
         let mut uploads = UploadBatch::new(device, queue, "view");
         let view = View::build(
             device,
@@ -3537,9 +3543,13 @@ impl ForwardRenderer {
             },
             &mut || {},
         )?;
-        if let Err(error) = uploads.submit() {
-            view.destroy(device);
-            return Err(error);
+        // The last fallible step: a failed submit leaves nothing pending.
+        match uploads.submit_deferred() {
+            Ok(pending) => self.uploads_in_flight.push(pending),
+            Err(error) => {
+                view.destroy(device);
+                return Err(error);
+            }
         }
         if self.views.len() <= free {
             self.views.resize_with(free + 1, || None);
@@ -3556,7 +3566,9 @@ impl ForwardRenderer {
     /// what a view it never was had hidden.
     ///
     /// Like [`destroy`](Self::destroy), the caller's to call once no frame in
-    /// flight still names the view's buffers and groups.
+    /// flight still names the view's buffers and groups. Any start-up upload
+    /// not yet retired is waited for first — a view destroyed before a frame
+    /// has run past its own fills would otherwise release what they write.
     ///
     /// # Panics
     ///
@@ -3572,6 +3584,10 @@ impl ForwardRenderer {
             .get_mut(view.index() - 1)
             .and_then(Option::take)
             .unwrap_or_else(|| panic!("{view:?} is not a view this renderer built"));
+        // Every pending upload rather than this view's alone: the list does
+        // not say whose each is, and once frames have run past them it is
+        // usually empty.
+        self.wait_for_uploads(device, "destroy_view");
         built.destroy(device);
         self.instances.clear_flags(view.hidden_bit());
     }

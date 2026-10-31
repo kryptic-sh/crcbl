@@ -1002,8 +1002,10 @@ impl DrawGen {
     /// `uploads` carries the one start-up copy this makes: the one that zeroes
     /// the hysteresis state, described on [`group_state`](Self::group_state).
     /// It is recorded, not submitted, so **no frame may run these passes until
-    /// the caller's [`UploadBatch::submit`] has returned `Ok`** — a renderer
-    /// building several of these submits all of their copies with one wait.
+    /// the caller has submitted that batch** — waiting, with
+    /// [`UploadBatch::submit`], or, with [`UploadBatch::submit_deferred`], to
+    /// the queue the frames go to. A renderer building several of these
+    /// submits all of their copies in one submission.
     ///
     /// # Errors
     ///

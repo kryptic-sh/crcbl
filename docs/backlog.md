@@ -542,15 +542,21 @@ did, so every presenter retired frames with `wait_idle`), and
 `crcbl-mtl`'s timeline reads waiting for the signalling command buffer, which
 the three Metal CI jobs passed with both in (run 40758600597). What is left:
 
-- **The UI renderer no longer waits; the forward renderer still does.**
-  `UiRenderer` submits its batch with `UploadBatch::submit_deferred` and retires
-  the `PendingUpload` in `begin_frame` (2026-10-31). Release builds, load about
-  4.5: `UiRenderer::new` went from 1.40 ms to 0.55 ms (medians) on the RDNA2
-  iGPU and 0.77 to 0.65 ms on NAVI31; ANV's 7–10 ms first submission was not
-  measured (no ANV here). `ForwardRenderer`'s build batch and `upload_page`
-  still call `submit()`; moving them needs the same retire point in its frame
-  loop. The null backend signals timelines at submit, so only the Vulkan e2e
-  validation runs check that the staging outlives a real GPU's copies.
+- **The UI and forward renderers no longer wait for their start-up uploads.**
+  `UiRenderer` and `ForwardRenderer` (build, `create_view`, `set_wind_layers`)
+  submit with `UploadBatch::submit_deferred` and retire the `PendingUpload`s in
+  `begin_frame` (2026-10-31); `crcbl_frame::require_frame_queue` refuses any
+  other queue for both. Release builds, fresh device per run, load ~3–5, not a
+  quiet window: `ForwardRenderer::new` went from 11.31 to 9.81 ms (medians) on
+  the RDNA2 iGPU and 12.54 to 12.13 ms on NAVI31; ANV not measured. Still
+  waiting: `upload_page` (build and `replace_page`), `ProbeTable::new`/`fill`
+  and `set_grass`'s uploads. The probe-table clear has an ordering reason to
+  stay out of the batch (a scene with probes refills the rows straight after
+  it), and pages keep their own submission so every page's staging is not alive
+  at once, so either move needs its own design. `destroy_view` waits for every
+  pending upload, not only its view's, as the list records no owners. The null
+  backend signals timelines at submit, so only the Vulkan e2e validation runs
+  check that the staging outlives a real GPU's copies.
 - **ANV's first submission is the bulk of what remains.** Measured with a
   throwaway test on the iGPU (debug build, at a load average of about 8 to 9
   from a parallel build, not in a quiet window): the first upload on a fresh

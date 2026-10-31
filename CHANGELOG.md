@@ -45,6 +45,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_frame::require_frame_queue`**: the shared refusal of any queue but
+  the device's graphics queue for uploads submitted without a wait.
 - **`crcbl_frame::UploadBatch::submit_deferred` and `PendingUpload`**: submit a
   start-up batch without waiting and retire its staging once a timeline
   semaphore says the GPU is past it.
@@ -130,6 +132,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl_render::ForwardRenderer`'s build, `create_view` and `set_wind_layers`
+  no longer block on `Device::wait_idle` for their start-up uploads.** Each
+  batch is submitted with `UploadBatch::submit_deferred` and ordered before the
+  frames that read it by queue order; its staging is freed by the first
+  `begin_frame` (or `begin_skinned_frame`) that sees its timeline semaphore
+  signalled, or by `destroy` / `destroy_view`, which wait for it first. Any
+  queue other than the device's graphics queue is now refused with
+  `HalError::InvalidDescriptor`. A device without timeline semaphores (WebGPU)
+  still waits. On an RDNA2 iGPU `ForwardRenderer::new` went from 11.31 ms to
+  9.81 ms.
 - **`crcbl_frame::UiRenderer::new` (and `with_images` / `with_ring`) no longer
   blocks on `Device::wait_idle` for its start-up textures.** The upload is
   submitted and ordered before the first frame by queue order; its staging is

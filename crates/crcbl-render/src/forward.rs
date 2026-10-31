@@ -199,7 +199,7 @@ use crate::sky_pass::SkyPass;
 use crate::ssao::{Ssao, cached_group};
 use crate::ssr::{Ssr, SsrEnvironment, SsrImages};
 use crate::stack::CameraStack;
-use crate::texture::{UploadBatch, UploadedTexture, upload_texture_mip_layers};
+use crate::texture::{PendingUpload, UploadBatch, UploadedTexture, upload_texture_mip_layers};
 use crate::transient::TransientPool;
 use crate::upscale::Upscale;
 use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages, VolumetricReads};
@@ -2502,6 +2502,18 @@ pub struct ForwardRenderer {
     /// dispatch wrote, so the CPU knows how many *calls* it submitted and
     /// nothing about how many blades came out of them.
     recorded_grass_draws: u64,
+    /// Start-up uploads submitted without a wait — the build's batch, and one
+    /// for each [`create_view`](ForwardRenderer::create_view) and
+    /// [`set_wind_layers`](ForwardRenderer::set_wind_layers) since — whose
+    /// staging the GPU may still be reading.
+    ///
+    /// Each is retired by the first `begin_frame` that finds its semaphore
+    /// signalled, and waited for by [`destroy`](ForwardRenderer::destroy) and
+    /// [`destroy_view`](ForwardRenderer::destroy_view) before they release
+    /// anything the copies write. Queue order is what lets a frame read the
+    /// uploaded resources without waiting first — see [`PendingUpload`] — so
+    /// every one of them was submitted to the device's graphics queue.
+    uploads_in_flight: Vec<PendingUpload>,
 }
 
 /// What a partly-built [`ForwardRenderer`] has to give back.
@@ -3478,15 +3490,23 @@ impl ForwardRenderer {
         if !missing.is_empty() {
             return Err(HalError::UnsupportedFeatures { missing });
         }
+        crcbl_frame::require_frame_queue(device, queue, "a forward renderer")?;
         let mut rollback = Rollback::default();
-        // **One submission and one wait for the build's small uploads**: the
+        // **One submission and no wait for the build's small uploads**: the
         // placeholders, the split-sum and area-light tables, and every view's
         // and shadow cull's start-up fills are recorded into this batch as they
         // are created, and submitted once the renderer is whole. Each used to
         // be its own submit and `wait_idle`, and on Mesa's ANV the first submit
         // on a fresh device costs several milliseconds and every later round
         // trip about half of one. The geometry pools, the pages and the probe
-        // table still submit for themselves.
+        // table still submit for themselves, all of them before this batch's
+        // submission, and none of them reads anything it writes.
+        //
+        // The batch is submitted without a wait: every reader of what it
+        // writes is a frame on this same queue, after it, which is all the
+        // ordering the copies need — see `PendingUpload`. Its staging is
+        // retired by the first `begin_frame` that finds its semaphore
+        // signalled, or waited for by `destroy`.
         let mut uploads = UploadBatch::new(device, queue, "forward");
         match Self::build(
             device,
@@ -3497,8 +3517,14 @@ impl ForwardRenderer {
             &mut rollback,
             service,
         ) {
-            Ok(renderer) => match uploads.submit() {
-                Ok(()) => Ok(renderer),
+            // The submit is the build's last fallible step, so nothing can
+            // fail between it and the renderer owning the upload: a failed
+            // submit leaves nothing pending, and `destroy` finds an empty list.
+            Ok(mut renderer) => match uploads.submit_deferred() {
+                Ok(pending) => {
+                    renderer.uploads_in_flight.push(pending);
+                    Ok(renderer)
+                }
                 Err(error) => {
                     renderer.destroy(device);
                     Err(error)
@@ -3510,6 +3536,44 @@ impl ForwardRenderer {
                 drop(uploads);
                 rollback.run(device);
                 Err(error)
+            }
+        }
+    }
+
+    /// Releases every start-up upload the GPU is known to be past, without
+    /// blocking — the first thing each `begin_frame` does.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from reading a semaphore — a lost device. What was not
+    /// released stays in the list.
+    fn retire_uploads(&mut self, device: &dyn Device) -> Result<(), HalError> {
+        let mut index = 0;
+        while index < self.uploads_in_flight.len() {
+            if self.uploads_in_flight[index].poll(device)? {
+                // Retired, so dropping it releases nothing and logs nothing.
+                drop(self.uploads_in_flight.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Blocks until every start-up upload has landed and releases them, before
+    /// `caller` destroys anything their copies write.
+    ///
+    /// A failed wait is a lost device. What it would have released is leaked
+    /// rather than freed under the GPU, and said so in the log; the caller goes
+    /// on, as a destroy has nothing to hand an error to.
+    fn wait_for_uploads(&mut self, device: &dyn Device, caller: &str) {
+        for mut pending in self.uploads_in_flight.drain(..) {
+            if let Err(error) = pending.wait(device) {
+                crcbl_core::log::warn!(
+                    "ForwardRenderer::{caller}: a start-up upload's wait failed ({error}); its \
+                     staging buffers are leaked rather than freed under the GPU"
+                );
+                // Dropping it is the leak, and it logs one of its own.
             }
         }
     }
@@ -5881,6 +5945,9 @@ impl ForwardRenderer {
             frame_grass: None,
             wind: crcbl_shaders::wind::WindParams::default(),
             recorded_grass_draws: 0,
+            // The build's own batch joins once it is submitted, which is after
+            // this returns — see `build_on_path`.
+            uploads_in_flight: Vec::new(),
         })
     }
 
@@ -6307,6 +6374,8 @@ impl ForwardRenderer {
         light: &DirectionalLight,
         extent: (u32, u32),
     ) -> Result<(), HalError> {
+        // First, before anything this frame could release or rewrite.
+        self.retire_uploads(device)?;
         // The instance pool owns the ring, so its slot is the frame index the
         // uniform buffer and the bind group below are picked with.
         self.frame = self.instances.rotate();
@@ -6365,6 +6434,8 @@ impl ForwardRenderer {
         light: &DirectionalLight,
         extent: (u32, u32),
     ) -> Result<(), SkinningError> {
+        // First, on `begin_frame`'s terms.
+        self.retire_uploads(device)?;
         self.frame = self.instances.rotate();
         // An empty plan dispatches nothing — see [`Skinning::begin_frame`] — so
         // it leaves the vertex pool where it was, and the shadow atlas with it.
@@ -10043,17 +10114,25 @@ impl ForwardRenderer {
     /// field does, and like a field it is drawn from the next `begin_frame` on:
     /// the frame freezes its layers with its field.
     ///
+    /// The new pair is uploaded in one batch that is **not waited for**, on
+    /// the build's terms: `queue` must be the device's graphics queue, and
+    /// the batch's staging is retired by a later `begin_frame`.
+    ///
     /// # Errors
     ///
     /// [`crate::grass::WindLayerError`] for a layer that is not four bytes a
-    /// texel of the grid it came with, or a seam call that failed.
+    /// texel of the grid it came with, a `queue` that is not the device's
+    /// graphics queue, or a seam call that failed.
     pub fn set_wind_layers(
         &mut self,
         device: &dyn Device,
         queue: QueueHandle,
         layers: Option<&crate::grass::WindLayers>,
     ) -> Result<(), crate::grass::WindLayerError> {
-        self.grass.set_wind_layers(device, queue, layers)
+        crcbl_frame::require_frame_queue(device, queue, "a forward renderer's wind layers")?;
+        let pending = self.grass.set_wind_layers(device, queue, layers)?;
+        self.uploads_in_flight.push(pending);
+        Ok(())
     }
 
     /// The wind's uniform block for the frames from here on —
@@ -10949,7 +11028,12 @@ impl ForwardRenderer {
     }
 
     /// Releases everything, in dependency order. The device must be idle.
-    pub fn destroy(self, device: &dyn Device) {
+    ///
+    /// The start-up uploads are waited for first all the same: a renderer
+    /// destroyed before any frame has a build batch nothing else has waited
+    /// for, and its copies write the placeholders and fills released below.
+    pub fn destroy(mut self, device: &dyn Device) {
+        self.wait_for_uploads(device, "destroy");
         if let Some(stats) = self.cull_stats {
             stats.destroy(device);
         }

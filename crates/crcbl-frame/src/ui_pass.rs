@@ -165,9 +165,8 @@ use crcbl_hal::{
     Extent3d, FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError,
     ImageAspect, ImageSubresourceLayers, ImageUsage, ImageViewHandle, ImageViewType, IndexFormat,
     LoadOp, MemoryLocation, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
-    QueueHandle, QueueKind, ResourceState, SampleType, SamplerAddressMode, SamplerDesc,
-    SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp,
-    check_portable_storage_buffers,
+    QueueHandle, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, check_portable_storage_buffers,
 };
 
 use crcbl_shaders::{Stage, UI};
@@ -387,7 +386,7 @@ impl UiRenderer {
     /// already registered.
     ///
     /// The upload is submitted to `queue` and not waited for, so `queue` must
-    /// be the device's [`QueueKind::Graphics`] queue — the one frames are
+    /// be the device's [`QueueKind::Graphics`](crcbl_hal::QueueKind::Graphics) queue — the one frames are
     /// submitted to, and the one the build refuses anything else for: queue
     /// order is what puts the copies before the first frame that samples them
     /// — see [`PendingUpload`]. Its staging is released by the first
@@ -458,14 +457,7 @@ impl UiRenderer {
         }
         // Enforced rather than documented: the start-up upload is not waited
         // for, and only the frames' own queue orders its copies before them.
-        let graphics = device.queue(QueueKind::Graphics);
-        if graphics != Some(queue) {
-            return Err(HalError::InvalidDescriptor(format!(
-                "a UI pass must be built on the device's graphics queue ({graphics:?}), the one \
-                 its frames are submitted to, and was given {queue:?}: its start-up upload is \
-                 ordered before the first frame by that queue alone"
-            )));
-        }
+        crate::texture::require_frame_queue(device, queue, "a UI pass")?;
         let mut rollback = Rollback::default();
         match Self::build(
             device,

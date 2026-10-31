@@ -35,7 +35,9 @@
 //! and has no graph to belong to; each is called out at the call site.
 //! [`ForwardRenderer`]'s build records the small ones — its placeholders and
 //! tables, every view's and shadow cull's fills, and the calm wind layers —
-//! into one [`texture::UploadBatch`], submitted with one wait. The one that also runs
+//! into one [`texture::UploadBatch`], submitted once and not waited for: its
+//! frames follow it on the same queue, and the first `begin_frame` past it
+//! frees its staging. The one that also runs
 //! later is [`texture`]'s — between two frames, never inside
 //! one, on an image no frame names yet, and blocking until its copy lands — when
 //! [`ForwardRenderer::replace_page`](forward::ForwardRenderer::replace_page)

@@ -355,7 +355,7 @@ fn the_wind_is_calm_until_it_is_set() {
     let device = device.as_ref();
     let mut scene = calm_scene(device, queue);
     let calm = scene.wind.intensity.view;
-    scene
+    let mut set = scene
         .set_wind_layers(
             device,
             queue,
@@ -372,10 +372,17 @@ fn the_wind_is_calm_until_it_is_set() {
         )
         .expect("the layers upload");
     assert_ne!(scene.wind.intensity.view, calm);
-    scene
+    let mut removed = scene
         .set_wind_layers(device, queue, None)
         .expect("removing is a set");
     assert_eq!(scene.retired.len(), 2, "both replacements were retired");
+    // Not waited for at the set: the caller retires each upload, here at once.
+    for pending in [&mut set, &mut removed] {
+        assert!(!pending.is_retired(), "a set waited for its upload");
+        pending
+            .wait(device)
+            .expect("the null backend has signalled it");
+    }
     scene.destroy(device);
 }
 

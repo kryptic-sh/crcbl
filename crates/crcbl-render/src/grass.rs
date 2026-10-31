@@ -109,7 +109,9 @@ use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
 use crate::partial::Partial;
 use crate::pipeline_batch;
 use crate::ssao::cached_group;
-use crate::texture::{UploadBatch, UploadedTexture, upload_texture, upload_texture_mip_layers};
+use crate::texture::{
+    PendingUpload, UploadBatch, UploadedTexture, upload_texture, upload_texture_mip_layers,
+};
 
 pub use field::{
     BladeLod, BladeLook, BladeNormal, BladeShape, BladeStyle, BladeType, CELLS_PER_TILE, Clumping,
@@ -403,32 +405,37 @@ impl GrassScene {
 
     /// Replaces the two wind layers; [`None`] restores the calm placeholder.
     ///
+    /// Both layers go up in one batch submitted to `queue` **without a wait**,
+    /// and the returned [`PendingUpload`] is the caller's to retire: the next
+    /// frame samples them later on the same queue, which is all the ordering
+    /// they need, so `queue` must be the one frames are submitted to.
+    ///
     /// # Errors
     ///
     /// [`WindLayerError`] for a layer that is not four bytes a texel, or a seam
-    /// call that failed.
+    /// call that failed. Nothing is pending and nothing is replaced then.
     pub(crate) fn set_wind_layers(
         &mut self,
         device: &dyn Device,
         queue: crcbl_hal::QueueHandle,
         layers: Option<&WindLayers>,
-    ) -> Result<(), WindLayerError> {
+    ) -> Result<PendingUpload, WindLayerError> {
+        let mut uploads = UploadBatch::new(device, queue, "wind");
         let wind = match layers {
-            Some(layers) => Wind::upload(device, queue, layers)?,
-            None => {
-                let mut uploads = UploadBatch::new(device, queue, "calm wind");
-                let calm = Wind::calm(device, &mut uploads)?;
-                if let Err(error) = uploads.submit() {
-                    calm.destroy(device);
-                    return Err(error.into());
-                }
-                calm
+            Some(layers) => Wind::upload(device, &mut uploads, layers)?,
+            None => Wind::calm(device, &mut uploads)?,
+        };
+        let pending = match uploads.submit_deferred() {
+            Ok(pending) => pending,
+            Err(error) => {
+                wind.destroy(device);
+                return Err(error.into());
             }
         };
         let old = core::mem::replace(&mut self.wind, wind);
         self.retired
             .push((self.frames, Retired::Wind(Box::new(old))));
-        Ok(())
+        Ok(pending)
     }
 
     /// Ages the retirement list and releases whatever the ring has passed.
@@ -726,22 +733,23 @@ impl Wind {
         }
     }
 
+    /// The authored layers, recorded into `uploads` after both are checked.
+    /// A failure destroys the layer already added and so abandons the batch,
+    /// on [`Wind::calm`]'s terms.
     fn upload(
         device: &dyn Device,
-        queue: crcbl_hal::QueueHandle,
+        uploads: &mut UploadBatch<'_>,
         layers: &WindLayers,
     ) -> Result<Self, WindLayerError> {
         layers.direction.check()?;
         layers.intensity.check()?;
-        let one = |label, layer: &WindLayer| {
-            upload_texture(
-                device,
-                queue,
+        let mut one = |label, layer: &WindLayer| {
+            uploads.texture(
                 label,
                 Format::Rgba8Unorm,
-                layer.texels[0],
-                layer.texels[1],
-                &layer.rgba8,
+                (layer.texels[0], layer.texels[1]),
+                &[&[&layer.rgba8]],
+                ImageViewType::D2,
             )
         };
         let direction = one("wind direction", &layers.direction)?;
@@ -751,6 +759,7 @@ impl Wind {
                 intensity,
             }),
             Err(error) => {
+                uploads.abandon();
                 direction.destroy(device);
                 Err(error.into())
             }
