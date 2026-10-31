@@ -132,6 +132,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The render-scale upscale fetches nine samples instead of sixteen.**
+  `shaders/upscale.slang` keeps the same Catmull-Rom kernel but merges each
+  axis's two middle taps into one bilinear fetch at their balance point
+  (`crcbl_shaders::upscale::merged_pair_offset`), so the linear sampler computes
+  their weighted sum. The pass is bound by texture-sample rate: on an RDNA2 iGPU
+  at 1440×810 → 1920×1080 it went from 1.876 ms to 1.057 ms (0.035 → 0.021 ms on
+  an RX 7900 XTX), with the output within three 8-bit codes of the sixteen-tap
+  filter.
 - **`crcbl_render::ForwardRenderer`'s build, `create_view` and `set_wind_layers`
   no longer block on `Device::wait_idle` for their start-up uploads.** Each
   batch is submitted with `UploadBatch::submit_deferred` and ordered before the

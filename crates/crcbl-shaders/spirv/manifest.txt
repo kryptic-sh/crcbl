@@ -620,16 +620,16 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [upscale]
 source = shaders/upscale.slang
-source-sha256 = 1bd03dad84c364eeefd44261e78009f9801698db78b1e986e0372bb1c9ee22f9
+source-sha256 = be75b68f843d522f3499351335403c188d80e1be54ce283844796748671e7f49
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/upscale.spv
-spirv-sha256 = 385a4b3f3846d0a53095179e2da04be011cab9ba5af6a464bc7dd132fafc4b48
+spirv-sha256 = 2f9ff9d6377e3a0253a79212d763c0561508422f1f6d837d381c1372eb3b9ecd
 wgsl = wgsl/upscale.wgsl
-wgsl-sha256 = a31417333ec016d2712bbeaeb0a798f9afe7846253fb41687832f4a6db7354ab
+wgsl-sha256 = 83e9ee53080495058ebc2912cdd6df3193d7201a861966d3a4d3b51926ae88c3
 msl = msl/upscale.metal
-msl-sha256 = 84c2e83d1a0401491429f6df72aa8b4f6e67bf3ba54266a736de5ef489b3a1e5
+msl-sha256 = 120366df09446487f1923454b729c5301f6e245b5fd4361a9adb1b2252d84e0b
 dxil = vertexMain:dxil/upscale.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/upscale.fragment.dxil:1cd2a648b47b888569b750331f7e1b444f88fad86115ba57df6075b488b8a67a
+dxil = fragmentMain:dxil/upscale.fragment.dxil:1002582b0c4891a1f936fafb452a8987a15a84d0553cb93ce0c149d9bf081e18
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [volumetric]

@@ -32,23 +32,53 @@ EW's runs hit the gfx ring, quarry's the compute ring.
 
 ## Upscale and SSAO upsample are a quarter of an iGPU's low-tier frame (2026-10-30)
 
-EW's raid demo, offscreen, Raphael iGPU (RDNA2, RADV) on IndirectCount, low tier
-at 1920x1080 output (1440x810 internal), load about 12, so relative figures
-only. Pass p50s, 11.5 ms in all: forward 3.96 ms (877k fragments over 72k
-triangles after a depth prepass — shader-bound at about 4.5 ns a fragment, not
-overdraw), upscale 1.87 ms, ssao 1.41, ssao-upsample 1.08, ssr 0.73, fxaa 0.64,
-ssao-blur 0.55. An earlier 720p default-settings run read forward 4.85, ssao
-1.90, ssr 1.78, ssao-upsample 0.86, 12.1 ms in all.
+EW measured, and an investigation (2026-10-31) reproduced with headless
+`quarry --size 1920x1080 --exec "quality low"` on the Raphael iGPU (RDNA2,
+RADV), GPU p50s at 0.75 scale: forward 2.62 ms, upscale 1.87, ssao 0.76,
+ssao-blur 0.41, ssao-upsample 0.81, ssr 0.63, fxaa 0.49, frame 8.36 (load 8–10).
+Upscale is texture-sample-rate bound (~0.117 ms per tap per output pixel); the
+upsample spends ~39% of itself on bent-normal maths the low tier has off. The
+upscale now fetches nine samples (the bilinear form of the same Catmull-Rom
+kernel): 1.876 → 1.057 ms on the iGPU. Ranked fixes left:
 
-- **Upscale costs nearly half of forward** for one full-screen pass over 2.07M
-  output fragments. Check which filter the low tier selects and what it samples
-  per fragment; a bilinear or a cheaper sharpen at low tier is the likely
-  answer. Not investigated.
-- **SSAO's upsample costs most of what SSAO does.** Check its tap count and
-  whether a depth-aware bilateral at half the taps holds the edges. Not
-  investigated.
-- Together they are about 25% of the low-tier frame on this iGPU, the class of
-  device the low tier exists for. Measure in a quiet window before acting.
+- **No GPU gate sees a wrong merged offset in `upscale.slang`.**
+  `mesh_e2e/render_scale.rs` passed with the shader's offset sabotaged and its
+  artifacts regenerated: its bounds are too loose for a sub-texel weighting
+  error on a flat-shaded cube. The guard is the CPU mirror test
+  `the_merged_fetch_reproduces_the_four_tap_row` plus the grep test pinning the
+  shader's spelling; closing it needs a GPU check of the upscale against a CPU
+  four-tap reference on a noise source. The browser gates never draw below
+  render scale 1.0, so the WGSL upscale is checked only by naga.
+- **SSAO upsample and blur: skip the bent work when bent normals are off.** A
+  second upsample pipeline without the bent path, picked in `Ssao::add_passes`
+  as the hemisphere gather already is (a separate `.slang`: no `#include`, and
+  two entry points in one module are refused): −0.54 ms worst case. Fallback: a
+  uniform branch on `camera.params.w` (−0.36 / −0.06 ms). Must still write
+  `BENT_NORMAL_NONE_CHANNEL`; alcove's `golden.rs` and lantern's bent-off
+  reading guard that.
+- **Half-res linear view-z from the gather, read with `GatherRed`** in the
+  upsample and blur: upsample 1.40 → 0.49 ms worst case with the bent skip.
+  Needs a transient image and a binding, `ImageGatherExtended` checked on the
+  wgsl/msl/dxil targets, and probably a re-bless of every AO-on golden (a
+  review).
+- **A cheaper upscale filter at potato/low** via a new tier key: 5-tap −0.43 ms
+  over 9-tap but visibly different on fine detail (max 28 codes); bilinear −1.63
+  ms over today but soft. Needs a `VIDEO_KEYS` row (moves the options browser
+  gate) and a preset column.
+- Declined: a compute upscale (cost is sample rate, not dispatch); FSR1 EASU
+  (more maths, ~12 texels, no cheaper on 2 CUs); folding the upsample into
+  `forward` (moves the cost).
+- Harness with each variant, timed on HAL timestamps: outside the repo, in the
+  2026-10-31 session scratchpad (`gpu-pass`).
+
+### `--set engine.video.render_scale` does not reach the renderer at start-up
+
+In headless `quarry` and `lantern`, `--set engine.video.render_scale=0.75` alone
+produced no upscale pass, while `--set 'engine.video.antialiasing="fxaa"'` took
+effect at start-up and `--exec "quality low"` (0.75) did too. So the start-up
+render scale from the settings layers seems not to reach
+`ForwardRenderer::set_render_scale` until a settings write applies it. Cause not
+investigated; it misleads anyone measuring scale with `--set`.
 
 ## Skinning's per-frame CPU after the binding compare (2026-10-31)
 
@@ -10948,13 +10978,13 @@ fixed bilinear-class filter, and on Win32 it would exist for dx12 only, since
 Vulkan cannot ask for it.
 
 **What exists today** (read, not re-run): `crcbl_render::upscale` with
-`shaders/upscale.slang`, a 16-tap Catmull-Rom spatial filter targeting spirv,
-wgsl, msl and dxil. It runs as the last 3D pass, after tonemap and the AA
-resolve, with the UI composited afterwards at native resolution. `render_scale`
-goes from `[engine.video]` through `crcbl::settings` and
-`GpuContext::render_scale` to `ForwardRenderer::set_render_scale`, clamped to
-`MIN_RENDER_SCALE..=1.0`, and `apps/options` has a slider for it. It is checked
-by
+`shaders/upscale.slang`, a Catmull-Rom spatial filter (nine bilinear fetches
+since 2026-10-31) targeting spirv, wgsl, msl and dxil. It runs as the last 3D
+pass, after tonemap and the AA resolve, with the UI composited afterwards at
+native resolution. `render_scale` goes from `[engine.video]` through
+`crcbl::settings` and `GpuContext::render_scale` to
+`ForwardRenderer::set_render_scale`, clamped to `MIN_RENDER_SCALE..=1.0`, and
+`apps/options` has a slider for it. It is checked by
 `mesh_e2e::render_scale::a_scaled_frame_is_the_same_picture_resampled_by_as_much_as_the_scale_says`.
 No crate outside `crcbl-shell` reads `HW_UPSCALE`, so the engine already always
 does its own pass; this entry is about making that pass complete.

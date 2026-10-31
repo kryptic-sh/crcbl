@@ -18,11 +18,20 @@
 //!
 //! # One pass, one sampler, and why it is linear
 //!
-//! `upscale.slang` computes its own sixteen weights, so a nearest sampler would
-//! be the defensible choice. It is the wrong one at the border: every tap is
-//! addressed by UV and the ring outside the source is what `ClampToEdge`
-//! decides, and a linear sampler reaching a clamped edge returns the edge texel
-//! exactly, which is what the filter wants there.
+//! `upscale.slang` computes its own Catmull-Rom weights, but it fetches the
+//! 4x4 kernel in nine samples rather than sixteen, and **the linear filter is
+//! what makes that work**. The two middle taps of each axis are merged into one
+//! fetch placed between their texels at the pair's balance point
+//! ([`crcbl_shaders::upscale::merged_pair_offset`]), so the sampler's own
+//! interpolation computes their weighted sum. A nearest sampler would snap that
+//! fetch onto one texel and break the kernel at every pixel, not just at the
+//! edge.
+//!
+//! `ClampToEdge` decides the border, as it did for the sixteen-tap form: every
+//! fetch is addressed by UV, an outer fetch past the edge returns the edge
+//! texel, and a merged fetch straddling the edge interpolates the edge texel
+//! with its clamped copy — the edge texel again, exactly what the two taps it
+//! replaces would have read.
 
 use crcbl_hal::{
     BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
@@ -140,7 +149,8 @@ impl Upscale {
             &[ColorTargetState::opaque(target_format)],
         )?);
 
-        // **Linear, and only the border depends on it** — see the module docs.
+        // **Linear, and the merged middle fetch depends on it** — see the module
+        // docs.
         let sampler = made.add(device.create_sampler(&SamplerDesc {
             label: Some("upscale source"),
             mag_filter: FilterMode::Linear,
