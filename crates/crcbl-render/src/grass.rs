@@ -106,6 +106,7 @@ use crcbl_shaders::{GRASS, GRASS_GEN, Stage};
 
 use crate::draw_gen::compute_pipeline_entry;
 use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
+use crate::partial::Partial;
 use crate::pipeline_batch;
 use crate::ssao::cached_group;
 use crate::texture::{UploadBatch, UploadedTexture, upload_texture, upload_texture_mip_layers};
@@ -1022,12 +1023,9 @@ impl Grass {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing created before the failing
-    /// call is released**: it stays alive until the device goes. The forward
-    /// renderer builds this between frames, the first time a frame has a
-    /// field, with no rollback to hand it to. The one exception is the draw
-    /// batch's own members, which are released when one of them is refused,
-    /// because the batch runs them all regardless.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`] — the draw batch's
+    /// other members included, since the batch runs them all regardless.
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -1070,28 +1068,29 @@ impl Grass {
             entries: &gen_entries,
         };
         check_portable_storage_buffers(Some("grass generate"), &[&gen_desc])?;
-        let gen_layout = device.create_bind_group_layout(&gen_desc)?;
-        let gen_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        let mut made = Partial::new(device);
+        let gen_layout = made.add(device.create_bind_group_layout(&gen_desc)?);
+        let gen_pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("grass generate"),
             bind_group_layouts: &[gen_layout],
             push_constants: None,
-        })?;
-        let clear_pipeline = compute_pipeline_entry(
+        })?);
+        let clear_pipeline = made.add(compute_pipeline_entry(
             device,
             "grass clear",
             &GRASS_GEN,
             "clearMain",
             gen_pipeline_layout,
             WORKGROUP_SIZE,
-        )?;
-        let generate_pipeline = compute_pipeline_entry(
+        )?);
+        let generate_pipeline = made.add(compute_pipeline_entry(
             device,
             "grass generate",
             &GRASS_GEN,
             "generateMain",
             gen_pipeline_layout,
             WORKGROUP_SIZE,
-        )?;
+        )?);
 
         // **Every binding is visible to both stages**, on `crate::water`'s
         // terms: Slang's Metal backend materialises every global into every
@@ -1156,12 +1155,13 @@ impl Grass {
             entries: &raster_entries,
         };
         check_portable_storage_buffers(Some("grass"), &[&raster_desc])?;
-        let raster_layout = device.create_bind_group_layout(&raster_desc)?;
-        let raster_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("grass"),
-            bind_group_layouts: &[raster_layout],
-            push_constants: None,
-        })?;
+        let raster_layout = made.add(device.create_bind_group_layout(&raster_desc)?);
+        let raster_pipeline_layout =
+            made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("grass"),
+                bind_group_layouts: &[raster_layout],
+                push_constants: None,
+            })?);
         let list = PrimitiveTopology::TriangleList;
         // **Strips**: a blade is a pair of vertices at each height and one at
         // the tip, which is decision 3's fifteen and seven only as a strip.
@@ -1182,12 +1182,10 @@ impl Grass {
             ],
         );
         // Every member ran whatever the others returned, so a refusal leaves
-        // the rest of the batch live: release them here, since the `?`s below
-        // return before anything else could.
-        if results.iter().any(Result::is_err) {
-            for pipeline in results.iter().flatten() {
-                device.destroy_graphics_pipeline(*pipeline);
-            }
+        // the rest of the batch live: each success is held before the `?`s
+        // below, so the first of them releases the others too.
+        for pipeline in results.iter().flatten() {
+            made.add(*pipeline);
         }
         let [
             raster_pipeline,
@@ -1202,7 +1200,7 @@ impl Grass {
         let blade_near_pipeline = blade_near_pipeline?;
         let blade_far_pipeline = blade_far_pipeline?;
 
-        let card_sampler = device.create_sampler(&SamplerDesc {
+        let card_sampler = made.add(device.create_sampler(&SamplerDesc {
             label: Some("grass card"),
             // **Linear within a level, and the level is the shader's.**
             // `grass.slang`'s `grassCardLevel` picks a whole level per instance
@@ -1215,8 +1213,8 @@ impl Grass {
             mip_filter: FilterMode::Linear,
             address_mode: [SamplerAddressMode::ClampToEdge; 3],
             ..SamplerDesc::default()
-        })?;
-        let wind_sampler = match device.create_sampler(&SamplerDesc {
+        })?);
+        let wind_sampler = made.add(device.create_sampler(&SamplerDesc {
             label: Some("wind layers"),
             min_filter: FilterMode::Linear,
             mag_filter: FilterMode::Linear,
@@ -1226,38 +1224,33 @@ impl Grass {
             // texel indices are the statement of.
             address_mode: [SamplerAddressMode::Repeat; 3],
             ..SamplerDesc::default()
-        }) {
-            Ok(sampler) => sampler,
-            Err(error) => {
-                device.destroy_sampler(card_sampler);
-                return Err(error);
-            }
-        };
+        })?);
 
         let mut gen_params = Vec::with_capacity(frames);
         let mut wind_params = Vec::with_capacity(frames);
         let mut raster_params = Vec::with_capacity(frames);
         for _ in 0..frames {
-            raster_params.push(device.create_buffer(&BufferDesc {
+            raster_params.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some("grass params"),
                 size: PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?);
-            gen_params.push(device.create_buffer(&BufferDesc {
+            })?));
+            gen_params.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some("grass generate params"),
                 size: GEN_PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?);
-            wind_params.push(device.create_buffer(&BufferDesc {
+            })?));
+            wind_params.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some("grass wind params"),
                 size: WIND_PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?);
+            })?));
         }
 
+        made.keep();
         Ok(Self {
             gen_layout,
             gen_pipeline_layout,

@@ -79,6 +79,7 @@ use std::rc::Rc;
 
 use crate::draw_gen::{UINT_STRIDE, bound, compute_pipeline_entry, storage, uniform};
 use crate::graph::{ImageId, RenderGraph};
+use crate::partial::Partial;
 use crate::transient::TransientBufferDesc;
 
 /// Vertices in the over-sized full-screen triangle `cmaa2_apply.slang`
@@ -179,10 +180,8 @@ impl Cmaa2 {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**: what this created before the failure stays alive until the
-    /// device goes. The forward renderer builds it between frames, the first
-    /// time a frame asks for it, with no rollback to hand it to.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -252,58 +251,62 @@ impl Cmaa2 {
         // WebGPU device guarantees per stage.
         check_portable_storage_buffers(Some("cmaa2"), &[&working_desc, &apply_desc])?;
 
-        let working_layout = device.create_bind_group_layout(&working_desc)?;
+        let mut made = Partial::new(device);
+        let working_layout = made.add(device.create_bind_group_layout(&working_desc)?);
         let working_set_layouts = [working_layout];
-        let working_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("cmaa2 working"),
-            bind_group_layouts: &working_set_layouts,
-            push_constants: None,
-        })?;
+        let working_pipeline_layout =
+            made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("cmaa2 working"),
+                bind_group_layouts: &working_set_layouts,
+                push_constants: None,
+            })?);
         // `compute_pipeline_entry` rather than `compute_pipeline` because each
         // source is compiled per entry point and named by it, which is the shape
         // the manifest and `crcbl_dx12::dxil` both read.
-        let edges = compute_pipeline_entry(
+        let edges = made.add(compute_pipeline_entry(
             device,
             "cmaa2 edges",
             &CMAA2_EDGES,
             "edgesMain",
             working_pipeline_layout,
             WORKGROUP_SIZE,
-        )?;
-        let shapes = compute_pipeline_entry(
+        )?);
+        let shapes = made.add(compute_pipeline_entry(
             device,
             "cmaa2 shapes",
             &CMAA2_SHAPES,
             "shapesMain",
             working_pipeline_layout,
             WORKGROUP_SIZE,
-        )?;
+        )?);
 
-        let apply_layout = device.create_bind_group_layout(&apply_desc)?;
+        let apply_layout = made.add(device.create_bind_group_layout(&apply_desc)?);
         let apply_set_layouts = [apply_layout];
-        let apply_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("cmaa2 apply"),
-            bind_group_layouts: &apply_set_layouts,
-            push_constants: None,
-        })?;
-        let apply_pipeline = build_fullscreen(
+        let apply_pipeline_layout =
+            made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("cmaa2 apply"),
+                bind_group_layouts: &apply_set_layouts,
+                push_constants: None,
+            })?);
+        let apply_pipeline = made.add(build_fullscreen(
             device,
             "cmaa2-apply",
             &CMAA2_APPLY,
             apply_pipeline_layout,
             &[ColorTargetState::opaque(target_format)],
-        )?;
+        )?);
 
         let mut uniforms = Vec::with_capacity(frames);
         for _ in 0..frames {
-            uniforms.push(device.create_buffer(&BufferDesc {
+            uniforms.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some("cmaa2 params"),
                 size: PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?);
+            })?));
         }
 
+        made.keep();
         Ok(Self {
             working_layout,
             working_pipeline_layout,

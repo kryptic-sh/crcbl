@@ -846,6 +846,9 @@ pub(super) struct State {
     /// How many `reconfigure_swapchain` calls fail before succeeding again. See
     /// [`Recorder::fail_next_reconfigures`].
     pub(super) reconfigure_failures: u32,
+    /// How many object creations succeed before the next one fails, or
+    /// [`None`] for none failing. See [`Recorder::fail_create_after`].
+    pub(super) creates_before_failure: Option<u32>,
     /// Whether the surface has moved under the swapchain, so every presentation
     /// call reports [`SurfaceError::OutOfDate`](crate::SurfaceError::OutOfDate)
     /// until a reconfigure clears it. See
@@ -897,6 +900,7 @@ impl State {
             pipelines_created: Vec::new(),
             device_errors: std::collections::VecDeque::new(),
             reconfigure_failures: 0,
+            creates_before_failure: None,
             swapchain_out_of_date: false,
             suboptimal_acquires: 0,
             clamped_extent: None,
@@ -1348,6 +1352,56 @@ impl Recorder {
         } else {
             false
         }
+    }
+
+    /// Lets the next `creates` object creations through and fails the one after
+    /// them with [`HalError::OutOfDeviceMemory`](crate::HalError::OutOfDeviceMemory),
+    /// once; every creation after that succeeds again.
+    ///
+    /// A *creation* is any `Device::create_*` that returns a handle through a
+    /// `Result` — buffers, images, views, samplers, shader modules, layouts,
+    /// groups, pipelines, query sets and semaphores — and a readback request;
+    /// the swapchain has [`fail_next_reconfigures`](Self::fail_next_reconfigures)
+    /// instead. Each one counts whether or not it would have succeeded.
+    ///
+    /// There for a constructor's **partial-failure path**: stepping `creates`
+    /// from zero fails each of a constructor's creations in turn, and
+    /// [`total_live_objects`](Self::total_live_objects) before and after shows
+    /// whether what it had created by then was released.
+    pub fn fail_create_after(&self, creates: u32) {
+        self.lock().creates_before_failure = Some(creates);
+    }
+
+    /// Counts one creation against [`fail_create_after`](Self::fail_create_after),
+    /// and says whether it is the one to fail. The backend's half.
+    pub(super) fn take_create_failure(&self) -> bool {
+        let mut state = self.lock();
+        match state.creates_before_failure {
+            Some(0) => {
+                state.creates_before_failure = None;
+                true
+            }
+            Some(left) => {
+                state.creates_before_failure = Some(left - 1);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Withdraws a [`fail_create_after`](Self::fail_create_after) failure not
+    /// yet delivered, so every creation succeeds again.
+    pub fn cancel_create_failure(&self) {
+        self.lock().creates_before_failure = None;
+    }
+
+    /// Whether a [`fail_create_after`](Self::fail_create_after) failure is
+    /// still owed — `false` once it has been delivered, which is how a test
+    /// tells a constructor that failed on the injected creation from one that
+    /// finished before reaching it.
+    #[must_use]
+    pub fn create_failure_pending(&self) -> bool {
+        self.lock().creates_before_failure.is_some()
     }
 
     /// Makes every presentation call report

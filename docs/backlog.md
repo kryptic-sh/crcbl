@@ -267,17 +267,15 @@ Splitting each one's buffers from its pipelines would make the pipelines lazy.
   `service`; neither exists. `GrassScene::new` (two 1×1 calm wind textures, no
   pipeline) stays in the build on purpose.
 
-### A pass constructor that fails part way leaks what it made
+### A failed lazy build is not tested through a frame
 
-`Ssao`, `ContactShadows`, `Bloom`, `Fxaa`, `Cmaa2`, `Upscale`, `AtlasView`,
-`Water` and `Grass` `::new` return on the first failing seam call without
-releasing the layouts, samplers and pipelines already created. This was true
-before they became lazy (the rollback only held them once whole);
-`View::build_passes`, `View::build_content` and `begin_frame_body` now build
-them between frames with no rollback, so a failed late build mid-session leaks
-on every retry, and in the engine loop it ends the game where it used to fail at
-start-up. Not observed; only a device refusing a pipeline mid-constructor
-triggers it. Fix: release on the failing path inside each constructor.
+Every render pass constructor releases what it made when a create fails
+(`crate::partial::Partial`, pinned per constructor by
+`crates/crcbl-render/src/forward/tests/partial_builds.rs`). Nothing yet fails a
+create inside `View::build_passes` or `View::build_content` during `begin_frame`
+and retries on the next frame, checking `total_live_objects()` across both; in
+the engine loop such a failure still ends the game where it used to fail at
+start-up.
 
 ### Start-up: what `ForwardRenderer`'s build still submits on its own
 
@@ -312,12 +310,6 @@ count went from 23 to 6 and `create_view`'s from 5 to 1. On an RX 7900 XTX
 (RADV, debug build, load 8–9, not a quiet window) `ForwardRenderer::new` on a
 fresh device went from a median of 65.6–66.5 ms to 62.9–63.5 ms across three
 interleaved runs.
-
-Also found, not fixed: `Ssr::new` and `Exposure::new` say "Nothing is released
-on the failing path … the caller holds a rollback, and this is stored in it
-whole", but a failure inside either leaves nothing stored, so whatever they
-created before the failing `?` (layouts, pipelines, the sky table, buffers)
-leaks. Verified by reading only.
 
 ### Start-up: Metal compiles MSL source per shader module
 

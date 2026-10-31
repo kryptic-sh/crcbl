@@ -79,6 +79,7 @@ use crcbl_hal::{
 use crcbl_shaders::{BLOOM_COMPOSITE, BLOOM_DOWN, BLOOM_UP, bloom};
 
 use crate::graph::{ImageId, RenderGraph};
+use crate::partial::Partial;
 use crate::ssao::cached_group;
 
 /// Vertices in the over-sized full-screen triangle every `bloom_*.slang`
@@ -244,10 +245,8 @@ impl Bloom {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**: what this created before the failure stays alive until the
-    /// device goes. The forward renderer builds it between frames, the first
-    /// time a frame asks for it, with no rollback to hand it to.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -261,14 +260,15 @@ impl Bloom {
     ) -> Result<Self, HalError> {
         // **Linear, unlike every other sampler this crate creates.** See the
         // field it is stored in.
-        let sampler = device.create_sampler(&SamplerDesc {
+        let mut made = Partial::new(device);
+        let sampler = made.add(device.create_sampler(&SamplerDesc {
             label: Some("bloom chain"),
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
             mip_filter: FilterMode::Linear,
             address_mode: [SamplerAddressMode::ClampToEdge; 3],
             ..SamplerDesc::default()
-        })?;
+        })?);
 
         let entries = [
             BindGroupLayoutEntry {
@@ -303,13 +303,13 @@ impl Bloom {
             entries: &entries,
         };
         check_portable_storage_buffers(Some("bloom chain"), &[&desc])?;
-        let layout = device.create_bind_group_layout(&desc)?;
+        let layout = made.add(device.create_bind_group_layout(&desc)?);
         let set_layouts = [layout];
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        let pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("bloom chain"),
             bind_group_layouts: &set_layouts,
             push_constants: None,
-        })?;
+        })?);
 
         // The same shape with the scene target in front of it: the composite is
         // the last upsample and the add in one pass, so it names both images.
@@ -354,13 +354,14 @@ impl Bloom {
             entries: &composite_entries,
         };
         check_portable_storage_buffers(Some("bloom composite"), &[&composite_desc])?;
-        let composite_layout = device.create_bind_group_layout(&composite_desc)?;
+        let composite_layout = made.add(device.create_bind_group_layout(&composite_desc)?);
         let composite_set_layouts = [composite_layout];
-        let composite_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("bloom composite"),
-            bind_group_layouts: &composite_set_layouts,
-            push_constants: None,
-        })?;
+        let composite_pipeline_layout =
+            made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("bloom composite"),
+                bind_group_layouts: &composite_set_layouts,
+                push_constants: None,
+            })?);
 
         let opaque = [ColorTargetState::opaque(CHAIN_FORMAT)];
         // **`One`/`One` on colour, `Zero`/`One` on alpha**: the upsample adds its
@@ -380,28 +381,39 @@ impl Bloom {
             write_mask: ColorWrites::ALL,
         }];
 
-        let down_pipeline =
-            build_fullscreen(device, "bloom down", &BLOOM_DOWN, pipeline_layout, &opaque)?;
-        let up_pipeline =
-            build_fullscreen(device, "bloom up", &BLOOM_UP, pipeline_layout, &additive)?;
-        let composite_pipeline = build_fullscreen(
+        let down_pipeline = made.add(build_fullscreen(
+            device,
+            "bloom down",
+            &BLOOM_DOWN,
+            pipeline_layout,
+            &opaque,
+        )?);
+        let up_pipeline = made.add(build_fullscreen(
+            device,
+            "bloom up",
+            &BLOOM_UP,
+            pipeline_layout,
+            &additive,
+        )?);
+        let composite_pipeline = made.add(build_fullscreen(
             device,
             "bloom composite",
             &BLOOM_COMPOSITE,
             composite_pipeline_layout,
             &opaque,
-        )?;
+        )?);
 
         let mut uniforms = Vec::with_capacity(frames * Self::MAX_PASSES as usize);
         for _ in 0..frames * Self::MAX_PASSES as usize {
-            uniforms.push(device.create_buffer(&BufferDesc {
+            uniforms.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some("bloom params"),
                 size: bloom::PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?);
+            })?));
         }
 
+        made.keep();
         Ok(Self {
             sampler,
             layout,

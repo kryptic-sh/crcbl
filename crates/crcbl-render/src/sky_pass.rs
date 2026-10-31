@@ -73,6 +73,7 @@ use crcbl_hal::{
 use crcbl_shaders::{SKY, atmosphere, sky};
 
 use crate::graph::{ImageId, RenderGraph};
+use crate::partial::Partial;
 
 /// Vertices in the over-sized full-screen triangle `sky.slang` generates from
 /// `SV_VertexID`. No geometry is bound anywhere.
@@ -144,9 +145,8 @@ impl SkyPass {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**, for the reason every other builder in this crate gives: the
-    /// caller holds a rollback, and this is stored in it whole.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -195,39 +195,40 @@ impl SkyPass {
             entries: &entries,
         };
         check_portable_storage_buffers(Some("sky"), &[&desc])?;
-        let layout = device.create_bind_group_layout(&desc)?;
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        let mut made = Partial::new(device);
+        let layout = made.add(device.create_bind_group_layout(&desc)?);
+        let pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("sky"),
             bind_group_layouts: &[layout],
             push_constants: None,
-        })?;
-        let pipeline = build_tested_fullscreen(
+        })?);
+        let pipeline = made.add(build_tested_fullscreen(
             device,
             "sky",
             &SKY,
             pipeline_layout,
             &[ColorTargetState::opaque(color_format)],
             depth_format,
-        )?;
+        )?);
 
         let mut uniforms = Vec::with_capacity(frames);
         let mut luts = Vec::with_capacity(frames);
         let mut aerials = Vec::with_capacity(frames);
         let mut groups = Vec::with_capacity(frames);
         for _ in 0..frames {
-            let buffer = device.create_buffer(&BufferDesc {
+            let buffer = made.add(device.create_buffer(&BufferDesc {
                 label: Some("sky params"),
                 size: sky::PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?;
+            })?);
             uniforms.push(buffer);
-            let lut = device.create_buffer(&BufferDesc {
+            let lut = made.add(device.create_buffer(&BufferDesc {
                 label: Some("sky view lut"),
                 size: atmosphere::SKY_VIEW_BUFFER_BYTES as u64,
                 usage: BufferUsage::STORAGE,
                 memory: MemoryLocation::HostUpload,
-            })?;
+            })?);
             // Zeroed once here rather than left as whatever the allocation
             // held. Nothing reads it on a gradient frame — the shader branches
             // before the first load — but a buffer whose contents depend on
@@ -235,18 +236,18 @@ impl SkyPass {
             // both have something to say about.
             device.write_buffer(lut, 0, &vec![0u8; atmosphere::SKY_VIEW_BUFFER_BYTES])?;
             luts.push(lut);
-            let aerial = device.create_buffer(&BufferDesc {
+            let aerial = made.add(device.create_buffer(&BufferDesc {
                 label: Some("aerial view lut"),
                 size: atmosphere::AERIAL_VIEW_BUFFER_BYTES as u64,
                 usage: BufferUsage::STORAGE,
                 memory: MemoryLocation::HostUpload,
-            })?;
+            })?);
             // Zeroed for the sky-view LUT's reason: the composite reads it only
             // where the block's aerial switch is on, which a frame with no
             // atmosphere leaves off.
             device.write_buffer(aerial, 0, &vec![0u8; atmosphere::AERIAL_VIEW_BUFFER_BYTES])?;
             aerials.push(aerial);
-            groups.push(device.create_bind_group(&BindGroupDesc {
+            groups.push(made.add(device.create_bind_group(&BindGroupDesc {
                 label: Some("sky"),
                 layout,
                 entries: &[
@@ -262,9 +263,10 @@ impl SkyPass {
                     },
                 ],
                 variable_count: None,
-            })?);
+            })?));
         }
 
+        made.keep();
         Ok(Self {
             uniforms,
             luts,

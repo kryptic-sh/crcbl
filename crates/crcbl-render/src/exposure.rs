@@ -56,6 +56,7 @@ use crate::draw_gen::{
     uniform,
 };
 use crate::graph::{ImageId, ImportedBuffer, RenderGraph};
+use crate::partial::Partial;
 use crate::ssao::cached_group;
 use crate::texture::UploadBatch;
 
@@ -161,13 +162,30 @@ impl Exposure {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**, for the reason every other builder in this crate gives: the
-    /// caller holds a rollback, and this is stored in it whole.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`] — and
+    /// [abandons](UploadBatch::abandon) `uploads`, which by then may hold a
+    /// start-up fill into a slot that release destroyed.
     pub(crate) fn new(
         device: &dyn Device,
         uploads: &mut UploadBatch<'_>,
         frames: usize,
+    ) -> Result<Self, HalError> {
+        let mut made = Partial::new(device);
+        let built = Self::build(device, uploads, frames, &mut made);
+        match built {
+            Ok(_) => made.keep(),
+            Err(_) => uploads.abandon(),
+        }
+        built
+    }
+
+    /// [`Exposure::new`]'s body, with every object it creates held in `made`.
+    fn build(
+        device: &dyn Device,
+        uploads: &mut UploadBatch<'_>,
+        frames: usize,
+        made: &mut Partial<'_>,
     ) -> Result<Self, HalError> {
         // **Two, not one.** A frame reads the slot behind it for the exposure
         // to adapt away from, and with a single slot that is the one this
@@ -209,33 +227,33 @@ impl Exposure {
             entries: &entries,
         };
         check_portable_storage_buffers(Some("exposure"), &[&desc])?;
-        let layout = device.create_bind_group_layout(&desc)?;
+        let layout = made.add(device.create_bind_group_layout(&desc)?);
         let set_layouts = [layout];
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        let pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("exposure"),
             bind_group_layouts: &set_layouts,
             push_constants: None,
-        })?;
+        })?);
         // Three entry points of one module, which is why this is
         // `compute_pipeline_entry` rather than `compute_pipeline`: the three
         // share the binning arithmetic and shaders here have no `#include`.
-        let clear = compute_pipeline_entry(
+        let clear = made.add(compute_pipeline_entry(
             device,
             "exposure clear",
             &EXPOSURE,
             "clearMain",
             pipeline_layout,
             WORKGROUP_SIZE,
-        )?;
-        let histogram_pipeline = compute_pipeline_entry_with_workgroup(
+        )?);
+        let histogram_pipeline = made.add(compute_pipeline_entry_with_workgroup(
             device,
             "exposure histogram",
             &EXPOSURE,
             "histogramMain",
             pipeline_layout,
             [HISTOGRAM_TILE_SIDE, HISTOGRAM_TILE_SIDE, 1],
-        )?;
-        let reduce = compute_pipeline_entry(
+        )?);
+        let reduce = made.add(compute_pipeline_entry(
             device,
             "exposure reduce",
             &EXPOSURE,
@@ -246,19 +264,19 @@ impl Exposure {
             // an order a device schedules and the exposure would differ in its
             // last place between backends.
             1,
-        )?;
+        )?);
 
         let mut params = Vec::with_capacity(frames);
         let mut histograms = Vec::with_capacity(frames);
         let mut measured = Vec::with_capacity(frames);
         for frame in 0..frames {
-            params.push(device.create_buffer(&BufferDesc {
+            params.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some(&format!("exposure params {frame}")),
                 size: PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?);
-            histograms.push(device.create_buffer(&BufferDesc {
+            })?));
+            histograms.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some(&format!("exposure histogram {frame}")),
                 size: u64::from(BIN_COUNT) * BIN_STRIDE as u64,
                 // `TRANSFER_SRC` because a test reads the bins back and compares
@@ -267,8 +285,8 @@ impl Exposure {
                 // is a single number two different mistakes can agree on.
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 memory: MemoryLocation::DeviceLocal,
-            })?);
-            let slot = device.create_buffer(&BufferDesc {
+            })?));
+            let slot = made.add(device.create_buffer(&BufferDesc {
                 label: Some(&format!("exposure measured {frame}")),
                 size: MEASURED_SIZE as u64,
                 // `STORAGE` in three stages: written by the reduce, read by the
@@ -277,7 +295,7 @@ impl Exposure {
                 // fill below.
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
                 memory: MemoryLocation::DeviceLocal,
-            })?;
+            })?);
             // **Every slot starts at the default exposure**, because the first
             // frame's reduce reads one of them as the value to adapt from and a
             // device-local allocation carries whatever was last in that memory.

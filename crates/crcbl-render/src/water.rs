@@ -79,6 +79,7 @@ use crcbl_shaders::{Stage, WATER, WATER_COPY};
 use crcbl_water::{BodyError, WaterBody, surface_mesh};
 
 use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
+use crate::partial::Partial;
 use crate::ssao::cached_group;
 
 /// The grid spacing every body's surface is meshed at, in metres.
@@ -491,10 +492,8 @@ impl Water {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**: what this created before the failure stays alive until the
-    /// device goes. The forward renderer builds it between frames, the first
-    /// time a frame has water, with no rollback to hand it to.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -517,13 +516,15 @@ impl Water {
             entries: &copy_entries,
         };
         check_portable_storage_buffers(Some("water copy"), &[&copy_desc])?;
-        let copy_layout = device.create_bind_group_layout(&copy_desc)?;
-        let copy_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("water copy"),
-            bind_group_layouts: &[copy_layout],
-            push_constants: None,
-        })?;
-        let copy_pipeline = build_fullscreen_with(
+        let mut made = Partial::new(device);
+        let copy_layout = made.add(device.create_bind_group_layout(&copy_desc)?);
+        let copy_pipeline_layout =
+            made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("water copy"),
+                bind_group_layouts: &[copy_layout],
+                push_constants: None,
+            })?);
+        let copy_pipeline = made.add(build_fullscreen_with(
             device,
             "water copy",
             &WATER_COPY,
@@ -536,7 +537,7 @@ impl Water {
                 stencil: None,
                 bias: DepthBias::default(),
             }),
-        )?;
+        )?);
 
         // **Every binding is visible to both stages**, though the vertex stage
         // reads only the frame block and the vertices and the fragment stage
@@ -608,24 +609,26 @@ impl Water {
             entries: &surface_entries,
         };
         check_portable_storage_buffers(Some("water"), &[&surface_desc])?;
-        let surface_layout = device.create_bind_group_layout(&surface_desc)?;
-        let surface_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("water"),
-            bind_group_layouts: &[surface_layout],
-            push_constants: None,
-        })?;
-        let surface_pipeline = build_surface(device, surface_pipeline_layout)?;
+        let surface_layout = made.add(device.create_bind_group_layout(&surface_desc)?);
+        let surface_pipeline_layout =
+            made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("water"),
+                bind_group_layouts: &[surface_layout],
+                push_constants: None,
+            })?);
+        let surface_pipeline = made.add(build_surface(device, surface_pipeline_layout)?);
 
         let mut uniforms = Vec::with_capacity(frames);
         for _ in 0..frames {
-            uniforms.push(device.create_buffer(&BufferDesc {
+            uniforms.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some("water params"),
                 size: PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?);
+            })?));
         }
 
+        made.keep();
         Ok(Self {
             copy_layout,
             copy_pipeline_layout,

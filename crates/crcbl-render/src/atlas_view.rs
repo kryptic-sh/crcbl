@@ -49,6 +49,7 @@ use crcbl_hal::{
 use crcbl_shaders::{ATLAS_VIEW, atlas_view};
 
 use crate::graph::{ImageId, RenderGraph};
+use crate::partial::Partial;
 use crate::ssao::cached_group;
 
 /// Vertices in the over-sized full-screen triangle `atlas_view.slang` generates
@@ -109,10 +110,8 @@ impl AtlasView {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**: what this created before the failure stays alive until the
-    /// device goes. The forward renderer builds it between frames, the first
-    /// time a frame asks for it, with no rollback to hand it to.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -162,33 +161,35 @@ impl AtlasView {
             entries: &entries,
         };
         check_portable_storage_buffers(Some("shadow atlas view"), &[&desc])?;
-        let layout = device.create_bind_group_layout(&desc)?;
+        let mut made = Partial::new(device);
+        let layout = made.add(device.create_bind_group_layout(&desc)?);
         let set_layouts = [layout];
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        let pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("shadow atlas view"),
             bind_group_layouts: &set_layouts,
             push_constants: None,
-        })?;
+        })?);
 
         let targets = [ColorTargetState::opaque(target_format)];
-        let pipeline = build_fullscreen(
+        let pipeline = made.add(build_fullscreen(
             device,
             "shadow atlas view",
             &ATLAS_VIEW,
             pipeline_layout,
             &targets,
-        )?;
+        )?);
 
         let mut uniforms = Vec::with_capacity(frames);
         for _ in 0..frames {
-            uniforms.push(device.create_buffer(&BufferDesc {
+            uniforms.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some("shadow atlas view params"),
                 size: atlas_view::PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?);
+            })?));
         }
 
+        made.keep();
         Ok(Self {
             uniforms,
             layout,

@@ -51,6 +51,7 @@ use crcbl_hal::{
 use crcbl_shaders::{SSR, SSR_BLUR, sky_prefilter, ssr};
 
 use crate::graph::{ImageId, RenderGraph};
+use crate::partial::Partial;
 use crate::ssao::cached_group;
 use crate::texture::{UploadBatch, UploadedTexture};
 
@@ -260,9 +261,10 @@ impl Ssr {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**, for the reason every other builder in this crate gives: the
-    /// caller holds a rollback, and this is stored in it whole.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`] — and
+    /// [abandons](UploadBatch::abandon) `uploads`, which by then may hold the
+    /// sky table's copy into an image that release destroyed.
     pub(crate) fn new(
         device: &dyn Device,
         uploads: &mut UploadBatch<'_>,
@@ -276,17 +278,41 @@ impl Ssr {
             &[ColorTargetState],
         ) -> Result<GraphicsPipelineHandle, HalError>,
     ) -> Result<Self, HalError> {
+        let mut made = Partial::new(device);
+        let built = Self::build(device, uploads, dfg, frames, build_fullscreen, &mut made);
+        match built {
+            Ok(_) => made.keep(),
+            Err(_) => uploads.abandon(),
+        }
+        built
+    }
+
+    /// [`Ssr::new`]'s body, with every object it creates held in `made`.
+    fn build(
+        device: &dyn Device,
+        uploads: &mut UploadBatch<'_>,
+        dfg: ImageViewHandle,
+        frames: usize,
+        build_fullscreen: impl Fn(
+            &dyn Device,
+            &str,
+            &crcbl_shaders::Shader,
+            PipelineLayoutHandle,
+            &[ColorTargetState],
+        ) -> Result<GraphicsPipelineHandle, HalError>,
+        made: &mut Partial<'_>,
+    ) -> Result<Self, HalError> {
         // The committed table, fixed point in four bytes a texel — see
         // `sky_prefilter::PREFILTER_TEXEL_BYTES`. Not baked here, for the DFG
         // table's reason in `crate::forward`: the integrator is a Monte Carlo
         // sum and four backends would bake four tables.
-        let sky_prefilter = uploads.texture(
+        let sky_prefilter = made.add_texture(uploads.texture(
             "sky prefilter table",
             Format::Rgba8Unorm,
             (SKY_PREFILTER_SIZE, SKY_PREFILTER_SIZE),
             &[&[&sky_prefilter::texels()]],
             ImageViewType::D2,
-        )?;
+        )?);
 
         // **No sampler**, which is the whole of what reading by `Load` buys —
         // and it buys more here than in the occlusion pass, because what a tap
@@ -440,13 +466,13 @@ impl Ssr {
             entries: &entries,
         };
         check_portable_storage_buffers(Some("ssr"), &[&desc])?;
-        let layout = device.create_bind_group_layout(&desc)?;
+        let layout = made.add(device.create_bind_group_layout(&desc)?);
         let set_layouts = [layout];
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        let pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("ssr"),
             bind_group_layouts: &set_layouts,
             push_constants: None,
-        })?;
+        })?);
 
         // **The same shape as the march, with the raw reflection where the
         // reflectivity attachment was.** The blur reads the sharpness ramp out
@@ -504,13 +530,14 @@ impl Ssr {
             entries: &blur_entries,
         };
         check_portable_storage_buffers(Some("ssr blur"), &[&blur_desc])?;
-        let blur_layout = device.create_bind_group_layout(&blur_desc)?;
+        let blur_layout = made.add(device.create_bind_group_layout(&blur_desc)?);
         let blur_set_layouts = [blur_layout];
-        let blur_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("ssr blur"),
-            bind_group_layouts: &blur_set_layouts,
-            push_constants: None,
-        })?;
+        let blur_pipeline_layout =
+            made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("ssr blur"),
+                bind_group_layouts: &blur_set_layouts,
+                push_constants: None,
+            })?);
 
         // The same format the forward pass wrote, for both: the blur's output is
         // that image plus a term, so a narrower target would tonemap a truncated
@@ -518,23 +545,29 @@ impl Ssr {
         // reflection out of that same image, which an eight-bit target would
         // clip to the tonemap's range before the tonemap ever saw it.
         let targets = [ColorTargetState::opaque(Format::Rgba16Float)];
-        let pipeline = build_fullscreen(device, "ssr", &SSR, pipeline_layout, &targets)?;
-        let blur_pipeline = build_fullscreen(
+        let pipeline = made.add(build_fullscreen(
+            device,
+            "ssr",
+            &SSR,
+            pipeline_layout,
+            &targets,
+        )?);
+        let blur_pipeline = made.add(build_fullscreen(
             device,
             "ssr blur",
             &SSR_BLUR,
             blur_pipeline_layout,
             &targets,
-        )?;
+        )?);
 
         let mut uniforms = Vec::with_capacity(frames);
         for _ in 0..frames {
-            uniforms.push(device.create_buffer(&BufferDesc {
+            uniforms.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some("ssr params"),
                 size: ssr::PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?);
+            })?));
         }
 
         Ok(Self {

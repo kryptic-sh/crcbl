@@ -161,6 +161,7 @@ use crcbl_shaders::{SSAO, SSAO_BLUR, SSAO_HEMISPHERE, SSAO_UPSAMPLE, ssao};
 
 pub(crate) use crate::bind_group_cache::cached_group;
 use crate::graph::{ImageId, RenderGraph};
+use crate::partial::Partial;
 
 /// Vertices in the over-sized full-screen triangle `ssao.slang` and
 /// `ssao_blur.slang` generate from `SV_VertexID`. No geometry is bound anywhere.
@@ -599,10 +600,8 @@ impl Ssao {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**: what this created before the failure stays alive until the
-    /// device goes. The forward renderer builds it between frames, the first
-    /// time a frame asks for it, with no rollback to hand it to.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -646,13 +645,14 @@ impl Ssao {
             entries: &entries,
         };
         check_portable_storage_buffers(Some("ssao"), &[&desc])?;
-        let layout = device.create_bind_group_layout(&desc)?;
+        let mut made = Partial::new(device);
+        let layout = made.add(device.create_bind_group_layout(&desc)?);
         let set_layouts = [layout];
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        let pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("ssao"),
             bind_group_layouts: &set_layouts,
             push_constants: None,
-        })?;
+        })?);
 
         // **The same shape, one binding longer.** The blur unprojects the depth
         // it weights its kernel by, so it names the uniform block at 0 exactly
@@ -698,44 +698,51 @@ impl Ssao {
             entries: &blur_entries,
         };
         check_portable_storage_buffers(Some("ssao blur"), &[&blur_desc])?;
-        let blur_layout = device.create_bind_group_layout(&blur_desc)?;
+        let blur_layout = made.add(device.create_bind_group_layout(&blur_desc)?);
         let blur_set_layouts = [blur_layout];
-        let blur_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("ssao blur"),
-            bind_group_layouts: &blur_set_layouts,
-            push_constants: None,
-        })?;
+        let blur_pipeline_layout =
+            made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("ssao blur"),
+                bind_group_layouts: &blur_set_layouts,
+                push_constants: None,
+            })?);
 
         let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
-        let pipeline = build_fullscreen(device, "ssao", &SSAO, pipeline_layout, &targets)?;
+        let pipeline = made.add(build_fullscreen(
+            device,
+            "ssao",
+            &SSAO,
+            pipeline_layout,
+            &targets,
+        )?);
         // The other technique, on the same layout and the same target — see
         // [`Ssao::hemisphere_pipeline`].
-        let hemisphere_pipeline = build_fullscreen(
+        let hemisphere_pipeline = made.add(build_fullscreen(
             device,
             "ssao hemisphere",
             &SSAO_HEMISPHERE,
             pipeline_layout,
             &targets,
-        )?;
-        let blur_pipeline = build_fullscreen(
+        )?);
+        let blur_pipeline = made.add(build_fullscreen(
             device,
             "ssao blur",
             &SSAO_BLUR,
             blur_pipeline_layout,
             &targets,
-        )?;
+        )?);
         // **The blur's layout, and the same colour target.** The reconstruction
         // writes the same `R8Unorm` channel at a different extent, and an extent
         // is not part of a pipeline — the graph takes the render area from the
         // attachment it was given. See [`Ssao::upsample_pipeline`] for why the
         // layout is shared and the pipeline is not.
-        let upsample_pipeline = build_fullscreen(
+        let upsample_pipeline = made.add(build_fullscreen(
             device,
             "ssao upsample",
             &SSAO_UPSAMPLE,
             blur_pipeline_layout,
             &targets,
-        )?;
+        )?);
 
         let mut uniforms = Vec::with_capacity(frames);
         let mut split_uniforms = Vec::with_capacity(frames);
@@ -744,15 +751,16 @@ impl Ssao {
             (&mut split_uniforms, "ssao params (shipped)"),
         ] {
             for _ in 0..frames {
-                ring.push(device.create_buffer(&BufferDesc {
+                ring.push(made.add(device.create_buffer(&BufferDesc {
                     label: Some(label),
                     size: ssao::PARAMS_SIZE as u64,
                     usage: BufferUsage::UNIFORM,
                     memory: MemoryLocation::HostUpload,
-                })?);
+                })?));
             }
         }
 
+        made.keep();
         Ok(Self {
             uniforms,
             split_uniforms,

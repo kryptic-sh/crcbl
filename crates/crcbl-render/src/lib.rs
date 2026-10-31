@@ -169,6 +169,7 @@ pub mod mesh_pool;
 pub mod nine_slice;
 pub mod occlusion_cull;
 pub mod orbit;
+mod partial;
 pub mod pass_stats;
 mod pipeline_batch;
 mod probe;

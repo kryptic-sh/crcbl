@@ -32,7 +32,9 @@
 //! so a caller's *error* paths would never run either.
 //! [`report_device_error`](Recorder::report_device_error) queues an out-of-band
 //! failure, [`fail_next_reconfigures`](Recorder::fail_next_reconfigures) refuses
-//! a swapchain rebuild, [`report_swapchain_out_of_date`](Recorder::report_swapchain_out_of_date)
+//! a swapchain rebuild, [`fail_create_after`](Recorder::fail_create_after)
+//! fails one object creation part way through a constructor,
+//! [`report_swapchain_out_of_date`](Recorder::report_swapchain_out_of_date)
 //! resizes the window out from under the frame loop,
 //! [`report_suboptimal_acquires`](Recorder::report_suboptimal_acquires) hands
 //! out a frame the surface has outgrown but will still take,
@@ -781,6 +783,16 @@ impl NullDevice {
         }
     }
 
+    /// The injected failure [`Recorder::fail_create_after`] owes, if this
+    /// creation is the one it falls on.
+    fn injected_create_failure(&self) -> Result<(), HalError> {
+        if self.recorder.take_create_failure() {
+            Err(HalError::OutOfDeviceMemory)
+        } else {
+            Ok(())
+        }
+    }
+
     fn unsupported(&self, what: &'static str) -> HalError {
         HalError::Unsupported {
             backend: BackendKind::Null,
@@ -1056,6 +1068,7 @@ impl Device for NullDevice {
     // --- resources ---
 
     fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<BufferHandle, HalError> {
+        self.injected_create_failure()?;
         if desc.size == 0 {
             return Err(HalError::InvalidDescriptor(
                 "buffer size must be non-zero".to_string(),
@@ -1126,6 +1139,7 @@ impl Device for NullDevice {
     }
 
     fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
+        self.injected_create_failure()?;
         self.check(ObjectKind::Buffer, desc.buffer.to_bits(), "buffer")?;
         if let Some(wait) = desc.after {
             self.check(ObjectKind::Semaphore, wait.semaphore.to_bits(), "semaphore")?;
@@ -1246,6 +1260,7 @@ impl Device for NullDevice {
     }
 
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError> {
+        self.injected_create_failure()?;
         // Every rule this used to spell out inline is now `ImageDesc::check`,
         // on the seam, so a backend that wants them does not copy them. The
         // messages are the ones that were here; this backend is the reference
@@ -1277,6 +1292,7 @@ impl Device for NullDevice {
     }
 
     fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
+        self.injected_create_failure()?;
         self.check(ObjectKind::Image, desc.image.to_bits(), "image")?;
         // The seam's subresource rule, which this backend could not state
         // before: `create_image` filed `Detail::None`, so neither count was
@@ -1306,6 +1322,7 @@ impl Device for NullDevice {
     }
 
     fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<SamplerHandle, HalError> {
+        self.injected_create_failure()?;
         // The ceiling is the rule this backend already had, now stated once on
         // the seam with the message that was here. The floor is the one it did
         // not: `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` all refused an
@@ -1333,6 +1350,7 @@ impl Device for NullDevice {
         &self,
         desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
+        self.injected_create_failure()?;
         let sources = desc.provided();
         if sources.is_empty() {
             // Every real backend rejects this too; saying so here means the
@@ -1376,6 +1394,7 @@ impl Device for NullDevice {
         &self,
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
+        self.injected_create_failure()?;
         desc.check_entries(&self.caps, BackendKind::Null)?;
         let update_after_bind = desc
             .entries
@@ -1406,6 +1425,7 @@ impl Device for NullDevice {
     }
 
     fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
+        self.injected_create_failure()?;
         self.check(
             ObjectKind::BindGroupLayout,
             desc.layout.to_bits(),
@@ -1482,6 +1502,7 @@ impl Device for NullDevice {
         &self,
         desc: &PipelineLayoutDesc<'_>,
     ) -> Result<PipelineLayoutHandle, HalError> {
+        self.injected_create_failure()?;
         for layout in desc.bind_group_layouts {
             self.check(
                 ObjectKind::BindGroupLayout,
@@ -1540,6 +1561,7 @@ impl Device for NullDevice {
         &self,
         desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
+        self.injected_create_failure()?;
         self.check_stage(desc.vertex)?;
         self.check_raster_state(
             desc.layout,
@@ -1567,6 +1589,7 @@ impl Device for NullDevice {
         &self,
         desc: &MeshPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
+        self.injected_create_failure()?;
         // Before anything else, so a device modelling the absent capability
         // refuses for the reason the caller needs to hear rather than tripping
         // over a stale handle first.
@@ -1614,6 +1637,7 @@ impl Device for NullDevice {
         &self,
         desc: &ComputePipelineDesc<'_>,
     ) -> Result<ComputePipelineHandle, HalError> {
+        self.injected_create_failure()?;
         if !self.caps.features.contains(Features::COMPUTE) {
             return Err(self.unsupported("compute shaders"));
         }
@@ -1642,6 +1666,7 @@ impl Device for NullDevice {
     // --- queries ---
 
     fn create_query_set(&self, desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
+        self.injected_create_failure()?;
         desc.kind.check_supported(BackendKind::Null)?;
         let required = match desc.kind {
             QueryKind::Timestamp => Features::TIMESTAMP_QUERY,
@@ -1702,6 +1727,7 @@ impl Device for NullDevice {
     // --- synchronisation ---
 
     fn create_semaphore(&self, desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
+        self.injected_create_failure()?;
         if matches!(desc.kind, SemaphoreKind::Timeline { .. })
             && !self.caps.features.contains(Features::TIMELINE_SEMAPHORE)
         {

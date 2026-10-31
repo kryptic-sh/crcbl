@@ -45,6 +45,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_hal::null::Recorder::fail_create_after`**, with
+  `cancel_create_failure` and `create_failure_pending`: fail the Nth object
+  creation on the null backend, to drive a constructor's partial-failure path.
 - **`crcbl_frame::texture::UploadBatch` is public**, re-exported as
   `crcbl_render::UploadBatch`: start-up texture uploads recorded into one
   command buffer and submitted with one wait. It gains `UploadBatch::fill`, the
@@ -242,6 +245,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   uploading its own identical `"dfg pair table"` per view.
 
 ### Fixed
+
+- **A render pass constructor that fails part way no longer leaks what it
+  made.** `Ssao`, `ContactShadows`, `Bloom`, `Fxaa`, `Cmaa2`, `Upscale`, the
+  shadow atlas viewer, `Water`, `Grass`, `Ssr`, `Exposure`, `Volumetric`,
+  `SkyPass`, `Hiz` and `OcclusionPyramid` now release the layouts, pipelines,
+  samplers and buffers they had already created when a later create fails. These
+  passes are built lazily between frames, so a refused pipeline used to leak
+  again on every retry.
 
 - **A lossless WebP no longer builds prefix codes its image never uses.**
   `crcbl_image::webp::decode` read and built every prefix-code group up to the

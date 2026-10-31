@@ -1483,8 +1483,8 @@ impl View {
     /// # Errors
     ///
     /// [`HalError`] from the pass's constructor. The passes already held stay
-    /// held; one that failed part way leaves what it had created, on its
-    /// constructor's own terms.
+    /// held; one that failed part-way has released what it had created — see
+    /// [`crate::partial`].
     pub(super) fn build_passes(
         &mut self,
         device: &dyn Device,
@@ -1549,8 +1549,8 @@ impl View {
     /// # Errors
     ///
     /// [`HalError`] from a constructor. Whatever is already held stays held;
-    /// one that failed part way leaves what it had created, on its
-    /// constructor's own terms.
+    /// one that failed part-way has released what it had created — see
+    /// [`crate::partial`].
     pub(super) fn build_content(
         &mut self,
         device: &dyn Device,

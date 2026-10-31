@@ -60,6 +60,7 @@ use crcbl_shaders::HIZ;
 use crcbl_shaders::cull::OCCLUSION_MAX_LEVELS;
 
 use crate::graph::{ImageId, ImportedImage, InitialClaim, RenderGraph};
+use crate::partial::Partial;
 use crate::ssao::cached_group;
 use crate::transient::TransientPool;
 
@@ -193,8 +194,8 @@ impl OcclusionPyramid {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. Nothing is released on the failing path,
-    /// for the reason every builder in this crate gives.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -223,13 +224,14 @@ impl OcclusionPyramid {
             entries: &entries,
         };
         check_portable_storage_buffers(Some("occlusion hiz"), &[&desc])?;
-        let layout = device.create_bind_group_layout(&desc)?;
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        let mut made = Partial::new(device);
+        let layout = made.add(device.create_bind_group_layout(&desc)?);
+        let pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("occlusion hiz"),
             bind_group_layouts: &[layout],
             push_constants: None,
-        })?;
-        let pipeline = build_depth_fullscreen(
+        })?);
+        let pipeline = made.add(build_depth_fullscreen(
             device,
             "occlusion hiz",
             &HIZ,
@@ -237,7 +239,8 @@ impl OcclusionPyramid {
             "farthestMain",
             pipeline_layout,
             Format::D32Float,
-        )?;
+        )?);
+        made.keep();
         Ok(Self {
             layout,
             pipeline_layout,

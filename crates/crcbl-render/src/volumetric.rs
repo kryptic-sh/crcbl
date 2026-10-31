@@ -105,6 +105,7 @@ use crate::camera::{DirectionalLight, Fog};
 use crate::draw_gen::{UINT_STRIDE, bound, compute_pipeline_entry, storage, uniform};
 use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
 use crate::light_grid::{FrameView, Grid, LightGrid};
+use crate::partial::Partial;
 use crate::shadow::{self, Cascades};
 use crate::ssao::cached_group;
 
@@ -304,9 +305,8 @@ impl Volumetric {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**, for the reason every other builder in this crate gives: the
-    /// caller holds a rollback, and this is stored in it whole.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -369,32 +369,34 @@ impl Volumetric {
             entries: &compute_entries,
         };
         check_portable_storage_buffers(Some("volumetric"), &[&compute_desc])?;
-        let compute_layout = device.create_bind_group_layout(&compute_desc)?;
+        let mut made = Partial::new(device);
+        let compute_layout = made.add(device.create_bind_group_layout(&compute_desc)?);
         let compute_set_layouts = [compute_layout];
-        let compute_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("volumetric"),
-            bind_group_layouts: &compute_set_layouts,
-            push_constants: None,
-        })?;
+        let compute_pipeline_layout =
+            made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("volumetric"),
+                bind_group_layouts: &compute_set_layouts,
+                push_constants: None,
+            })?);
         // Two entry points of one module, which is why this is
         // `compute_pipeline_entry` rather than `compute_pipeline`: the pair
         // shares the froxel arithmetic and shaders here have no `#include`.
-        let scatter = compute_pipeline_entry(
+        let scatter = made.add(compute_pipeline_entry(
             device,
             "volumetric scatter",
             &VOLUMETRIC,
             "scatterMain",
             compute_pipeline_layout,
             WORKGROUP_SIZE,
-        )?;
-        let integrate = compute_pipeline_entry(
+        )?);
+        let integrate = made.add(compute_pipeline_entry(
             device,
             "volumetric integrate",
             &VOLUMETRIC,
             "integrateMain",
             compute_pipeline_layout,
             WORKGROUP_SIZE,
-        )?;
+        )?);
 
         let composite_entries = [
             BindGroupLayoutEntry {
@@ -474,31 +476,32 @@ impl Volumetric {
             entries: &composite_entries,
         };
         check_portable_storage_buffers(Some("volumetric composite"), &[&composite_desc])?;
-        let composite_layout = device.create_bind_group_layout(&composite_desc)?;
+        let composite_layout = made.add(device.create_bind_group_layout(&composite_desc)?);
         let composite_set_layouts = [composite_layout];
-        let composite_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("volumetric composite"),
-            bind_group_layouts: &composite_set_layouts,
-            push_constants: None,
-        })?;
+        let composite_pipeline_layout =
+            made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("volumetric composite"),
+                bind_group_layouts: &composite_set_layouts,
+                push_constants: None,
+            })?);
         // The same format the forward pass wrote: this image stands in for the
         // scene colour from here on, so a narrower one would tonemap a truncated
         // frame — and fog adds a radiance rather than only removing one.
         let targets = [ColorTargetState::opaque(Format::Rgba16Float)];
-        let composite_pipeline = build_fullscreen(
+        let composite_pipeline = made.add(build_fullscreen(
             device,
             "volumetric composite",
             &VOLUMETRIC_COMPOSITE,
             composite_pipeline_layout,
             &targets,
-        )?;
+        )?);
 
         let mut params = Vec::with_capacity(frames);
         let mut volumes = Vec::with_capacity(frames);
         let mut lighting = Vec::with_capacity(frames);
         let mut compute_groups = Vec::with_capacity(frames);
         for frame in 0..frames {
-            let block = device.create_buffer(&BufferDesc {
+            let block = made.add(device.create_buffer(&BufferDesc {
                 label: Some(&format!("volumetric params {frame}")),
                 size: PARAMS_SIZE as u64,
                 // `TRANSFER_SRC` for the reason the froxel volume carries it: a
@@ -509,25 +512,25 @@ impl Volumetric {
                 // host is a different question from what the device saw.
                 usage: BufferUsage::UNIFORM | BufferUsage::TRANSFER_SRC,
                 memory: MemoryLocation::HostUpload,
-            })?;
-            let volume = device.create_buffer(&BufferDesc {
+            })?);
+            let volume = made.add(device.create_buffer(&BufferDesc {
                 label: Some(&format!("volumetric froxels {frame}")),
                 size: u64::from(froxels) * FROXEL_STRIDE as u64,
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 memory: MemoryLocation::DeviceLocal,
-            })?;
-            let seen = device.create_buffer(&BufferDesc {
+            })?);
+            let seen = made.add(device.create_buffer(&BufferDesc {
                 label: Some(&format!("volumetric lighting {frame}")),
                 size: u64::from(froxels) * LIGHTING_STRIDE as u64,
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 memory: MemoryLocation::DeviceLocal,
-            })?;
+            })?);
             // **Built once rather than cached against the graph**, which the
             // shadow atlas and the light ring are what make possible: the
             // renderer owns that image and those buffers for its whole life and
             // hands the graph the same handles every frame, so this group names
             // nothing a frame can change.
-            let group = device.create_bind_group(&BindGroupDesc {
+            let group = made.add(device.create_bind_group(&BindGroupDesc {
                 label: Some(&format!("volumetric {frame}")),
                 layout: compute_layout,
                 entries: &[
@@ -551,13 +554,14 @@ impl Volumetric {
                 // to declare — the same `None` every other pass in this crate
                 // passes.
                 variable_count: None,
-            })?;
+            })?);
             params.push(block);
             volumes.push(volume);
             lighting.push(seen);
             compute_groups.push(group);
         }
 
+        made.keep();
         Ok(Self {
             params,
             froxels: volumes,

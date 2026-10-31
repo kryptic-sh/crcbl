@@ -11822,6 +11822,7 @@ mod tests {
     mod load_service;
     mod mesh_variants;
     mod page_reload;
+    mod partial_builds;
     mod shadow_reach;
     mod upload_waits;
 

@@ -5636,3 +5636,53 @@ fn a_binds_dynamic_offsets_are_held_to_the_layouts_slots() {
     device.destroy_pipeline_layout(pipeline_layout);
     device.destroy_bind_group_layout(layout);
 }
+
+/// [`Recorder::fail_create_after`] lets the named number of creations through,
+/// fails the next one with nothing created, and **runs out** — whichever kind
+/// of object each creation is.
+#[test]
+fn an_injected_creation_failure_lands_once_on_the_named_creation() {
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let buffer = BufferDesc {
+        label: None,
+        size: 16,
+        usage: BufferUsage::UNIFORM,
+        memory: MemoryLocation::HostUpload,
+    };
+
+    recorder.fail_create_after(2);
+    let first = device
+        .create_buffer(&buffer)
+        .expect("the first gets through");
+    let sampler = device
+        .create_sampler(&crate::SamplerDesc::default())
+        .expect("so does the second, of another kind");
+    assert!(recorder.create_failure_pending());
+    let live = recorder.total_live_objects();
+    let refused = device
+        .create_buffer(&buffer)
+        .expect_err("the third is the injected one");
+    assert!(matches!(refused, HalError::OutOfDeviceMemory), "{refused}");
+    assert_eq!(
+        recorder.total_live_objects(),
+        live,
+        "a refusal creates nothing"
+    );
+    assert!(!recorder.create_failure_pending());
+    let after = device
+        .create_buffer(&buffer)
+        .expect("and it does not repeat");
+
+    // A withdrawn one is never delivered.
+    recorder.fail_create_after(0);
+    recorder.cancel_create_failure();
+    let spared = device.create_buffer(&buffer).expect("withdrawn");
+
+    for handle in [first, after, spared] {
+        device.destroy_buffer(handle);
+    }
+    device.destroy_sampler(sampler);
+    assert_eq!(recorder.total_live_objects(), 0);
+    recorder.assert_valid();
+}

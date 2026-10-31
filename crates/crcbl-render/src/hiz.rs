@@ -60,6 +60,7 @@ use crcbl_hal::{
 use crcbl_shaders::HIZ;
 
 use crate::graph::{ImageId, RenderGraph};
+use crate::partial::Partial;
 use crate::ssao::cached_group;
 
 /// The vertex count of the full-screen triangle every pass here draws.
@@ -170,9 +171,8 @@ impl Hiz {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**, for the reason every other builder in this crate gives: the
-    /// caller holds a rollback, and this is stored in it whole.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -208,17 +208,18 @@ impl Hiz {
             entries: &entries,
         };
         check_portable_storage_buffers(Some("hiz"), &[&desc])?;
-        let layout = device.create_bind_group_layout(&desc)?;
+        let mut made = Partial::new(device);
+        let layout = made.add(device.create_bind_group_layout(&desc)?);
         let set_layouts = [layout];
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        let pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("hiz"),
             bind_group_layouts: &set_layouts,
             push_constants: None,
-        })?;
+        })?);
         let pipeline =
             // The **nearest** reduction; `farthestMain` beside it is
             // `crate::occlusion_cull`'s.
-            build_depth_fullscreen(
+            made.add(build_depth_fullscreen(
                 device,
                 "hiz",
                 &HIZ,
@@ -226,8 +227,9 @@ impl Hiz {
                 "fragmentMain",
                 pipeline_layout,
                 Format::D32Float,
-            )?;
+            )?);
 
+        made.keep();
         Ok(Self {
             layout,
             pipeline_layout,

@@ -39,6 +39,7 @@ use crcbl_hal::{
 use crcbl_shaders::{FXAA, fxaa};
 
 use crate::graph::{ImageId, RenderGraph};
+use crate::partial::Partial;
 use crate::ssao::cached_group;
 
 /// Vertices in the over-sized full-screen triangle `fxaa.slang` generates from
@@ -83,10 +84,8 @@ impl Fxaa {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. **Nothing is released on the failing
-    /// path**: what this created before the failure stays alive until the
-    /// device goes. The forward renderer builds it between frames, the first
-    /// time a frame asks for it, with no rollback to hand it to.
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
         frames: usize,
@@ -134,40 +133,42 @@ impl Fxaa {
             entries: &entries,
         };
         check_portable_storage_buffers(Some("fxaa"), &[&desc])?;
-        let layout = device.create_bind_group_layout(&desc)?;
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        let mut made = Partial::new(device);
+        let layout = made.add(device.create_bind_group_layout(&desc)?);
+        let pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("fxaa"),
             bind_group_layouts: &[layout],
             push_constants: None,
-        })?;
-        let pipeline = build_fullscreen(
+        })?);
+        let pipeline = made.add(build_fullscreen(
             device,
             "fxaa",
             &FXAA,
             pipeline_layout,
             &[ColorTargetState::opaque(target_format)],
-        )?;
+        )?);
 
         // **Linear**, unlike the tonemap's — see the module docs.
-        let sampler = device.create_sampler(&SamplerDesc {
+        let sampler = made.add(device.create_sampler(&SamplerDesc {
             label: Some("fxaa source"),
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
             mip_filter: FilterMode::Nearest,
             address_mode: [SamplerAddressMode::ClampToEdge; 3],
             ..SamplerDesc::default()
-        })?;
+        })?);
 
         let mut uniforms = Vec::with_capacity(frames);
         for _ in 0..frames {
-            uniforms.push(device.create_buffer(&BufferDesc {
+            uniforms.push(made.add(device.create_buffer(&BufferDesc {
                 label: Some("fxaa params"),
                 size: fxaa::PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
-            })?);
+            })?));
         }
 
+        made.keep();
         Ok(Self {
             uniforms,
             layout,
