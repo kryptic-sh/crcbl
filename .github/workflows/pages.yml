@@ -582,6 +582,9 @@ jobs:
             sudo apt-get install -y --no-install-recommends xvfb
           fi
           echo "Xvfb: $(command -v Xvfb)"
+          # The same demo has run 2-3x slower on one runner image than on another
+          # run, unexplained; the host CPU behind the runner is the first suspect.
+          echo "runner CPU: $(nproc) x $(lscpu | sed -n 's/^Model name: *//p'), load $(cut -d' ' -f1-3 /proc/loadavg)"
 
       # `groups` is set only on the rows under `include`; every other row runs
       # every group, exactly as it did before the split. Through `env` rather

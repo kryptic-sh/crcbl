@@ -892,9 +892,11 @@ runs). Left:
   call.
 - **Merge the eight ~1-minute 2D demo rows** into one looping row, freeing 7
   slots during the first 12 minutes.
-- **Print the runner's CPU in the demo jobs** (`nproc`, `lscpu` model, load
-  average) in `Check the browser gate's assumptions`, to explain the 2–3×
-  spread.
+- **The runner's CPU is now printed in each demo job**
+  (`Check the browser gate's assumptions`, since 2026-10-31): read it across a
+  few Pages runs to see whether the 2–3× spread per demo follows the host CPU
+  model. Run 41189560608 (e0ba9981) was slow across the board (alcove 45 min
+  against a ~26 mean).
 - **Not waiting for Pages before the next push** would roughly halve the cycle;
   `pages.yml` already cancels a superseded main run. A process change, the
   owner's call.
