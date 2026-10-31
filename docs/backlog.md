@@ -865,22 +865,22 @@ sundial, shard, puppet) now run as two `demos` rows each, split by check group
 with `--groups` (2026-10-31; predicted Pages ~39–42 min, to be read off the next
 runs). Left:
 
-- **Read the next two Pages runs' queue column** before splitting further: four
-  more matrix jobs could raise queue time. After the split the slowest single
-  row is projected to be quarry (35 min on run 41163797261: C 8.4, D 3.9, E 9.0,
-  F 3.6, I 6.8), then lantern (30). Splitting them needs their C blocks (quarry
-  `console` and `autoexec`) shown to hand the page back as they found it — the
-  comment at the end of C's opening in `web/tools/browser-e2e.mjs` says what to
-  look for.
-- **puppet's E cannot be split from its C.** Its `walk` block leaves the
-  character mid-circuit, and `queuedKeyChecks` in
-  `web/tools/browser-queued-input.mjs` starts from there, so puppet runs
-  `C,D,E | F,G,H,I` (~30 | 9 min). Giving `queuedKeyChecks` its own starting
-  position would make `C | D,E` sound.
-- **The split renamed four Pages checks** (`render breach in a real browser`
-  became `render breach (C) …` and `render breach (D,E,F,G,H,I) …`, likewise
-  sundial, shard, puppet). Branch protection, if it requires them, needs the new
-  names.
+- **First split run: Pages 51 min** (run for 3dbc2430, was 57–72); slowest rows
+  then puppet `C,D,E` 38 and quarry 34. **puppet and quarry are split too
+  (2026-10-31)**: puppet `E | C,D,F,G,H,I` (~32 | 16 min predicted from run
+  41186004585), quarry `C,E | D,F,G,H,I` (~20 | 21). `queuedKeyChecks` takes the
+  controls from the circuit itself when C's `walk` has not (E passed without
+  that too; the takeover keeps the first "held" reading off a moving base). Read
+  the next Pages runs, queue column included.
+- **puppet's E is the floor of its row** (27.3 min, 21.8 of it the three
+  queued-input cases, ~7 min each at 48×). Splitting further needs those cases
+  in a share of their own, or fewer beats per case; untried.
+- **tide is the next slowest row** (35.3 min unsplit on run 41186004585). Its C
+  blocks need checking before a split.
+- **The split renamed the split demos' Pages checks**
+  (`render breach in a real browser` became `render breach (C) …` and
+  `render breach (D,E,F,G,H,I) …`, likewise sundial, shard, puppet). Branch
+  protection, if it requires them, needs the new names.
 - A `--groups` run that checks nothing past C's opening prints the shell's
   generic "at least one failed" after the driver's own correct reason.
 

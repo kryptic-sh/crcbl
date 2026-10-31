@@ -1,4 +1,5 @@
-// Queued keyboard input in the real puppet page, after group C's course walk.
+// Queued keyboard input in the real puppet page. It takes the controls itself
+// when nothing has, so it runs the same with or without group C's course walk.
 // Keep the page alive: group I owns its Stop and GPU teardown receipts.
 import { Cdp, evaluate, say } from './browser-launch.mjs';
 
@@ -6,7 +7,8 @@ const FORWARD = { code: 'KeyW', text: 'w', virtualKeyCode: 87 };
 const BACKWARD = { code: 'KeyS', text: 's', virtualKeyCode: 83 };
 const ESCAPE = { code: 'Escape', text: 'Escape', virtualKeyCode: 27 };
 // Between the course wall and spawn in apps/puppet/src/map.rs. Choose the
-// direction with room, rather than pushing W into the wall group C reached.
+// direction with room, rather than pushing W into the wall group C's walk
+// reaches, or S off the ground's edge behind the spawn.
 const TURN_Z = 8;
 
 export async function queuedKeyChecks({
@@ -76,8 +78,42 @@ export async function queuedKeyChecks({
     visibility:
       'the visibility edge clears held input without a canvas blur event',
   };
+  // **The state every case below starts from: the player driving, nothing
+  // held.** Group C's `walk` block leaves it that way, at the riser; without C
+  // the character is still pacing its unattended circuit. The first case's own
+  // press would end that circuit, but its `base` would be read off a character
+  // the circuit was still moving, so the first "held" witness would be credited
+  // with the circuit's motion as well as the key's. So take the controls the
+  // way a visitor does, with one press of the walk key toward the lane, held
+  // until a heartbeat says `pilot: player`. A no-op after C's walk, which
+  // already ended the circuit.
+  const pilot = () => {
+    const lines = hud();
+    for (let at = lines.length - 1; at >= 0; at -= 1) {
+      const found = lines[at].match(/\bpilot: (\w+)/);
+      if (found) return found[1];
+    }
+    return null;
+  };
   let recovered = true;
   try {
+    if (pilot() !== 'player') {
+      await status(3);
+      const from = hud().length;
+      await sendKey(page, FORWARD, 'keyDown');
+      const took = await until(async () =>
+        hud()
+          .slice(from)
+          .some((line) => /\bpilot: player\b/.test(line))
+          ? true
+          : null
+      );
+      await sendKey(page, FORWARD, 'keyUp');
+      ensure(
+        took === true,
+        `${FORWARD.code} never took the controls from the circuit; last pilot ${pilot()}`
+      );
+    }
     for (const kind of Object.keys(names)) {
       if (!recovered) {
         check(

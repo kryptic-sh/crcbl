@@ -424,7 +424,7 @@ jobs:
           # 1.0x for the 2D demos, 51.1x for breach on `80022df`. If one of
           # these goes red, read **which** check failed before touching a
           # number: the cap says "out of wall clock", never "too slow".
-          - quarry
+          # quarry runs as two jobs: see `include`.
           - lantern
           # alcove is the third 3D fixture and it sits with lantern rather than
           # with shard: one small flat-shaded court, no animation and a fixed
@@ -480,10 +480,11 @@ jobs:
         # **THE HEAVY DEMOS RUN AS TWO JOBS EACH, SINCE 2026-10-31.** The
         # driver makes its lettered groups in order on one page, and on this
         # runner's software rasteriser breach, sundial, shard and puppet each
-        # spent longer in them than any other demo — so the slowest of them,
-        # not the sum, set the workflow's wall clock, and every push waited on
-        # it. `--groups` on `web/run-browser-e2e.sh` makes a share of them, and
-        # each demo below runs as two shares whose union is every group.
+        # spent longer in them than any other demo, and quarry next — so the
+        # slowest of them, not the sum, set the workflow's wall clock, and
+        # every push waited on it. `--groups` on `web/run-browser-e2e.sh` makes
+        # a share of them, and each demo below runs as two shares whose union
+        # is every group.
         #
         # **The cut is where the measured group times balance**, read off the
         # timestamps of Pages runs 41163797261 and 41177732812, and only where
@@ -496,14 +497,20 @@ jobs:
         #     breach   C 25.6 (its blocks)  |  D 4.9 E 5.6 F 3.9 H 1.0 I 8.0
         #     sundial  C 15.4               |  D 2.1 E 6.5 F 3.1 H 0.7 I 5.1
         #     shard    C 15.0 D 6.4         |  E 3.5 F 4.4 H 1.4 I 9.9
-        #     puppet   C 3.8 D 2.0 E 21.6   |  F 2.0 H 0.5 I 3.2
         #
-        # with A, B and C's opening, two to four minutes, on both sides.
-        # **puppet is cut after E, not before it**: its `walk` block leaves the
-        # character at a step, and group E's queued-input checks start from
-        # there, so a share that ran E without C would be checking a different
-        # page. D stays with E for the same reason — D reads the frame the
-        # walk left.
+        # and on 41186004585, the first run with these splits:
+        #
+        #     puppet   E 27.3 (21.8 of it queued input)  |  C 4.9 D 2.5 F 2.4
+        #                                                   H 0.4 I 2.3
+        #     quarry   C 6.1 E 8.9  |  D 3.8 F 3.6 H 0.8 I 7.0
+        #
+        # with A, B and C's opening, two to five minutes, on both sides. A
+        # share is any set of groups, not a run of them: they still run in
+        # order. **puppet's E is a share of its own** because it is most of
+        # the demo's time; its queued-input checks take the controls from the
+        # unattended circuit themselves when C's `walk` has not, so they do
+        # not stand on C. quarry's `console` and `autoexec` blocks put the view,
+        # the panel and the OPFS store back and hand the canvas its focus.
         #
         # sundial is the fourth 3D fixture and it sits with alcove: one open
         # plaza, flat-shaded, a fixed camera, and a shadow atlas rendered
@@ -538,9 +545,13 @@ jobs:
           - demo: shard
             groups: E,F,G,H,I
           - demo: puppet
-            groups: C,D,E
+            groups: E
           - demo: puppet
-            groups: F,G,H,I
+            groups: C,D,F,G,H,I
+          - demo: quarry
+            groups: C,E
+          - demo: quarry
+            groups: D,F,G,H,I
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

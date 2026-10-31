@@ -4796,11 +4796,13 @@ try {
   //
   // **Skipping those blocks is only sound where they hand the page back as
   // they found it**, and most say they do: breach's `practice` and shard's
-  // `save` reload and click the canvas again, sundial's `knobs` resets. One
-  // does not: puppet's `walk` ends the character's circuit and leaves it at a
-  // step, and group E's queued-input checks in `browser-queued-input.mjs`
-  // start from there — so puppet's split in `.github/workflows/pages.yml`
-  // keeps C, D and E in one job. Check a demo's blocks before splitting it.
+  // `save` reload and click the canvas again, sundial's `knobs` resets,
+  // quarry's `console` restores the view and closes the panel and its
+  // `autoexec` removes the file it seeded, reboots and clicks the canvas
+  // again. One does not: puppet's `walk` ends the character's circuit and
+  // leaves it at a step. Group E's queued-input checks in
+  // `browser-queued-input.mjs` need the circuit ended, and take the controls
+  // themselves when C did not. Check a demo's blocks before splitting it.
   afterOpening = checks.length;
   if (!runs('C')) say("web e2e: C's per-demo blocks are not selected");
 
