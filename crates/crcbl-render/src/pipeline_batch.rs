@@ -32,7 +32,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use crcbl_hal::BackendKind;
-use crcbl_hal::Device;
+use crcbl_hal::{ComputePipelineHandle, Device, GraphicsPipelineHandle};
 #[cfg(not(target_arch = "wasm32"))]
 use crcbl_jobs::{Pool, Spawn};
 
@@ -62,6 +62,55 @@ pub(crate) type Job<'a, R> = dyn Fn() -> R + Sync + 'a;
 /// One pipeline's creation, as a batch member — see the native definition.
 #[cfg(target_arch = "wasm32")]
 pub(crate) type Job<'a, R> = dyn Fn() -> R + 'a;
+
+/// One member's pipeline, for a batch whose members are not all one kind —
+/// the forward build's, where the froxel volume's compute pair compiles beside
+/// the mesh pass's raster pipelines.
+///
+/// A batch's results come back in its jobs' order, so the caller that listed
+/// a member knows which kind it made and reads it back with
+/// [`graphics`](Self::graphics) or [`compute`](Self::compute).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Pipeline {
+    Graphics(GraphicsPipelineHandle),
+    Compute(ComputePipelineHandle),
+}
+
+impl Pipeline {
+    /// The raster or mesh pipeline a graphics member made.
+    ///
+    /// # Panics
+    ///
+    /// If the member made a compute pipeline — a caller reading its results
+    /// back in another order than it listed its jobs.
+    pub(crate) fn graphics(self) -> GraphicsPipelineHandle {
+        match self {
+            Self::Graphics(pipeline) => pipeline,
+            Self::Compute(_) => panic!("a graphics member of the batch made a compute pipeline"),
+        }
+    }
+
+    /// The compute pipeline a compute member made.
+    ///
+    /// # Panics
+    ///
+    /// On [`graphics`](Self::graphics)' terms, the other way round.
+    pub(crate) fn compute(self) -> ComputePipelineHandle {
+        match self {
+            Self::Compute(pipeline) => pipeline,
+            Self::Graphics(_) => panic!("a compute member of the batch made a graphics pipeline"),
+        }
+    }
+}
+
+impl From<Pipeline> for crate::partial::Created {
+    fn from(pipeline: Pipeline) -> Self {
+        match pipeline {
+            Pipeline::Graphics(pipeline) => pipeline.into(),
+            Pipeline::Compute(pipeline) => pipeline.into(),
+        }
+    }
+}
 
 /// Runs every job and returns each one's result in the jobs' order.
 ///

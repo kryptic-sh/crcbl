@@ -208,9 +208,9 @@ pub(crate) struct Ssr {
     /// would make a pass that is meant to stand alone depend on that pair having
     /// been built, for 128 bytes per frame in flight.
     uniforms: Vec<BufferHandle>,
-    layout: BindGroupLayoutHandle,
-    pipeline_layout: PipelineLayoutHandle,
-    pipeline: GraphicsPipelineHandle,
+    /// The layouts and both pipelines, compiled ahead of the ring — see
+    /// [`SsrPipelines`].
+    pipelines: SsrPipelines,
     /// `[frame]`: the group, cached against all three views together.
     ///
     /// **One per frame in flight**, because this group names [`Ssr::uniforms`]
@@ -218,9 +218,6 @@ pub(crate) struct Ssr {
     /// keyed on the views alone would hand the even frames' block to the odd
     /// frames.
     groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
-    blur_layout: BindGroupLayoutHandle,
-    blur_pipeline_layout: PipelineLayoutHandle,
-    blur_pipeline: GraphicsPipelineHandle,
     /// `[frame]`: the blur group, cached against its own three views together.
     ///
     /// **A ring for [`Ssr::groups`]' reason exactly**: `ssr_blur.slang` weights
@@ -243,77 +240,39 @@ pub(crate) struct Ssr {
     dfg: ImageViewHandle,
 }
 
-impl Ssr {
-    /// Passes [`Ssr::add_passes`] adds to a frame.
-    pub(crate) const PASSES: u32 = 2;
+/// The reflection pair's two layouts, created ahead of its pipelines so each
+/// pipeline can be one member of somebody else's [`pipeline_batch`] — see
+/// [`SsrPipelines`].
+///
+/// Handles only, and `Copy` so a batch's jobs can each take them: nothing here
+/// owns them until [`SsrLayouts::finish`] hands them to the set.
+///
+/// [`pipeline_batch`]: crate::pipeline_batch
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SsrLayouts {
+    layout: BindGroupLayoutHandle,
+    pipeline_layout: PipelineLayoutHandle,
+    blur_layout: BindGroupLayoutHandle,
+    blur_pipeline_layout: PipelineLayoutHandle,
+}
 
-    /// Builds both pipelines and the uniform ring, recording the sky table's
-    /// upload into `uploads` — so no frame may run these passes until that
-    /// batch has been submitted.
+impl SsrLayouts {
+    /// Both pipelines' one colour target.
     ///
-    /// `dfg` is the renderer's split-sum table — see [`Ssr::dfg`] — and must
-    /// outlive this.
-    ///
-    /// `build_fullscreen` is handed in rather than duplicated, on
-    /// [`Ssao::new`](crate::ssao::Ssao::new)'s terms: it is [`crate::forward`]'s,
-    /// because the shape it carries — a triangle out of `SV_VertexID`, no depth
-    /// state, one colour target — is documented there.
+    /// The same format the forward pass wrote, for both: the blur's output is
+    /// that image plus a term, so a narrower target would tonemap a truncated
+    /// scene and the reflection would be blamed for it — and the march's is a
+    /// reflection out of that same image, which an eight-bit target would
+    /// clip to the tonemap's range before the tonemap ever saw it.
+    const TARGETS: [ColorTargetState; 1] = [ColorTargetState::opaque(Format::Rgba16Float)];
+
+    /// Creates the march's layout and the blur's, each held in `made` — so the
+    /// caller's guard releases them if anything after fails.
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. A failure part-way through releases
-    /// everything already created — see [`crate::partial`] — and
-    /// [abandons](UploadBatch::abandon) `uploads`, which by then may hold the
-    /// sky table's copy into an image that release destroyed.
-    pub(crate) fn new(
-        device: &dyn Device,
-        uploads: &mut UploadBatch<'_>,
-        dfg: ImageViewHandle,
-        frames: usize,
-        build_fullscreen: impl Fn(
-            &dyn Device,
-            &str,
-            &crcbl_shaders::Shader,
-            PipelineLayoutHandle,
-            &[ColorTargetState],
-        ) -> Result<GraphicsPipelineHandle, HalError>,
-    ) -> Result<Self, HalError> {
-        let mut made = Partial::new(device);
-        let built = Self::build(device, uploads, dfg, frames, build_fullscreen, &mut made);
-        match built {
-            Ok(_) => made.keep(),
-            Err(_) => uploads.abandon(),
-        }
-        built
-    }
-
-    /// [`Ssr::new`]'s body, with every object it creates held in `made`.
-    fn build(
-        device: &dyn Device,
-        uploads: &mut UploadBatch<'_>,
-        dfg: ImageViewHandle,
-        frames: usize,
-        build_fullscreen: impl Fn(
-            &dyn Device,
-            &str,
-            &crcbl_shaders::Shader,
-            PipelineLayoutHandle,
-            &[ColorTargetState],
-        ) -> Result<GraphicsPipelineHandle, HalError>,
-        made: &mut Partial<'_>,
-    ) -> Result<Self, HalError> {
-        // The committed table, fixed point in four bytes a texel — see
-        // `sky_prefilter::PREFILTER_TEXEL_BYTES`. Not baked here, for the DFG
-        // table's reason in `crate::forward`: the integrator is a Monte Carlo
-        // sum and four backends would bake four tables.
-        let sky_prefilter = made.add_texture(uploads.texture(
-            "sky prefilter table",
-            Format::Rgba8Unorm,
-            (SKY_PREFILTER_SIZE, SKY_PREFILTER_SIZE),
-            &[&[&sky_prefilter::texels()]],
-            ImageViewType::D2,
-        )?);
-
+    /// [`HalError`] from either layout.
+    pub(crate) fn new(device: &dyn Device, made: &mut Partial<'_>) -> Result<Self, HalError> {
         // **No sampler**, which is the whole of what reading by `Load` buys —
         // and it buys more here than in the occlusion pass, because what a tap
         // fetches is a colour rather than a fraction a blur will average. See
@@ -538,26 +497,199 @@ impl Ssr {
                 bind_group_layouts: &blur_set_layouts,
                 push_constants: None,
             })?);
-
-        // The same format the forward pass wrote, for both: the blur's output is
-        // that image plus a term, so a narrower target would tonemap a truncated
-        // scene and the reflection would be blamed for it — and the march's is a
-        // reflection out of that same image, which an eight-bit target would
-        // clip to the tonemap's range before the tonemap ever saw it.
-        let targets = [ColorTargetState::opaque(Format::Rgba16Float)];
-        let pipeline = made.add(build_fullscreen(
-            device,
-            "ssr",
-            &SSR,
+        Ok(Self {
+            layout,
             pipeline_layout,
-            &targets,
-        )?);
-        let blur_pipeline = made.add(build_fullscreen(
+            blur_layout,
+            blur_pipeline_layout,
+        })
+    }
+
+    /// The march's pipeline — the pair's costly compile.
+    ///
+    /// `build_fullscreen` is handed in rather than duplicated, on
+    /// [`Ssao::new`](crate::ssao::Ssao::new)'s terms: it is [`crate::forward`]'s,
+    /// because the shape it carries — a triangle out of `SV_VertexID`, no depth
+    /// state, one colour target — is documented there.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from `build_fullscreen`.
+    pub(crate) fn march(
+        self,
+        device: &dyn Device,
+        build_fullscreen: impl Fn(
+            &dyn Device,
+            &str,
+            &crcbl_shaders::Shader,
+            PipelineLayoutHandle,
+            &[ColorTargetState],
+        ) -> Result<GraphicsPipelineHandle, HalError>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        build_fullscreen(device, "ssr", &SSR, self.pipeline_layout, &Self::TARGETS)
+    }
+
+    /// The blur's pipeline, on [`march`](Self::march)'s terms.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from `build_fullscreen`.
+    pub(crate) fn blur(
+        self,
+        device: &dyn Device,
+        build_fullscreen: impl Fn(
+            &dyn Device,
+            &str,
+            &crcbl_shaders::Shader,
+            PipelineLayoutHandle,
+            &[ColorTargetState],
+        ) -> Result<GraphicsPipelineHandle, HalError>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        build_fullscreen(
             device,
             "ssr blur",
             &SSR_BLUR,
-            blur_pipeline_layout,
-            &targets,
+            self.blur_pipeline_layout,
+            &Self::TARGETS,
+        )
+    }
+
+    /// The whole set, out of these layouts and the two pipelines made against
+    /// them, which it owns from here.
+    pub(crate) fn finish(
+        self,
+        pipeline: GraphicsPipelineHandle,
+        blur_pipeline: GraphicsPipelineHandle,
+    ) -> SsrPipelines {
+        SsrPipelines {
+            layouts: self,
+            pipeline,
+            blur_pipeline,
+        }
+    }
+}
+
+/// The reflection pair's layouts and pipelines: everything [`Ssr`] owns that
+/// names none of its buffers.
+///
+/// **Built apart from [`Ssr::new`]** so the march's compile — the costly one —
+/// can overlap others: `ForwardRenderer`'s build compiles these two as members
+/// of its mesh pass's [`pipeline_batch`], out of [`SsrLayouts`], and hands the
+/// set to the camera's march. The march itself stays eager, because water binds
+/// its block and its prefiltered sky.
+///
+/// [`pipeline_batch`]: crate::pipeline_batch
+#[derive(Debug)]
+pub(crate) struct SsrPipelines {
+    layouts: SsrLayouts,
+    pipeline: GraphicsPipelineHandle,
+    blur_pipeline: GraphicsPipelineHandle,
+}
+
+impl SsrPipelines {
+    /// Creates the layouts and both pipelines one after the other, for a
+    /// build with no batch to put them in — a view made after the renderer.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
+    pub(crate) fn new(
+        device: &dyn Device,
+        build_fullscreen: impl Fn(
+            &dyn Device,
+            &str,
+            &crcbl_shaders::Shader,
+            PipelineLayoutHandle,
+            &[ColorTargetState],
+        ) -> Result<GraphicsPipelineHandle, HalError>,
+    ) -> Result<Self, HalError> {
+        let mut made = Partial::new(device);
+        let layouts = SsrLayouts::new(device, &mut made)?;
+        let pipeline = made.add(layouts.march(device, &build_fullscreen)?);
+        let blur_pipeline = made.add(layouts.blur(device, build_fullscreen)?);
+        made.keep();
+        Ok(layouts.finish(pipeline, blur_pipeline))
+    }
+
+    /// Holds every handle in `made`, layouts first, so a constructor that
+    /// takes the set releases it with whatever else it was building — after
+    /// the groups that name the layouts, since a guard releases in reverse.
+    fn hold(&self, made: &mut Partial<'_>) {
+        let layouts = self.layouts;
+        made.add(layouts.layout);
+        made.add(layouts.pipeline_layout);
+        made.add(layouts.blur_layout);
+        made.add(layouts.blur_pipeline_layout);
+        made.add(self.pipeline);
+        made.add(self.blur_pipeline);
+    }
+
+    /// Releases everything, in dependency order. The device must be idle.
+    pub(crate) fn destroy(self, device: &dyn Device) {
+        device.destroy_graphics_pipeline(self.blur_pipeline);
+        device.destroy_pipeline_layout(self.layouts.blur_pipeline_layout);
+        device.destroy_bind_group_layout(self.layouts.blur_layout);
+        device.destroy_graphics_pipeline(self.pipeline);
+        device.destroy_pipeline_layout(self.layouts.pipeline_layout);
+        device.destroy_bind_group_layout(self.layouts.layout);
+    }
+}
+
+impl Ssr {
+    /// Passes [`Ssr::add_passes`] adds to a frame.
+    pub(crate) const PASSES: u32 = 2;
+
+    /// Builds the uniform ring against `pipelines`, which it owns from here,
+    /// recording the sky table's upload into `uploads` — so no frame may run
+    /// these passes until that batch has been submitted.
+    ///
+    /// `dfg` is the renderer's split-sum table — see [`Ssr::dfg`] — and must
+    /// outlive this.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created and `pipelines` with it — see
+    /// [`crate::partial`] — and [abandons](UploadBatch::abandon) `uploads`,
+    /// which by then may hold the sky table's copy into an image that release
+    /// destroyed.
+    pub(crate) fn new(
+        device: &dyn Device,
+        uploads: &mut UploadBatch<'_>,
+        pipelines: SsrPipelines,
+        dfg: ImageViewHandle,
+        frames: usize,
+    ) -> Result<Self, HalError> {
+        let mut made = Partial::new(device);
+        pipelines.hold(&mut made);
+        let built = Self::build(device, uploads, pipelines, dfg, frames, &mut made);
+        match built {
+            Ok(_) => made.keep(),
+            Err(_) => uploads.abandon(),
+        }
+        built
+    }
+
+    /// [`Ssr::new`]'s body, with every object it creates held in `made`.
+    fn build(
+        device: &dyn Device,
+        uploads: &mut UploadBatch<'_>,
+        pipelines: SsrPipelines,
+        dfg: ImageViewHandle,
+        frames: usize,
+        made: &mut Partial<'_>,
+    ) -> Result<Self, HalError> {
+        // The committed table, fixed point in four bytes a texel — see
+        // `sky_prefilter::PREFILTER_TEXEL_BYTES`. Not baked here, for the DFG
+        // table's reason in `crate::forward`: the integrator is a Monte Carlo
+        // sum and four backends would bake four tables.
+        let sky_prefilter = made.add_texture(uploads.texture(
+            "sky prefilter table",
+            Format::Rgba8Unorm,
+            (SKY_PREFILTER_SIZE, SKY_PREFILTER_SIZE),
+            &[&[&sky_prefilter::texels()]],
+            ImageViewType::D2,
         )?);
 
         let mut uniforms = Vec::with_capacity(frames);
@@ -572,13 +704,8 @@ impl Ssr {
 
         Ok(Self {
             uniforms,
-            layout,
-            pipeline_layout,
-            pipeline,
+            pipelines,
             groups: vec![None; frames],
-            blur_layout,
-            blur_pipeline_layout,
-            blur_pipeline,
             blur_groups: vec![None; frames],
             sky_prefilter,
             dfg,
@@ -662,9 +789,9 @@ impl Ssr {
             composited,
             pyramid,
         } = images;
-        let pipeline = self.pipeline;
-        let pipeline_layout = self.pipeline_layout;
-        let layout = self.layout;
+        let pipeline = self.pipelines.pipeline;
+        let pipeline_layout = self.pipelines.layouts.pipeline_layout;
+        let layout = self.pipelines.layouts.layout;
         let uniforms = self.uniforms[frame];
         let sky_prefilter_view = self.sky_prefilter.view;
         let dfg_view = self.dfg;
@@ -823,9 +950,9 @@ impl Ssr {
             encoder.draw(0..FULLSCREEN_VERTICES, 0..1);
         });
 
-        let blur_pipeline = self.blur_pipeline;
-        let blur_pipeline_layout = self.blur_pipeline_layout;
-        let blur_layout = self.blur_layout;
+        let blur_pipeline = self.pipelines.blur_pipeline;
+        let blur_pipeline_layout = self.pipelines.layouts.blur_pipeline_layout;
+        let blur_layout = self.pipelines.layouts.blur_layout;
         graph
             .add_render_pass("ssr-blur")
             .color(
@@ -896,12 +1023,7 @@ impl Ssr {
         for cached in self.groups.into_iter().chain(self.blur_groups).flatten() {
             device.destroy_bind_group(cached.1);
         }
-        device.destroy_graphics_pipeline(self.blur_pipeline);
-        device.destroy_pipeline_layout(self.blur_pipeline_layout);
-        device.destroy_bind_group_layout(self.blur_layout);
-        device.destroy_graphics_pipeline(self.pipeline);
-        device.destroy_pipeline_layout(self.pipeline_layout);
-        device.destroy_bind_group_layout(self.layout);
+        self.pipelines.destroy(device);
         for buffer in self.uniforms {
             device.destroy_buffer(buffer);
         }

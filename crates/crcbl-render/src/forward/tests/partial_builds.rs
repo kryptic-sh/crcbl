@@ -134,6 +134,15 @@ fn the_settings_driven_passes_release_on_every_failure() {
         |device| AtlasView::new(device, FRAMES, target, fullscreen),
         AtlasView::destroy,
     );
+    // Built by the first frame that draws reflections since the march became
+    // its only reader — see `View::build_passes`.
+    fails_cleanly_at_every_creation(
+        "Hiz::new",
+        &recorder,
+        device,
+        |device| Hiz::new(device, FRAMES, ForwardRenderer::build_depth_fullscreen),
+        Hiz::destroy,
+    );
 }
 
 /// [`Ssao::prepare`] is a constructor of its own — the bent-free filters are
@@ -236,13 +245,26 @@ fn the_view_build_passes_release_on_every_failure() {
             range: ImageSubresourceRange::all(Format::Rgba8Unorm),
         })
         .expect("a view");
-    fails_cleanly_at_every_creation(
+    // The pipeline sets first, alone: each is built apart from its pass so a
+    // renderer's build can compile it in a batch — see `ViewPipelines`.
+    let ssr_pipelines = fails_cleanly_at_every_creation(
+        "SsrPipelines::new",
+        &recorder,
+        device,
+        |device| SsrPipelines::new(device, fullscreen),
+        SsrPipelines::destroy,
+    );
+    // Then each pass over a set it takes and must release with its own
+    // objects: every failure past the set's own creations is one where the
+    // pass has to let go of the set it was handed.
+    let ssr = fails_cleanly_at_every_creation(
         "Ssr::new",
         &recorder,
         device,
         |device| {
             let mut uploads = UploadBatch::new(device, queue, "test");
-            let built = Ssr::new(device, &mut uploads, dfg, FRAMES, fullscreen);
+            let pipelines = SsrPipelines::new(device, fullscreen)?;
+            let built = Ssr::new(device, &mut uploads, pipelines, dfg, FRAMES);
             // A failed build must abandon the batch, or a later submit would
             // copy into the objects it just released.
             if built.is_err() {
@@ -254,6 +276,10 @@ fn the_view_build_passes_release_on_every_failure() {
             built
         },
         Ssr::destroy,
+    );
+    assert!(
+        ssr > ssr_pipelines,
+        "`Ssr::new` created nothing past its pipelines, so it never had to release them"
     );
     fails_cleanly_at_every_creation(
         "Exposure::new",
@@ -273,13 +299,6 @@ fn the_view_build_passes_release_on_every_failure() {
             built
         },
         Exposure::destroy,
-    );
-    fails_cleanly_at_every_creation(
-        "Hiz::new",
-        &recorder,
-        device,
-        |device| Hiz::new(device, FRAMES, ForwardRenderer::build_depth_fullscreen),
-        Hiz::destroy,
     );
     fails_cleanly_at_every_creation(
         "OcclusionPyramid::new",
@@ -330,22 +349,34 @@ fn the_view_build_passes_release_on_every_failure() {
     )
     .expect("a light grid");
     let shadow_sampler = sampler(device);
-    fails_cleanly_at_every_creation(
+    let volumetric_pipelines = fails_cleanly_at_every_creation(
+        "VolumetricPipelines::new",
+        &recorder,
+        device,
+        |device| VolumetricPipelines::new(device, fullscreen),
+        VolumetricPipelines::destroy,
+    );
+    let volumetric = fails_cleanly_at_every_creation(
         "Volumetric::new",
         &recorder,
         device,
         |device| {
+            let pipelines = VolumetricPipelines::new(device, fullscreen)?;
             Volumetric::new(
                 device,
+                pipelines,
                 FRAMES,
                 FROXEL_CAPACITY,
                 dfg,
                 shadow_sampler,
                 &lights,
-                fullscreen,
             )
         },
         Volumetric::destroy,
+    );
+    assert!(
+        volumetric > volumetric_pipelines,
+        "`Volumetric::new` created nothing past its pipelines, so it never had to release them"
     );
 
     device.destroy_sampler(shadow_sampler);
@@ -357,4 +388,151 @@ fn the_view_build_passes_release_on_every_failure() {
     device.destroy_image(dfg_image);
     assert_eq!(recorder.total_live_objects(), 0);
     recorder.assert_valid();
+}
+
+/// Every creation `recorder` has counted since it was last cleared, in order,
+/// by kind and label — what [`Recorder::fail_create_after`] counts: a command
+/// buffer is created by `finish`, which cannot fail, so it is recorded and not
+/// counted.
+fn creations(recorder: &Recorder) -> Vec<(ObjectKind, Option<String>)> {
+    recorder
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Created { kind, label } if *kind != ObjectKind::CommandBuffer => {
+                Some((*kind, label.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// What a renderer's build goes on without when the device refuses it: the
+/// culling counters' readback ring, whose absence `CullStatsRing::new`
+/// answers with `None`.
+const OPTIONAL: [&str; 1] = ["cull stats readback"];
+
+/// **A renderer's build that fails anywhere from the camera's view-pass
+/// layouts to its last creation leaks nothing** — which is the whole of the
+/// mesh pass's [`pipeline_batch`] with the froxel volume's and the reflection
+/// march's members in it, the camera's build with the two passes that are
+/// handed a set, and everything the renderer builds after the camera.
+///
+/// Every member of a batch runs whatever the others returned, so a refusal
+/// part way through leaves the later members' pipelines live: the mesh pass's
+/// are the renderer's rollback's, the view passes' are held with their layouts
+/// until each set is whole, and a set handed to the camera is the camera's to
+/// release. The null device takes the serial path, which runs every member
+/// just the same — see `crate::pipeline_batch`'s own tests for the parallel
+/// one. A refused [`OPTIONAL`] object is not a failure: the build goes on
+/// without it, and the renderer it hands back must still release whole.
+#[test]
+fn a_build_failing_in_its_pipeline_batch_leaks_nothing() {
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let before = recorder.total_live_objects();
+    recorder.clear();
+    let renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb)
+        .expect("the null backend accepts every descriptor");
+    let created = creations(&recorder);
+    renderer.destroy(device);
+    let index = |kind: ObjectKind, label: &str| {
+        created
+            .iter()
+            .position(|(created, named)| *created == kind && named.as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("the build created no {kind:?} labelled `{label}`"))
+    };
+    let first = index(ObjectKind::BindGroupLayout, "volumetric");
+    let last = created.len() - 1;
+    for (kind, label) in [
+        (ObjectKind::ComputePipeline, "volumetric scatter"),
+        (ObjectKind::GraphicsPipeline, "ssr"),
+        (ObjectKind::GraphicsPipeline, "forward mesh"),
+        (ObjectKind::GraphicsPipeline, "shadow tile clear"),
+        (ObjectKind::ComputePipeline, "volumetric integrate"),
+        (ObjectKind::GraphicsPipeline, "volumetric composite"),
+        (ObjectKind::GraphicsPipeline, "ssr blur"),
+        (ObjectKind::Image, "sky prefilter table"),
+        (ObjectKind::Buffer, "volumetric params 0"),
+    ] {
+        assert!(
+            (first..=last).contains(&index(kind, label)),
+            "`{label}` is not between the view passes' layouts and the build's last \
+             creation, so this window does not cover it"
+        );
+    }
+
+    let mut tolerated = Vec::new();
+    for (creates, failed) in created.iter().enumerate().take(last + 1).skip(first) {
+        recorder.clear();
+        recorder.fail_create_after(u32::try_from(creates).expect("fits"));
+        let error = match ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb) {
+            // An optional object the build goes on without — see
+            // `OPTIONAL` — which must still release whole.
+            Ok(renderer) => {
+                assert!(
+                    OPTIONAL.contains(&failed.1.as_deref().unwrap_or_default()),
+                    "the build succeeded although creation {creates}, {failed:?}, failed"
+                );
+                renderer.destroy(device);
+                assert_eq!(
+                    recorder.total_live_objects(),
+                    before,
+                    "the build without creation {creates}, {failed:?}, leaked"
+                );
+                tolerated.push(creates);
+                continue;
+            }
+            Err(error) => error,
+        };
+        assert!(
+            !recorder.create_failure_pending(),
+            "the build failed before reaching creation {creates}: {error}"
+        );
+        assert!(
+            matches!(error, HalError::OutOfDeviceMemory),
+            "the build did not propagate the failure at creation {creates}: {error}"
+        );
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "the build leaked when creation {creates}, {failed:?}, failed"
+        );
+    }
+    eprintln!("creations {first}..={last}; built without: {tolerated:?}");
+    recorder.assert_valid();
+}
+
+/// **A view made after the renderer builds both its pipeline sets or neither**:
+/// `ViewPipelines::new` failed at each creation leaves nothing alive — and in
+/// particular where the march's set fails after the volume's was made, which
+/// it then has to release itself.
+#[test]
+fn a_views_pipeline_sets_release_on_every_failure() {
+    let (recorder, device, _) = open();
+    let device = device.as_ref();
+    let fullscreen = ForwardRenderer::build_fullscreen;
+    let volumetric = fails_cleanly_at_every_creation(
+        "VolumetricPipelines::new",
+        &recorder,
+        device,
+        |device| VolumetricPipelines::new(device, fullscreen),
+        VolumetricPipelines::destroy,
+    );
+    let both = fails_cleanly_at_every_creation(
+        "ViewPipelines::new",
+        &recorder,
+        device,
+        ViewPipelines::new,
+        |pipelines, device| {
+            pipelines.ssr.destroy(device);
+            pipelines.volumetric.destroy(device);
+        },
+    );
+    assert!(
+        both > volumetric,
+        "`ViewPipelines::new` created nothing past the volume's set, so no failure \
+         had a finished set to release"
+    );
+    assert_eq!(recorder.total_live_objects(), 0);
 }

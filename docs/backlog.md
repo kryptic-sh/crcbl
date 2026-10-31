@@ -256,11 +256,24 @@ that serialises compiles. Measured cold on radv: 489–508 ms against 829–851 
 (uncapped it was 422–447 ms; the cap trades that for loading-screen headroom).
 Left:
 
-- Still serial: `Water::new` (`water`, 52 ms cold), `Volumetric::new`
-  (`volumetric scatter`, 37 ms) and `Ssr::new` (`ssr`, 35 ms), each the one
-  costly pipeline inside its own constructor in `View::build`; overlapping them
-  means pulling their pipeline descriptions out. The mesh and grass batches also
-  run one after the other.
+- The camera's froxel volume and reflection march compile in the mesh batch
+  (`VolumetricPipelines`, `SsrPipelines`, 2026-11-01): `volumetric scatter` and
+  `ssr` lead it, so both are in its first round whatever a round's size (the
+  colour pipeline joins them only where a round holds three or more jobs), and
+  their other three pipelines trail every mesh member, on the guess that those
+  are cheap (never timed alone). Measured 2026-11-01 (RX 7900 XTX, radv, cold
+  with `MESA_SHADER_CACHE_DISABLE`, quiet window, load 1.7–1.8, five interleaved
+  pairs): a cold `ForwardRenderer::new` went from 261.8–267.0 ms to 191.5–204.4
+  ms. Still one after the other: the mesh batch, `DrawGenPipelines::new`'s two
+  batches and, on the first grassy frame, the grass batch. A view made by
+  `create_view` compiles its volume's and march's pipelines serially
+  (`ViewPipelines::new`); a batch of its own would need the five members listed
+  a second time.
+- Still serial: `Water::new` (`water`, about 52 ms cold), now on the first frame
+  with a body (`View::build_content`) rather than in the build. Its pipelines
+  compile one after another inside its constructor; overlapping them means
+  pulling their descriptions out as `VolumetricPipelines` did, into a batch of
+  the frame's own.
 - The null backend's `destroy_*` on a dead handle is a silent no-op, so no
   null-backend test can catch a double destroy; `DrawGenPipelines`' exactly-once
   release rests on `Arc::into_inner` and on vk validation in the e2e runs.
@@ -281,10 +294,12 @@ Left:
   synchronised unless created externally-synchronised); persisting it is the
   separate "The Vulkan pipeline cache is not persisted" entry.
 
-### Start-up: `ForwardRenderer` still builds `Hiz` eagerly
+### Start-up: what `ForwardRenderer`'s build still makes eagerly
 
-The settings-driven post passes are built on first use (2026-10-30). Still built
-unconditionally by `ForwardRenderer::build`
+The settings-driven post passes are built on first use (2026-10-30), and so is
+`Hiz` (2026-11-01, by `View::build_passes` for `RenderEffects::REFLECTIONS`).
+The default stack reflects, so the camera's pyramid is still built at start-up.
+Still built unconditionally by `ForwardRenderer::build`
 (`crates/crcbl-render/src/forward.rs`) and `View::build`
 (`crates/crcbl-render/src/forward/view.rs`):
 
@@ -296,14 +311,17 @@ unconditionally by `ForwardRenderer::build`
   material is double-sided still compiles the unused single-sided cutout. With
   water and grass deferred too, a cold `ForwardRenderer::new` measured ~275 ms
   (2026-10-31, load ~16); its critical path is `forward mesh` (~135 ms) and,
-  serial beside it, volumetric scatter (~40 ms) and SSR (~30 ms).
-- `Hiz::new`, read only by the reflection march.
+  serial beside it, volumetric scatter (~40 ms) and SSR (~30 ms). Those two now
+  compile in the mesh batch: 191.5–204.4 ms cold on 2026-11-01 (see the
+  parallel-build entry).
 
 Decided eager, with reasons (2026-10-30): `Exposure` (the tonemap binds its
 measured buffer every frame; `exposure_buffers` is public), `Volumetric` (water
 binds its buffers; its composite runs for an atmosphere with the fog bit off;
 `froxel_buffers` is public), `Ssr` (water binds its block and sky prefilter).
-Splitting each one's buffers from its pipelines would make the pipelines lazy.
+`Volumetric` and `Ssr` now take their pipelines prebuilt, so the pipelines could
+become lazy without the buffers. Water and the atmosphere's composite would then
+have to build them first.
 
 - Measured 2026-10-30 (RX 7900 XTX, radv, cold, load ~12): making the post
   passes lazy saved ~21 ms of a ~815 ms cold `ForwardRenderer::new`, so the

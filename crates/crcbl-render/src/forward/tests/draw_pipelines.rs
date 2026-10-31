@@ -100,8 +100,8 @@ fn every_draw_generator_shares_one_set_of_pipelines() {
 /// else it had made.
 ///
 /// A device whose limits refuse the mesh path's three-target colour pipeline,
-/// which the camera builds after its generator — so the shared set and the
-/// generator holding it are both in the rollback when the refusal arrives.
+/// which the build compiles after the shared set — so the set is in the
+/// rollback when the refusal arrives.
 #[test]
 fn a_failed_build_releases_the_shared_pipelines() {
     let recorder = Recorder::new();

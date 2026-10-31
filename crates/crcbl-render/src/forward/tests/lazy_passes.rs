@@ -536,3 +536,57 @@ fn the_filters_follow_the_switch_the_frame_was_begun_with() {
     assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
     recorder.assert_valid();
 }
+
+/// Whether `labels` holds a pass of the Hi-Z pyramid — see [`crate::hiz`].
+fn reduces_depth(labels: &[String]) -> bool {
+    labels.iter().any(|label| label.starts_with("hiz-"))
+}
+
+/// **The Hi-Z pyramid is built for the reflection march and nothing else**:
+/// with the camera, whose default stack reflects, and otherwise by a view's
+/// first frame that does — once. The march itself is built either way, since
+/// water reads its block.
+#[test]
+fn the_depth_pyramid_is_built_by_the_first_frame_that_reflects() {
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    assert_eq!(
+        (created(&recorder, "hiz"), created(&recorder, "ssr")),
+        (1, 1),
+        "the default stack reflects, so the build made the camera's pyramid and march"
+    );
+
+    // One frame without reflections, which is what a later view's build
+    // expects.
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none().force(RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    let labels = recorded(device, queue, &mut renderer, None);
+    assert!(!reduces_depth(&labels), "{labels:?}");
+    let view = renderer
+        .create_view(device, queue, &ViewDesc::default())
+        .expect("a second view fits");
+    assert_eq!(
+        (created(&recorder, "hiz"), created(&recorder, "ssr")),
+        (1, 2),
+        "the view built its march and no pyramid for a frame that does not reflect"
+    );
+
+    renderer.set_effect_request(EffectRequest::default());
+    for lap in 0..2 {
+        let labels = recorded(device, queue, &mut renderer, Some(view));
+        assert!(reduces_depth(&labels), "frame {lap}: {labels:?}");
+        assert_eq!(
+            created(&recorder, "hiz"),
+            2,
+            "after frame {lap} reflecting, the view's pyramid was not built exactly once"
+        );
+    }
+
+    renderer.destroy_view(device, view);
+    renderer.destroy(device);
+    assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
+    recorder.assert_valid();
+}

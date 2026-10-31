@@ -188,7 +188,8 @@ use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDe
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshUpload};
 use crate::occlusion_cull::{OcclusionCulling, OcclusionPyramid};
-use crate::pipeline_batch;
+use crate::partial::Partial;
+use crate::pipeline_batch::{self, Pipeline};
 use crate::probe::{ProbeTable, ProbeTableDesc};
 use crate::probe_gather::{ProbeGather, ProbeGatherDesc, RsmImages, RsmTargets};
 use crate::rsm;
@@ -197,12 +198,15 @@ use crate::shadow::{self, Cascades};
 use crate::skinning::{SkinRange, SkinnedMesh, Skinning, SkinningError};
 use crate::sky_pass::SkyPass;
 use crate::ssao::{Ssao, cached_group};
-use crate::ssr::{Ssr, SsrEnvironment, SsrImages};
+use crate::ssr::{Ssr, SsrEnvironment, SsrImages, SsrLayouts, SsrPipelines};
 use crate::stack::CameraStack;
 use crate::texture::{PendingUpload, UploadBatch, UploadedTexture, upload_texture_mip_layers};
 use crate::transient::TransientPool;
 use crate::upscale::Upscale;
-use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages, VolumetricReads};
+use crate::volumetric::{
+    FroxelBuffers, Medium, Volumetric, VolumetricImages, VolumetricLayouts, VolumetricPipelines,
+    VolumetricReads,
+};
 use crate::water::{Water, WaterBodies, WaterFrame, WaterImages, WaterInputs};
 use crcbl_shaders::atmosphere::{SKY_VIEW_BUILD_ROWS, SkyView, SkyViewBuild};
 
@@ -218,7 +222,7 @@ pub use shadow_inputs::{FRAME_UNIFORMS_READERS, UniformsField, UniformsReader};
 
 use bucket_draws::{BucketDraws, EmitTail, RegionStep};
 
-use view::{FramePasses, Overlays, TonemapPipeline, View, ViewInputs, ViewOutput};
+use view::{FramePasses, Overlays, TonemapPipeline, View, ViewInputs, ViewOutput, ViewPipelines};
 pub use view::{
     FrameTargets, MAX_VIEWS, ViewBackground, ViewDesc, ViewId, ViewLighting, ViewMask, ViewTarget,
 };
@@ -2563,7 +2567,8 @@ struct Rollback {
     probe_gather: Option<ProbeGather>,
     /// A view's cull and draw-argument passes, while [`View::build`] — which
     /// keeps a rollback of this type of its own — is still building the rest of
-    /// that view; the renderer's own rollback never holds one. They
+    /// that view. Only a view's rollback holds this one; the renderer's keeps
+    /// its shadow culls' in [`shadow_draws`](Self::shadow_draws). They
     /// own a ring of buffers and dispatch
     /// [`draw_pipelines`](Self::draw_pipelines), and clean themselves up on
     /// their own failure path, so this only carries one that was built.
@@ -2582,9 +2587,6 @@ struct Rollback {
     /// three buffers — and which clean themselves up on their own failure path,
     /// so this only carries one that was built.
     lights: Option<LightGrid>,
-    /// Topic 47's depth pyramid, which owns one
-    /// pipeline, one layout and a ring of blocks per level.
-    hiz: Option<Hiz>,
     /// Topic 03 §3.3's farthest-depth pyramid,
     /// which owns one pipeline, one layout and — once a frame culled — a chain
     /// of level images.
@@ -2592,9 +2594,18 @@ struct Rollback {
     /// Topic 47's reflection march, which owns one
     /// pipeline, one layout and a ring of blocks.
     ssr: Option<Ssr>,
+    /// The march's layouts and pipelines while nothing else owns them — see
+    /// [`SsrPipelines`]. In the renderer's rollback, from the mesh batch that
+    /// compiled them until [`View::build`] takes them; in a view's, from
+    /// [`View::build`]'s start — the set came from that batch or from
+    /// [`ViewPipelines::new`] — until [`Ssr::new`] takes it.
+    ssr_pipelines: Option<SsrPipelines>,
     /// The froxel volume, which owns three
     /// pipelines, two layouts and two rings of buffers.
     volumetric: Option<Volumetric>,
+    /// The volume's layouts and pipelines, on [`Rollback::ssr_pipelines`]'
+    /// terms.
+    volumetric_pipelines: Option<VolumetricPipelines>,
     /// Topic 43 §6's auto-exposure, which owns three
     /// pipelines, one layout and three rings of buffers.
     exposure: Option<Exposure>,
@@ -2658,14 +2669,17 @@ impl Rollback {
         if let Some(volumetric) = self.volumetric {
             volumetric.destroy(device);
         }
+        if let Some(pipelines) = self.volumetric_pipelines {
+            pipelines.destroy(device);
+        }
         if let Some(ssr) = self.ssr {
             ssr.destroy(device);
         }
+        if let Some(pipelines) = self.ssr_pipelines {
+            pipelines.destroy(device);
+        }
         if let Some(occlusion_pyramid) = self.occlusion_pyramid {
             occlusion_pyramid.destroy(device);
-        }
-        if let Some(hiz) = self.hiz {
-            hiz.destroy(device);
         }
         if let Some(draws) = self.draws {
             draws.destroy(device);
@@ -5131,6 +5145,190 @@ impl ForwardRenderer {
         })?;
         rollback.samplers.push(shadow_sampler);
 
+        // The pipelines every generator dispatches, the camera's and each
+        // shadow cull's, compiled once here and shared — with the occlusion
+        // phases, because every camera's generator is built for them.
+        let draw_pipelines = rollback
+            .draw_pipelines
+            .insert(DrawGenPipelines::new(device, true, service)?);
+
+        let mesh_set_layouts = [mesh_layout];
+        let mesh_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("mesh"),
+            bind_group_layouts: &mesh_set_layouts,
+            // The camera goes in the uniform buffer above rather than here:
+            // `Features::PUSH_CONSTANTS` is absent on Tier B and the seam is
+            // explicit that the substitute is a data-layout decision. So this
+            // file needs no tier branch at all — it has been on Tier B's shape
+            // since P1, and `crate::ui_pass` is where the split actually bites.
+            push_constants: None,
+        })?;
+        rollback.pipeline_layouts.push(mesh_pipeline_layout);
+
+        // The colour pass's pipeline and its depth-only twin, out of one set of
+        // modules — see [`MeshModules`], which is where the two shapes and the
+        // reasons for them live. Both are created before either is unwrapped and
+        // the modules are released between, so a failing creation leaks nothing.
+        //
+        // **Each shape has a twin per material side** — see
+        // [`SidedPipelines`], which is where the cull modes and the reason for a
+        // pipeline rather than a per-draw state live. The shadow tile clear is
+        // the one exception: its triangle comes out of `SV_VertexID` and it
+        // already culls nothing.
+        //
+        // Beside them: the cutout twin of the depth shape, which a frame whose
+        // material table masks alpha is recorded with instead (see
+        // [`MeshModules::depth_masked_pipeline`]); the one that resets a tile,
+        // which the cadence rung needs and the attachment's load operation
+        // cannot express ([`MeshModules::depth_clear_pipeline`]); and the
+        // irradiance probes' reflective shadow map ([`MeshModules::rsm_pipeline`]).
+        //
+        // **Only what this scene can draw with is compiled.** The bucket table
+        // above is final — nothing adds a material or changes a probe volume's
+        // update after `build` — so `scene_modes` and the volume are the whole
+        // of what any frame of this renderer will ask for. The single-sided
+        // colour and depth shapes and the tile clear are built for every
+        // scene; each `CullMode::None` twin only where a bucket is
+        // double-sided, the cutout shape only where one masks, and the
+        // reflective shadow map only where the probes are updated. An opaque,
+        // single-sided scene without an updated volume, such as the demo
+        // scene, compiles only those.
+        //
+        // **They are one [`pipeline_batch`], compiled side by side** where
+        // the device allows it: on a cold driver cache each is a shader
+        // compilation, and this is the build's longest run of them. `service`
+        // runs before each round of the batch, or before each pipeline where the
+        // batch is serial — see [`ForwardRenderer::with_scene_serviced`].
+        //
+        // **The camera's froxel volume and reflection march are members too**,
+        // which is why this batch runs before the camera is built rather than
+        // after it: each has one costly compile — the scatter pass and the
+        // march — that `View::build` would otherwise make one after the other
+        // beside nothing. Their layouts are created first and held by `pending`
+        // until the batch has made every pipeline against them; the passes
+        // themselves stay in the view, built eagerly — see
+        // [`VolumetricPipelines`] and [`SsrPipelines`].
+        let holds = |mode: u32| scene_modes.contains(&mode);
+        // The single-sided shapes are built even where `DEPTH_MODES[0]` is not
+        // held: they are the template the frame's draw lists are partitioned
+        // from, and the rare scene with no opaque single-sided material pays a
+        // compile each for them.
+        let [_, masked, double, masked_double] = DEPTH_MODES;
+        let any_double = holds(double) || holds(masked_double);
+        let any_masked = holds(masked) || holds(masked_double);
+        let updates_probes = scene.probes.update == ProbeUpdate::EveryFrame;
+        let mut pending = Partial::new(device);
+        let volumetric = VolumetricLayouts::new(device, &mut pending)?;
+        let ssr = SsrLayouts::new(device, &mut pending)?;
+        let modules = MeshModules::new(device, emit, culls_clusters)?;
+        let layout = mesh_pipeline_layout;
+        let [back, none] = MeshModules::SIDES;
+        let raster = |made: Result<GraphicsPipelineHandle, HalError>| made.map(Pipeline::Graphics);
+        let color = |cull| {
+            raster(modules.color_pipeline(device, layout, PolygonMode::Fill, cull, "forward"))
+        };
+        let depth = |cull| raster(modules.depth_pipeline(device, layout, cull));
+        let depth_masked = |cull| raster(modules.depth_masked_pipeline(device, layout, cull));
+        let rsm = |cull| raster(modules.rsm_pipeline(device, layout, cull));
+        let fullscreen = Self::build_fullscreen;
+        // Each member beside whether this scene needs it, in one fixed order the
+        // results are read back out of below.
+        let members: [(bool, &pipeline_batch::Job<'_, _>); 9] = [
+            (true, &|| color(back)),
+            (any_double, &|| color(none)),
+            (true, &|| depth(back)),
+            (holds(double), &|| depth(none)),
+            (any_masked, &|| depth_masked(back)),
+            (holds(masked_double), &|| depth_masked(none)),
+            (true, &|| {
+                raster(modules.depth_clear_pipeline(device, layout))
+            }),
+            (updates_probes, &|| rsm(back)),
+            (updates_probes && any_double, &|| rsm(none)),
+        ];
+        // The view passes' costly pair leads the batch, so it is in the first
+        // round whatever a round's size, and the mesh pass's members follow it
+        // into the earliest rounds left. Their other members, never timed alone
+        // and taken to be cheap, trail every mesh member.
+        let leading: [&pipeline_batch::Job<'_, _>; 2] = [
+            &|| volumetric.scatter(device).map(Pipeline::Compute),
+            &|| ssr.march(device, fullscreen).map(Pipeline::Graphics),
+        ];
+        let trailing: [&pipeline_batch::Job<'_, _>; 3] = [
+            &|| volumetric.integrate(device).map(Pipeline::Compute),
+            &|| {
+                volumetric
+                    .composite(device, fullscreen)
+                    .map(Pipeline::Graphics)
+            },
+            &|| ssr.blur(device, fullscreen).map(Pipeline::Graphics),
+        ];
+        let jobs: Vec<&pipeline_batch::Job<'_, _>> = leading
+            .into_iter()
+            .chain(
+                members
+                    .iter()
+                    .filter_map(|(needed, job)| needed.then_some(*job)),
+            )
+            .chain(trailing)
+            .collect();
+        let mut made = pipeline_batch::create_listed(device, service, &jobs).into_iter();
+        let mut next = || {
+            made.next()
+                .unwrap_or_else(|| unreachable!("one result per job"))
+        };
+        let [scatter, march] = [(); 2].map(|()| next());
+        let results: [Option<Result<Pipeline, HalError>>; 9] =
+            members.map(|(needed, _)| needed.then(&mut next));
+        let [integrate, composite, blur] = [(); 3].map(|()| next());
+        modules.destroy(device);
+        // Register every successful creation before propagating any error.
+        // Results later in this batch may own pipelines even when the first
+        // result failed; dropping an unvisited Result does not release a HAL
+        // handle. The outer rollback owns the mesh pass's until build
+        // succeeds, and `pending` the view passes' until each set is whole.
+        for pipeline in results.iter().flatten().flatten() {
+            rollback.pipelines.push(pipeline.graphics());
+        }
+        for pipeline in [&scatter, &march, &integrate, &composite, &blur]
+            .into_iter()
+            .flatten()
+        {
+            pending.add(*pipeline);
+        }
+        let volumetric = volumetric.finish(
+            scatter?.compute(),
+            integrate?.compute(),
+            composite?.graphics(),
+        );
+        let ssr = ssr.finish(march?.graphics(), blur?.graphics());
+        pending.keep();
+        rollback.volumetric_pipelines = Some(volumetric);
+        rollback.ssr_pipelines = Some(ssr);
+        let [
+            mesh_single,
+            mesh_double,
+            shadow_single,
+            shadow_double,
+            depth_masked_single,
+            depth_masked_double,
+            shadow_clear_pipeline,
+            rsm_single,
+            rsm_double,
+        ] = results.map(|result| result.map(|made| made.map(Pipeline::graphics)).transpose());
+        let built = |single: Option<GraphicsPipelineHandle>, double| {
+            single.map(|single| SidedPipelines { single, double })
+        };
+        let mesh_pipeline = built(mesh_single?, mesh_double?).unwrap_or_else(|| {
+            unreachable!("the colour pass's single-sided shape is always built")
+        });
+        let shadow_pipeline = built(shadow_single?, shadow_double?)
+            .unwrap_or_else(|| unreachable!("the depth pass's single-sided shape is always built"));
+        let depth_masked_pipeline = built(depth_masked_single?, depth_masked_double?);
+        let shadow_clear_pipeline = shadow_clear_pipeline?
+            .unwrap_or_else(|| unreachable!("the tile clear is always built"));
+        let rsm_pipeline = built(rsm_single?, rsm_double?);
+
         // --- the camera ---
         //
         // Everything the camera's picture needs of its own, built against the
@@ -5138,12 +5336,6 @@ impl ForwardRenderer {
         // the two is drawn. Into the rollback whole as soon as it exists, so a
         // failure further down releases it with everything else.
         let slot_pages = vec![page_bindings; instance_buffers.len()];
-        // The pipelines every generator dispatches, the camera's and each
-        // shadow cull's, compiled once here and shared — with the occlusion
-        // phases, because every camera's generator is built for them.
-        let draw_pipelines = rollback
-            .draw_pipelines
-            .insert(DrawGenPipelines::new(device, true, service)?);
         rollback.primary = Some(View::build(
             device,
             uploads,
@@ -5189,6 +5381,17 @@ impl ForwardRenderer {
                 ambient_occlusion: ambient_occlusion_placeholder.view,
                 contact_shadow: contact_shadow_placeholder.view,
                 probe_visibility: probe_visibility_placeholder.view,
+            },
+            // Compiled in the mesh pass's batch above, and the view's from here.
+            ViewPipelines {
+                volumetric: rollback
+                    .volumetric_pipelines
+                    .take()
+                    .unwrap_or_else(|| unreachable!("the mesh batch made the volume's set")),
+                ssr: rollback
+                    .ssr_pipelines
+                    .take()
+                    .unwrap_or_else(|| unreachable!("the mesh batch made the march's set")),
             },
             service,
         )?);
@@ -5480,127 +5683,6 @@ impl ForwardRenderer {
             shadow_selection.push(frame_shadow_selection);
             service();
         }
-
-        let mesh_set_layouts = [mesh_layout];
-        let mesh_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
-            label: Some("mesh"),
-            bind_group_layouts: &mesh_set_layouts,
-            // The camera goes in the uniform buffer above rather than here:
-            // `Features::PUSH_CONSTANTS` is absent on Tier B and the seam is
-            // explicit that the substitute is a data-layout decision. So this
-            // file needs no tier branch at all — it has been on Tier B's shape
-            // since P1, and `crate::ui_pass` is where the split actually bites.
-            push_constants: None,
-        })?;
-        rollback.pipeline_layouts.push(mesh_pipeline_layout);
-
-        // The colour pass's pipeline and its depth-only twin, out of one set of
-        // modules — see [`MeshModules`], which is where the two shapes and the
-        // reasons for them live. Both are created before either is unwrapped and
-        // the modules are released between, so a failing creation leaks nothing.
-        //
-        // **Each shape has a twin per material side** — see
-        // [`SidedPipelines`], which is where the cull modes and the reason for a
-        // pipeline rather than a per-draw state live. The shadow tile clear is
-        // the one exception: its triangle comes out of `SV_VertexID` and it
-        // already culls nothing.
-        //
-        // Beside them: the cutout twin of the depth shape, which a frame whose
-        // material table masks alpha is recorded with instead (see
-        // [`MeshModules::depth_masked_pipeline`]); the one that resets a tile,
-        // which the cadence rung needs and the attachment's load operation
-        // cannot express ([`MeshModules::depth_clear_pipeline`]); and the
-        // irradiance probes' reflective shadow map ([`MeshModules::rsm_pipeline`]).
-        //
-        // **Only what this scene can draw with is compiled.** The bucket table
-        // above is final — nothing adds a material or changes a probe volume's
-        // update after `build` — so `scene_modes` and the volume are the whole
-        // of what any frame of this renderer will ask for. The single-sided
-        // colour and depth shapes and the tile clear are built for every
-        // scene; each `CullMode::None` twin only where a bucket is
-        // double-sided, the cutout shape only where one masks, and the
-        // reflective shadow map only where the probes are updated. An opaque,
-        // single-sided scene without an updated volume, such as the demo
-        // scene, compiles only those.
-        //
-        // **They are one [`pipeline_batch`], compiled side by side** where
-        // the device allows it: on a cold driver cache each is a shader
-        // compilation, and this is the build's longest run of them. `service`
-        // runs before each round of the batch, or before each pipeline where the
-        // batch is serial — see [`ForwardRenderer::with_scene_serviced`].
-        let holds = |mode: u32| scene_modes.contains(&mode);
-        // The single-sided shapes are built even where `DEPTH_MODES[0]` is not
-        // held: they are the template the frame's draw lists are partitioned
-        // from, and the rare scene with no opaque single-sided material pays a
-        // compile each for them.
-        let [_, masked, double, masked_double] = DEPTH_MODES;
-        let any_double = holds(double) || holds(masked_double);
-        let any_masked = holds(masked) || holds(masked_double);
-        let updates_probes = scene.probes.update == ProbeUpdate::EveryFrame;
-        let modules = MeshModules::new(device, emit, culls_clusters)?;
-        let layout = mesh_pipeline_layout;
-        let [back, none] = MeshModules::SIDES;
-        let color =
-            |cull| modules.color_pipeline(device, layout, PolygonMode::Fill, cull, "forward");
-        let depth = |cull| modules.depth_pipeline(device, layout, cull);
-        let depth_masked = |cull| modules.depth_masked_pipeline(device, layout, cull);
-        let rsm = |cull| modules.rsm_pipeline(device, layout, cull);
-        // Each member beside whether this scene needs it, in one fixed order the
-        // results are read back out of below.
-        let members: [(bool, &pipeline_batch::Job<'_, _>); 9] = [
-            (true, &|| color(back)),
-            (any_double, &|| color(none)),
-            (true, &|| depth(back)),
-            (holds(double), &|| depth(none)),
-            (any_masked, &|| depth_masked(back)),
-            (holds(masked_double), &|| depth_masked(none)),
-            (true, &|| modules.depth_clear_pipeline(device, layout)),
-            (updates_probes, &|| rsm(back)),
-            (updates_probes && any_double, &|| rsm(none)),
-        ];
-        let jobs: Vec<&pipeline_batch::Job<'_, _>> = members
-            .iter()
-            .filter_map(|(needed, job)| needed.then_some(*job))
-            .collect();
-        let mut made = pipeline_batch::create_listed(device, service, &jobs).into_iter();
-        let results: [Option<Result<GraphicsPipelineHandle, HalError>>; 9] =
-            members.map(|(needed, _)| {
-                needed.then(|| {
-                    made.next()
-                        .unwrap_or_else(|| unreachable!("one result per job"))
-                })
-            });
-        modules.destroy(device);
-        // Register every successful creation before propagating any error.
-        // Results later in this batch may own pipelines even when the first
-        // result failed; dropping an unvisited Result does not release a HAL
-        // handle. The outer rollback owns all of them until build succeeds.
-        for pipeline in results.iter().flatten().flatten() {
-            rollback.pipelines.push(*pipeline);
-        }
-        let [
-            mesh_single,
-            mesh_double,
-            shadow_single,
-            shadow_double,
-            depth_masked_single,
-            depth_masked_double,
-            shadow_clear_pipeline,
-            rsm_single,
-            rsm_double,
-        ] = results.map(Option::transpose);
-        let built = |single: Option<GraphicsPipelineHandle>, double| {
-            single.map(|single| SidedPipelines { single, double })
-        };
-        let mesh_pipeline = built(mesh_single?, mesh_double?).unwrap_or_else(|| {
-            unreachable!("the colour pass's single-sided shape is always built")
-        });
-        let shadow_pipeline = built(shadow_single?, shadow_double?)
-            .unwrap_or_else(|| unreachable!("the depth pass's single-sided shape is always built"));
-        let depth_masked_pipeline = built(depth_masked_single?, depth_masked_double?);
-        let shadow_clear_pipeline = shadow_clear_pipeline?
-            .unwrap_or_else(|| unreachable!("the tile clear is always built"));
-        let rsm_pipeline = built(rsm_single?, rsm_double?);
 
         // --- the tonemap pass ---
         let tonemap_entries = [

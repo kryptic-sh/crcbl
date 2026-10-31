@@ -895,8 +895,11 @@ pub(super) struct View {
     /// frame that draws it.
     pub(super) contact_shadows: Option<ContactShadows>,
     /// Topic 47's depth pyramid, which the reflection
-    /// march climbs — see [`crate::hiz`].
-    pub(super) hiz: Hiz,
+    /// march climbs — see [`crate::hiz`]. Built on [`View::ssao`]'s terms for
+    /// [`RenderEffects::REFLECTIONS`] — the default stack holds it — because
+    /// the march is its only reader, unlike [`View::ssr`]'s, which water
+    /// reads too.
+    pub(super) hiz: Option<Hiz>,
     /// Topic 03 §3.3's farthest-depth pyramid,
     /// which the occlusion cull reads — see [`crate::occlusion_cull`].
     pub(super) occlusion_pyramid: OcclusionPyramid,
@@ -952,6 +955,38 @@ pub(super) struct View {
     pub(super) shadow_sampler: SamplerHandle,
 }
 
+/// The layouts and pipelines a view's froxel volume and reflection march are
+/// built against, compiled before [`View::build`] and handed to it.
+///
+/// **Apart from the passes** so the camera's can be compiled in the renderer's
+/// mesh-pass batch, beside the compiles they would otherwise follow — see
+/// `ForwardRenderer::build`. A view made later builds its own with
+/// [`ViewPipelines::new`].
+pub(super) struct ViewPipelines {
+    pub(super) volumetric: VolumetricPipelines,
+    pub(super) ssr: SsrPipelines,
+}
+
+impl ViewPipelines {
+    /// Both sets, one pipeline after another, for a view built after the
+    /// renderer: there is no build's batch left for it to join.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any seam call, having released whatever it created.
+    pub(super) fn new(device: &dyn Device) -> Result<Self, HalError> {
+        let fullscreen = ForwardRenderer::build_fullscreen;
+        let volumetric = VolumetricPipelines::new(device, fullscreen)?;
+        match SsrPipelines::new(device, fullscreen) {
+            Ok(ssr) => Ok(Self { volumetric, ssr }),
+            Err(error) => {
+                volumetric.destroy(device);
+                Err(error)
+            }
+        }
+    }
+}
+
 impl View {
     /// Creates one camera's resources against the scene `inputs` describes.
     ///
@@ -967,6 +1002,9 @@ impl View {
     /// [abandons](UploadBatch::abandon) the batch, because the rollback has
     /// destroyed what it recorded into.
     ///
+    /// `pipelines` are the froxel volume's and the reflection march's, which
+    /// the view owns from here — released with the rest on a failure.
+    ///
     /// `service` is called after each subsystem is built — see
     /// [`ForwardRenderer::with_scene_serviced`], which is where the reason and
     /// the measurement are.
@@ -978,9 +1016,14 @@ impl View {
         device: &dyn Device,
         uploads: &mut UploadBatch<'_>,
         inputs: &ViewInputs<'_>,
+        pipelines: ViewPipelines,
         service: &mut dyn FnMut(),
     ) -> Result<Self, HalError> {
-        let mut rollback = Rollback::default();
+        let mut rollback = Rollback {
+            volumetric_pipelines: Some(pipelines.volumetric),
+            ssr_pipelines: Some(pipelines.ssr),
+            ..Rollback::default()
+        };
         let built = Self::build_into(device, uploads, inputs, &mut rollback, service);
         if built.is_err() {
             uploads.abandon();
@@ -1256,29 +1299,24 @@ impl View {
         //
         // **Built here whatever the effects say**, unlike the occlusion pair:
         // the water surface binds this pass's block and prefiltered sky on
-        // every frame it draws — see [`crate::water`].
+        // every frame it draws — see [`crate::water`]. Its pipelines were
+        // compiled before this — see [`ViewPipelines`].
+        //
+        // The Hi-Z pyramid the march climbs is not: nothing else reads it, so
+        // it is built with the passes the effects ask for — see
+        // [`View::build_passes`].
         rollback.ssr = Some(Ssr::new(
             device,
             uploads,
+            rollback
+                .ssr_pipelines
+                .take()
+                .unwrap_or_else(|| unreachable!("`View::build` placed the march's set above")),
             inputs.specular_dfg,
             frames,
-            ForwardRenderer::build_fullscreen,
         )?);
         service();
-
-        // --- the Hi-Z pyramid the march climbs ---
-        //
-        // After the march it serves and before the chain below, on their reason:
-        // `Rollback::run` releases in the reverse order of construction. Its
-        // pipeline is the only one in this file with a depth attachment and no
-        // colour one — see [`ForwardRenderer::build_depth_fullscreen`].
-        rollback.hiz = Some(Hiz::new(
-            device,
-            frames,
-            ForwardRenderer::build_depth_fullscreen,
-        )?);
-        service();
-        // The occlusion cull's farthest pyramid beside it, built from the same
+        // The occlusion cull's farthest pyramid, built from the Hi-Z pyramid's
         // reduction. Its images wait for a frame's extent.
         rollback.occlusion_pyramid = Some(OcclusionPyramid::new(
             device,
@@ -1289,7 +1327,7 @@ impl View {
 
         // --- the froxel volume ---
         //
-        // Stored whole for the three above's reason, and after them because
+        // Stored whole for the reason the march is, and after it because
         // `Rollback::run` releases in the reverse order of construction. It sits
         // between the march and the chain in the frame as well: the medium is
         // scene content and the chain is a lens. Its volume holds the same
@@ -1301,12 +1339,15 @@ impl View {
         // water surface binds its buffers on every frame it draws.
         rollback.volumetric = Some(Volumetric::new(
             device,
+            rollback
+                .volumetric_pipelines
+                .take()
+                .unwrap_or_else(|| unreachable!("`View::build` placed the volume's set above")),
             frames,
             FROXEL_CAPACITY,
             inputs.shadow_map,
             inputs.shadow_sampler,
             lights,
-            ForwardRenderer::build_fullscreen,
         )?);
         service();
 
@@ -1404,9 +1445,7 @@ impl View {
                 // draw — see [`View::build_passes`].
                 ssao: None,
                 contact_shadows: None,
-                hiz: rollback.hiz.take().unwrap_or_else(|| {
-                    unreachable!("the pyramid was placed in the rollback above")
-                }),
+                hiz: None,
                 occlusion_pyramid: rollback.occlusion_pyramid.take().unwrap_or_else(|| {
                     unreachable!("the occlusion pyramid was placed in the rollback above")
                 }),
@@ -1501,6 +1540,16 @@ impl View {
         }
         if effects.contains(RenderEffects::CONTACT_SHADOWS) && self.contact_shadows.is_none() {
             self.contact_shadows = Some(ContactShadows::new(device, frames, fullscreen)?);
+            service();
+        }
+        // Its pipeline is the only one here with a depth attachment and no
+        // colour one — see [`ForwardRenderer::build_depth_fullscreen`].
+        if effects.contains(RenderEffects::REFLECTIONS) && self.hiz.is_none() {
+            self.hiz = Some(Hiz::new(
+                device,
+                frames,
+                ForwardRenderer::build_depth_fullscreen,
+            )?);
             service();
         }
         if effects.contains(RenderEffects::BLOOM) && self.bloom.is_none() {
@@ -3017,8 +3066,13 @@ impl View {
                 // be written before the pass that reads it is recorded. Skipped
                 // outright on a frame whose extent has no levels, which
                 // `Hiz::add_passes` would record zero passes for anyway.
-                self.hiz
-                    .add_passes(graph, frame, extent, scene_depth, &pyramid);
+                self.hiz.as_mut().expect(BUILT_BY_BEGIN_FRAME).add_passes(
+                    graph,
+                    frame,
+                    extent,
+                    scene_depth,
+                    &pyramid,
+                );
                 self.ssr.add_passes(
                     graph,
                     frame,
@@ -3400,7 +3454,9 @@ impl View {
         self.auto_exposure.destroy(device);
         self.volumetric.destroy(device);
         self.ssr.destroy(device);
-        self.hiz.destroy(device);
+        if let Some(pass) = self.hiz {
+            pass.destroy(device);
+        }
         self.occlusion_pyramid.destroy(device);
         if let Some(pass) = self.contact_shadows {
             pass.destroy(device);
@@ -3505,6 +3561,7 @@ impl ForwardRenderer {
         // the next frame is on the same queue, after it — so a view made
         // between frames no longer drains the device.
         let mut uploads = UploadBatch::new(device, queue, "view");
+        let pipelines = ViewPipelines::new(device)?;
         let view = View::build(
             device,
             &mut uploads,
@@ -3556,6 +3613,7 @@ impl ForwardRenderer {
                 contact_shadow: self.contact_shadow_placeholder.view,
                 probe_visibility,
             },
+            pipelines,
             &mut || {},
         )?;
         // The last fallible step: a failed submit leaves nothing pending.

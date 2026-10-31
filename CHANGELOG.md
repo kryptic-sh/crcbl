@@ -66,6 +66,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   point light's six faces together) its box reaches before or after the frame,
   and holds the rest. An object with no box still redraws every map on every
   skinned frame, and so does any frame with one such object in it.
+- **`ForwardRenderer::new` compiles the camera's volumetric fog and reflection
+  pipelines beside its mesh pipelines.** They used to compile one after another
+  after the mesh batch had finished; on Vulkan, D3D12 and Metal they now run in
+  the same parallel batch: a cold build on an RX 7900 XTX under radv went from
+  about 266 ms to about 198 ms (medians). The Hi-Z pyramid behind screen-space
+  reflections is now built only for a view whose effects draw reflections:
+  during `ForwardRenderer::new` for the primary view under the default effect
+  stack, by `create_view` or the first frame that reflects for any other view,
+  and never for a view that keeps them off.
 
 ## [0.14.0] - 2026-10-31
 

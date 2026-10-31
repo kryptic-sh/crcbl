@@ -248,16 +248,12 @@ pub(crate) struct Volumetric {
     /// rather than a component of the first, argued at
     /// [`LIGHTING_STRIDE`].
     lighting: Vec<BufferHandle>,
-    compute_layout: BindGroupLayoutHandle,
-    compute_pipeline_layout: PipelineLayoutHandle,
-    scatter: ComputePipelineHandle,
-    integrate: ComputePipelineHandle,
+    /// The layouts and the three pipelines, compiled ahead of the rings —
+    /// see [`VolumetricPipelines`].
+    pipelines: VolumetricPipelines,
     /// `[frame]`: the compute group. Names only buffers this owns, so it is
     /// built once rather than cached against a graph-realised view.
     compute_groups: Vec<BindGroupHandle>,
-    composite_layout: BindGroupLayoutHandle,
-    composite_pipeline_layout: PipelineLayoutHandle,
-    composite_pipeline: GraphicsPipelineHandle,
     /// `[frame]`: the composite group, cached against both its views together.
     ///
     /// **One per frame in flight** on [`crate::ssr`]'s terms: this group names
@@ -267,66 +263,30 @@ pub(crate) struct Volumetric {
     composite_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
 }
 
-impl Volumetric {
-    /// Passes [`Volumetric::add_passes`] adds to a frame at most: the column's
-    /// and the composite's.
-    ///
-    /// A ceiling since the air arrived: a frame whose fog effect is off and
-    /// whose atmosphere is not adds the composite alone.
-    pub(crate) const PASSES: u32 = Self::COLUMN_PASSES + Self::COMPOSITE_PASSES;
+/// The froxel volume's two layouts, created ahead of its pipelines so each
+/// pipeline can be one member of somebody else's [`pipeline_batch`] — see
+/// [`VolumetricPipelines`].
+///
+/// Handles only, and `Copy` so a batch's jobs can each take them: nothing here
+/// owns them until [`VolumetricLayouts::finish`] hands them to the set.
+///
+/// [`pipeline_batch`]: crate::pipeline_batch
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VolumetricLayouts {
+    compute_layout: BindGroupLayoutHandle,
+    compute_pipeline_layout: PipelineLayoutHandle,
+    composite_layout: BindGroupLayoutHandle,
+    composite_pipeline_layout: PipelineLayoutHandle,
+}
 
-    /// The column's compute passes — the scatter and the scan — which run
-    /// exactly when the fog effect does.
-    ///
-    /// Exact rather than a ceiling: a frame always has froxels — [`Grid`] floors
-    /// every extent at one tile and one slice — so neither ever drops out.
-    pub(crate) const COLUMN_PASSES: u32 = 2;
-
-    /// The composite, which runs on every frame with the fog effect or an
-    /// atmosphere, and the only full-screen draw among them.
-    pub(crate) const COMPOSITE_PASSES: u32 = 1;
-
-    /// Builds both pipelines, the buffer rings and the compute groups.
-    ///
-    /// `froxels` is the volume's capacity, which is
-    /// [`FROXEL_CAPACITY`](crate::light_grid::FROXEL_CAPACITY) outside a test
-    /// that wants a smaller one, and it is what [`Grid::for_frame`] is asked to
-    /// fit a frame under.
-    ///
-    /// `lights` is the frame ring the scatter pass reads its light rows and
-    /// its froxel lists from — the same buffers the mesh pass binds — and the
-    /// compute groups name them at construction, which is sound for the reason
-    /// the shadow atlas is: [`LightGrid`] creates its ring once and hands out
-    /// the same handles for its whole life.
-    ///
-    /// `build_fullscreen` is handed in rather than duplicated, on
-    /// [`Ssr::new`](crate::ssr::Ssr::new)'s terms: it is [`crate::forward`]'s,
-    /// because the shape it carries is documented there.
+impl VolumetricLayouts {
+    /// Creates the compute layout and the composite's, each held in `made` —
+    /// so the caller's guard releases them if anything after fails.
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. A failure part-way through releases
-    /// everything already created — see [`crate::partial`].
-    pub(crate) fn new(
-        device: &dyn Device,
-        frames: usize,
-        froxels: u32,
-        shadow_atlas: ImageViewHandle,
-        shadow_sampler: SamplerHandle,
-        lights: &LightGrid,
-        build_fullscreen: impl Fn(
-            &dyn Device,
-            &str,
-            &crcbl_shaders::Shader,
-            PipelineLayoutHandle,
-            &[ColorTargetState],
-        ) -> Result<GraphicsPipelineHandle, HalError>,
-    ) -> Result<Self, HalError> {
-        if frames == 0 || froxels == 0 {
-            return Err(HalError::InvalidDescriptor(
-                "a froxel volume needs at least one frame in flight and one froxel".to_string(),
-            ));
-        }
+    /// [`HalError`] from either layout.
+    pub(crate) fn new(device: &dyn Device, made: &mut Partial<'_>) -> Result<Self, HalError> {
         // `volumetric.slang`'s declaration order, which is the only order Metal
         // and D3D12 agree about — see `crcbl_shaders::declaration_order`.
         let compute_entries = [
@@ -369,7 +329,6 @@ impl Volumetric {
             entries: &compute_entries,
         };
         check_portable_storage_buffers(Some("volumetric"), &[&compute_desc])?;
-        let mut made = Partial::new(device);
         let compute_layout = made.add(device.create_bind_group_layout(&compute_desc)?);
         let compute_set_layouts = [compute_layout];
         let compute_pipeline_layout =
@@ -378,25 +337,6 @@ impl Volumetric {
                 bind_group_layouts: &compute_set_layouts,
                 push_constants: None,
             })?);
-        // Two entry points of one module, which is why this is
-        // `compute_pipeline_entry` rather than `compute_pipeline`: the pair
-        // shares the froxel arithmetic and shaders here have no `#include`.
-        let scatter = made.add(compute_pipeline_entry(
-            device,
-            "volumetric scatter",
-            &VOLUMETRIC,
-            "scatterMain",
-            compute_pipeline_layout,
-            WORKGROUP_SIZE,
-        )?);
-        let integrate = made.add(compute_pipeline_entry(
-            device,
-            "volumetric integrate",
-            &VOLUMETRIC,
-            "integrateMain",
-            compute_pipeline_layout,
-            WORKGROUP_SIZE,
-        )?);
 
         let composite_entries = [
             BindGroupLayoutEntry {
@@ -484,18 +424,227 @@ impl Volumetric {
                 bind_group_layouts: &composite_set_layouts,
                 push_constants: None,
             })?);
+        Ok(Self {
+            compute_layout,
+            compute_pipeline_layout,
+            composite_layout,
+            composite_pipeline_layout,
+        })
+    }
+
+    /// The scatter pass's pipeline — the set's costly compile.
+    ///
+    /// Two entry points of one module, which is why this and
+    /// [`integrate`](Self::integrate) are `compute_pipeline_entry` rather than
+    /// `compute_pipeline`: the pair shares the froxel arithmetic and shaders
+    /// here have no `#include`.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the module or the pipeline.
+    pub(crate) fn scatter(self, device: &dyn Device) -> Result<ComputePipelineHandle, HalError> {
+        compute_pipeline_entry(
+            device,
+            "volumetric scatter",
+            &VOLUMETRIC,
+            "scatterMain",
+            self.compute_pipeline_layout,
+            WORKGROUP_SIZE,
+        )
+    }
+
+    /// The column scan's pipeline — see [`scatter`](Self::scatter).
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the module or the pipeline.
+    pub(crate) fn integrate(self, device: &dyn Device) -> Result<ComputePipelineHandle, HalError> {
+        compute_pipeline_entry(
+            device,
+            "volumetric integrate",
+            &VOLUMETRIC,
+            "integrateMain",
+            self.compute_pipeline_layout,
+            WORKGROUP_SIZE,
+        )
+    }
+
+    /// The composite's pipeline.
+    ///
+    /// `build_fullscreen` is handed in rather than duplicated, on
+    /// [`SsrLayouts::march`](crate::ssr::SsrLayouts::march)'s terms: it is
+    /// [`crate::forward`]'s, because the shape it carries is documented there.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from `build_fullscreen`.
+    pub(crate) fn composite(
+        self,
+        device: &dyn Device,
+        build_fullscreen: impl Fn(
+            &dyn Device,
+            &str,
+            &crcbl_shaders::Shader,
+            PipelineLayoutHandle,
+            &[ColorTargetState],
+        ) -> Result<GraphicsPipelineHandle, HalError>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
         // The same format the forward pass wrote: this image stands in for the
         // scene colour from here on, so a narrower one would tonemap a truncated
         // frame — and fog adds a radiance rather than only removing one.
         let targets = [ColorTargetState::opaque(Format::Rgba16Float)];
-        let composite_pipeline = made.add(build_fullscreen(
+        build_fullscreen(
             device,
             "volumetric composite",
             &VOLUMETRIC_COMPOSITE,
-            composite_pipeline_layout,
+            self.composite_pipeline_layout,
             &targets,
-        )?);
+        )
+    }
 
+    /// The whole set, out of these layouts and the three pipelines made
+    /// against them, which it owns from here.
+    pub(crate) fn finish(
+        self,
+        scatter: ComputePipelineHandle,
+        integrate: ComputePipelineHandle,
+        composite: GraphicsPipelineHandle,
+    ) -> VolumetricPipelines {
+        VolumetricPipelines {
+            layouts: self,
+            scatter,
+            integrate,
+            composite,
+        }
+    }
+}
+
+/// The froxel volume's layouts and pipelines: everything [`Volumetric`] owns
+/// that names none of its buffers.
+///
+/// **Built apart from [`Volumetric::new`]** so the scatter pass's compile — the
+/// costly one — can overlap others: `ForwardRenderer`'s build compiles these
+/// three as members of its mesh pass's [`pipeline_batch`], out of
+/// [`VolumetricLayouts`], and hands the set to the camera's volume. The volume
+/// itself stays eager, because water binds its buffers.
+///
+/// [`pipeline_batch`]: crate::pipeline_batch
+#[derive(Debug)]
+pub(crate) struct VolumetricPipelines {
+    layouts: VolumetricLayouts,
+    scatter: ComputePipelineHandle,
+    integrate: ComputePipelineHandle,
+    composite: GraphicsPipelineHandle,
+}
+
+impl VolumetricPipelines {
+    /// Creates the layouts and the three pipelines one after another, for a
+    /// build with no batch to put them in — a view made after the renderer.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created — see [`crate::partial`].
+    pub(crate) fn new(
+        device: &dyn Device,
+        build_fullscreen: impl Fn(
+            &dyn Device,
+            &str,
+            &crcbl_shaders::Shader,
+            PipelineLayoutHandle,
+            &[ColorTargetState],
+        ) -> Result<GraphicsPipelineHandle, HalError>,
+    ) -> Result<Self, HalError> {
+        let mut made = Partial::new(device);
+        let layouts = VolumetricLayouts::new(device, &mut made)?;
+        let scatter = made.add(layouts.scatter(device)?);
+        let integrate = made.add(layouts.integrate(device)?);
+        let composite = made.add(layouts.composite(device, build_fullscreen)?);
+        made.keep();
+        Ok(layouts.finish(scatter, integrate, composite))
+    }
+
+    /// Holds every handle in `made`, layouts first, so a constructor that
+    /// takes the set releases it with whatever else it was building — after
+    /// the groups that name the layouts, since a guard releases in reverse.
+    fn hold(&self, made: &mut Partial<'_>) {
+        let layouts = self.layouts;
+        made.add(layouts.compute_layout);
+        made.add(layouts.compute_pipeline_layout);
+        made.add(layouts.composite_layout);
+        made.add(layouts.composite_pipeline_layout);
+        made.add(self.scatter);
+        made.add(self.integrate);
+        made.add(self.composite);
+    }
+
+    /// Releases everything, in dependency order. The device must be idle.
+    pub(crate) fn destroy(self, device: &dyn Device) {
+        device.destroy_graphics_pipeline(self.composite);
+        device.destroy_pipeline_layout(self.layouts.composite_pipeline_layout);
+        device.destroy_bind_group_layout(self.layouts.composite_layout);
+        device.destroy_compute_pipeline(self.integrate);
+        device.destroy_compute_pipeline(self.scatter);
+        device.destroy_pipeline_layout(self.layouts.compute_pipeline_layout);
+        device.destroy_bind_group_layout(self.layouts.compute_layout);
+    }
+}
+
+impl Volumetric {
+    /// Passes [`Volumetric::add_passes`] adds to a frame at most: the column's
+    /// and the composite's.
+    ///
+    /// A ceiling since the air arrived: a frame whose fog effect is off and
+    /// whose atmosphere is not adds the composite alone.
+    pub(crate) const PASSES: u32 = Self::COLUMN_PASSES + Self::COMPOSITE_PASSES;
+
+    /// The column's compute passes — the scatter and the scan — which run
+    /// exactly when the fog effect does.
+    ///
+    /// Exact rather than a ceiling: a frame always has froxels — [`Grid`] floors
+    /// every extent at one tile and one slice — so neither ever drops out.
+    pub(crate) const COLUMN_PASSES: u32 = 2;
+
+    /// The composite, which runs on every frame with the fog effect or an
+    /// atmosphere, and the only full-screen draw among them.
+    pub(crate) const COMPOSITE_PASSES: u32 = 1;
+
+    /// Builds the buffer rings and the compute groups against `pipelines`,
+    /// which it owns from here.
+    ///
+    /// `froxels` is the volume's capacity, which is
+    /// [`FROXEL_CAPACITY`](crate::light_grid::FROXEL_CAPACITY) outside a test
+    /// that wants a smaller one, and it is what [`Grid::for_frame`] is asked to
+    /// fit a frame under.
+    ///
+    /// `lights` is the frame ring the scatter pass reads its light rows and
+    /// its froxel lists from — the same buffers the mesh pass binds — and the
+    /// compute groups name them at construction, which is sound for the reason
+    /// the shadow atlas is: [`LightGrid`] creates its ring once and hands out
+    /// the same handles for its whole life.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created and `pipelines` with it, so the caller has
+    /// nothing left to clean up — see [`crate::partial`].
+    pub(crate) fn new(
+        device: &dyn Device,
+        pipelines: VolumetricPipelines,
+        frames: usize,
+        froxels: u32,
+        shadow_atlas: ImageViewHandle,
+        shadow_sampler: SamplerHandle,
+        lights: &LightGrid,
+    ) -> Result<Self, HalError> {
+        let mut made = Partial::new(device);
+        pipelines.hold(&mut made);
+        if frames == 0 || froxels == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "a froxel volume needs at least one frame in flight and one froxel".to_string(),
+            ));
+        }
+        let compute_layout = pipelines.layouts.compute_layout;
         let mut params = Vec::with_capacity(frames);
         let mut volumes = Vec::with_capacity(frames);
         let mut lighting = Vec::with_capacity(frames);
@@ -566,14 +715,8 @@ impl Volumetric {
             params,
             froxels: volumes,
             lighting,
-            compute_layout,
-            compute_pipeline_layout,
-            scatter,
-            integrate,
+            pipelines,
             compute_groups,
-            composite_layout,
-            composite_pipeline_layout,
-            composite_pipeline,
             composite_groups: vec![None; frames],
         })
     }
@@ -756,10 +899,10 @@ impl Volumetric {
                 final_state: ResourceState::ShaderRead,
             },
         );
-        let compute_layout = self.compute_pipeline_layout;
+        let compute_layout = self.pipelines.layouts.compute_pipeline_layout;
         let compute_group = self.compute_groups[frame];
-        let scatter = self.scatter;
-        let integrate = self.integrate;
+        let scatter = self.pipelines.scatter;
+        let integrate = self.pipelines.integrate;
 
         // **The column only where the fog effect runs.** An atmosphere frame
         // with the effect off adds the composite alone, for the air — and the
@@ -816,9 +959,9 @@ impl Volumetric {
                 });
         }
 
-        let pipeline = self.composite_pipeline;
-        let pipeline_layout = self.composite_pipeline_layout;
-        let layout = self.composite_layout;
+        let pipeline = self.pipelines.composite;
+        let pipeline_layout = self.pipelines.layouts.composite_pipeline_layout;
+        let layout = self.pipelines.layouts.composite_layout;
         let params = self.params[frame];
         let froxels = self.froxels[frame];
         let lighting = self.lighting[frame];
@@ -910,16 +1053,10 @@ impl Volumetric {
         for cached in self.composite_groups.into_iter().flatten() {
             device.destroy_bind_group(cached.1);
         }
-        device.destroy_graphics_pipeline(self.composite_pipeline);
-        device.destroy_pipeline_layout(self.composite_pipeline_layout);
-        device.destroy_bind_group_layout(self.composite_layout);
-        device.destroy_compute_pipeline(self.integrate);
-        device.destroy_compute_pipeline(self.scatter);
-        device.destroy_pipeline_layout(self.compute_pipeline_layout);
         for group in self.compute_groups {
             device.destroy_bind_group(group);
         }
-        device.destroy_bind_group_layout(self.compute_layout);
+        self.pipelines.destroy(device);
         for buffer in self
             .params
             .into_iter()
