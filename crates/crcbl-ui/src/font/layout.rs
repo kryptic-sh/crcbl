@@ -126,6 +126,14 @@ impl TextAlign {
     }
 }
 
+/// Where [`TextLayout::align`] puts `line`, of a paragraph that runs right to
+/// left when `rtl` says so, across a box `width` pixels wide: its left edge's
+/// offset from the box's left.
+fn aligned_offset(line: &TextLine, rtl: bool, width: f32, align: TextAlign) -> f32 {
+    let room = (width - line.width).max(0.0);
+    room * align.share(rtl)
+}
+
 /// One glyph as laid out.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedGlyph {
@@ -319,13 +327,22 @@ impl TextLayout {
     /// overflowing line.
     pub fn align(&mut self, width: f32, align: TextAlign) {
         for (line, &rtl) in self.lines.iter_mut().zip(&self.rtl) {
-            let room = (width - line.width).max(0.0);
-            let offset = room * align.share(rtl);
+            let offset = aligned_offset(line, rtl, width, align);
             for glyph in &mut self.glyphs[line.glyphs.clone()] {
                 glyph.offset.x += offset - line.offset;
             }
             line.offset = offset;
         }
+    }
+
+    /// Whether [`TextLayout::align`] at `width` and `align` would move no
+    /// line, so a caller drawing it aligned can draw it as it is rather than
+    /// align a copy.
+    pub(crate) fn is_aligned(&self, width: f32, align: TextAlign) -> bool {
+        self.lines
+            .iter()
+            .zip(&self.rtl)
+            .all(|(line, &rtl)| aligned_offset(line, rtl, width, align) - line.offset == 0.0)
     }
 
     /// Every drawn glyph, line by line.

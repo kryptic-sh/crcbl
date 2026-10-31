@@ -124,6 +124,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A left- or start-aligned `nowrap` text span no longer copies its laid-out
+  text every frame to draw it**: `Ui::emit` draws the kept layout as it is when
+  aligning would move nothing. That is 9 fewer allocations per label each frame
+  (a 180-label panel in one tree: 2,164 → 544 allocations, about 12% faster);
+  centred, right- and end-aligned text still copies.
 - **`Skinning::begin_frame` writes each frame's joint palettes a matrix at a
   time** (one reserved buffer, a `bytemuck` cast of each matrix's columns)
   instead of a float at a time; the bytes are unchanged (column-major

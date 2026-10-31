@@ -2,6 +2,7 @@
 //!
 //! See the module docs of [`crate::tree`] for what each kind of node draws.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use glam::Vec2;
@@ -274,21 +275,25 @@ impl Ui {
                     let unrounded = &self.store.get(node.slot).unrounded;
                     let (size, line_height) = (style.font_size, style.text_line_height(font));
                     let mut layout = match style.white_space {
-                        WhiteSpace::Normal => TextLayout::new(
+                        WhiteSpace::Normal => Cow::Owned(TextLayout::new(
                             font,
                             text,
                             size,
                             line_height,
                             Some(content_width(unrounded)),
-                        ),
+                        )),
                         // Measuring or cutting it laid out what it shows
-                        // already; a copy, as aligning moves its glyphs.
+                        // already: drawn as it is, or a copy where aligning
+                        // moves its glyphs.
                         WhiteSpace::NoWrap => node.shown_layout.as_deref().map_or_else(
-                            || TextLayout::nowrap(font, text, size, line_height),
-                            TextLayout::clone,
+                            || Cow::Owned(TextLayout::nowrap(font, text, size, line_height)),
+                            Cow::Borrowed,
                         ),
                     };
-                    layout.align(content_max.x - content_min.x, style.text_align);
+                    let (width, align) = (content_max.x - content_min.x, style.text_align);
+                    if !layout.is_aligned(width, align) {
+                        layout.to_mut().align(width, align);
+                    }
                     let lines = layout
                         .lines()
                         .iter()

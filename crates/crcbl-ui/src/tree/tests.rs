@@ -693,6 +693,72 @@ fn a_wrapped_span_emits_its_measured_lines_inside_its_box() {
     }
 }
 
+/// **A `nowrap` span draws its kept layout aligned in its box**: for every
+/// alignment the emitted run is the span's layout aligned at its width —
+/// drawn as kept where aligning moves nothing, from an aligned copy where it
+/// moves the line.
+#[cfg(feature = "parsed-font")]
+#[test]
+fn a_nowrap_span_emits_its_layout_aligned_in_its_box() {
+    use crate::font::Font;
+    use crate::font::layout::TextLayout;
+    use crate::tree::style::WhiteSpace;
+
+    const TEXT: &str = "HEALTH 100";
+    let mut runs = Vec::new();
+    for align in [
+        TextAlign::Left,
+        TextAlign::Start,
+        TextAlign::Center,
+        TextAlign::Right,
+    ] {
+        let mut ui = Ui::new();
+        let mut span = None;
+        frame(&mut ui, idle(), |ui| {
+            ui.block(
+                "",
+                &[
+                    Declaration::FlexDirection(FlexDirection::Column),
+                    Declaration::Width(px(200.0)),
+                ],
+                |ui| {
+                    span = Some(
+                        ui.span(
+                            "",
+                            TEXT,
+                            &[
+                                Declaration::FontFamily(FontFamily::Sans),
+                                Declaration::FontSize(16.0),
+                                Declaration::LineHeight(LineHeight::Px(20.0)),
+                                Declaration::WhiteSpace(WhiteSpace::NoWrap),
+                                Declaration::TextAlign(align),
+                            ],
+                        )
+                        .key,
+                    );
+                },
+            );
+        });
+        let (span_min, span_max) = ui.rect(span.expect("built")).expect("laid out");
+        let list = emitted(&ui);
+        let glyphs = list
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Glyphs { glyphs, .. } => Some(glyphs.clone()),
+                _ => None,
+            })
+            .expect("the span drew no glyph run");
+        let mut laid = TextLayout::nowrap(Font::sans(), TEXT, 16.0, 20.0);
+        laid.align(span_max.x - span_min.x, align);
+        assert_eq!(glyphs, laid.glyphs(), "{align:?}");
+        runs.push(glyphs);
+    }
+    assert_eq!(runs[0], runs[1], "start is left in a left-to-right span");
+    assert_ne!(runs[0], runs[2], "centring moved nothing");
+    assert_ne!(runs[2], runs[3], "right is not centre");
+}
+
 /// **Changing only a span's family or line height re-measures it**: the
 /// measurement is keyed by both, so a cached size from the other font is never
 /// reused.

@@ -276,6 +276,48 @@ fn alignment_places_each_line_in_its_box() {
     assert_eq!(wide.lines()[0].offset, 0.0);
 }
 
+/// **`is_aligned` says whether aligning would move anything**: it holds
+/// exactly when an aligned copy is the layout unchanged, for every alignment,
+/// in a box as wide as the widest line and in a wider one, for lines of two
+/// widths and for a right-to-left paragraph.
+#[test]
+fn is_aligned_holds_exactly_when_aligning_moves_nothing() {
+    let font = Font::sans();
+    let (mut held, mut moved) = (0, 0);
+    for text in ["The quick\nfox", "\u{05E9}\u{05DC}\u{05D5}\u{05DD}"] {
+        let base = TextLayout::nowrap(font, text, SIZE, LINE);
+        let widest = base
+            .lines()
+            .iter()
+            .map(|line| line.width)
+            .fold(0.0, f32::max);
+        for width in [widest, widest + 40.0] {
+            for align in [
+                TextAlign::Start,
+                TextAlign::End,
+                TextAlign::Left,
+                TextAlign::Center,
+                TextAlign::Right,
+            ] {
+                let mut aligned = base.clone();
+                aligned.align(width, align);
+                let unchanged = aligned == base;
+                assert_eq!(
+                    base.is_aligned(width, align),
+                    unchanged,
+                    "{text:?} at {width}px, {align:?}"
+                );
+                if unchanged {
+                    held += 1;
+                } else {
+                    moved += 1;
+                }
+            }
+        }
+    }
+    assert!(held > 0 && moved > 0, "{held} unchanged, {moved} moved");
+}
+
 /// **The wrap width snaps to whole pixels with a sliver of slack**, so two
 /// computations of one width an ulp apart agree.
 #[test]

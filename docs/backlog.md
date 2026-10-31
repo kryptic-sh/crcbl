@@ -81,9 +81,12 @@ an ellipsis span draws the layout its cut measured. Left:
   `nowrap` layouts are kept; `emit` lays a wrapped span out at its content width
   every frame. Keeping the definite-width bucket's layout would cover it, at a
   layout per width bucket held.
-- Drawing a kept layout still copies it once a frame, because
-  `TextLayout::align` moves glyphs in place; aligning at layout time or drawing
-  with an offset would remove the copy.
+- Drawing a kept layout copies it once a frame only where aligning moves it:
+  centred, right- or end-aligned text, or right-to-left start-aligned text
+  narrower than its box; `emit_node` borrows it when `TextLayout::is_aligned`
+  holds. Aligning at layout time would remove the remaining copy; drawing with a
+  shifted origin would not be bit-identical, as `(origin + d) + x` is not
+  `origin + (x + d)` in floating point.
 - **Profiled EW's real shape (2026-10-31):** one persistent `Ui`, 180 label
   trees a frame, each `begin_frame`/block/span/`layout`/`emit`, 140 px ellipsis
   spans, ~80 cut, Roboto: 2.04 ms median release (load ~3.5), callgrind. ~60%
@@ -108,9 +111,14 @@ an ellipsis span draws the layout its cut measured. Left:
   - **SipHash throughout the tree** (`hash_of`, `DefaultHasher` in `push`,
     `call_site_key`, the style key) is 3–4% of the frame; a fast hasher is a new
     dependency, so the owner's call.
-  - **Allocation per shape**: `run_shaper` creates a `harfrust::Buffer` per run
-    and `TextLayout::lay_out` allocates its vectors and copies the text; ~6% of
-    the frame, ~95 allocations a label.
+  - **Allocation per shape: re-measured 2026-10-31, nothing to fix in a steady
+    frame.** `run_shaper`'s `harfrust::Buffer::new` and `TextLayout::lay_out`
+    ran the same number of times in a 20- and a 100-frame callgrind run of the
+    harness: kept layouts and cuts mean a steady frame shapes nothing, so
+    reusing the buffer would only speed up the first frame. Declined for now.
+    What still allocates each frame is `DrawList::text_glyphs` (a glyph `Vec`
+    copy and an `Arc<str>` per command, ~3 a label in one tree, ~9 one cycle per
+    label); the allocator is ~3.5–3.8% of the frame.
   - Labels drawn as separate cycles on one `Ui` share node keys, so they share
     one stored node: hover, press and focus are one slot, and the hit test sees
     only the last label. Worth documenting on `ReadoutPanel`-style drawing.
