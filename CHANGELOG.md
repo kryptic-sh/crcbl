@@ -13,7 +13,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`crcbl_render::SkinnedInstanceDesc` has a `bounds: Option<Aabb>` field**,
+  and `crcbl_shaders::mesh::GpuInstance` grew `bounds_min`/`bounds_max` in place
+  of its two padding words, so `INSTANCE_STRIDE` is 176 bytes, not 160, and
+  `INSTANCE_PAD_WORDS` is gone. Pass `bounds: None` to keep today's behaviour; a
+  code path that sized or indexed the instance buffer by hand must use
+  `INSTANCE_STRIDE`.
+- **`crcbl_render::cull::world_box` returns `Option<(Vec3, Vec3)>`**: `None` for
+  a skinned instance with no box of its own, which every cull keeps whole.
+
 ### Added
+
+- **Skinned instances can be frustum-culled.** A model-space box on
+  `SkinnedInstanceDesc::bounds` sets the record's new `GpuInstance::OWNS_BOUNDS`
+  bit, and the camera, occlusion and shadow culls (`cull.slang`,
+  `crcbl_render::cull::visible_instances`, the occlusion oracle and the shadow
+  cache's caster footprints) test that box instead of keeping the instance
+  everywhere. `ForwardRenderer::set_skinned_bounds(handle, bounds)` moves the
+  box each frame without counting as a move, for a pose that travels away from
+  its origin — such as a ragdoll. With `None` a skinned instance is still kept
+  by every cull. The box must contain every vertex the palette can place: a cull
+  that finds it outside drops the whole object, even while part of the pose is
+  on screen. `set_skinned_instance` rebuilds the record from its description, so
+  its `bounds` replaces a box `set_skinned_bounds` wrote. An inverted or
+  non-finite box is refused and nothing is written: `add_skinned_instance` and
+  `set_skinned_bounds` (which returns `Result<(), InstancePoolError>`) return
+  the new `InstancePoolError::InvalidBounds`, and `set_skinned_instance` panics
+  naming it, as it does for an out-of-range material.
 
 - **`crcbl_anim::rotate_joints` — several model-space joint turns for one
   palette update.**

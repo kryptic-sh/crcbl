@@ -64,8 +64,12 @@ struct GpuInstance_std430_0
     @align(4) flags_1 : u32,
     @align(16) base_vertex_1 : u32,
     @align(4) previous_base_vertex_0 : u32,
-    @align(8) pad1_0 : u32,
-    @align(4) pad2_0 : u32,
+    @align(8) bounds_min_x_0 : f32,
+    @align(4) bounds_min_y_0 : f32,
+    @align(16) bounds_min_z_0 : f32,
+    @align(4) bounds_max_x_0 : f32,
+    @align(8) bounds_max_y_0 : f32,
+    @align(4) bounds_max_z_0 : f32,
 };
 
 @binding(1) @group(0) var<storage, read> instances_0 : array<GpuInstance_std430_0>;

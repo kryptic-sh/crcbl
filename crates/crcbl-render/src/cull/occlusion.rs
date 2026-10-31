@@ -197,19 +197,24 @@ impl DepthPyramid {
 /// An instance's box in world space: the centre and half-extent `cull.slang`'s
 /// `world_box` computes, by the same conservative transform as
 /// [`Aabb::transformed`](super::Aabb::transformed).
+///
+/// The box is [`GpuInstance::cull_bounds`], so `None` is a deforming instance
+/// with no box of its own — `cull.slang`'s `has_box` refusing — which every
+/// caller keeps whole.
 #[must_use]
-pub fn world_box(instance: &GpuInstance, mesh: &GpuMesh) -> (Vec3, Vec3) {
-    let min = Vec3::from_array(mesh.bounds_min);
-    let max = Vec3::from_array(mesh.bounds_max);
+pub fn world_box(instance: &GpuInstance, mesh: &GpuMesh) -> Option<(Vec3, Vec3)> {
+    let (min, max) = instance.cull_bounds(mesh)?;
+    let min = Vec3::from_array(min);
+    let max = Vec3::from_array(max);
     let local_center = (max + min) * 0.5;
     let local_extent = (max - min) * 0.5;
     let transform = Mat4::from_cols_array(&instance.transform);
     let basis = Mat3::from_mat4(transform);
     let absolute = Mat3::from_cols(basis.x_axis.abs(), basis.y_axis.abs(), basis.z_axis.abs());
-    (
+    Some((
         transform.transform_point3(local_center),
         absolute * local_extent,
-    )
+    ))
 }
 
 /// A box projected onto a target: the pixel rectangle its corners span, with
@@ -402,8 +407,9 @@ pub struct EarlyInputs<'a> {
 /// features, each tagged [`ENTRY_OCCLUDED`] where the previous frame's pyramid
 /// hides it.
 ///
-/// A deforming instance — [`GpuInstance::BASE_VERTEX_OVERRIDE`] — is kept
-/// untagged, because its source bounds do not describe its vertices.
+/// A deforming instance — [`GpuInstance::BASE_VERTEX_OVERRIDE`] — with no box
+/// of its own is kept untagged, because its source bounds do not describe its
+/// vertices. One that carries a box is tested by it like any other.
 #[must_use]
 pub fn early_entries(
     frustum: &Frustum,
@@ -415,12 +421,10 @@ pub fn early_entries(
     let mut entries = Vec::new();
     for index in super::visible_instances(frustum, instances, meshes, hidden_view) {
         let instance = &instances[index as usize];
-        if instance.flags & GpuInstance::BASE_VERTEX_OVERRIDE != 0 {
+        let Some((center, extent)) = world_box(instance, &meshes[instance.mesh as usize]) else {
             entries.push(index);
             continue;
-        }
-        let mesh = &meshes[instance.mesh as usize];
-        let (center, extent) = world_box(instance, mesh);
+        };
         if inputs.small_feature_pixels.is_some_and(|pixels| {
             small_feature(
                 inputs.view_projection,
@@ -459,12 +463,11 @@ pub fn late_entry(
         return entry;
     }
     let instance = &instances[(entry & crcbl_shaders::cull::ENTRY_INDEX_MASK) as usize];
-    let (center, extent) = world_box(instance, &meshes[instance.mesh as usize]);
-    if occluded(view_projection, center, extent, pyramid) {
-        entry
-    } else {
-        entry | ENTRY_RESCUED
-    }
+    // The first phase marks only an instance it had a box for, so `None` is an
+    // entry nothing here marked; rescuing it is the side that draws.
+    let hidden = world_box(instance, &meshes[instance.mesh as usize])
+        .is_some_and(|(center, extent)| occluded(view_projection, center, extent, pyramid));
+    if hidden { entry } else { entry | ENTRY_RESCUED }
 }
 
 /// Face `f`'s side planes: the first [`FACE_PLANES`] of the frustum of its
@@ -508,7 +511,8 @@ pub fn face_tags(faces: &FacePlanes, center: Vec3, extent: Vec3) -> u32 {
 
 /// The survivor-list entries a point light's cull writes, ascending:
 /// [`visible_instances`](super::visible_instances) against the light's box,
-/// each tagged by [`face_tags`] — or with every face, for a deforming instance.
+/// each tagged by [`face_tags`] — or with every face, for a deforming instance
+/// with no box of its own.
 #[must_use]
 pub fn face_entries(
     frustum: &Frustum,
@@ -520,11 +524,10 @@ pub fn face_entries(
         .into_iter()
         .map(|index| {
             let instance = &instances[index as usize];
-            if instance.flags & GpuInstance::BASE_VERTEX_OVERRIDE != 0 {
-                return index | (((1 << FACE_COUNT) - 1) << ENTRY_FACE_SHIFT);
-            }
-            let (center, extent) = world_box(instance, &meshes[instance.mesh as usize]);
-            index | face_tags(faces, center, extent)
+            world_box(instance, &meshes[instance.mesh as usize]).map_or(
+                index | (((1 << FACE_COUNT) - 1) << ENTRY_FACE_SHIFT),
+                |(center, extent)| index | face_tags(faces, center, extent),
+            )
         })
         .collect()
 }

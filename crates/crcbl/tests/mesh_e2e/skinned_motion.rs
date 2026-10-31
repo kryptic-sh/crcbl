@@ -107,6 +107,7 @@ impl SkinnedMotionScene {
                 // [`SkinnedMotionScene::move_to`] ever changes it, so in every
                 // other test here the motion read back is the palette's.
                 transform: Mat4::from_translation(MOVING_AT),
+                bounds: None,
             })
             .expect("an instance pool of thousands has room for one object");
         let skinning = Skinning::new(
@@ -162,6 +163,7 @@ impl SkinnedMotionScene {
                 mesh: &self.skinned,
                 material: crcbl::render::scene::DEMO_UNTINTED,
                 transform: Mat4::from_translation(at),
+                bounds: None,
             },
         );
     }

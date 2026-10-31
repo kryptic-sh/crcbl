@@ -13,6 +13,7 @@ fn skinned_instance_refusal_preserves_prior_skinning_and_retries_pending_uploads
                 mesh: &fixture.skinned,
                 material: DEMO_UNTINTED,
                 transform: Mat4::IDENTITY,
+                bounds: None,
             })
             .unwrap();
         let handles: Vec<_> = (0..4)

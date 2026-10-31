@@ -8375,6 +8375,8 @@ pub(crate) mod tests {
                 flags: GpuInstance::LIVE,
                 base_vertex: 0,
                 previous_base_vertex: 0,
+                bounds_min: [0.0; 3],
+                bounds_max: [0.0; 3],
             }
             .to_bytes(),
         );

@@ -13116,12 +13116,12 @@ What the rung did leave behind:
 
 - **Static caching within a group is the rung above, and is unbuilt — priced
   2026-09-05, and it needs a decision.** **Decided 2026-09-25: the cheap shape
-  below** — a `STATIC` bit in `GpuInstance::flags` (bit 17 is free), one
-  `visible` list partitioned from both ends by two counters, and the statics'
-  depth kept by the copy every backend has — built when a scene's shadow pass is
-  shown to be bound by redrawing its unmoved casters, not before. The cache
-  holds a group's whole map, so one moved caster redraws every caster that group
-  covers. What the tree has and lacks, read that day:
+  below** — a `STATIC` bit in `GpuInstance::flags` (bit 18 is free: 17 is
+  `OWNS_BOUNDS`), one `visible` list partitioned from both ends by two counters,
+  and the statics' depth kept by the copy every backend has — built when a
+  scene's shadow pass is shown to be bound by redrawing its unmoved casters, not
+  before. The cache holds a group's whole map, so one moved caster redraws every
+  caster that group covers. What the tree has and lacks, read that day:
   - **Invalidation is whole-pool.** `ForwardRenderer::shadow_group_record` folds
     `InstancePool::revision` in, and that counter moves on any instance write;
     `GpuInstance::flags` now carries `LIVE`, `BASE_VERTEX_OVERRIDE`, the
@@ -16549,10 +16549,12 @@ from an imported document at load.
 **What it blocks, each verified separately:**
 
 - Conservative animated bounds: the bind-pose box inflated by the clip's bounds,
-  computed at cook time. Today `cull.slang` never frustum-culls an instance
-  carrying `INSTANCE_BASE_VERTEX_OVERRIDE` — its source bounds cannot reject
-  deformed vertices, so it is kept whole, and in every face of a point light's
-  cube. A cooked bound would let a skinned instance be culled at all.
+  computed at cook time. The culls already test a skinned instance's own box
+  when its record carries one (`SkinnedInstanceDesc::bounds`,
+  `ForwardRenderer::set_skinned_bounds`), but the box is the caller's to
+  compute; with `None` the instance is kept whole, in every face of a point
+  light's cube. A cooked per-clip bound is what would hand every caller one
+  without its own pose math.
 - Per-clip **hitbox transform tracks**, which `26-prediction.md`'s lag
   compensation depends on for server-side posed hitboxes with no pose math.
 - The **server strip** (root track + event track + duration) that the plan's
@@ -16683,16 +16685,24 @@ found).
 skinned region is a range of the mesh pool, so draw generation and the shadow
 passes gained no skinning branch. The one flag is
 `GpuInstance::BASE_VERTEX_OVERRIDE`: the raster stages read it for the base
-vertex, and `cull.slang` reads it to keep a deforming instance unculled.
-`apps/puppet` consumes it natively and in the browser, with shadows.
+vertex, and `cull.slang` reads it to keep a deforming instance unculled unless
+`GpuInstance::OWNS_BOUNDS` gives the record a box of its own. `apps/puppet`
+consumes it natively and in the browser, with shadows.
 
 Remaining work:
 
 - **One dispatch per animated range**, not one over a range table. The
   GPU-driven form needs a range table the shader can index — a second layout to
   pin against `slangc`.
-- **Conservative animated bounds**, so a skinned instance can be culled at all —
-  owed by the cook (_No cook, no cooked clip format_).
+- **Cooked animated bounds.** A skinned instance is culled by a box the caller
+  hands over (`SkinnedInstanceDesc::bounds`, `set_skinned_bounds`); none of the
+  workspace's own callers (`apps/puppet`, `apps/viewer`, `apps/editor`) passes
+  one yet, so each still draws its skinned instances everywhere. A per-clip
+  bound from the cook (_No cook, no cooked clip format_) is what they would use.
+  Note that `apps/puppet`'s `Character::place_at` replaces each limb every frame
+  through `set_skinned_instance`, which rebuilds the record from its
+  description, so a limb's box belongs in that description; a
+  `set_skinned_bounds` made before it is overwritten.
 - **Bad joint indices are contained, not diagnosed.** `Skinning::begin_frame`
   refuses them by name and the shader clamps, but `crcbl-scene` cannot do better
   at import because a glTF primitive does not know its skin.

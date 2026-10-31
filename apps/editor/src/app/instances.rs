@@ -194,6 +194,7 @@ fn add_all(
                 mesh: skins.mesh(draw),
                 material,
                 transform,
+                bounds: None,
             }),
         })
         .collect()
@@ -213,6 +214,7 @@ fn set(renderer: &mut ForwardRenderer, skins: &Skins, handle: InstanceHandle, de
                 mesh: skins.mesh(draw),
                 material,
                 transform,
+                bounds: None,
             },
         ),
     }

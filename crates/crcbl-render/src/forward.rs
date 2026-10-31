@@ -163,7 +163,7 @@ use crate::camera::{Atmosphere, Camera, DirectionalLight, Fog, Sky};
 use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
 use crate::contact_shadows::ContactShadows;
 use crate::counters::FrameCounters;
-use crate::cull::Frustum;
+use crate::cull::{Aabb, Frustum};
 use crate::cull_stats::CullStatsRing;
 use crate::debug_draw::DebugDraw;
 use crate::draw_gen::{DrawGen, DrawGenDesc, DrawGenPipelines, FrameCull, GeneratedDraws};
@@ -1390,6 +1390,27 @@ pub struct SkinnedInstanceDesc<'a> {
     /// deformed mesh in the world. See
     /// [`SkinRange::palette`](crate::skinning::SkinRange::palette).
     pub transform: Mat4,
+    /// A **model-space** box around every pose this object will be drawn in
+    /// until it is next set, in the space [`transform`](Self::transform)
+    /// carries into the world — or `None`, which keeps it in every cull.
+    ///
+    /// **`None` is the safe default and the costly one.** The region's source
+    /// mesh's box is its bind pose, which says nothing about where a skinning
+    /// dispatch moves the vertices, so an object without a box of its own is
+    /// drawn by every camera and every shadow map wherever it is. With one, the
+    /// frustum culls, the occlusion culls and the shadow cache's footprints
+    /// test it exactly as they test a rigid mesh's box. **The box has to
+    /// contain every vertex the palette can put anywhere**: a cull that finds
+    /// it outside drops the whole object, so a box that misses part of a pose
+    /// can make an object vanish while that part is on screen.
+    /// [`ForwardRenderer::set_skinned_bounds`] moves it each frame, for a pose
+    /// — a ragdoll — that travels far from the object's origin.
+    ///
+    /// Every corner must be finite and `min` must not exceed `max` on any
+    /// axis. An inverted or non-finite box is refused rather than written,
+    /// because the culls would read it as a box nothing reaches and drop the
+    /// object everywhere — see [`InstancePoolError::InvalidBounds`].
+    pub bounds: Option<Aabb>,
 }
 
 /// The sky-view LUT a frame is drawn from, and everything taken out of it.
@@ -3264,6 +3285,42 @@ struct SkinnedInstance {
     /// applies to `previous_transform` for the same reason: a spawn did not
     /// travel from anywhere.
     pointed: bool,
+}
+
+/// [`SkinnedInstanceDesc::bounds`] as the record carries it: the
+/// [`OWNS_BOUNDS`](mesh::GpuInstance::OWNS_BOUNDS) bit and the box's two
+/// corners, or no bit and a zeroed box the culls do not read.
+///
+/// # Errors
+///
+/// [`InstancePoolError::InvalidBounds`] for a box with a non-finite corner or
+/// with `min` past `max` on any axis — see [`SkinnedInstanceDesc::bounds`].
+fn bounds_fields(bounds: Option<Aabb>) -> Result<(u32, [f32; 3], [f32; 3]), InstancePoolError> {
+    let Some(bounds) = bounds else {
+        return Ok((0, [0.0; 3], [0.0; 3]));
+    };
+    // `min <= max` is false for a NaN lane as well as for an inverted one, and
+    // `is_finite` is what refuses an infinity, which orders but cannot be
+    // carried through a transform without becoming one.
+    if !(bounds.min.is_finite() && bounds.max.is_finite() && bounds.min.cmple(bounds.max).all()) {
+        return Err(InstancePoolError::InvalidBounds {
+            min: bounds.min.to_array(),
+            max: bounds.max.to_array(),
+        });
+    }
+    Ok((
+        mesh::GpuInstance::OWNS_BOUNDS,
+        bounds.min.to_array(),
+        bounds.max.to_array(),
+    ))
+}
+
+/// [`bounds_fields`] for [`ForwardRenderer::set_skinned_instance`], which has
+/// no `Result` to return it through: the renderer's answer to a description it
+/// cannot use is a panic naming it, as for a material index past the end of the
+/// scene.
+fn bounds_fields_or_panic(bounds: Option<Aabb>) -> (u32, [f32; 3], [f32; 3]) {
+    bounds_fields(bounds).unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// The two base vertices an object drawn out of `mesh` alternates between, in
@@ -7087,7 +7144,10 @@ impl ForwardRenderer {
     /// # Errors
     ///
     /// [`InstancePoolError::PoolFull`], on
-    /// [`add_instance`](Self::add_instance)'s terms.
+    /// [`add_instance`](Self::add_instance)'s terms, and
+    /// [`InstancePoolError::InvalidBounds`] for a
+    /// [`SkinnedInstanceDesc::bounds`] the culls could not read, before
+    /// anything is written.
     ///
     /// # Panics
     ///
@@ -7098,11 +7158,12 @@ impl ForwardRenderer {
         &mut self,
         desc: &SkinnedInstanceDesc<'_>,
     ) -> Result<InstanceHandle, InstancePoolError> {
+        let bounds = bounds_fields(desc.bounds)?;
         // Parity zero, and it never reaches the GPU as such: the instance pool
         // uploads by delta at `begin_skinned_frame`, which re-points every entry
         // of the list below before it flushes. What this writes is the rest of
         // the record.
-        let instance = self.skinned_gpu_instance(desc, 0);
+        let instance = self.skinned_gpu_instance(desc, bounds, 0);
         let handle = self.instances.insert(&instance)?;
         self.skinned_instances.push(SkinnedInstance {
             handle,
@@ -7124,11 +7185,25 @@ impl ForwardRenderer {
     /// swap a bind-pose instance over to a region without removing and replacing
     /// it.
     ///
+    /// **The description's box replaces whatever box the object had**,
+    /// including one [`set_skinned_bounds`](Self::set_skinned_bounds) wrote: the
+    /// record is rebuilt from `desc`, and [`SkinnedInstanceDesc::bounds`] is
+    /// part of it, so a `None` here takes the object's box away. A caller that
+    /// both places an object and moves its box — a ragdoll — passes the box in
+    /// this description, or calls `set_skinned_bounds` after this call.
+    ///
     /// # Panics
     ///
-    /// On [`add_skinned_instance`](Self::add_skinned_instance)'s terms.
+    /// On [`add_skinned_instance`](Self::add_skinned_instance)'s terms, and on
+    /// a [`SkinnedInstanceDesc::bounds`] that call would refuse with
+    /// [`InstancePoolError::InvalidBounds`]: this call has no `Result`, so a
+    /// description it cannot use is a panic naming it, as an out-of-range
+    /// material is. A box that changes every frame belongs in
+    /// [`set_skinned_bounds`](Self::set_skinned_bounds), which returns the
+    /// refusal instead.
     pub fn set_skinned_instance(&mut self, handle: InstanceHandle, desc: &SkinnedInstanceDesc<'_>) {
-        let mut instance = self.skinned_gpu_instance(desc, 0);
+        let bounds = bounds_fields_or_panic(desc.bounds);
+        let mut instance = self.skinned_gpu_instance(desc, bounds, 0);
         instance.flags |= self.kept_flags(handle);
         if !self.instances.set(handle, &instance) {
             return;
@@ -7165,9 +7240,13 @@ impl ForwardRenderer {
     /// The mesh id is the **source** mesh's, not a second entry's, so the bucket
     /// this instance is scattered into, the levels it selects through and the
     /// box it is culled against are the ones the undeformed mesh already had.
+    ///
+    /// `bounds` is [`bounds_fields`]' answer for `desc.bounds`, which the caller
+    /// has already checked.
     fn skinned_gpu_instance(
         &self,
         desc: &SkinnedInstanceDesc<'_>,
+        (bounds_flag, bounds_min, bounds_max): (u32, [f32; 3], [f32; 3]),
         parity: u32,
     ) -> mesh::GpuInstance {
         let base_vertex = desc.mesh.region().base(parity);
@@ -7178,7 +7257,9 @@ impl ForwardRenderer {
             // The override bit **and** the material mode: a skinned instance is
             // routed by the same key as a rigid one, so a skinned cutout lands
             // in its mesh's masked bucket rather than in the opaque twin.
-            flags: mesh::GpuInstance::BASE_VERTEX_OVERRIDE | self.material_mode_bits(desc.material),
+            flags: mesh::GpuInstance::BASE_VERTEX_OVERRIDE
+                | self.material_mode_bits(desc.material)
+                | bounds_flag,
             base_vertex,
             // At rest, which is what a record this call writes has to be: the
             // object has not been drawn out of this region yet, so the other
@@ -7186,8 +7267,53 @@ impl ForwardRenderer {
             // [`point_skinned_instances`](Self::point_skinned_instances) is
             // what starts pointing this at the half before.
             previous_base_vertex: base_vertex,
+            bounds_min,
+            bounds_max,
             ..mesh::GpuInstance::default()
         }
+    }
+
+    /// Replaces the model-space box the skinned object `handle` names is culled
+    /// by, and **nothing else** — see [`SkinnedInstanceDesc::bounds`], whose
+    /// terms this writes on. `None` puts it back in every cull.
+    ///
+    /// The call a pose that travels makes once a frame: a ragdoll's bodies
+    /// drift metres from the object's origin while its transform stays where it
+    /// fell, and [`set_skinned_instance`](Self::set_skinned_instance) would
+    /// rewrite the whole record as a move to change the box. This is not a
+    /// move, on [`set_instance_views`](Self::set_instance_views)' terms: the
+    /// transform history is left alone, so the motion target sees no travel the
+    /// object did not make. It is still a write
+    /// [`InstancePool::take_written`] names, so a shadow map the box reached
+    /// before or after it is redrawn.
+    ///
+    /// Takes effect at the next [`begin_frame`](Self::begin_frame) or
+    /// [`begin_skinned_frame`](Self::begin_skinned_frame), which uploads the
+    /// element. A stale handle writes nothing and is not an error. On a rigid
+    /// instance the box replaces its mesh's until the next
+    /// [`set_instance`](Self::set_instance) rewrites the record.
+    ///
+    /// **A later [`set_skinned_instance`](Self::set_skinned_instance) replaces
+    /// this box with its description's**, `None` included — the description
+    /// is authoritative. Call this after placing the object, or pass the box in
+    /// the description.
+    ///
+    /// # Errors
+    ///
+    /// [`InstancePoolError::InvalidBounds`] for a box with a non-finite corner
+    /// or with `min` past `max` on any axis, and the record is left as it was.
+    /// **An error rather than a panic**, unlike
+    /// [`set_skinned_instance`](Self::set_skinned_instance)'s: this is the
+    /// per-frame path a simulated pose's box takes, and a body that goes `NaN`
+    /// for a frame is a condition a game can be in, not a mistake in its code.
+    pub fn set_skinned_bounds(
+        &mut self,
+        handle: InstanceHandle,
+        bounds: Option<Aabb>,
+    ) -> Result<(), InstancePoolError> {
+        let (flag, min, max) = bounds_fields(bounds)?;
+        self.instances.set_bounds(handle, flag, min, max);
+        Ok(())
     }
 
     /// Points every skinned object at the half of its region a frame of this
@@ -22102,6 +22228,7 @@ mod tests {
                 mesh: &fixture.skinned,
                 material: DEMO_UNTINTED,
                 transform: Mat4::IDENTITY,
+                bounds: None,
             })
             .expect("a pool of thousands has room for one object");
 
@@ -22134,6 +22261,271 @@ mod tests {
              ignored the parity entirely would pass this"
         );
 
+        fixture.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **A skinned object's own box reaches the buffer a frame draws from, and
+    /// [`ForwardRenderer::set_skinned_bounds`] moves it without moving the
+    /// object.**
+    ///
+    /// Read out of the instance ring rather than the host mirror, and put to
+    /// [`crate::cull::visible_instances`] — the CPU reference the device's cull
+    /// is held to — so what is asserted is that reference's decision on the
+    /// bytes a frame uploads: kept while the box is around the origin the
+    /// camera looks at, culled once the setter moves it thirty metres away,
+    /// and kept again — in every cull, as a boxless skinned object always is —
+    /// once the setter takes the box away.
+    ///
+    /// **And the box is not a move.** The object is moved a metre first, and
+    /// the box set after the move and before the frame: the record must still
+    /// say it travelled from where it was, which a box written through
+    /// [`InstancePool::set`] would overwrite with the transform it already
+    /// carries.
+    #[test]
+    fn a_skinned_box_is_carried_and_moved_without_a_move() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut fixture = SkinnedFixture::build(device, queue);
+        let near = Aabb {
+            min: Vec3::splat(-0.5),
+            max: Vec3::splat(0.5),
+        };
+        let handle = fixture
+            .renderer
+            .add_skinned_instance(&SkinnedInstanceDesc {
+                mesh: &fixture.skinned,
+                material: DEMO_UNTINTED,
+                transform: Mat4::IDENTITY,
+                bounds: Some(near),
+            })
+            .expect("a pool of thousands has room for one object");
+        let frustum = Frustum::from_view_projection(Camera::default().view_projection(1.0));
+        let meshes = fixture.renderer.pool.table_entries();
+        let kept = |record: mesh::GpuInstance| {
+            !crate::cull::visible_instances(&frustum, &[record], &meshes, 0).is_empty()
+        };
+
+        fixture.begin(device);
+        let first = instance_record(&recorder, &fixture.renderer, handle);
+        assert_ne!(first.flags & mesh::GpuInstance::OWNS_BOUNDS, 0);
+        assert_eq!(
+            (first.bounds_min, first.bounds_max),
+            (near.min.to_array(), near.max.to_array())
+        );
+        assert!(kept(first), "a box around the origin is in view");
+
+        let stepped = Mat4::from_translation(Vec3::X);
+        fixture.renderer.set_skinned_instance(
+            handle,
+            &SkinnedInstanceDesc {
+                mesh: &fixture.skinned,
+                material: DEMO_UNTINTED,
+                transform: stepped,
+                bounds: Some(near),
+            },
+        );
+        let far = Aabb {
+            min: Vec3::new(29.5, -0.5, -0.5),
+            max: Vec3::new(30.5, 0.5, 0.5),
+        };
+        fixture
+            .renderer
+            .set_skinned_bounds(handle, Some(far))
+            .expect("a finite, ordered box");
+        fixture.begin(device);
+        let moved = instance_record(&recorder, &fixture.renderer, handle);
+        assert_eq!(
+            (moved.bounds_min, moved.bounds_max),
+            (far.min.to_array(), far.max.to_array())
+        );
+        assert!(
+            !kept(moved),
+            "the moved box is off screen, so the object is culled"
+        );
+        assert_eq!(moved.transform, stepped.to_cols_array());
+        assert_eq!(
+            moved.previous_transform, first.transform,
+            "the box was set after the move, and the record must still say where the \
+             object moved from"
+        );
+        assert_ne!(
+            moved.base_vertex, first.base_vertex,
+            "the frame still re-pointed the object, and the box survived it"
+        );
+
+        fixture
+            .renderer
+            .set_skinned_bounds(handle, None)
+            .expect("no box is always accepted");
+        fixture.begin(device);
+        let cleared = instance_record(&recorder, &fixture.renderer, handle);
+        assert_eq!(cleared.flags & mesh::GpuInstance::OWNS_BOUNDS, 0);
+        assert!(
+            kept(cleared),
+            "without a box the object is in every cull again"
+        );
+
+        fixture.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **A replace takes its description's box**: a box
+    /// [`ForwardRenderer::set_skinned_bounds`] wrote is gone after a
+    /// [`ForwardRenderer::set_skinned_instance`] whose description says
+    /// `None`, and replaced by the description's when it says `Some`. The
+    /// description is authoritative, which is what a caller placing an object
+    /// every frame has to know — see `set_skinned_instance`'s docs.
+    #[test]
+    fn a_skinned_replace_takes_its_descriptions_box() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut fixture = SkinnedFixture::build(device, queue);
+        let desc = |bounds| SkinnedInstanceDesc {
+            mesh: &fixture.skinned,
+            material: DEMO_UNTINTED,
+            transform: Mat4::IDENTITY,
+            bounds,
+        };
+        let handle = fixture
+            .renderer
+            .add_skinned_instance(&desc(None))
+            .expect("a pool of thousands has room for one object");
+        let set = Aabb {
+            min: Vec3::splat(-2.0),
+            max: Vec3::splat(2.0),
+        };
+        let given = Aabb {
+            min: Vec3::splat(-1.0),
+            max: Vec3::splat(1.0),
+        };
+        let record = |renderer: &ForwardRenderer| {
+            renderer.instances.get(handle).expect("the object is live")
+        };
+
+        fixture
+            .renderer
+            .set_skinned_bounds(handle, Some(set))
+            .expect("a finite, ordered box");
+        assert_ne!(
+            record(&fixture.renderer).flags & mesh::GpuInstance::OWNS_BOUNDS,
+            0
+        );
+        fixture.renderer.set_skinned_instance(handle, &desc(None));
+        assert_eq!(
+            record(&fixture.renderer).flags & mesh::GpuInstance::OWNS_BOUNDS,
+            0,
+            "a description with no box takes the set box away"
+        );
+
+        fixture
+            .renderer
+            .set_skinned_bounds(handle, Some(set))
+            .expect("a finite, ordered box");
+        fixture
+            .renderer
+            .set_skinned_instance(handle, &desc(Some(given)));
+        let replaced = record(&fixture.renderer);
+        assert_ne!(replaced.flags & mesh::GpuInstance::OWNS_BOUNDS, 0);
+        assert_eq!(
+            (replaced.bounds_min, replaced.bounds_max),
+            (given.min.to_array(), given.max.to_array()),
+            "a description with a box replaces the set one with its own"
+        );
+
+        fixture.begin(device);
+        fixture.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **A box the culls could not read is refused at the boundary**: an
+    /// inverted one and one with a `NaN` or an infinite corner are
+    /// [`InstancePoolError::InvalidBounds`] from
+    /// [`ForwardRenderer::add_skinned_instance`] and from
+    /// [`ForwardRenderer::set_skinned_bounds`], neither of which writes
+    /// anything, and a panic naming the box from
+    /// [`ForwardRenderer::set_skinned_instance`], which has no `Result` — while
+    /// a degenerate box, a single point, is a box and is accepted.
+    #[test]
+    fn an_unusable_skinned_box_is_refused() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut fixture = SkinnedFixture::build(device, queue);
+        let desc = |bounds| SkinnedInstanceDesc {
+            mesh: &fixture.skinned,
+            material: DEMO_UNTINTED,
+            transform: Mat4::IDENTITY,
+            bounds: Some(bounds),
+        };
+        let unusable = [
+            Aabb {
+                min: Vec3::new(1.0, -1.0, -1.0),
+                max: Vec3::new(-1.0, 1.0, 1.0),
+            },
+            Aabb {
+                min: Vec3::new(-1.0, f32::NAN, -1.0),
+                max: Vec3::ONE,
+            },
+            Aabb {
+                min: Vec3::splat(-1.0),
+                max: Vec3::new(1.0, 1.0, f32::INFINITY),
+            },
+        ];
+        let live = fixture.renderer.instances.live().len();
+        for bounds in unusable {
+            let refused = fixture.renderer.add_skinned_instance(&desc(bounds));
+            assert!(
+                matches!(refused, Err(InstancePoolError::InvalidBounds { .. })),
+                "{bounds:?} was not refused by name: {refused:?}"
+            );
+        }
+        assert_eq!(
+            fixture.renderer.instances.live().len(),
+            live,
+            "a refused object takes no slot"
+        );
+
+        let point = Aabb {
+            min: Vec3::ONE,
+            max: Vec3::ONE,
+        };
+        let handle = fixture
+            .renderer
+            .add_skinned_instance(&desc(point))
+            .expect("a single point is a box");
+        for bounds in unusable {
+            let refused = fixture.renderer.set_skinned_bounds(handle, Some(bounds));
+            assert!(
+                matches!(refused, Err(InstancePoolError::InvalidBounds { .. })),
+                "set_skinned_bounds did not refuse {bounds:?} by name: {refused:?}"
+            );
+            let skinned = &fixture.skinned;
+            let renderer = &mut fixture.renderer;
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                renderer.set_skinned_instance(
+                    handle,
+                    &SkinnedInstanceDesc {
+                        mesh: skinned,
+                        material: DEMO_UNTINTED,
+                        transform: Mat4::IDENTITY,
+                        bounds: Some(bounds),
+                    },
+                );
+            }));
+            assert!(panicked.is_err(), "set_skinned_instance wrote {bounds:?}");
+        }
+        let kept = fixture
+            .renderer
+            .instances
+            .get(handle)
+            .expect("the object is live");
+        assert_eq!(
+            (kept.bounds_min, kept.bounds_max),
+            (point.min.to_array(), point.max.to_array()),
+            "a refused box leaves the one before it in place"
+        );
+
+        fixture.begin(device);
         fixture.destroy(device);
         recorder.assert_valid();
     }
@@ -22172,6 +22564,7 @@ mod tests {
                 mesh: &fixture.skinned,
                 material: DEMO_UNTINTED,
                 transform: Mat4::IDENTITY,
+                bounds: None,
             })
             .expect("a pool of thousands has room for one object");
 
@@ -22223,6 +22616,7 @@ mod tests {
                 mesh: &second,
                 material: DEMO_UNTINTED,
                 transform: Mat4::IDENTITY,
+                bounds: None,
             },
         );
 
@@ -22287,6 +22681,7 @@ mod tests {
                 mesh: &fixture.skinned,
                 material: DEMO_UNTINTED,
                 transform: Mat4::IDENTITY,
+                bounds: None,
             })
             .expect("a pool of thousands has room for one object");
 
@@ -22302,6 +22697,7 @@ mod tests {
                 mesh: &fixture.skinned,
                 material: DEMO_UNTINTED,
                 transform: moved,
+                bounds: None,
             },
         );
         fixture.begin(device);
@@ -22357,6 +22753,7 @@ mod tests {
                 mesh: &fixture.skinned,
                 material: DEMO_UNTINTED,
                 transform: Mat4::IDENTITY,
+                bounds: None,
             })
             .expect("room for one object");
         fixture.begin(device);

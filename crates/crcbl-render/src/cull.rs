@@ -509,9 +509,13 @@ fn max_stretch(basis: Mat3) -> f32 {
 /// origin is. An instance naming an entry past the end of `meshes` is not
 /// visible either — the shader has no such guard, because a bind group's buffer
 /// bound whole is exactly the table and reading past it is a validation error
-/// the caller must not create. A live instance with
-/// [`GpuInstance::BASE_VERTEX_OVERRIDE`] is kept after that empty-mesh check:
-/// its source mesh bounds do not describe its skinned vertex region.
+/// the caller must not create. The box tested is
+/// [`GpuInstance::cull_bounds`]: the record's own under
+/// [`GpuInstance::OWNS_BOUNDS`](crcbl_shaders::mesh::GpuInstance::OWNS_BOUNDS),
+/// the mesh entry's otherwise — and a live instance with
+/// [`GpuInstance::BASE_VERTEX_OVERRIDE`] and no box of its own is kept after
+/// that empty-mesh check, because its source mesh bounds do not describe its
+/// skinned vertex region.
 ///
 /// An instance whose [`flags`](GpuInstance::flags) carry `hidden_view` is **not**
 /// visible, asked straight after the live bit: it is the view's own bit of
@@ -541,13 +545,14 @@ pub fn visible_instances(
         if mesh.index_count == 0 {
             continue;
         }
-        let deforming = instance.flags & GpuInstance::BASE_VERTEX_OVERRIDE != 0;
-        let bounds = Aabb {
-            min: Vec3::from_array(mesh.bounds_min),
-            max: Vec3::from_array(mesh.bounds_max),
-        };
-        let world = bounds.transformed(Mat4::from_cols_array(&instance.transform));
-        if deforming || frustum.intersects(&world) {
+        let kept = instance.cull_bounds(mesh).is_none_or(|(min, max)| {
+            let bounds = Aabb {
+                min: Vec3::from_array(min),
+                max: Vec3::from_array(max),
+            };
+            frustum.intersects(&bounds.transformed(Mat4::from_cols_array(&instance.transform)))
+        });
+        if kept {
             visible.push(u32::try_from(index).unwrap_or_else(|_| {
                 unreachable!("an instance array is indexed by u32 everywhere else")
             }));
@@ -855,6 +860,35 @@ mod tests {
             visible_instances(&frustum(), &[skinned], &[unit_cube()], 0),
             vec![0],
             "a palette may have moved the skinned vertices into view"
+        );
+    }
+
+    /// A skinned instance with a box of its own is culled by that box: outside
+    /// is rejected even where its source box is in view, and a box inside or
+    /// straddling a plane is kept even where its source box is outside.
+    #[test]
+    fn a_skinned_instance_with_its_own_box_is_culled_by_it() {
+        let skinned = |at_x: f32, bounds_min: [f32; 3], bounds_max: [f32; 3]| {
+            let record = at(Vec3::X * at_x);
+            GpuInstance {
+                flags: record.flags | GpuInstance::BASE_VERTEX_OVERRIDE | GpuInstance::OWNS_BOUNDS,
+                bounds_min,
+                bounds_max,
+                ..record
+            }
+        };
+        let instances = [
+            // 0: source box at the origin, in view; own box eight metres right.
+            skinned(0.0, [7.5, -0.5, -0.5], [8.5, 0.5, 0.5]),
+            // 1: source box eight metres right; own box back at the origin.
+            skinned(8.0, [-8.5, -0.5, -0.5], [-7.5, 0.5, 0.5]),
+            // 2: source box eight metres right; own box reaching from inside the
+            //    view to well past its right-hand plane.
+            skinned(8.0, [-8.5, -0.5, -0.5], [0.0, 0.5, 0.5]),
+        ];
+        assert_eq!(
+            visible_instances(&frustum(), &instances, &[unit_cube()], 0),
+            vec![1, 2]
         );
     }
 

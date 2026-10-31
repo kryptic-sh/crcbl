@@ -1970,6 +1970,7 @@ fn skinned_palette_case(headless: Headless) {
             mesh: &region,
             material: crcbl_render::scene::DEMO_UNTINTED,
             transform,
+            bounds: None,
         })
         .expect("an instance pool of thousands has room for one object");
     let mut skinning = Skinning::new(
@@ -2068,6 +2069,7 @@ fn skinned_palette_case(headless: Headless) {
             mesh: &region,
             material: crcbl_render::scene::DEMO_UNTINTED,
             transform: Mat4::from_translation(Vec3::X * SKINNED_SOURCE_OUTSIDE_X),
+            bounds: None,
         },
     );
     let outside = draw(

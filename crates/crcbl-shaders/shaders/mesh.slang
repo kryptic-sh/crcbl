@@ -858,17 +858,27 @@ struct GpuInstance
     /// applied to *this* frame's deformed vertex, and a limb that swung would
     /// report the motion of the body it hangs off.
     uint previous_base_vertex;
-    /// Pads the record to a multiple of the transform's 16-byte alignment.
+    /// This instance's own **model-space** box, read by `cull.slang` in place
+    /// of the mesh entry's when `INSTANCE_OWNS_BOUNDS` is set in `flags` and
+    /// ignored when it is not. Nothing in this file reads it. What a skinned
+    /// instance is culled by, since its mesh entry's box is the bind pose — see
+    /// `crcbl_shaders::mesh::GpuInstance::cull_bounds`.
     ///
-    /// **Spelled out rather than left to the layout rules**, because the four
-    /// targets do not agree about the tail: `std430` and Metal round the struct
-    /// up to that alignment and DXIL's structured-buffer stride does not, so a
-    /// record ending at the field above is 160 bytes in SPIR-V, WGSL and MSL and
-    /// 152 in DXIL — one buffer, two element sizes, and nothing that reports it.
-    /// `DrawConstants` below carries the same pair for `std140`'s version of the
-    /// same rule.
-    uint pad1;
-    uint pad2;
+    /// Six scalars, and they are also what closes the record: the fields sum to
+    /// `crcbl_shaders::mesh::INSTANCE_STRIDE`, a multiple of the transform's
+    /// 16-byte alignment. **That sum
+    /// matters**, because the four targets do not agree about a tail: `std430`
+    /// and Metal round the struct up to that alignment and DXIL's
+    /// structured-buffer stride does not, so a record whose fields stopped
+    /// short of it would be one buffer with two element sizes and nothing that
+    /// reports it. `DrawConstants` below carries a pair of declared padding
+    /// words for `std140`'s version of the same rule.
+    float bounds_min_x;
+    float bounds_min_y;
+    float bounds_min_z;
+    float bounds_max_x;
+    float bounds_max_y;
+    float bounds_max_z;
 };
 
 

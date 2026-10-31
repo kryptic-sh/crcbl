@@ -160,6 +160,23 @@ pub enum InstancePoolError {
         /// Slots that cannot be handed out.
         in_use: u32,
     },
+    /// A box handed over for an instance to be culled by has a non-finite
+    /// corner, or a `min` past its `max` on some axis.
+    ///
+    /// Refused rather than written, because the culls would test it as given:
+    /// an inverted box reaches no frustum and a `NaN` lane fails every plane
+    /// test, so either would drop the object from every view without a word.
+    /// See [`SkinnedInstanceDesc::bounds`](crate::SkinnedInstanceDesc::bounds).
+    #[error(
+        "an instance box must be finite with min <= max on every axis, and this one has min \
+         {min:?} and max {max:?}"
+    )]
+    InvalidBounds {
+        /// The box's lowest corner, as given.
+        min: [f32; 3],
+        /// Its highest corner, as given.
+        max: [f32; 3],
+    },
     /// Anything the seam refused.
     #[error(transparent)]
     Hal(#[from] HalError),
@@ -550,6 +567,34 @@ impl InstancePool {
         let index = handle.index();
         let mut record = self.read(index);
         record.flags = flags | GpuInstance::LIVE;
+        self.write(index, &record);
+        true
+    }
+
+    /// Rewrites `handle`'s own box and the
+    /// [`GpuInstance::OWNS_BOUNDS`] bit that says the culls read it, and
+    /// **nothing else**, on [`set_bases`](Self::set_bases)' terms: a box is not
+    /// a move, so the transform history is left as it is and the element is
+    /// not enrolled in the next [`rotate`](Self::rotate)'s carry-forward.
+    ///
+    /// `owns` is the bit or zero; any other bit in it is ignored. Returns
+    /// whether the handle named a live instance; a stale one writes nothing.
+    pub fn set_bounds(
+        &mut self,
+        handle: InstanceHandle,
+        owns: u32,
+        bounds_min: [f32; 3],
+        bounds_max: [f32; 3],
+    ) -> bool {
+        if !self.slots.contains(handle.cast()) {
+            return false;
+        }
+        let index = handle.index();
+        let mut record = self.read(index);
+        record.flags =
+            (record.flags & !GpuInstance::OWNS_BOUNDS) | (owns & GpuInstance::OWNS_BOUNDS);
+        record.bounds_min = bounds_min;
+        record.bounds_max = bounds_max;
         self.write(index, &record);
         true
     }
@@ -959,6 +1004,8 @@ mod tests {
             flags: n + 3,
             base_vertex: n + 4,
             previous_base_vertex: n + 5,
+            bounds_min: [n as f32 + 6.0; 3],
+            bounds_max: [n as f32 + 7.0; 3],
         }
     }
 
@@ -1318,6 +1365,75 @@ mod tests {
             "a removed element reads back dead"
         );
         assert!(pool.record(2).is_none(), "past the high-water mark");
+
+        pool.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// [`InstancePool::set_bounds`] writes the box and the
+    /// [`GpuInstance::OWNS_BOUNDS`] bit and nothing else: every other flag and
+    /// field survives, a zero `owns` clears the bit, a bit `owns` carries
+    /// besides it is ignored, the transform history is not touched, and a
+    /// stale handle writes nothing.
+    #[test]
+    fn set_bounds_writes_the_box_and_its_bit_alone() {
+        let (recorder, device) = open();
+        let device = device.as_ref();
+        let mut pool = pool(device, 4);
+        let other_flags =
+            (1 << 8) | GpuInstance::CASTS_NO_SHADOW | GpuInstance::BASE_VERTEX_OVERRIDE;
+        let handle = pool
+            .insert(&GpuInstance {
+                flags: other_flags,
+                ..instance(1)
+            })
+            .expect("room");
+        assert!(pool.set(
+            handle,
+            &GpuInstance {
+                flags: other_flags,
+                ..instance(2)
+            }
+        ));
+        let before = pool.get(handle).expect("live");
+
+        let (min, max) = ([-3.0, -2.0, -1.0], [1.0, 2.0, 3.0]);
+        assert!(
+            pool.set_bounds(handle, GpuInstance::OWNS_BOUNDS | (1 << 20), min, max),
+            "the handle is live"
+        );
+        let owned = pool.get(handle).expect("live");
+        assert_eq!(
+            owned,
+            GpuInstance {
+                flags: before.flags | GpuInstance::OWNS_BOUNDS,
+                bounds_min: min,
+                bounds_max: max,
+                ..before
+            },
+            "the box and its bit are written, the extra bit in `owns` is not, and nothing \
+             else moves — the previous transform included"
+        );
+
+        assert!(pool.set_bounds(handle, 0, [0.0; 3], [0.0; 3]));
+        let cleared = pool.get(handle).expect("live");
+        assert_eq!(
+            cleared.flags, before.flags,
+            "a zero `owns` clears the bit alone"
+        );
+
+        assert!(pool.remove(handle), "the handle is live");
+        let mut written = Vec::new();
+        pool.take_written(&mut written);
+        let dead = pool.record(0).expect("below the high-water mark");
+        assert!(
+            !pool.set_bounds(handle, GpuInstance::OWNS_BOUNDS, min, max),
+            "a stale handle is refused"
+        );
+        assert_eq!(pool.record(0), Some(dead), "and writes nothing");
+        written.clear();
+        pool.take_written(&mut written);
+        assert!(written.is_empty(), "nor names the element as written");
 
         pool.destroy(device);
         recorder.assert_valid();

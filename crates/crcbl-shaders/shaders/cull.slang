@@ -117,7 +117,8 @@ struct GpuInstance
     /// element holds a removed instance's leftovers, and the entry point
     /// rejects it before reading anything else. Bit 1 is the base-vertex
     /// override the raster stages read. A set bit retains this instance because
-    /// the source mesh bounds do not describe its skinned vertices.
+    /// the source mesh bounds do not describe its skinned vertices — unless
+    /// bit 17, `INSTANCE_OWNS_BOUNDS`, says the record carries a box of its own.
     uint flags;
     /// The pool vertex this instance's indices are relative to, read **instead
     /// of** the mesh entry's when `INSTANCE_BASE_VERTEX_OVERRIDE` is set in
@@ -131,11 +132,15 @@ struct GpuInstance
     /// geometry stages when the override bit is set, and by nothing here:
     /// this pass decides what is on screen, and neither question is where a fragment was.
     uint previous_base_vertex;
-    /// Pads the record to a multiple of the transform's alignment, matching
-    /// `mesh.slang` — where the four targets' disagreement about the tail is
-    /// written out.
-    uint pad1;
-    uint pad2;
+    /// This instance's own model-space box, matching `mesh.slang`'s copy —
+    /// tested in place of the mesh entry's when `INSTANCE_OWNS_BOUNDS` is set
+    /// in `flags`; see `has_box` below.
+    float bounds_min_x;
+    float bounds_min_y;
+    float bounds_min_z;
+    float bounds_max_x;
+    float bounds_max_y;
+    float bounds_max_z;
 };
 
 /// `GpuInstance::flags` bit 0: this element is a live instance, matching
@@ -152,6 +157,12 @@ static const uint INSTANCE_LIVE = 1;
 /// The mesh table still holds the source bounds, so they cannot reject a
 /// deforming instance: its skinned vertices may have moved into the frustum.
 static const uint INSTANCE_BASE_VERTEX_OVERRIDE = 2;
+
+/// `GpuInstance::flags` bit 17: test the record's own `bounds_min_*` and
+/// `bounds_max_*` instead of the mesh entry's box, matching
+/// `crcbl_shaders::mesh::GpuInstance::OWNS_BOUNDS`. What lets a deforming
+/// instance be culled at all — see `has_box` below.
+static const uint INSTANCE_OWNS_BOUNDS = 0x20000;
 
 /// Which element of `visible_count` this pass adds to.
 ///
@@ -423,15 +434,33 @@ bool admits(GpuInstance instance)
     return (instance.flags & cull.hidden_view) == 0;
 }
 
-/// The world-space box of `instance`'s mesh bounds: its centre and half-extent.
+/// Whether any box describes `instance`'s vertices: false for a deforming
+/// instance that carries none of its own, which every cull then keeps whole.
 ///
-/// The conservative transform the header names. `mul(m, v)` is row-wise —
+/// `crcbl_shaders::mesh::GpuInstance::cull_bounds` is this rule on the host,
+/// and `world_box` below reads the box it chooses.
+bool has_box(GpuInstance instance)
+{
+    return (instance.flags & INSTANCE_OWNS_BOUNDS) != 0
+        || (instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) == 0;
+}
+
+/// The world-space box of `instance`: its centre and half-extent.
+///
+/// The model-space box is the record's own under `INSTANCE_OWNS_BOUNDS` and the
+/// mesh entry's otherwise; a caller asks `has_box` first. The conservative
+/// transform the header names. `mul(m, v)` is row-wise —
 /// `r[i] = dot(m[i], v)` — so `mul(abs(basis), e)` is `r[i] = sum_j |m[i][j]| *
 /// e[j]`, which is the world-axis half-extent of the rotated box.
 void world_box(GpuInstance instance, GpuMesh mesh, out float3 center, out float3 extent)
 {
-    float3 bounds_min = float3(mesh.min_x, mesh.min_y, mesh.min_z);
-    float3 bounds_max = float3(mesh.max_x, mesh.max_y, mesh.max_z);
+    bool owns = (instance.flags & INSTANCE_OWNS_BOUNDS) != 0;
+    float3 bounds_min = owns
+        ? float3(instance.bounds_min_x, instance.bounds_min_y, instance.bounds_min_z)
+        : float3(mesh.min_x, mesh.min_y, mesh.min_z);
+    float3 bounds_max = owns
+        ? float3(instance.bounds_max_x, instance.bounds_max_y, instance.bounds_max_z)
+        : float3(mesh.max_x, mesh.max_y, mesh.max_z);
     float3 local_center = 0.5 * (bounds_max + bounds_min);
     float3 local_extent = 0.5 * (bounds_max - bounds_min);
     float3x3 basis = (float3x3)instance.transform;
@@ -654,7 +683,7 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     }
 
     uint entry = index;
-    if ((instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) == 0)
+    if (has_box(instance))
     {
         float3 center;
         float3 extent;
@@ -692,8 +721,9 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     }
     else if ((cull.features & CULL_FACES) != 0)
     {
-        // A deforming instance's source bounds do not describe its vertices, so
-        // it is kept whole — in every face, on the same terms.
+        // A deforming instance with no box of its own is bounded by nothing its
+        // source mesh holds, so it is kept whole — in every face, on the same
+        // terms.
         entry |= ((1u << FACE_COUNT) - 1) << ENTRY_FACE_SHIFT;
     }
 
@@ -742,7 +772,7 @@ void occlusionMain(uint3 thread: SV_DispatchThreadID)
     }
 
     uint entry = index;
-    if ((instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) == 0)
+    if (has_box(instance))
     {
         float3 center;
         float3 extent;

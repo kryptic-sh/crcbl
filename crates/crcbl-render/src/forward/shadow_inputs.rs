@@ -22,7 +22,8 @@ const FOOTPRINT_SLACK: f32 = 1.0e-3;
 /// the shadow culls would decide it.
 ///
 /// **The cull's own question, asked on the host and answered conservatively.**
-/// `cull.slang` keeps an instance when it is live and its mesh's box, carried by
+/// `cull.slang` keeps an instance when it is live and its box —
+/// [`GpuInstance::cull_bounds`], the record's own or its mesh's — carried by
 /// its transform, reaches inside every plane of the cull's frustum — and only a
 /// kept instance draws. [`crate::cull::visible_instances`] is the same rule, and
 /// this is it with every doubt resolved towards "it could be anywhere".
@@ -34,9 +35,9 @@ pub(super) enum CasterFootprint {
     Nowhere,
     /// Draws only where this world box reaches, slack included.
     Within(Aabb),
-    /// Could draw into any map: a skinned instance, whose vertices are not its
-    /// mesh's and so are bounded by nothing the host holds, or a record whose
-    /// mesh or transform gives no finite box.
+    /// Could draw into any map: a skinned instance with no box of its own,
+    /// whose vertices are not its mesh's and so are bounded by nothing the host
+    /// holds, or a record whose mesh or transform gives no finite box.
     Everywhere,
 }
 
@@ -45,12 +46,6 @@ impl CasterFootprint {
     pub(super) fn of(record: &GpuInstance, meshes: &[GpuMesh]) -> Self {
         if record.flags & GpuInstance::LIVE == 0 {
             return Self::Nowhere;
-        }
-        // The cull keeps a skinned instance whatever its box says — see
-        // `crate::cull::visible_instances` — because its box is its source
-        // mesh's and its vertices are a compute pass's.
-        if record.flags & GpuInstance::BASE_VERTEX_OVERRIDE != 0 {
-            return Self::Everywhere;
         }
         // A mesh id with no entry, or an entry naming no mesh, is one the cull
         // rejects; it is taken as everywhere all the same, because the cost of
@@ -61,9 +56,15 @@ impl CasterFootprint {
         else {
             return Self::Everywhere;
         };
+        // The cull keeps a skinned instance with no box of its own whatever its
+        // mesh's box says — see `crate::cull::visible_instances` — because that
+        // box is its source mesh's and its vertices are a compute pass's.
+        let Some((min, max)) = record.cull_bounds(mesh) else {
+            return Self::Everywhere;
+        };
         let world = Aabb {
-            min: Vec3::from_array(mesh.bounds_min),
-            max: Vec3::from_array(mesh.bounds_max),
+            min: Vec3::from_array(min),
+            max: Vec3::from_array(max),
         }
         .transformed(Mat4::from_cols_array(&record.transform));
         let (center, extent) = (world.center(), world.half_extent());
@@ -896,9 +897,10 @@ mod tests {
         }
     }
 
-    /// A footprint is the cull's own question: dead is nowhere, skinned is
-    /// everywhere, and a live rigid instance is its mesh's box carried by its
-    /// transform, never smaller.
+    /// A footprint is the cull's own question: dead is nowhere, skinned without
+    /// a box of its own is everywhere, skinned with one is that box, and a live
+    /// rigid instance is its mesh's box carried by its transform, never
+    /// smaller.
     #[test]
     fn a_footprint_is_the_cull_s_box_and_never_smaller() {
         let cube = GpuMesh {
@@ -934,6 +936,23 @@ mod tests {
         assert_eq!(
             CasterFootprint::of(&skinned, &meshes),
             CasterFootprint::Everywhere
+        );
+        // A skinned instance that carries a box of its own is that box — not
+        // its mesh's, which sits at the origin here — carried by its transform.
+        let bounded = GpuInstance {
+            flags: skinned.flags | GpuInstance::OWNS_BOUNDS,
+            bounds_min: [-1.0, 0.0, -1.0],
+            bounds_max: [1.0, 2.0, 1.0],
+            ..at(20.0)
+        };
+        let CasterFootprint::Within(bounds) = CasterFootprint::of(&bounded, &meshes) else {
+            panic!("a skinned instance with its own box has a footprint");
+        };
+        assert!(bounds.min.x < 19.0 && bounds.max.x > 21.0);
+        assert!(bounds.min.y < 0.0 && bounds.max.y > 2.0);
+        assert!(
+            bounds.max.y < 2.1 && bounds.min.x > 18.9,
+            "the footprint is the instance's own box, not a wider one"
         );
         for mesh in [1, 7] {
             let unnamed = GpuInstance { mesh, ..at(0.0) };

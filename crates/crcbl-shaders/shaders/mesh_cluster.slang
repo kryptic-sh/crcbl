@@ -405,11 +405,15 @@ struct GpuInstance
     /// skinning region the frame before this one filled. `emit_cluster` below
     /// takes a fragment's previous clip position from the vertex at this base.
     uint previous_base_vertex;
-    /// Pads the record to a multiple of the transform's alignment, matching
-    /// `mesh.slang` — where the four targets' disagreement about the tail is
-    /// written out.
-    uint pad1;
-    uint pad2;
+    /// This instance's own model-space box, matching `mesh.slang`'s copy and
+    /// read by nothing here. It bounds the whole deformed instance, which
+    /// `cull.slang` tests; it says nothing about any one cluster of it.
+    float bounds_min_x;
+    float bounds_min_y;
+    float bounds_min_z;
+    float bounds_max_x;
+    float bounds_max_y;
+    float bounds_max_z;
 };
 
 /// Matching `static const uint INSTANCE_BASE_VERTEX_OVERRIDE` in `mesh.slang`.

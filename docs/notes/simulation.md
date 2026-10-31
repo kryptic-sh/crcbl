@@ -1547,9 +1547,11 @@ layout and a pipeline rewrite later. `SkinnedRegion` reserves two runs,
 through `previous_base_vertex`. The consumer today is the motion target; the TAA
 pass it was reserved for does not exist.
 
-**Culling a skinned instance wants conservative animated bounds from the cook.**
-The bind-pose box inflated by the clip's bounds, computed at cook time. Until a
-cook exists a skinned instance is never frustum-culled.
+**A skinned instance is culled by a box its caller supplies; a cooked one is
+still owed.** `SkinnedInstanceDesc::bounds` and
+`ForwardRenderer::set_skinned_bounds` hand the culls a model-space box, and an
+instance without one is never frustum-culled. What the cook would add is that
+box computed for the caller: the bind-pose box inflated by the clip's bounds.
 
 **One dispatch per animated range, for now.** The GPU-driven form needs a range
 table the shader can index — a second layout to pin against `slangc` — and was

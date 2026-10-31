@@ -499,6 +499,7 @@ impl Gpu {
                 mesh: &draws.last().expect("the reservation was just pushed").mesh,
                 material: row.material,
                 transform: entry.transform,
+                bounds: None,
             });
             if let Err(error) = placed {
                 release_skinned(renderer, draws);

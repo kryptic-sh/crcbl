@@ -1148,6 +1148,7 @@ impl Character {
                     mesh: &limb.mesh,
                     material: self.body_material,
                     transform: body,
+                    bounds: None,
                 },
             );
         }
@@ -1328,6 +1329,7 @@ fn reserve_limb(
         mesh: &skinned,
         material,
         transform: Mat4::IDENTITY,
+        bounds: None,
     });
     match instance {
         Ok(instance) => Ok(Limb {

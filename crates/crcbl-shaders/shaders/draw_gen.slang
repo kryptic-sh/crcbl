@@ -315,11 +315,14 @@ struct GpuInstance
     /// geometry stages when the override bit is set, and by nothing here:
     /// this pass buckets survivors by mesh, and neither question is where a fragment was.
     uint previous_base_vertex;
-    /// Pads the record to a multiple of the transform's alignment, matching
-    /// `mesh.slang` — where the four targets' disagreement about the tail is
-    /// written out.
-    uint pad1;
-    uint pad2;
+    /// This instance's own model-space box, matching `mesh.slang`'s copy and
+    /// read by nothing here: `cull.slang` has already decided what survived.
+    float bounds_min_x;
+    float bounds_min_y;
+    float bounds_min_z;
+    float bounds_max_x;
+    float bounds_max_y;
+    float bounds_max_z;
 };
 
 /// One resident mesh's range in the geometry pools **and its local-space

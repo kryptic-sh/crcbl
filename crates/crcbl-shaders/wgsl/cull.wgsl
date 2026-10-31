@@ -39,8 +39,12 @@ struct GpuInstance_std430_0
     @align(4) flags_0 : u32,
     @align(16) base_vertex_0 : u32,
     @align(4) previous_base_vertex_0 : u32,
-    @align(8) pad1_0 : u32,
-    @align(4) pad2_0 : u32,
+    @align(8) bounds_min_x_0 : f32,
+    @align(4) bounds_min_y_0 : f32,
+    @align(16) bounds_min_z_0 : f32,
+    @align(4) bounds_max_x_0 : f32,
+    @align(8) bounds_max_y_0 : f32,
+    @align(4) bounds_max_z_0 : f32,
 };
 
 @binding(1) @group(0) var<storage, read> instances_0 : array<GpuInstance_std430_0>;
@@ -141,16 +145,48 @@ fn admits_0( _S2 : u32) -> bool
     return ((_S3 & ((cull_0.hidden_view_0)))) == u32(0);
 }
 
-fn world_box_0( _S4 : u32,  _S5 : ptr<function, GpuMesh_std430_0>,  _S6 : ptr<function, vec3<f32>>,  _S7 : ptr<function, vec3<f32>>)
+fn has_box_0( _S4 : u32) -> bool
 {
-    var bounds_min_0 : vec3<f32> = vec3<f32>((*_S5).min_x_0, (*_S5).min_y_0, (*_S5).min_z_0);
-    var bounds_max_0 : vec3<f32> = vec3<f32>((*_S5).max_x_0, (*_S5).max_y_0, (*_S5).max_z_0);
-    var _S8 : vec3<f32> = vec3<f32>(0.5f);
-    var local_extent_0 : vec3<f32> = _S8 * (bounds_max_0 - bounds_min_0);
-    var _S9 : mat4x4<f32> = mat4x4<f32>(instances_0[_S4].transform_0.data_1[i32(0)][i32(0)], instances_0[_S4].transform_0.data_1[i32(1)][i32(0)], instances_0[_S4].transform_0.data_1[i32(2)][i32(0)], instances_0[_S4].transform_0.data_1[i32(3)][i32(0)], instances_0[_S4].transform_0.data_1[i32(0)][i32(1)], instances_0[_S4].transform_0.data_1[i32(1)][i32(1)], instances_0[_S4].transform_0.data_1[i32(2)][i32(1)], instances_0[_S4].transform_0.data_1[i32(3)][i32(1)], instances_0[_S4].transform_0.data_1[i32(0)][i32(2)], instances_0[_S4].transform_0.data_1[i32(1)][i32(2)], instances_0[_S4].transform_0.data_1[i32(2)][i32(2)], instances_0[_S4].transform_0.data_1[i32(3)][i32(2)], instances_0[_S4].transform_0.data_1[i32(0)][i32(3)], instances_0[_S4].transform_0.data_1[i32(1)][i32(3)], instances_0[_S4].transform_0.data_1[i32(2)][i32(3)], instances_0[_S4].transform_0.data_1[i32(3)][i32(3)]);
-    var _S10 : mat3x3<f32> = mat3x3<f32>(_S9[i32(0)].xyz, _S9[i32(1)].xyz, _S9[i32(2)].xyz);
-    (*_S6) = (((vec4<f32>(_S8 * (bounds_max_0 + bounds_min_0), 1.0f)) * (_S9))).xyz;
-    (*_S7) = (((local_extent_0) * (abs_0(_S10))));
+    var _S5 : u32 = instances_0[_S4].flags_0;
+    var _S6 : bool;
+    if((((instances_0[_S4].flags_0) & (u32(131072)))) != u32(0))
+    {
+        _S6 = true;
+    }
+    else
+    {
+        _S6 = ((_S5 & (u32(2)))) == u32(0);
+    }
+    return _S6;
+}
+
+fn world_box_0( _S7 : u32,  _S8 : ptr<function, GpuMesh_std430_0>,  _S9 : ptr<function, vec3<f32>>,  _S10 : ptr<function, vec3<f32>>)
+{
+    var owns_0 : bool = (((instances_0[_S7].flags_0) & (u32(131072)))) != u32(0);
+    var bounds_min_0 : vec3<f32>;
+    if(owns_0)
+    {
+        bounds_min_0 = vec3<f32>(instances_0[_S7].bounds_min_x_0, instances_0[_S7].bounds_min_y_0, instances_0[_S7].bounds_min_z_0);
+    }
+    else
+    {
+        bounds_min_0 = vec3<f32>((*_S8).min_x_0, (*_S8).min_y_0, (*_S8).min_z_0);
+    }
+    var bounds_max_0 : vec3<f32>;
+    if(owns_0)
+    {
+        bounds_max_0 = vec3<f32>(instances_0[_S7].bounds_max_x_0, instances_0[_S7].bounds_max_y_0, instances_0[_S7].bounds_max_z_0);
+    }
+    else
+    {
+        bounds_max_0 = vec3<f32>((*_S8).max_x_0, (*_S8).max_y_0, (*_S8).max_z_0);
+    }
+    var _S11 : vec3<f32> = vec3<f32>(0.5f);
+    var local_extent_0 : vec3<f32> = _S11 * (bounds_max_0 - bounds_min_0);
+    var _S12 : mat4x4<f32> = mat4x4<f32>(instances_0[_S7].transform_0.data_1[i32(0)][i32(0)], instances_0[_S7].transform_0.data_1[i32(1)][i32(0)], instances_0[_S7].transform_0.data_1[i32(2)][i32(0)], instances_0[_S7].transform_0.data_1[i32(3)][i32(0)], instances_0[_S7].transform_0.data_1[i32(0)][i32(1)], instances_0[_S7].transform_0.data_1[i32(1)][i32(1)], instances_0[_S7].transform_0.data_1[i32(2)][i32(1)], instances_0[_S7].transform_0.data_1[i32(3)][i32(1)], instances_0[_S7].transform_0.data_1[i32(0)][i32(2)], instances_0[_S7].transform_0.data_1[i32(1)][i32(2)], instances_0[_S7].transform_0.data_1[i32(2)][i32(2)], instances_0[_S7].transform_0.data_1[i32(3)][i32(2)], instances_0[_S7].transform_0.data_1[i32(0)][i32(3)], instances_0[_S7].transform_0.data_1[i32(1)][i32(3)], instances_0[_S7].transform_0.data_1[i32(2)][i32(3)], instances_0[_S7].transform_0.data_1[i32(3)][i32(3)]);
+    var _S13 : mat3x3<f32> = mat3x3<f32>(_S12[i32(0)].xyz, _S12[i32(1)].xyz, _S12[i32(2)].xyz);
+    (*_S9) = (((vec4<f32>(_S11 * (bounds_max_0 + bounds_min_0), 1.0f)) * (_S12))).xyz;
+    (*_S10) = (((local_extent_0) * (abs_0(_S13))));
     return;
 }
 
@@ -168,18 +204,18 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     {
         return;
     }
-    var _S11 : GpuMesh_std430_0 = meshes_0[instances_0[index_0].mesh_0];
-    if((_S11.index_count_0) == u32(0))
+    var _S14 : GpuMesh_std430_0 = meshes_0[instances_0[index_0].mesh_0];
+    if((_S14.index_count_0) == u32(0))
     {
         return;
     }
     var face_0 : u32;
     var entry_0 : u32;
-    if((((instances_0[index_0].flags_0) & (u32(2)))) == u32(0))
+    if(has_box_0(index_0))
     {
         var center_2 : vec3<f32>;
         var extent_2 : vec3<f32>;
-        world_box_0(index_0, &(_S11), &(center_2), &(extent_2));
+        world_box_0(index_0, &(_S14), &(center_2), &(extent_2));
         if(!in_frustum_0(center_2, extent_2))
         {
             return;
@@ -276,62 +312,62 @@ fn project_box_0( view_proj_1 : mat4x4<f32>,  center_3 : vec3<f32>,  extent_3 : 
         {
             break;
         }
-        var _S12 : f32;
+        var _S15 : f32;
         if(((corner_0 & (u32(1)))) != u32(0))
         {
-            _S12 = 1.0f;
+            _S15 = 1.0f;
         }
         else
         {
-            _S12 = -1.0f;
+            _S15 = -1.0f;
         }
-        var _S13 : f32;
+        var _S16 : f32;
         if(((corner_0 & (u32(2)))) != u32(0))
         {
-            _S13 = 1.0f;
+            _S16 = 1.0f;
         }
         else
         {
-            _S13 = -1.0f;
+            _S16 = -1.0f;
         }
-        var _S14 : f32;
+        var _S17 : f32;
         if(((corner_0 & (u32(4)))) != u32(0))
         {
-            _S14 = 1.0f;
+            _S17 = 1.0f;
         }
         else
         {
-            _S14 = -1.0f;
+            _S17 = -1.0f;
         }
-        var clip_0 : vec4<f32> = (((vec4<f32>(center_3 + vec3<f32>(_S12, _S13, _S14) * extent_3, 1.0f)) * (view_proj_1)));
-        var _S15 : f32 = clip_0.w;
-        if(!(_S15 > 0.0f))
+        var clip_0 : vec4<f32> = (((vec4<f32>(center_3 + vec3<f32>(_S15, _S16, _S17) * extent_3, 1.0f)) * (view_proj_1)));
+        var _S18 : f32 = clip_0.w;
+        if(!(_S18 > 0.0f))
         {
             bounds_0.valid_0 = false;
             return bounds_0;
         }
-        var depth_0 : f32 = clip_0.z / _S15;
-        var x_1 : f32 = (clip_0.x / _S15 * 0.5f + 0.5f) * width_0;
-        var y_0 : f32 = (0.5f - clip_0.y / _S15 * 0.5f) * height_0;
-        var _S16 : bool;
+        var depth_0 : f32 = clip_0.z / _S18;
+        var x_1 : f32 = (clip_0.x / _S18 * 0.5f + 0.5f) * width_0;
+        var y_0 : f32 = (0.5f - clip_0.y / _S18 * 0.5f) * height_0;
+        var _S19 : bool;
         if(!(depth_0 <= 1.0f))
         {
-            _S16 = true;
+            _S19 = true;
         }
         else
         {
-            _S16 = !((abs(x_1)) < 1.6777216e+07f);
+            _S19 = !((abs(x_1)) < 1.6777216e+07f);
         }
-        var _S17 : bool;
-        if(_S16)
+        var _S20 : bool;
+        if(_S19)
         {
-            _S17 = true;
+            _S20 = true;
         }
         else
         {
-            _S17 = !((abs(y_0)) < 1.6777216e+07f);
+            _S20 = !((abs(y_0)) < 1.6777216e+07f);
         }
-        if(_S17)
+        if(_S20)
         {
             bounds_0.valid_0 = false;
             return bounds_0;
@@ -403,32 +439,32 @@ fn occluded_0( view_proj_2 : mat4x4<f32>,  center_4 : vec3<f32>,  extent_4 : vec
     var y0_0 : i32 = i32(floor(bounds_1.min_y_1)) - i32(1);
     var x1_0 : i32 = i32(floor(bounds_1.max_x_1)) + i32(1);
     var y1_0 : i32 = i32(floor(bounds_1.max_y_1)) + i32(1);
-    var _S18 : bool;
+    var _S21 : bool;
     if(x1_0 < i32(0))
     {
-        _S18 = true;
+        _S21 = true;
     }
     else
     {
-        _S18 = y1_0 < i32(0);
+        _S21 = y1_0 < i32(0);
     }
-    if(_S18)
+    if(_S21)
     {
-        _S18 = true;
+        _S21 = true;
     }
     else
     {
-        _S18 = x0_0 >= width_1;
+        _S21 = x0_0 >= width_1;
     }
-    if(_S18)
+    if(_S21)
     {
-        _S18 = true;
+        _S21 = true;
     }
     else
     {
-        _S18 = y0_0 >= height_1;
+        _S21 = y0_0 >= height_1;
     }
-    if(_S18)
+    if(_S21)
     {
         return false;
     }
@@ -443,18 +479,18 @@ fn occluded_0( view_proj_2 : mat4x4<f32>,  center_4 : vec3<f32>,  extent_4 : vec
         {
             if((((right_0 >> (level_1))) - ((left_0 >> (level_1)))) > u32(1))
             {
-                _S18 = true;
+                _S21 = true;
             }
             else
             {
-                _S18 = (((bottom_0 >> (level_1))) - ((top_0 >> (level_1)))) > u32(1);
+                _S21 = (((bottom_0 >> (level_1))) - ((top_0 >> (level_1)))) > u32(1);
             }
         }
         else
         {
-            _S18 = false;
+            _S21 = false;
         }
-        if(_S18)
+        if(_S21)
         {
         }
         else
@@ -463,36 +499,36 @@ fn occluded_0( view_proj_2 : mat4x4<f32>,  center_4 : vec3<f32>,  extent_4 : vec
         }
         level_1 = level_1 + u32(1);
     }
-    var _S19 : u32 = max(((cull_0.target_width_0) >> (level_1)), u32(1)) - u32(1);
-    var _S20 : u32 = min((left_0 >> (level_1)), _S19);
-    var _S21 : u32 = max(((cull_0.target_height_0) >> (level_1)), u32(1)) - u32(1);
-    var _S22 : u32 = min((top_0 >> (level_1)), _S21);
-    var _S23 : u32 = min((right_0 >> (level_1)), _S19);
-    var _S24 : u32 = min((bottom_0 >> (level_1)), _S21);
+    var _S22 : u32 = max(((cull_0.target_width_0) >> (level_1)), u32(1)) - u32(1);
+    var _S23 : u32 = min((left_0 >> (level_1)), _S22);
+    var _S24 : u32 = max(((cull_0.target_height_0) >> (level_1)), u32(1)) - u32(1);
+    var _S25 : u32 = min((top_0 >> (level_1)), _S24);
+    var _S26 : u32 = min((right_0 >> (level_1)), _S22);
+    var _S27 : u32 = min((bottom_0 >> (level_1)), _S24);
     var farthest_0 : f32 = 1.0f;
-    var y_1 : u32 = _S22;
+    var y_1 : u32 = _S25;
     for(;;)
     {
-        if(y_1 <= _S24)
+        if(y_1 <= _S27)
         {
         }
         else
         {
             break;
         }
-        var x_2 : u32 = _S20;
+        var x_2 : u32 = _S23;
         for(;;)
         {
-            if(x_2 <= _S23)
+            if(x_2 <= _S26)
             {
             }
             else
             {
                 break;
             }
-            var _S25 : f32 = min(farthest_0, pyramid_load_0(level_1, vec2<i32>(i32(x_2), i32(y_1))));
+            var _S28 : f32 = min(farthest_0, pyramid_load_0(level_1, vec2<i32>(i32(x_2), i32(y_1))));
             var x_3 : u32 = x_2 + u32(1);
-            farthest_0 = _S25;
+            farthest_0 = _S28;
             x_2 = x_3;
         }
         y_1 = y_1 + u32(1);
@@ -513,51 +549,51 @@ fn occlusionMain(@builtin(global_invocation_id) thread_1 : vec3<u32>)
     {
         return;
     }
-    var _S26 : GpuMesh_std430_0 = meshes_0[instances_0[index_1].mesh_0];
-    if((_S26.index_count_0) == u32(0))
+    var _S29 : GpuMesh_std430_0 = meshes_0[instances_0[index_1].mesh_0];
+    if((_S29.index_count_0) == u32(0))
     {
         return;
     }
     var entry_1 : u32;
-    if((((instances_0[index_1].flags_0) & (u32(2)))) == u32(0))
+    if(has_box_0(index_1))
     {
         var center_5 : vec3<f32>;
         var extent_5 : vec3<f32>;
-        world_box_0(index_1, &(_S26), &(center_5), &(extent_5));
+        world_box_0(index_1, &(_S29), &(center_5), &(extent_5));
         if(!in_frustum_0(center_5, extent_5))
         {
             return;
         }
-        var _S27 : bool;
+        var _S30 : bool;
         if((((cull_0.features_0) & (u32(4)))) != u32(0))
         {
             var bounds_2 : ScreenBounds_0 = project_box_0(mat4x4<f32>(cull_0.view_proj_0.data_0[i32(0)][i32(0)], cull_0.view_proj_0.data_0[i32(1)][i32(0)], cull_0.view_proj_0.data_0[i32(2)][i32(0)], cull_0.view_proj_0.data_0[i32(3)][i32(0)], cull_0.view_proj_0.data_0[i32(0)][i32(1)], cull_0.view_proj_0.data_0[i32(1)][i32(1)], cull_0.view_proj_0.data_0[i32(2)][i32(1)], cull_0.view_proj_0.data_0[i32(3)][i32(1)], cull_0.view_proj_0.data_0[i32(0)][i32(2)], cull_0.view_proj_0.data_0[i32(1)][i32(2)], cull_0.view_proj_0.data_0[i32(2)][i32(2)], cull_0.view_proj_0.data_0[i32(3)][i32(2)], cull_0.view_proj_0.data_0[i32(0)][i32(3)], cull_0.view_proj_0.data_0[i32(1)][i32(3)], cull_0.view_proj_0.data_0[i32(2)][i32(3)], cull_0.view_proj_0.data_0[i32(3)][i32(3)]), center_5, extent_5, f32(cull_0.target_width_0), f32(cull_0.target_height_0));
             if(bounds_2.valid_0)
             {
-                _S27 = (max(bounds_2.max_x_1 - bounds_2.min_x_1, bounds_2.max_y_1 - bounds_2.min_y_1)) < (cull_0.small_feature_pixels_0);
+                _S30 = (max(bounds_2.max_x_1 - bounds_2.min_x_1, bounds_2.max_y_1 - bounds_2.min_y_1)) < (cull_0.small_feature_pixels_0);
             }
             else
             {
-                _S27 = false;
+                _S30 = false;
             }
-            if(_S27)
+            if(_S30)
             {
-                var _S28 : u32 = atomicAdd(&(visible_count_0[u32(7)]), u32(1));
+                var _S31 : u32 = atomicAdd(&(visible_count_0[u32(7)]), u32(1));
                 return;
             }
         }
         if((((cull_0.features_0) & (u32(2)))) != u32(0))
         {
-            _S27 = occluded_0(mat4x4<f32>(cull_0.previous_view_proj_0.data_0[i32(0)][i32(0)], cull_0.previous_view_proj_0.data_0[i32(1)][i32(0)], cull_0.previous_view_proj_0.data_0[i32(2)][i32(0)], cull_0.previous_view_proj_0.data_0[i32(3)][i32(0)], cull_0.previous_view_proj_0.data_0[i32(0)][i32(1)], cull_0.previous_view_proj_0.data_0[i32(1)][i32(1)], cull_0.previous_view_proj_0.data_0[i32(2)][i32(1)], cull_0.previous_view_proj_0.data_0[i32(3)][i32(1)], cull_0.previous_view_proj_0.data_0[i32(0)][i32(2)], cull_0.previous_view_proj_0.data_0[i32(1)][i32(2)], cull_0.previous_view_proj_0.data_0[i32(2)][i32(2)], cull_0.previous_view_proj_0.data_0[i32(3)][i32(2)], cull_0.previous_view_proj_0.data_0[i32(0)][i32(3)], cull_0.previous_view_proj_0.data_0[i32(1)][i32(3)], cull_0.previous_view_proj_0.data_0[i32(2)][i32(3)], cull_0.previous_view_proj_0.data_0[i32(3)][i32(3)]), center_5, extent_5);
+            _S30 = occluded_0(mat4x4<f32>(cull_0.previous_view_proj_0.data_0[i32(0)][i32(0)], cull_0.previous_view_proj_0.data_0[i32(1)][i32(0)], cull_0.previous_view_proj_0.data_0[i32(2)][i32(0)], cull_0.previous_view_proj_0.data_0[i32(3)][i32(0)], cull_0.previous_view_proj_0.data_0[i32(0)][i32(1)], cull_0.previous_view_proj_0.data_0[i32(1)][i32(1)], cull_0.previous_view_proj_0.data_0[i32(2)][i32(1)], cull_0.previous_view_proj_0.data_0[i32(3)][i32(1)], cull_0.previous_view_proj_0.data_0[i32(0)][i32(2)], cull_0.previous_view_proj_0.data_0[i32(1)][i32(2)], cull_0.previous_view_proj_0.data_0[i32(2)][i32(2)], cull_0.previous_view_proj_0.data_0[i32(3)][i32(2)], cull_0.previous_view_proj_0.data_0[i32(0)][i32(3)], cull_0.previous_view_proj_0.data_0[i32(1)][i32(3)], cull_0.previous_view_proj_0.data_0[i32(2)][i32(3)], cull_0.previous_view_proj_0.data_0[i32(3)][i32(3)]), center_5, extent_5);
         }
         else
         {
-            _S27 = false;
+            _S30 = false;
         }
-        if(_S27)
+        if(_S30)
         {
             var entry_2 : u32 = (index_1 | (u32(2147483648)));
-            var _S29 : u32 = atomicAdd(&(visible_count_0[u32(5)]), u32(1));
+            var _S32 : u32 = atomicAdd(&(visible_count_0[u32(5)]), u32(1));
             entry_1 = entry_2;
         }
         else
@@ -582,8 +618,8 @@ fn occlusionMain(@builtin(global_invocation_id) thread_1 : vec3<u32>)
 fn lateMain(@builtin(global_invocation_id) thread_2 : vec3<u32>)
 {
     var index_2 : u32 = thread_2.x;
-    var _S30 : u32 = atomicLoad(&(visible_count_0[u32(0)]));
-    if(index_2 >= (min(_S30, cull_0.capacity_0)))
+    var _S33 : u32 = atomicLoad(&(visible_count_0[u32(0)]));
+    if(index_2 >= (min(_S33, cull_0.capacity_0)))
     {
         return;
     }
@@ -592,14 +628,14 @@ fn lateMain(@builtin(global_invocation_id) thread_2 : vec3<u32>)
     {
         return;
     }
-    var _S31 : u32 = (entry_3 & (u32(16777215)));
-    var _S32 : GpuMesh_std430_0 = meshes_0[instances_0[_S31].mesh_0];
+    var _S34 : u32 = (entry_3 & (u32(16777215)));
+    var _S35 : GpuMesh_std430_0 = meshes_0[instances_0[_S34].mesh_0];
     var center_6 : vec3<f32>;
     var extent_6 : vec3<f32>;
-    world_box_0(_S31, &(_S32), &(center_6), &(extent_6));
+    world_box_0(_S34, &(_S35), &(center_6), &(extent_6));
     if(occluded_0(mat4x4<f32>(cull_0.view_proj_0.data_0[i32(0)][i32(0)], cull_0.view_proj_0.data_0[i32(1)][i32(0)], cull_0.view_proj_0.data_0[i32(2)][i32(0)], cull_0.view_proj_0.data_0[i32(3)][i32(0)], cull_0.view_proj_0.data_0[i32(0)][i32(1)], cull_0.view_proj_0.data_0[i32(1)][i32(1)], cull_0.view_proj_0.data_0[i32(2)][i32(1)], cull_0.view_proj_0.data_0[i32(3)][i32(1)], cull_0.view_proj_0.data_0[i32(0)][i32(2)], cull_0.view_proj_0.data_0[i32(1)][i32(2)], cull_0.view_proj_0.data_0[i32(2)][i32(2)], cull_0.view_proj_0.data_0[i32(3)][i32(2)], cull_0.view_proj_0.data_0[i32(0)][i32(3)], cull_0.view_proj_0.data_0[i32(1)][i32(3)], cull_0.view_proj_0.data_0[i32(2)][i32(3)], cull_0.view_proj_0.data_0[i32(3)][i32(3)]), center_6, extent_6))
     {
-        var _S33 : u32 = atomicAdd(&(visible_count_0[u32(6)]), u32(1));
+        var _S36 : u32 = atomicAdd(&(visible_count_0[u32(6)]), u32(1));
         return;
     }
     visible_0[index_2] = (entry_3 | (u32(1073741824)));

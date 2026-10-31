@@ -418,3 +418,97 @@ fn the_early_phase_marks_and_the_late_phase_rescues() {
     };
     assert!(early_entries(&frustum, &instances, &meshes, 0, &small).is_empty());
 }
+
+/// **A skinned instance's own box is what the occlusion phases and a point
+/// light's faces test**, and one without a box is kept untagged and in every
+/// face, as it was before records could carry one.
+#[test]
+fn a_skinned_instance_is_occluded_and_faced_by_its_own_box() {
+    let extent = (64, 64);
+    let camera = crate::camera::Camera::default();
+    let view_projection = camera.view_projection(1.0);
+    let frustum = Frustum::from_view_projection(view_projection);
+    let mesh = GpuMesh {
+        index_count: 36,
+        bounds_min: [-0.05; 3],
+        bounds_max: [0.05; 3],
+        ..GpuMesh::default()
+    };
+    // Every record sits at the origin, so its source box is in front of the
+    // wall below; only a box of its own can put it behind the wall or off
+    // screen.
+    let skinned = |bounds: Option<(Vec3, Vec3)>| GpuInstance {
+        flags: GpuInstance::LIVE
+            | GpuInstance::BASE_VERTEX_OVERRIDE
+            | bounds.map_or(0, |_| GpuInstance::OWNS_BOUNDS),
+        bounds_min: bounds.map_or([0.0; 3], |(min, _)| min.to_array()),
+        bounds_max: bounds.map_or([0.0; 3], |(_, max)| max.to_array()),
+        transform: Mat4::IDENTITY.to_cols_array(),
+        ..GpuInstance::default()
+    };
+    let around = |center: Vec3| Some((center - Vec3::splat(0.05), center + Vec3::splat(0.05)));
+    let instances = [
+        // 0: no box of its own.
+        skinned(None),
+        // 1: its own box a metre behind the origin, behind the wall.
+        skinned(around(Vec3::new(0.0, 0.0, -1.0))),
+        // 2: its own box a metre in front of the origin, before the wall.
+        skinned(around(Vec3::new(0.0, 0.0, 1.0))),
+        // 3: its own box thirty metres to the right, off screen.
+        skinned(around(Vec3::new(30.0, 0.0, 0.0))),
+    ];
+    let meshes = [mesh];
+    let wall = camera
+        .depth_of(Vec3::new(0.0, 0.0, 0.5), 1.0)
+        .expect("in front of the eye");
+    let history =
+        DepthPyramid::reduce(&depth_image(extent, wall, &[]), extent, Reduction::Farthest);
+    let inputs = EarlyInputs {
+        view_projection,
+        previous_view_projection: view_projection,
+        history: Some(&history),
+        target: extent,
+        small_feature_pixels: None,
+    };
+    let early = early_entries(&frustum, &instances, &meshes, 0, &inputs);
+    assert_eq!(
+        early,
+        vec![0, 1 | ENTRY_OCCLUDED, 2],
+        "the boxless instance is kept unmarked, the box behind the wall is marked, the \
+         one before it is not, and the one off screen is culled"
+    );
+    assert_eq!(
+        late_entry(early[1], &instances, &meshes, view_projection, &history),
+        1 | ENTRY_OCCLUDED,
+        "this frame's wall keeps the mark on the box behind it"
+    );
+
+    // A point light beside the origin: the boxless instance is in every face,
+    // and one whose own box is along +X of the light is in that face and not
+    // in the face looking the other way.
+    let light = PointLight {
+        position: Vec3::new(0.0, 0.0, 0.0),
+        radius: 4.0,
+        color: Vec3::ONE,
+        fill: false,
+    };
+    let matrices: [Mat4; shadow::POINT_FACES] =
+        core::array::from_fn(|face| shadow::point_matrix(&light, face));
+    let faces = face_planes(&matrices);
+    let lit = [
+        skinned(None),
+        skinned(around(Vec3::new(3.0, 0.0, 0.0))),
+        skinned(around(Vec3::new(30.0, 0.0, 0.0))),
+    ];
+    let entries = face_entries(&shadow::point_frustum(&light), &faces, &lit, &meshes);
+    assert_eq!(
+        entries.len(),
+        2,
+        "the box past the light's radius is culled"
+    );
+    assert_eq!(entries[0] >> ENTRY_FACE_SHIFT, 0b11_1111);
+    assert_eq!(entries[1] & crcbl_shaders::cull::ENTRY_INDEX_MASK, 1);
+    let tags = entries[1] >> ENTRY_FACE_SHIFT;
+    assert_ne!(tags & 1, 0, "the box along +X reaches the +X face");
+    assert_eq!(tags & 0b10, 0, "and not the -X face");
+}

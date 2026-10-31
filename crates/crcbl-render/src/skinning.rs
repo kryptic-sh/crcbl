@@ -33,9 +33,12 @@
 //! [`GpuInstance::BASE_VERTEX_OVERRIDE`](crcbl_shaders::mesh::GpuInstance::BASE_VERTEX_OVERRIDE)
 //! takes it from its own record instead of from the mesh entry the draw
 //! resolved. A skinned instance still names its **source** mesh for bucket
-//! scattering and level selection. Instance and cluster culling conservatively
-//! keep deforming geometry: the source bounds and normal cones no longer
-//! describe the vertices that the skinning pass writes.
+//! scattering and level selection. Cluster culling keeps every selected cluster
+//! of a deforming instance, because the source spheres and normal cones no
+//! longer describe the vertices that the skinning pass writes. Instance culling
+//! keeps the whole instance too, unless its record carries a box of its own —
+//! [`SkinnedInstanceDesc::bounds`](crate::SkinnedInstanceDesc::bounds) — which
+//! the culls then test in place of the source mesh's.
 //!
 //! # The region is double-buffered, and the motion-vector pass reads the other half
 //!

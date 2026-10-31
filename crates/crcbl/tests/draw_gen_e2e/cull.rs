@@ -804,6 +804,64 @@ fn the_gpu_rejects_an_instance_hidden_from_its_view() {
     headless.finish();
 }
 
+/// **A skinned instance is culled by a box of its own, and only by one.**
+///
+/// Four skinned records against the scene camera, each drawing the unit cube.
+/// Without [`GpuInstance::OWNS_BOUNDS`] the pass keeps one whatever its mesh's
+/// box says, so the instance whose source box is far outside survives. With
+/// the bit, the record's box decides: one whose source box sits at the origin
+/// but whose own box is far away is culled, which only a pass reading the
+/// record's box can do, and one whose own box straddles the right-hand plane
+/// — scene instance 7's world box, reached from a transform that puts the
+/// source box outside — is kept.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
+fn the_gpu_culls_a_skinned_instance_by_its_own_box() {
+    let headless = open_probe();
+    let meshes = meshes();
+    let frustum = Frustum::from_view_projection(scene_camera().view_projection(aspect()));
+    let skinned = |transform: Mat4, bounds: Option<([f32; 3], [f32; 3])>| {
+        let record = instance(0, transform);
+        let (owns, (bounds_min, bounds_max)) = bounds.map_or((0, ([0.0; 3], [0.0; 3])), |box_| {
+            (GpuInstance::OWNS_BOUNDS, box_)
+        });
+        GpuInstance {
+            flags: record.flags | GpuInstance::BASE_VERTEX_OVERRIDE | owns,
+            bounds_min,
+            bounds_max,
+            ..record
+        }
+    };
+    let far_right = Mat4::from_translation(Vec3::new(20.0, 0.0, 0.0));
+    let instances = [
+        // 0: no box of its own, source box outside — kept.
+        skinned(far_right, None),
+        // 1: source box at the origin, own box twenty metres right — culled.
+        skinned(Mat4::IDENTITY, Some(([19.5, -0.5, -0.5], [20.5, 0.5, 0.5]))),
+        // 2: source box outside, own box straddling the right-hand plane —
+        //    kept.
+        skinned(far_right, Some(([-19.67, -0.5, -0.5], [-18.67, 0.5, 0.5]))),
+        // 3: source box outside, own box at the origin — kept.
+        skinned(far_right, Some(([-20.5, -0.5, -0.5], [-19.5, 0.5, 0.5]))),
+    ];
+    let expected = visible_instances(&frustum, &instances, &meshes, 0);
+    assert_eq!(
+        expected,
+        vec![0, 2, 3],
+        "the reference keeps the boxless instance and the two boxes that reach the frustum"
+    );
+
+    let probe = CullProbe::new(&headless, &instances, &meshes, VISIBLE_CAPACITY);
+    let result = probe.run(&headless, &frustum);
+    assert_eq!(
+        result.visible, expected,
+        "the GPU kept a different set of skinned instances than the reference"
+    );
+
+    probe.destroy(&headless);
+    headless.finish();
+}
+
 /// The one case the reference cannot be trusted to catch on its own: the
 /// visible set must **change** with the camera.
 ///
