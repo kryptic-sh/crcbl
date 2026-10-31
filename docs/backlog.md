@@ -62,10 +62,6 @@ EW's callgrind put over half of its raid demo's GPU-side frame CPU in
   (`apps/puppet`, `apps/viewer`, `apps/editor`, `crcbl-dx12`'s
   `renderer_registers`, the `crcbl` and `crcbl-vk` e2e tests, and EW). Needs
   that API decision.
-- **Palette serialisation** is now the largest remaining per-frame cost: one
-  `extend_from_slice` per float. Writing a `&[Mat4]` as bytes in one go (e.g.
-  through `bytemuck`, if glam's feature is enabled) would cut it. Not measured
-  separately.
 
 ## UI text is still shaped more than once a frame (2026-10-31)
 

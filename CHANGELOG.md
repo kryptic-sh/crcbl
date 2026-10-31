@@ -124,6 +124,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`Skinning::begin_frame` writes each frame's joint palettes a matrix at a
+  time** (one reserved buffer, a `bytemuck` cast of each matrix's columns)
+  instead of a float at a time; the bytes are unchanged (column-major
+  little-endian `f32`, explicit byte swapping kept for big-endian targets). For
+  18 × 64-joint palettes the serialisation went from about 8.5 µs to 0.9 µs a
+  frame.
 - **A `crcbl-ui` node whose style was reused from the frame before no longer
   hashes its `NodeStyle` for layout every frame.** The layout hash is taken once
   when the style is resolved and stored beside it, so `Ui::close` compares

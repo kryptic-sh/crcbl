@@ -835,7 +835,8 @@ impl Skinning {
         self.frames_begun = self.frames_begun.wrapping_add(1);
         let parity = self.parity();
 
-        let mut palette_bytes = Vec::new();
+        let joints: usize = ranges.iter().map(|range| range.palette.len()).sum();
+        let mut palette_bytes = Vec::with_capacity(joints * JOINT_STRIDE);
         let mut binding_base = 0u32;
         let mut plan = Vec::with_capacity(ranges.len());
         for (slot, range) in ranges.iter().enumerate() {
@@ -855,11 +856,7 @@ impl Skinning {
             // list never hands out twice. It is the backstop, not the check.
             device.write_buffer(self.params[frame][slot], 0, &block.to_bytes())?;
 
-            for matrix in range.palette {
-                for value in matrix.to_cols_array() {
-                    palette_bytes.extend_from_slice(&value.to_le_bytes());
-                }
-            }
+            write_palette(&mut palette_bytes, range.palette);
             // `check` held the total to the binding capacity, which is a `u32`.
             binding_base += vertex_count;
             plan.push(vertex_count.div_ceil(WORKGROUP_SIZE));
@@ -1181,6 +1178,24 @@ pub fn skin_vertex(palette: &[Mat4], binding: &SkinBinding, vertex: &MeshVertex)
         uv0: vertex.uv0,
         uv1: vertex.uv1,
         color: vertex.color,
+    }
+}
+
+/// Appends `palette` to `out` as the shader reads it: each matrix's columns,
+/// one after another, every `f32` little-endian.
+///
+/// A little-endian target's native bytes already are that, so each matrix
+/// goes in as one slice rather than a float at a time; a big-endian target
+/// swaps each float explicitly.
+fn write_palette(out: &mut Vec<u8>, palette: &[Mat4]) {
+    for matrix in palette {
+        let columns = matrix.to_cols_array();
+        #[cfg(target_endian = "little")]
+        out.extend_from_slice(bytemuck::cast_slice(&columns));
+        #[cfg(target_endian = "big")]
+        for value in columns {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
     }
 }
 
@@ -2719,5 +2734,61 @@ mod tests {
             let error = Skinning::new(device.as_ref(), &desc).expect_err("a zero is refused");
             assert!(matches!(error, SkinningError::Hal(_)), "{error}");
         }
+    }
+
+    /// The float-at-a-time serialisation `write_palette` replaced, kept as the
+    /// reference its bytes must equal.
+    fn reference_palette(palette: &[Mat4]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for matrix in palette {
+            for value in matrix.to_cols_array() {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn write_palette_matches_the_float_at_a_time_bytes() {
+        // A fixed xorshift, so the values are arbitrary bit patterns (NaN
+        // payloads and subnormals included) and the run is repeatable.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            f32::from_bits(state as u32)
+        };
+        let edges = [
+            -0.0,
+            0.0,
+            f32::from_bits(0x7fc0_0001),
+            f32::from_bits(0xffa0_1234),
+            f32::from_bits(1),
+            f32::from_bits(0x807f_ffff),
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+        ];
+        let mut palette: Vec<Mat4> = (0..64)
+            .map(|_| Mat4::from_cols_array(&std::array::from_fn(|_| next())))
+            .collect();
+        palette.push(Mat4::from_cols_array(&std::array::from_fn(|index| {
+            edges[index % edges.len()]
+        })));
+        // Not symmetric, so a transpose cannot pass.
+        palette.push(Mat4::from_cols_array(&std::array::from_fn(|index| {
+            index as f32
+        })));
+
+        let mut written = vec![0xaa];
+        write_palette(&mut written, &palette);
+        assert_eq!(written[0], 0xaa, "write_palette appends, it does not clear");
+        assert_eq!(written.len() - 1, palette.len() * JOINT_STRIDE);
+        assert!(
+            written[1..] == reference_palette(&palette)[..],
+            "write_palette is not the float-at-a-time bytes"
+        );
     }
 }
