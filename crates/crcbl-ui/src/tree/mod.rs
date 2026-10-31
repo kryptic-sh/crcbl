@@ -435,6 +435,8 @@ struct FrameNode {
     inherited: InheritedId,
     /// Its resolved style.
     style: NodeStyle,
+    /// [`NodeStyle::layout_hash`] of `style`, as resolving it produced.
+    style_hash: u64,
     content: Content,
     /// The parsed font a text span measures and draws in — a registered one,
     /// else its built-in family's — or `None` for the bitmap font. Resolved
@@ -1011,6 +1013,7 @@ impl Ui {
             pseudo: resolved.pseudo,
             inherited: resolved.inherited,
             style: resolved.style,
+            style_hash: resolved.layout_hash,
             content,
             font,
             shown: Shown::Pending,
@@ -1071,18 +1074,15 @@ impl Ui {
     /// ancestor's when its style, children or content changed.
     fn close(&mut self, index: usize) {
         let node = &self.nodes[index];
-        let mut style_hash = DefaultHasher::new();
-        node.style.layout_hash(&mut style_hash);
-        let style_hash = style_hash.finish();
         let stored = self.store.get_mut(node.slot);
         let changed = node.fresh
-            || stored.style_hash != style_hash
+            || stored.style_hash != node.style_hash
             || stored.child_hash != node.child_hash
             || stored.content_hash != node.content_hash;
         if !changed {
             return;
         }
-        stored.style_hash = style_hash;
+        stored.style_hash = node.style_hash;
         stored.child_hash = node.child_hash;
         stored.content_hash = node.content_hash;
         let mut next = Some(index);

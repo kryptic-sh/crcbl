@@ -109,9 +109,6 @@ an ellipsis span draws the layout its cut measured. Left:
     (`TEXTS_KEPT` in `crates/crcbl-ui/src/tree/layout.rs`, evicting to
     three-quarters of it) drops some of its own texts each cycle and measures
     them again; bounded, and only for a very large single layout.
-  - **`NodeStyle::layout_hash` runs for every node every frame** in `Ui::close`
-    even when `resolve_style` reused the stored style; the stored hash is still
-    valid then. 2.6–6.5% of the frame.
   - **SipHash throughout the tree** (`hash_of`, `DefaultHasher` in `push`,
     `call_site_key`, the style key) is 3–4% of the frame; a fast hasher is a new
     dependency, so the owner's call.

@@ -121,6 +121,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A `crcbl-ui` node whose style was reused from the frame before no longer
+  hashes its `NodeStyle` for layout every frame.** The layout hash is taken once
+  when the style is resolved and stored beside it, so `Ui::close` compares
+  stored hashes for every unchanged node. A steady 180-label frame runs about
+  26% fewer instructions.
 - **`crcbl-ui`'s text measure cache keeps a text's measurements for a while
   after the layout that last built it**, rather than only for text that layout
   built. A game that draws each label as a begin-frame, layout and emit cycle of

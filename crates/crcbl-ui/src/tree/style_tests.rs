@@ -1079,3 +1079,239 @@ fn a_node_at_full_opacity_pushes_no_group() {
     assert_eq!(list.len(), 2);
     assert!(list.opacity_groups().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// The layout hash
+// ---------------------------------------------------------------------------
+
+const HASHED_SHEET: &str = "
+    #root > * { height: 10px; }
+    .narrow { width: 10px; }
+    .wide { width: 30px; }
+    .h { width: 20px; }
+    .h:hover { width: 40px; }
+    .f { width: 20px; }
+    .f:focus { width: 50px; }
+    .p1 { --w: 15px; }
+    .p2 { --w: 25px; }
+    .kid { width: var(--w); height: 10px; }
+";
+
+/// What one frame of [`hashed_page`] is built from.
+#[derive(Clone, Copy)]
+struct HashedInputs {
+    class: &'static str,
+    inline_width: f32,
+    parent: &'static str,
+}
+
+const HASHED_STEADY: HashedInputs = HashedInputs {
+    class: "#c.narrow",
+    inline_width: 10.0,
+    parent: "#p.p1",
+};
+
+/// The keys of [`hashed_page`]'s nodes whose width each change moves.
+struct HashedKeys {
+    class: NodeKey,
+    inline: NodeKey,
+    hover: NodeKey,
+    focus: NodeKey,
+    kid: NodeKey,
+    sheet: NodeKey,
+}
+
+/// A row of nodes each sized by one thing a frame can change: a class, an
+/// inline width, a hover rule, a focus rule, a custom property inherited from
+/// a parent's class, and an app sheet that is replaced.
+fn hashed_page(ui: &mut Ui, inputs: HashedInputs) -> HashedKeys {
+    let mut keys = None;
+    ui.block(
+        "#root",
+        &[Declaration::FlexDirection(FlexDirection::Row)],
+        |ui| {
+            let class = ui.block(inputs.class, &[], |_| {}).key;
+            let inline = ui
+                .block(
+                    "#i",
+                    &[Declaration::Width(LengthAuto::Px(inputs.inline_width))],
+                    |_| {},
+                )
+                .key;
+            let hover = ui.block("#h.h", &[], |_| {}).key;
+            let focus = ui.block_with("#f.f", &[], Behavior::BUTTON, |_| {}).key;
+            let mut kid = None;
+            ui.block(inputs.parent, &[], |ui| {
+                kid = Some(ui.block(".kid", &[], |_| {}).key);
+            });
+            let sheet = ui.block("#s.s", &[], |_| {}).key;
+            keys = Some(HashedKeys {
+                class,
+                inline,
+                hover,
+                focus,
+                kid: kid.expect("built"),
+                sheet,
+            });
+        },
+    );
+    keys.expect("built")
+}
+
+/// One frame of [`hashed_page`]: its keys, how many styles it hashed for
+/// layout, and how many it resolved.
+fn hashed_step(
+    ui: &mut Ui,
+    inputs: HashedInputs,
+    pointer: PointerInput,
+    nav: NavInput,
+) -> (HashedKeys, u32, u32) {
+    let before = super::resolve::layout_hashes();
+    ui.begin_frame_with(pointer, nav);
+    let keys = hashed_page(ui, inputs);
+    let hashed = super::resolve::layout_hashes() - before;
+    ui.layout(
+        Vec2::ZERO,
+        AvailableSpace::MAX_CONTENT,
+        &FontAtlas::built_in(),
+    );
+    (keys, hashed, ui.style_stats().resolves)
+}
+
+fn width(ui: &Ui, key: NodeKey) -> f32 {
+    let (min, max) = ui.rect(key).expect("laid out");
+    max.x - min.x
+}
+
+/// **A node whose style was reused hashes nothing for layout, and every
+/// change that re-resolves a style hashes exactly the nodes it re-resolved**
+/// — a class, an inline declaration, a hover, a focus, an inherited custom
+/// property and a replaced sheet each — with the layout following the change.
+#[test]
+fn only_a_re_resolved_style_is_hashed_for_layout_and_its_layout_follows() {
+    let mut ui = Ui::new();
+    let sheet = ui.add_stylesheet("hashed.css", HASHED_SHEET);
+    let app = ui.add_stylesheet("app.css", ".s { width: 5px; }");
+    let nav = NavInput::default();
+    let steady = HASHED_STEADY;
+
+    let (_, hashed, resolves) = hashed_step(&mut ui, steady, idle(), nav);
+    assert_eq!(
+        (hashed, resolves),
+        (8, 8),
+        "a first frame hashes every node"
+    );
+    let (keys, hashed, resolves) = hashed_step(&mut ui, steady, idle(), nav);
+    assert_eq!(
+        (hashed, resolves),
+        (0, 0),
+        "a steady frame hashed a reused style"
+    );
+    assert_eq!(width(&ui, keys.class), 10.0);
+    assert_eq!(width(&ui, keys.kid), 15.0);
+
+    // Each change: how many nodes it re-resolves, the node whose width moves,
+    // and the width it moves to.
+    let check = |ui: &mut Ui,
+                 what: &str,
+                 inputs: HashedInputs,
+                 pointer: PointerInput,
+                 nav: NavInput,
+                 pick: fn(&HashedKeys) -> NodeKey,
+                 want: f32| {
+        let (keys, hashed, resolves) = hashed_step(ui, inputs, pointer, nav);
+        assert!(resolves > 0, "{what} re-resolved nothing");
+        assert_eq!(hashed, resolves, "{what}: hashed {hashed} of {resolves}");
+        assert_eq!(width(ui, pick(&keys)), want, "{what}: layout did not move");
+        let (_, hashed, _) = hashed_step(ui, inputs, pointer, nav);
+        assert_eq!(hashed, 0, "the frame after {what} hashed a reused style");
+    };
+
+    let wide = HashedInputs {
+        class: "#c.wide",
+        ..steady
+    };
+    check(&mut ui, "a class", wide, idle(), nav, |k| k.class, 30.0);
+    check(
+        &mut ui,
+        "a class back",
+        steady,
+        idle(),
+        nav,
+        |k| k.class,
+        10.0,
+    );
+
+    let inline = HashedInputs {
+        inline_width: 12.0,
+        ..steady
+    };
+    check(
+        &mut ui,
+        "an inline width",
+        inline,
+        idle(),
+        nav,
+        |k| k.inline,
+        12.0,
+    );
+
+    let parent = HashedInputs {
+        parent: "#p.p2",
+        ..inline
+    };
+    check(
+        &mut ui,
+        "a parent's class",
+        parent,
+        idle(),
+        nav,
+        |k| k.kid,
+        25.0,
+    );
+
+    let on_hover = {
+        let (min, max) = ui.rect(keys.hover).expect("laid out");
+        hover((min + max) * 0.5)
+    };
+    check(&mut ui, "a hover", parent, on_hover, nav, |k| k.hover, 40.0);
+    check(
+        &mut ui,
+        "an unhover",
+        parent,
+        idle(),
+        nav,
+        |k| k.hover,
+        20.0,
+    );
+
+    let focus = NavInput::NAVIGATION;
+    check(&mut ui, "a focus", parent, idle(), focus, |k| k.focus, 50.0);
+
+    ui.replace_stylesheet(app, ".s { width: 7px; }")
+        .expect("parses");
+    check(
+        &mut ui,
+        "a replaced sheet",
+        parent,
+        idle(),
+        focus,
+        |k| k.sheet,
+        7.0,
+    );
+    ui.replace_stylesheet(sheet, &HASHED_SHEET.replace("30px", "35px"))
+        .expect("parses");
+    let wide = HashedInputs {
+        class: "#c.wide",
+        ..parent
+    };
+    check(
+        &mut ui,
+        "an edited rule",
+        wide,
+        idle(),
+        focus,
+        |k| k.class,
+        35.0,
+    );
+}

@@ -126,6 +126,10 @@ pub(crate) struct StoredNode {
     pub inline: Vec<Declaration>,
     /// Its resolved style as of `style_key`.
     pub resolved: NodeStyle,
+    /// [`NodeStyle::layout_hash`] of `resolved`, written with it, so a node
+    /// that takes its stored style hashes nothing. Zero until the first
+    /// resolve, which a fresh node always runs.
+    pub resolved_hash: u64,
     /// What it passed to its children as of `style_key`.
     pub inherited: InheritedId,
 }
@@ -173,6 +177,7 @@ impl StoredNode {
             style_key: 0,
             inline: Vec::new(),
             resolved: NodeStyle::DEFAULT,
+            resolved_hash: 0,
             inherited: InheritedId::ROOT,
         }
     }

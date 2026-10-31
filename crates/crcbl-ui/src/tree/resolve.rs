@@ -20,7 +20,9 @@
 //! Resolution runs before layout and emission see the node: a node's
 //! [`NodeStyle`] is the resolved one, and [`NodeStyle::layout_hash`] of it is
 //! what decides whether layout caches clear — so a rule that changes only a
-//! colour on hover moves no layout.
+//! colour on hover moves no layout. The hash is taken once per resolve and
+//! stored beside the style, so a node that takes its stored style hashes
+//! nothing either.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
@@ -36,6 +38,9 @@ use crate::style::{
 /// What resolving one node produced.
 pub(super) struct Resolved {
     pub style: NodeStyle,
+    /// [`NodeStyle::layout_hash`] of `style`: the stored one when the style
+    /// was reused, so a steady frame hashes no style.
+    pub layout_hash: u64,
     pub pseudo: PseudoClasses,
     pub inherited: InheritedId,
 }
@@ -111,6 +116,27 @@ impl Element for FrameElement<'_> {
             ..*self
         })
     }
+}
+
+/// [`NodeStyle::layout_hash`] of `style`, finished.
+fn layout_hash_of(style: &NodeStyle) -> u64 {
+    #[cfg(test)]
+    LAYOUT_HASHES.with(|count| count.set(count.get() + 1));
+    let mut hasher = DefaultHasher::new();
+    style.layout_hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many styles [`layout_hash_of`] hashed on this thread.
+    static LAYOUT_HASHES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// How many styles this thread has hashed for layout, for a test to diff.
+#[cfg(test)]
+pub(super) fn layout_hashes() -> u32 {
+    LAYOUT_HASHES.with(std::cell::Cell::get)
 }
 
 impl Ui {
@@ -198,6 +224,7 @@ impl Ui {
         if !fresh && reused && stored.style_key == key && stored.inline == inline {
             return Resolved {
                 style: stored.resolved,
+                layout_hash: stored.resolved_hash,
                 pseudo,
                 inherited: stored.inherited,
             };
@@ -235,14 +262,18 @@ impl Ui {
                 .intern(&style, definition.custom.clone())
         };
 
+        let layout_hash = layout_hash_of(&style);
+
         let stored = self.store.get_mut(slot);
         stored.style_key = key;
         stored.inline.clear();
         stored.inline.extend_from_slice(inline);
         stored.resolved = style;
+        stored.resolved_hash = layout_hash;
         stored.inherited = inherited;
         Resolved {
             style,
+            layout_hash,
             pseudo,
             inherited,
         }
