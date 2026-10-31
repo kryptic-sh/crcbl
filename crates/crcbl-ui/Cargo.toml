@@ -47,7 +47,7 @@ crcbl-reflect = { workspace = true }
 # `content_size` measures each node's scrollable overflow, which is what clamps
 # an `overflow: scroll` container's offset (`Layout::scroll_height`); it adds a
 # field to the layout output and moves no box.
-taffy = { version = "0.14.0", default-features = false, features = ["content_size", "flexbox", "std"] }
+taffy = { version = "0.15.0", default-features = false, features = ["content_size", "flexbox", "std"] }
 # CSS tokenizing and rule-block parsing for `style` — UI section 3 in
 # `docs/notes/tooling.md`, the user's decision of 2026-09-15; selectors, values and the cascade
 # are this crate's. Default features off: `fast_match_byte` and
