@@ -3,7 +3,7 @@
 // the demo under test *renders*.
 //
 //   node web/tools/browser-e2e.mjs [--site target/site] [--demo demos/breakout/]
-//                                  [--no-isolation]
+//                                  [--no-isolation] [--groups D,E,F]
 //
 // `web/run-browser-e2e.sh` is the entry point a human or CI runs; this file is
 // the half that needs a JS engine. Everything here is plain Node with no
@@ -53,6 +53,11 @@
 //      e2e runners fail on that line; this is the same question asked of the
 //      browser side, whose tables are the handle table `crcbl-webgpu` has
 //      instead of one of its own. It runs after group H because it ends the run
+//
+// `--groups` runs a share of them, for a CI job that splits one heavy demo in
+// two: A and B always run, and so does the opening of C that every later group
+// stands on, and the named groups run after them in the order above. The
+// verdict line names what ran. See `SELECTED` for what makes a split sound.
 //
 // THE READBACK IS THE PART THAT NEEDED PROVING. Three ways to get a WebGPU
 // canvas's pixels into JS look equivalent and are not, measured on Chromium 150
@@ -138,7 +143,7 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
  * argument without asking which flag it is reading for. {@link KNOWN_FLAGS} is
  * the list that does not.
  */
-const KNOWN_ARGS = ['adapter', 'demo', 'out', 'site', 'timeout'];
+const KNOWN_ARGS = ['adapter', 'demo', 'groups', 'out', 'site', 'timeout'];
 
 /**
  * The options that are switches rather than values.
@@ -2514,6 +2519,63 @@ const TIMEOUT_MS = Number(
  */
 const ADAPTER = args.adapter ?? process.env.CRCBL_WEB_E2E_ADAPTER ?? 'auto';
 
+/** Every lettered group, in the order a run makes them. See the header. */
+const GROUPS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
+
+/** The groups every run makes: there is no page to check without them. */
+const BOOT_GROUPS = ['A', 'B'];
+
+/**
+ * The groups this run makes: `--groups D,E,F`, or every one of them.
+ *
+ * **This exists to split one demo's run across CI jobs.** The groups run in
+ * order on one page, and on a runner's software rasteriser a heavy demo's run
+ * is the longest job in the Pages workflow — so `.github/workflows/pages.yml`
+ * runs such a demo as two jobs, each naming its share, and the workflow waits
+ * on the longer share rather than on the whole.
+ *
+ * A and B always run, named or not, and so does the opening of C — the click
+ * that gives the canvas the keyboard and the check that the simulation moves —
+ * because every later group stands on the page it leaves; `C` names the
+ * per-demo blocks after it. An unknown letter is an error, like an unknown
+ * option, and so is a list naming nothing beyond A and B: either is a run that
+ * would check less than its caller thinks it asked for.
+ */
+const SELECTED = (() => {
+  if (args.groups === undefined) return new Set(GROUPS);
+  const named = args.groups.split(',').map((letter) => letter.trim());
+  const unknown = named.filter((letter) => !GROUPS.includes(letter));
+  if (unknown.length) {
+    fail(
+      `--groups takes letters from ${GROUPS.join(',')}, comma-separated; ` +
+        `got ${unknown.map((letter) => JSON.stringify(letter)).join(', ')}`
+    );
+  }
+  if (named.every((letter) => BOOT_GROUPS.includes(letter))) {
+    fail(
+      `--groups ${args.groups} names nothing beyond ${BOOT_GROUPS.join(' and ')}, ` +
+        'which every run makes anyway'
+    );
+  }
+  return new Set([...BOOT_GROUPS, ...named]);
+})();
+
+/** Whether this run makes `letter`'s group. */
+const runs = (/** @type {string} */ letter) => SELECTED.has(letter);
+
+/** The selection, written the way the verdict and the shell wrapper read it. */
+const SELECTION = GROUPS.filter(runs).join(' ');
+
+/**
+ * The prefix this run's evidence files carry: the demo, and the groups when
+ * they are not all of them, so two shares of one demo never write over each
+ * other's screenshot and page log.
+ */
+const EVIDENCE =
+  SELECTED.size === GROUPS.length
+    ? SLUG
+    : `${SLUG}-${GROUPS.filter(runs).join('')}`;
+
 /** How many times the canvas is read back once the ball is in flight. */
 const SAMPLE_COUNT = 16;
 
@@ -4013,6 +4075,15 @@ async function preflight(binary, mode, origin) {
 const checks = [];
 
 /**
+ * How many checks had been recorded when C's opening finished, which every run
+ * makes whatever it selected — so the checks past this mark are the ones the
+ * selection bought. `null` until then.
+ *
+ * @type {number | null}
+ */
+let afterOpening = null;
+
+/**
  * When the last check was recorded, so the next one can say how long it took.
  *
  * **This exists because a browser gate's cost is a CI failure of its own.** The
@@ -4053,7 +4124,7 @@ const consoleLines = [];
 
 // **The page log, written as it arrives rather than when the run ends.**
 //
-// The run's own `${SLUG}-${mode}.log` below is written in one call after the
+// The run's own `${EVIDENCE}-${mode}.log` below is written in one call after the
 // last check, so a job the runner kills — a `timeout-minutes` cap firing — used
 // to leave the screenshot and nothing else, and where it stopped could not be
 // recovered from the artifact or from the step log, which flushes nothing
@@ -4063,7 +4134,7 @@ const consoleLines = [];
 // This one is appended per line and named without the adapter mode, because a
 // run that dies may never have chosen one. The upload step takes the whole of
 // `target/web-e2e` and runs `if: always()`, so it survives a cancellation.
-const LIVE_LOG = join(OUT, `${SLUG}-live.log`);
+const LIVE_LOG = join(OUT, `${EVIDENCE}-live.log`);
 writeFileSync(LIVE_LOG, '');
 
 // Records one page line in memory and on disk. Both, rather than deriving the
@@ -4088,6 +4159,10 @@ try {
       (site.isolated ? '' : ' (no COOP/COEP, as GitHub Pages serves it)')
   );
   say(`web e2e: adapter mode "${ADAPTER}"`);
+  // Read by `web/run-browser-e2e.sh`, which holds its per-demo name guards to
+  // the groups that were asked for. Printed before anything can fail, so a run
+  // that dies in group A still says what it was going to make.
+  say(`web e2e: groups selected: ${SELECTION}`);
 
   group('A — the platform');
 
@@ -4713,6 +4788,22 @@ try {
           heldNote()
   );
 
+  // **THE END OF C'S OPENING, WHICH RUNS WHATEVER `--groups` SELECTED.** Every
+  // group after this one stands on what it leaves: a canvas holding the
+  // keyboard, a run started where the demo has a start key, and a simulation
+  // seen advancing. So `C` in `--groups` picks the per-demo blocks below and
+  // never this opening.
+  //
+  // **Skipping those blocks is only sound where they hand the page back as
+  // they found it**, and most say they do: breach's `practice` and shard's
+  // `save` reload and click the canvas again, sundial's `knobs` resets. One
+  // does not: puppet's `walk` ends the character's circuit and leaves it at a
+  // step, and group E's queued-input checks in `browser-queued-input.mjs`
+  // start from there — so puppet's split in `.github/workflows/pages.yml`
+  // keeps C, D and E in one job. Check a demo's blocks before splitting it.
+  afterOpening = checks.length;
+  if (!runs('C')) say("web e2e: C's per-demo blocks are not selected");
+
   // **AND THE PAGE'S OWN CONTROLS, WHICH NOTHING ELSE HERE PRESSES.** Only the
   // two comparison fixtures and tide's gallery have a `knobs` block, because
   // they are the only demos on the site whose controls are HTML rather than keys
@@ -4737,7 +4828,7 @@ try {
   // focus coming back does not resume it — group E asserts all three. So each
   // reading below is taken after putting the run back in play the way a visitor
   // does: a click on the canvas, then Escape.
-  if (EXPECTED.knobs) {
+  if (EXPECTED.knobs && runs('C')) {
     const knobs = EXPECTED.knobs;
 
     /**
@@ -5392,7 +5483,7 @@ try {
   // Every number it asserts on comes from `apps/puppet/src/map.rs`, and the
   // failure messages carry the readings, so a red run here says which of the
   // four went wrong and at what value.
-  if (EXPECTED.walk) {
+  if (EXPECTED.walk && runs('C')) {
     const walk = EXPECTED.walk;
 
     /** The most recent value `pattern` captured on a HUD line, as a number. */
@@ -5665,7 +5756,7 @@ try {
   // Both shots are aimed by driving the demo's own look input and reading the
   // `aim` field back, rather than by reaching past it into the simulation — so
   // what the gate proves is that a player can aim, not that a test can.
-  if (EXPECTED.range) {
+  if (EXPECTED.range && runs('C')) {
     const range = EXPECTED.range;
 
     /** The most recent value `pattern` captured on a HUD line, as a number. */
@@ -6467,7 +6558,7 @@ try {
   //   the way **does not arrive**. Without the control, "health fell" passes
   //   for a build whose bots hit whatever they fired at, and the map's cover
   //   would be scenery.
-  if (EXPECTED.practice) {
+  if (EXPECTED.practice && runs('C')) {
     const practice = EXPECTED.practice;
     const mapUrl = `${url}${practice.query}`;
     const before = hud().length;
@@ -6761,7 +6852,7 @@ try {
       .map((line) => line.match(pattern)?.[1])
       .filter((value) => value !== undefined);
 
-  if (EXPECTED.zone) {
+  if (EXPECTED.zone && runs('C')) {
     const zone = EXPECTED.zone;
 
     // ---- the pair about input reaching the controller at all ----------------
@@ -6998,7 +7089,7 @@ try {
   // frames are arriving; `engaged` is not — a felled foe stops being engaged —
   // so its claims are made against the maximum any beat reported rather than
   // against the state at the moment of asking.
-  if (EXPECTED.fight) {
+  if (EXPECTED.fight && runs('C')) {
     const fight = EXPECTED.fight;
 
     /** Every value `pattern` has captured on the beats from `from` on, as numbers. */
@@ -7353,7 +7444,7 @@ try {
   // simulated tick; every reading after a reload is taken from the *first*
   // heartbeat that boot logged, which is another one. A machine drawing this
   // zone five times slower reaches both at the same simulated moment.
-  if (EXPECTED.save) {
+  if (EXPECTED.save && runs('C')) {
     const save = EXPECTED.save;
 
     /** One heartbeat, as the fields this block reads. */
@@ -7639,7 +7730,7 @@ try {
   // `app::Screen::log_heartbeat` logs on any edit as well as every
   // `HEARTBEAT_TICKS`, so every reading below is a line the demo emitted
   // because the thing being asserted had already happened.
-  if (EXPECTED.settings) {
+  if (EXPECTED.settings && runs('C')) {
     const settings = EXPECTED.settings;
 
     /** One of this screen's keys, pressed and released `times` over. */
@@ -7891,7 +7982,7 @@ try {
   //
   // Every failure message carries the values, so a red run says which of the
   // four went wrong and at what reading.
-  if (EXPECTED.budget) {
+  if (EXPECTED.budget && runs('C')) {
     const budget = EXPECTED.budget;
 
     /** Every HUD line, as the fields this block cares about. */
@@ -8006,7 +8097,7 @@ try {
   //
   // Its control is that the hash moves: a hash that never changed would match a
   // constant for the wrong reason.
-  if (EXPECTED.determinism) {
+  if (EXPECTED.determinism && runs('C')) {
     const det = EXPECTED.determinism;
 
     /** Every HUD line, as the fields this block cares about. */
@@ -8079,7 +8170,7 @@ try {
   //
   // Every failure message carries the readings, so a red run says which claim
   // went wrong and at what value.
-  if (EXPECTED.loop) {
+  if (EXPECTED.loop && runs('C')) {
     const loop = EXPECTED.loop;
 
     /** Every HUD line, as the fields this block cares about. */
@@ -8566,7 +8657,7 @@ try {
   // in this process. What is dispatched is the event the handler listens for,
   // carrying a `DataTransfer` with a real `File` in it, which is what a browser
   // delivers.
-  if (EXPECTED.drop) {
+  if (EXPECTED.drop && runs('C')) {
     // **A drag the page does not claim is a tab that navigates to the file**,
     // taking the canvas, the device and the log with it. `dragover` is the
     // event that decides it, so it is the one asked about; the frame lighting
@@ -8729,7 +8820,7 @@ try {
   // that block puts `riggedPairGlb()` on screen `pose` is `0.00` and could
   // never take a second value. It ran *before* the drop until the shelf landed,
   // when the document the module generates was what a tab opened with.
-  if (EXPECTED.playing) {
+  if (EXPECTED.playing && runs('C')) {
     const posed = await until(async () => {
       const seen = valuesOf(EXPECTED.playing);
       return seen.size > 1 ? seen : null;
@@ -8756,7 +8847,7 @@ try {
   // **IT RUNS AFTER THE DROP BLOCK, FOR THE REASON THE CHECK ABOVE DOES**: the
   // document the page opens with has no skin, so the dropped one is the only
   // skinned geometry a browser run ever has to look at.
-  if (EXPECTED.deforming) {
+  if (EXPECTED.deforming && runs('C')) {
     // **The viewer's own control, not a switch this harness reaches past it.**
     // `apps/viewer/src/app.rs` latches the turntable off the first time
     // `Controls::is_dragging` is true, which is a press *and* a movement — a
@@ -8935,7 +9026,7 @@ try {
   // `Input.insertText`, because the shim listens for `keydown` and nothing
   // else: text inserted by the protocol never reaches a listener and would
   // prove nothing about the path a visitor's keyboard takes.
-  if (EXPECTED.console) {
+  if (EXPECTED.console && runs('C')) {
     const spec = EXPECTED.console;
 
     // CDP's modifier bits, which are not the shim's.
@@ -9275,7 +9366,7 @@ try {
   // channel reports. The demo page is already loaded, its store is read once at
   // boot and never again, and the navigation below is what makes the write take
   // effect.
-  if (EXPECTED.autoexec) {
+  if (EXPECTED.autoexec && runs('C')) {
     const auto = EXPECTED.autoexec;
 
     // `crates/crcbl-store/src/web/opfs.rs`'s record frame, as its `frame()`
@@ -9508,182 +9599,151 @@ try {
     await until(async () => (hud().length > handedBack ? hud().length : null));
   }
 
-  group('D — it renders');
+  if (runs('D')) {
+    group('D — it renders');
 
-  // Sampled repeatedly rather than twice: a single pair could catch two frames
-  // that happen to match, and the count of distinct frames is a more useful
-  // number in a failure report than a boolean.
-  const samples = [];
-  for (let i = 0; i < SAMPLE_COUNT; i += 1) {
-    const sample = await evaluate(page, SAMPLE_CANVAS('#canvas'));
-    if (sample) samples.push(sample);
-    await pause(50);
+    // Sampled repeatedly rather than twice: a single pair could catch two
+    // frames that happen to match, and the count of distinct frames is a more
+    // useful number in a failure report than a boolean.
+    const samples = [];
+    for (let i = 0; i < SAMPLE_COUNT; i += 1) {
+      const sample = await evaluate(page, SAMPLE_CANVAS('#canvas'));
+      if (sample) samples.push(sample);
+      await pause(50);
+    }
+
+    const last = samples.at(-1);
+    check(
+      'D',
+      'the canvas has a backing store',
+      last && last.width > 0 && last.height > 0,
+      last ? `${last.width}x${last.height}` : 'no canvas'
+    );
+
+    // NOTHING IS FILTERED OUT OF THIS. It used to drop Chrome's "configured
+    // with a different format than is preferred by this device" warning, which
+    // `crcbl-webgpu` earned on every frame by offering `Bgra8Unorm` first while
+    // the browser preferred `rgba8unorm`. That backend now fetches
+    // `getPreferredCanvasFormat()` during its instance-open and reports it
+    // first, so the warning is not produced — and the filter that made it
+    // invisible is gone with it, because the whole cost of that warning is a
+    // full-canvas copy per frame that nothing else here would notice.
+    check(
+      'D',
+      'the browser reported no WebGPU device errors',
+      deviceErrors.length === 0,
+      deviceErrors.length
+        ? `${deviceErrors.length} error(s); first: ${deviceErrors[0].split('\n')[0]}`
+        : ''
+    );
+
+    check(
+      'D',
+      'the canvas is not one flat colour',
+      last && last.distinct > 1,
+      last
+        ? `${last.distinct} distinct colour(s): ${describe(last)}`
+        : 'nothing sampled'
+    );
+
+    // **A frame hash that changed is how every demo but one proves its loop is
+    // alive.** It is the cheapest proof there is and it needs nothing of the
+    // demo, which is why it is the check every row here makes — and why the one
+    // row that cannot make it needs a replacement rather than an exemption.
+    //
+    // `still` in EXPECTATIONS names the demo that draws the same picture on
+    // purpose: a settings screen has nothing to animate, so an identical hash
+    // is the correct result and a *changed* one would be the finding. The pair
+    // below asks the two halves separately — the loop presented new frames
+    // across the same window the samples were taken in, and the picture did not
+    // move while it did. Neither half passes on a stopped loop:
+    // `crcbl.frames()` is incremented by `web/engine/demo.js` inside the
+    // callback itself, so a loop that stopped leaves it standing and
+    // `loopFrames` reports that rather than hanging.
+    const frames = new Set(samples.map((s) => s.hash));
+    if (EXPECTED.still) {
+      const presented = await loopFrames(page, SAMPLE_COUNT);
+      check(
+        'D',
+        'the loop presents new frames while the canvas holds still',
+        presented !== null && presented > 0,
+        presented !== null
+          ? `${presented} frame(s) presented`
+          : `the loop presented nothing in ${pollCeiling()} ms`
+      );
+      check(
+        'D',
+        'and the canvas holds still, which is what this demo draws',
+        frames.size === 1,
+        `${frames.size} distinct frame(s) across ${samples.length} samples`
+      );
+    } else {
+      check(
+        'D',
+        'the canvas changes between frames while the simulation runs',
+        frames.size > 1,
+        `${frames.size} distinct frame(s) across ${samples.length} samples`
+      );
+    }
+
+    // **A number that only comes back if a readback completed**, and the one
+    // check here that is about the GPU answering rather than about pixels.
+    //
+    // `crcbl_render::cull_stats` copies the cull's survivor count into a
+    // host-readable buffer and polls for it across frames; what it gets reaches
+    // the debug panel, which is *glyphs on the canvas* — there is no DOM
+    // element, no wasm export and nothing in `crcbl.gpu.stats()` carrying it.
+    // So the ring's own `trace!` line, emitted where the answer lands, is the
+    // only thing a page can be asked for, and it is turned on for the length of
+    // this check alone.
+    //
+    // It is worth a check because this failed **in a browser and nowhere
+    // else**: `crcbl-webgpu` answers the first `poll_readback` on a handle with
+    // `Pending` and sends the real answer back a frame later, so a ring that
+    // polled a slot once and released it on the next line threw every answer
+    // away unread, and the panel's culling rows were empty for ever here while
+    // every native backend passed. Nothing else in this file would notice: the
+    // canvas looks identical. **Only a demo that culls something can report
+    // having culled it.** The ring records a stats copy when the cull pass runs
+    // over mesh instances; a demo whose frame is sprites and text builds a
+    // `ForwardRenderer` all the same but gives that pass nothing to count, so
+    // the readback correctly never arrives and asserting it here would be
+    // asserting a thing that is not true. `culls` in EXPECTATIONS names the
+    // demos with mesh geometry — the ones this claim is about — rather than
+    // skipping the check quietly everywhere else.
+    if (EXPECTED.culls) {
+      await evaluate(page, `(globalThis.crcbl.logLevel(${LOG_TRACE}), true)`);
+      const culled = await until(
+        async () =>
+          consoleLines.find((line) => CULL_STATS_LINE.test(line)) ?? null
+      );
+      await evaluate(page, `(globalThis.crcbl.logLevel(${LOG_INFO}), true)`);
+      check(
+        'D',
+        'the culling statistics come back off the GPU',
+        Boolean(culled),
+        culled?.trim() ?? 'the cull-stats readback never answered'
+      );
+    }
   }
 
-  const last = samples.at(-1);
-  check(
-    'D',
-    'the canvas has a backing store',
-    last && last.width > 0 && last.height > 0,
-    last ? `${last.width}x${last.height}` : 'no canvas'
-  );
-
-  // NOTHING IS FILTERED OUT OF THIS. It used to drop Chrome's "configured with
-  // a different format than is preferred by this device" warning, which
-  // `crcbl-webgpu` earned on every frame by offering `Bgra8Unorm` first while
-  // the browser preferred `rgba8unorm`. That backend now fetches
-  // `getPreferredCanvasFormat()` during its instance-open and reports it first,
-  // so the warning is not produced — and the filter that made it invisible is
-  // gone with it, because the whole cost of that warning is a full-canvas copy
-  // per frame that nothing else here would notice.
-  check(
-    'D',
-    'the browser reported no WebGPU device errors',
-    deviceErrors.length === 0,
-    deviceErrors.length
-      ? `${deviceErrors.length} error(s); first: ${deviceErrors[0].split('\n')[0]}`
-      : ''
-  );
-
-  check(
-    'D',
-    'the canvas is not one flat colour',
-    last && last.distinct > 1,
-    last
-      ? `${last.distinct} distinct colour(s): ${describe(last)}`
-      : 'nothing sampled'
-  );
-
-  // **A frame hash that changed is how every demo but one proves its loop is
-  // alive.** It is the cheapest proof there is and it needs nothing of the
-  // demo, which is why it is the check every row here makes — and why the one
-  // row that cannot make it needs a replacement rather than an exemption.
-  //
-  // `still` in EXPECTATIONS names the demo that draws the same picture on
-  // purpose: a settings screen has nothing to animate, so an identical hash is
-  // the correct result and a *changed* one would be the finding. The pair below
-  // asks the two halves separately — the loop presented new frames across the
-  // same window the samples were taken in, and the picture did not move while
-  // it did. Neither half passes on a stopped loop: `crcbl.frames()` is
-  // incremented by `web/engine/demo.js` inside the callback itself, so a loop
-  // that stopped leaves it standing and `loopFrames` reports that rather than
-  // hanging.
-  const frames = new Set(samples.map((s) => s.hash));
-  if (EXPECTED.still) {
-    const presented = await loopFrames(page, SAMPLE_COUNT);
-    check(
-      'D',
-      'the loop presents new frames while the canvas holds still',
-      presented !== null && presented > 0,
-      presented !== null
-        ? `${presented} frame(s) presented`
-        : `the loop presented nothing in ${pollCeiling()} ms`
-    );
-    check(
-      'D',
-      'and the canvas holds still, which is what this demo draws',
-      frames.size === 1,
-      `${frames.size} distinct frame(s) across ${samples.length} samples`
-    );
-  } else {
-    check(
-      'D',
-      'the canvas changes between frames while the simulation runs',
-      frames.size > 1,
-      `${frames.size} distinct frame(s) across ${samples.length} samples`
-    );
-  }
-
-  // **A number that only comes back if a readback completed**, and the one
-  // check here that is about the GPU answering rather than about pixels.
-  //
-  // `crcbl_render::cull_stats` copies the cull's survivor count into a
-  // host-readable buffer and polls for it across frames; what it gets reaches
-  // the debug panel, which is *glyphs on the canvas* — there is no DOM element,
-  // no wasm export and nothing in `crcbl.gpu.stats()` carrying it. So the ring's
-  // own `trace!` line, emitted where the answer lands, is the only thing a page
-  // can be asked for, and it is turned on for the length of this check alone.
-  //
-  // It is worth a check because this failed **in a browser and nowhere else**:
-  // `crcbl-webgpu` answers the first `poll_readback` on a handle with `Pending`
-  // and sends the real answer back a frame later, so a ring that polled a slot
-  // once and released it on the next line threw every answer away unread, and
-  // the panel's culling rows were empty for ever here while every native backend
-  // passed. Nothing else in this file would notice: the canvas looks identical.
-  // **Only a demo that culls something can report having culled it.** The ring
-  // records a stats copy when the cull pass runs over mesh instances; a demo
-  // whose frame is sprites and text builds a `ForwardRenderer` all the same but
-  // gives that pass nothing to count, so the readback correctly never arrives
-  // and asserting it here would be asserting a thing that is not true. `culls`
-  // in EXPECTATIONS names the demos with mesh geometry — the ones this claim is
-  // about — rather than skipping the check quietly everywhere else.
-  if (EXPECTED.culls) {
-    await evaluate(page, `(globalThis.crcbl.logLevel(${LOG_TRACE}), true)`);
-    const culled = await until(
-      async () =>
-        consoleLines.find((line) => CULL_STATS_LINE.test(line)) ?? null
-    );
-    await evaluate(page, `(globalThis.crcbl.logLevel(${LOG_INFO}), true)`);
-    check(
-      'D',
-      'the culling statistics come back off the GPU',
-      Boolean(culled),
-      culled?.trim() ?? 'the cull-stats readback never answered'
-    );
-  }
-
-  group('E — focus and pause');
-
-  // **The reported bug, in a real browser.** A canvas that loses keyboard focus
-  // used to keep simulating and keep saying "Playing." — for a game sitting
-  // behind another window, that is a life lost while nobody is looking.
-  //
-  // The blur is real, not synthesized: moving focus to another element in the
-  // document fires a `FocusEvent` at the canvas exactly as clicking outside it
-  // does, which is the shim listener under test. There is no way to make the
-  // browser blur an element through `Input.dispatch*` — Tab is swallowed by the
-  // shim precisely so the page does not steal the game's keys.
-  //
-  // **What is measured is the HUD heartbeat**, which both samples log every
-  // sixty ticks, whatever state the game is in. The canvas would be the more
-  // direct observable and was tried first: breakout's ball dies within a second
-  // of the last paddle input, so a still board is the *normal* state by this
-  // point in the run and "the picture stopped changing" passes whether or not
-  // anything paused. A line that only the tick loop can emit does not.
-  // The control, and it is what makes every check after it mean something: a
-  // tick loop that emits nothing fails here, loudly, instead of the pause check
-  // passing for free on a run where no heartbeat could have appeared anyway.
-  //
-  // **Measured again rather than read off group B's**, because the question
-  // here is about *this* point in the run: everything between the two has
-  // clicked, dragged and held keys at the demo, and a tick loop that stopped
-  // somewhere in there is exactly what would make the pause check below pass
-  // for nothing. Group B's answer is a calibration; this one is a heartbeat.
-  const control = await heartbeatMs(
-    Math.min(budget(HEARTBEAT_DEADLINE_MS), pollCeiling())
-  );
-  const beat = control.pace;
-
-  check(
-    'E',
-    'a running demo logs its HUD from inside the tick',
-    beat !== null,
-    beat === null
-      ? `no ${control.line === 1 ? 'first' : 'second'} HUD line in ` +
-          `${control.budget} ms`
-      : `two HUD lines ${beat.beat} ms apart, in ${beat.waited} ms, with ` +
-          `every budget here scaled ${slowdown.toFixed(1)}x`
-  );
+  /** Group E's heartbeat control: two HUD lines, on a budget in demo time. */
+  const tickControl = () =>
+    heartbeatMs(Math.min(budget(HEARTBEAT_DEADLINE_MS), pollCeiling()));
 
   // **Never shorter than the constant used to give.** `TICK_WINDOW_MS` is the
   // floor, so a fast machine watches exactly as long as it did before this was
   // adaptive; a slow one watches longer. Shortening it on a fast machine would
   // make "a paused demo runs no ticks at all" easier to satisfy, which is the
   // one direction this change must not move.
-  const windowMs = Math.max(
-    TICK_WINDOW_MS,
-    (beat?.beat ?? 0) * TICK_WINDOW_BEATS
-  );
+  const tickWindow = (/** @type {{ beat: number } | null} */ beat) =>
+    Math.max(TICK_WINDOW_MS, (beat?.beat ?? 0) * TICK_WINDOW_BEATS);
+
+  /**
+   * How long groups E and F watch for heartbeats. Set from group E's control,
+   * or measured the same way when E is not selected and F is; see below.
+   */
+  let windowMs = TICK_WINDOW_MS;
 
   const heartbeats = async () => {
     const before = hud().length;
@@ -9691,1401 +9751,1493 @@ try {
     return hud().length - before;
   };
 
-  // **Escape, pressed on a page that is holding the pointer.** That is the only
-  // way the demos which ask for Pointer Lock ever meet the key: a browser
-  // reserves Escape while a page is locked, spends it on releasing the lock and
-  // delivers no `keydown` to anyone — so the demos whose hint says Escape pauses
-  // stayed locked and kept playing, which is what this block is here about. What
-  // pauses them is the release itself: `__crcbl_web_pointer_lock` in
-  // `crates/crcbl-shell/src/web/mod.rs` reports an exit the engine never asked
-  // for as the focus loss the loop already pauses on.
-  //
-  // **Ahead of the blur rather than in place of it.** Everything below presses
-  // Escape on a page that is *not* locked — the blur that starts it releases the
-  // lock — which is the different question this group has always asked.
-  const wantsLock = await evaluate(
-    page,
-    `crcbl.exports.__crcbl_web_pointer_lock_wanted(crcbl.gpu.canvasId)`
-  );
-  // Asked of every demo and in both directions: the engine's own answer, read
-  // through the export the shim polls once a frame, against what this file says
-  // about it. A demo that starts locking without `locks` on its row would
-  // otherwise skip the checks below and say nothing at all about them.
-  check(
-    'E',
-    'the demos that hold the pointer are the ones this file says hold it',
-    (wantsLock !== 0) === Boolean(EXPECTED.locks),
-    `the engine ${wantsLock !== 0 ? 'is' : 'is not'} asking for the pointer and ` +
-      `this demo's row ${EXPECTED.locks ? 'says it does' : 'does not say it does'}`
-  );
+  laterScenarios: {
+    if (runs('E')) {
+      group('E — focus and pause');
 
-  if (EXPECTED.locks) {
-    // A log of what the document saw, read back only when a check below
-    // fails: each pointerlockchange with the element it left, and every keydown
-    // that reached the document. The two checks under it are about an ordering
-    // — the browser releases the lock, the release pauses the demo — and a
-    // failure that only reports the end state cannot say which half moved.
-    await evaluate(
-      page,
-      `(() => { window.__crcblLockLog = [];
-                document.addEventListener('pointerlockchange', () =>
-                  window.__crcblLockLog.push('change:' +
-                    (document.pointerLockElement ? 'locked' : 'unlocked')));
-                document.addEventListener('keydown', (e) =>
-                  window.__crcblLockLog.push('key:' + e.code));
-                return true; })()`
-    );
-    const lockLog = async () =>
-      JSON.stringify(await evaluate(page, `window.__crcblLockLog`));
-    // The corner again, for the reason every other click in this group takes it:
-    // a centred click is a click on whatever the demo lays out in the middle.
-    const grabbed = await focusPoint();
-    await clickAt(grabbed);
-    const holding = await until(async () =>
-      (await evaluate(
+      // **The reported bug, in a real browser.** A canvas that loses keyboard
+      // focus used to keep simulating and keep saying "Playing." — for a game
+      // sitting behind another window, that is a life lost while nobody is
+      // looking.
+      //
+      // The blur is real, not synthesized: moving focus to another element in
+      // the document fires a `FocusEvent` at the canvas exactly as clicking
+      // outside it does, which is the shim listener under test. There is no way
+      // to make the browser blur an element through `Input.dispatch*` — Tab is
+      // swallowed by the shim precisely so the page does not steal the game's
+      // keys.
+      //
+      // **What is measured is the HUD heartbeat**, which both samples log every
+      // sixty ticks, whatever state the game is in. The canvas would be the
+      // more direct observable and was tried first: breakout's ball dies within
+      // a second of the last paddle input, so a still board is the *normal*
+      // state by this point in the run and "the picture stopped changing"
+      // passes whether or not anything paused. A line that only the tick loop
+      // can emit does not. The control, and it is what makes every check after
+      // it mean something: a tick loop that emits nothing fails here, loudly,
+      // instead of the pause check passing for free on a run where no heartbeat
+      // could have appeared anyway.
+      //
+      // **Measured again rather than read off group B's**, because the question
+      // here is about *this* point in the run: everything between the two has
+      // clicked, dragged and held keys at the demo, and a tick loop that
+      // stopped somewhere in there is exactly what would make the pause check
+      // below pass for nothing. Group B's answer is a calibration; this one is
+      // a heartbeat.
+      const control = await tickControl();
+      const beat = control.pace;
+
+      check(
+        'E',
+        'a running demo logs its HUD from inside the tick',
+        beat !== null,
+        beat === null
+          ? `no ${control.line === 1 ? 'first' : 'second'} HUD line in ` +
+              `${control.budget} ms`
+          : `two HUD lines ${beat.beat} ms apart, in ${beat.waited} ms, with ` +
+              `every budget here scaled ${slowdown.toFixed(1)}x`
+      );
+
+      windowMs = tickWindow(beat);
+
+      // **Escape, pressed on a page that is holding the pointer.** That is the
+      // only way the demos which ask for Pointer Lock ever meet the key: a
+      // browser reserves Escape while a page is locked, spends it on releasing
+      // the lock and delivers no `keydown` to anyone — so the demos whose hint
+      // says Escape pauses stayed locked and kept playing, which is what this
+      // block is here about. What pauses them is the release itself:
+      // `__crcbl_web_pointer_lock` in `crates/crcbl-shell/src/web/mod.rs`
+      // reports an exit the engine never asked for as the focus loss the loop
+      // already pauses on.
+      //
+      // **Ahead of the blur rather than in place of it.** Everything below
+      // presses Escape on a page that is *not* locked — the blur that starts it
+      // releases the lock — which is the different question this group has
+      // always asked.
+      const wantsLock = await evaluate(
         page,
-        `document.pointerLockElement === document.getElementById('canvas')`
-      ))
-        ? true
-        : null
-    );
-    check(
-      'E',
-      'a click on the canvas takes the pointer lock',
-      holding === true,
-      holding === true
-        ? 'the canvas is the document.pointerLockElement'
-        : 'the click never took the lock, so the check under this one would be ' +
-            'the unlocked Escape this group already presses further down'
-    );
+        `crcbl.exports.__crcbl_web_pointer_lock_wanted(crcbl.gpu.canvasId)`
+      );
+      // Asked of every demo and in both directions: the engine's own answer,
+      // read through the export the shim polls once a frame, against what this
+      // file says about it. A demo that starts locking without `locks` on its
+      // row would otherwise skip the checks below and say nothing at all about
+      // them.
+      check(
+        'E',
+        'the demos that hold the pointer are the ones this file says hold it',
+        (wantsLock !== 0) === Boolean(EXPECTED.locks),
+        `the engine ${wantsLock !== 0 ? 'is' : 'is not'} asking for the pointer and ` +
+          `this demo's row ${EXPECTED.locks ? 'says it does' : 'does not say it does'}`
+      );
 
-    // Read before the key and required to be 3, for the reason the resume check
-    // at the end of this group reads its own status first: a demo that was
-    // already paused would report 6 whatever Escape did.
-    const beforeLocked = await evaluate(page, `crcbl.status()`);
-    for (const type of ['keyDown', 'keyUp']) {
-      await page.send('Input.dispatchKeyEvent', {
-        type,
-        code: 'Escape',
-        key: 'Escape',
-        windowsVirtualKeyCode: 27,
-        nativeVirtualKeyCode: 27,
-      });
-    }
-    const pausedLocked =
-      holding === true &&
-      beforeLocked === 3 &&
-      (await until(async () => {
+      if (EXPECTED.locks) {
+        // A log of what the document saw, read back only when a check below
+        // fails: each pointerlockchange with the element it left, and every
+        // keydown that reached the document. The two checks under it are about
+        // an ordering — the browser releases the lock, the release pauses the
+        // demo — and a failure that only reports the end state cannot say which
+        // half moved.
+        await evaluate(
+          page,
+          `(() => { window.__crcblLockLog = [];
+                    document.addEventListener('pointerlockchange', () =>
+                      window.__crcblLockLog.push('change:' +
+                        (document.pointerLockElement ? 'locked' : 'unlocked')));
+                    document.addEventListener('keydown', (e) =>
+                      window.__crcblLockLog.push('key:' + e.code));
+                    return true; })()`
+        );
+        const lockLog = async () =>
+          JSON.stringify(await evaluate(page, `window.__crcblLockLog`));
+        // The corner again, for the reason every other click in this group
+        // takes it: a centred click is a click on whatever the demo lays out in
+        // the middle.
+        const grabbed = await focusPoint();
+        await clickAt(grabbed);
+        const holding = await until(async () =>
+          (await evaluate(
+            page,
+            `document.pointerLockElement === document.getElementById('canvas')`
+          ))
+            ? true
+            : null
+        );
+        check(
+          'E',
+          'a click on the canvas takes the pointer lock',
+          holding === true,
+          holding === true
+            ? 'the canvas is the document.pointerLockElement'
+            : 'the click never took the lock, so the check under this one would be ' +
+                'the unlocked Escape this group already presses further down'
+        );
+
+        // Read before the key and required to be 3, for the reason the resume
+        // check at the end of this group reads its own status first: a demo
+        // that was already paused would report 6 whatever Escape did.
+        const beforeLocked = await evaluate(page, `crcbl.status()`);
+        for (const type of ['keyDown', 'keyUp']) {
+          await page.send('Input.dispatchKeyEvent', {
+            type,
+            code: 'Escape',
+            key: 'Escape',
+            windowsVirtualKeyCode: 27,
+            nativeVirtualKeyCode: 27,
+          });
+        }
+        const pausedLocked =
+          holding === true &&
+          beforeLocked === 3 &&
+          (await until(async () => {
+            const status = await evaluate(page, `crcbl.status()`);
+            return status === 6 ? status : null;
+          }));
+        check(
+          'E',
+          'Escape pauses a demo that is holding the pointer lock',
+          pausedLocked === 6,
+          beforeLocked === 3
+            ? `status ${await evaluate(page, `crcbl.status()`)}, the document saw ` +
+                (await lockLog())
+            : `the demo was not running going in (status ${beforeLocked}), so ` +
+                'nothing here is about Escape'
+        );
+
+        // And the lock is gone, which is where that pause came from: the key
+        // itself reached no listener on the page at all.
+        const spentOnTheLock = await until(async () =>
+          (await evaluate(page, `document.pointerLockElement === null`))
+            ? true
+            : null
+        );
+        check(
+          'E',
+          'and the lock is what the browser spent that Escape on',
+          spentOnTheLock === true,
+          spentOnTheLock === true
+            ? 'the canvas is no longer the document.pointerLockElement'
+            : 'the canvas still holds the pointer, so the pause above came from ' +
+                `somewhere this check cannot see; the document saw ${await lockLog()}`
+        );
+
+        // **Put the run back before the rest of the group.** A demo left paused
+        // here would hand "blurring the canvas pauses the demo" a 6 it did not
+        // cause, and every check under that one is about a pause this group
+        // made itself. The click lands once the engine has let the pointer go —
+        // `pointerGivenBack` says why that wait is not optional — so nothing is
+        // armed to take the lock and what follows is a running page with a
+        // visible cursor, the state group E has always run on.
+        await pointerGivenBack();
+        await clickAt(grabbed);
+        for (const type of ['keyDown', 'keyUp']) {
+          await page.send('Input.dispatchKeyEvent', {
+            type,
+            code: 'Escape',
+            key: 'Escape',
+            windowsVirtualKeyCode: 27,
+            nativeVirtualKeyCode: 27,
+          });
+        }
+        const backInPlay = await until(async () => {
+          const status = await evaluate(page, `crcbl.status()`);
+          return status === 3 ? status : null;
+        });
+        check(
+          'E',
+          'and the run goes back into play for the rest of the group',
+          backInPlay === 3,
+          `status ${await evaluate(page, `crcbl.status()`)}`
+        );
+      }
+
+      await evaluate(page, `document.getElementById('stop').focus()`);
+      const paused = await until(async () => {
         const status = await evaluate(page, `crcbl.status()`);
         return status === 6 ? status : null;
-      }));
-    check(
-      'E',
-      'Escape pauses a demo that is holding the pointer lock',
-      pausedLocked === 6,
-      beforeLocked === 3
-        ? `status ${await evaluate(page, `crcbl.status()`)}, the document saw ` +
-            (await lockLog())
-        : `the demo was not running going in (status ${beforeLocked}), so ` +
-            'nothing here is about Escape'
-    );
-
-    // And the lock is gone, which is where that pause came from: the key itself
-    // reached no listener on the page at all.
-    const spentOnTheLock = await until(async () =>
-      (await evaluate(page, `document.pointerLockElement === null`))
-        ? true
-        : null
-    );
-    check(
-      'E',
-      'and the lock is what the browser spent that Escape on',
-      spentOnTheLock === true,
-      spentOnTheLock === true
-        ? 'the canvas is no longer the document.pointerLockElement'
-        : 'the canvas still holds the pointer, so the pause above came from ' +
-            `somewhere this check cannot see; the document saw ${await lockLog()}`
-    );
-
-    // **Put the run back before the rest of the group.** A demo left paused here
-    // would hand "blurring the canvas pauses the demo" a 6 it did not cause, and
-    // every check under that one is about a pause this group made itself. The
-    // click lands once the engine has let the pointer go — `pointerGivenBack`
-    // says why that wait is not optional — so nothing is armed to take the lock
-    // and what follows is a running page with a visible cursor, the state group
-    // E has always run on.
-    await pointerGivenBack();
-    await clickAt(grabbed);
-    for (const type of ['keyDown', 'keyUp']) {
-      await page.send('Input.dispatchKeyEvent', {
-        type,
-        code: 'Escape',
-        key: 'Escape',
-        windowsVirtualKeyCode: 27,
-        nativeVirtualKeyCode: 27,
       });
-    }
-    const backInPlay = await until(async () => {
-      const status = await evaluate(page, `crcbl.status()`);
-      return status === 3 ? status : null;
-    });
-    check(
-      'E',
-      'and the run goes back into play for the rest of the group',
-      backInPlay === 3,
-      `status ${await evaluate(page, `crcbl.status()`)}`
-    );
-  }
-
-  await evaluate(page, `document.getElementById('stop').focus()`);
-  const paused = await until(async () => {
-    const status = await evaluate(page, `crcbl.status()`);
-    return status === 6 ? status : null;
-  });
-  check(
-    'E',
-    'blurring the canvas pauses the demo',
-    paused === 6,
-    `status ${await evaluate(page, `crcbl.status()`)}`
-  );
-
-  const whilePaused = await heartbeats();
-  check(
-    'E',
-    'a paused demo runs no ticks at all',
-    whilePaused === 0,
-    `${whilePaused} HUD line(s) in ${windowMs} ms`
-  );
-
-  // Clicking back in deliberately does not resume — the pause menu is dismissed
-  // on purpose — so this is two steps and the first one must not be enough.
-  //
-  // **Not the canvas centre**, which is where this check used to click and is
-  // the whole of why this group read 23/25. The pause menu is laid out centred
-  // in the framebuffer and `RESUME` is the item the centre lands in, so a click
-  // there is a click on `RESUME` — the demo resumed, correctly, and the check
-  // read it as focus handling having regressed. It had not: `a_click_on_resume_-
-  // resumes_the_game` in each sample's `app.rs` requires exactly that. A corner
-  // is the part of the canvas least likely to be a widget in any sample, which
-  // is what a check about *focus* rather than about a button needs.
-  // `a_focusing_click_off_every_button_leaves_the_game_paused` pins the inset
-  // used here as being outside every button, in a place a layout change will
-  // trip over.
-  const corner = {
-    x: Math.round(rect.left + FOCUS_CLICK_INSET),
-    y: Math.round(rect.top + FOCUS_CLICK_INSET),
-  };
-  for (const type of ['mousePressed', 'mouseReleased']) {
-    await page.send('Input.dispatchMouseEvent', {
-      type,
-      x: corner.x,
-      y: corner.y,
-      button: 'left',
-      clickCount: 1,
-      buttons: type === 'mousePressed' ? 1 : 0,
-    });
-  }
-
-  // The click has to have *reached the engine* before "it is still paused"
-  // means anything: read the status too early and a demo that would have
-  // resumed still reports 6, and the check passes for the reason it exists to
-  // rule out. A sleep cannot establish that — it only makes the wrong answer
-  // less likely — so wait on the observable instead, which is the loop's own
-  // count. The shim's `pointerdown` listener runs synchronously while
-  // `Input.dispatchMouseEvent` is in flight, so the event is already queued in
-  // the wasm backend by the time the command returns; `frame()` in
-  // `web/engine/demo.js` drains that queue and applies any menu action, so two
-  // of its frames is the engine having had, and taken, its chance to resume.
-  const ranAfterClick = await loopFrames(page);
-  check(
-    'E',
-    'the demo loops again once the canvas has the focus back',
-    ranAfterClick !== null,
-    ranAfterClick === null
-      ? 'the frame loop ran fewer than two more frames after the click, so ' +
-          'nothing below can say the engine had its chance'
-      : `${ranAfterClick} more frame(s)`
-  );
-
-  // The other half of "the click reached the engine": it also has to have done
-  // the job it was dispatched for, or this is a check about a click that missed
-  // the canvas entirely.
-  const refocused = await evaluate(page, `document.activeElement?.id ?? ''`);
-  check(
-    'E',
-    'a click in the corner hands the canvas its keyboard back',
-    refocused === 'canvas',
-    `activeElement is "${refocused}"`
-  );
-
-  check(
-    'E',
-    'focus coming back does not resume on its own',
-    (await evaluate(page, `crcbl.status()`)) === 6,
-    `status ${await evaluate(page, `crcbl.status()`)}`
-  );
-
-  // **Read before the key, and required to be 6.** `until` returns the moment
-  // it sees a 3, including the 3 that was already there — so if anything above
-  // left the demo running, this check passes without Escape doing a thing, and
-  // the two checks after it fail instead with no hint of why. That is exactly
-  // how the centred click hid: "focus coming back does not resume" went red,
-  // "Escape resumes the demo" went green off the stale status, and Escape then
-  // *paused* a running demo and took the heartbeat check down with it. A check
-  // that cannot fail is not a check, and neither is one that cannot be reached.
-  const beforeEscape = await evaluate(page, `crcbl.status()`);
-  for (const type of ['keyDown', 'keyUp']) {
-    await page.send('Input.dispatchKeyEvent', {
-      type,
-      code: 'Escape',
-      key: 'Escape',
-      windowsVirtualKeyCode: 27,
-      nativeVirtualKeyCode: 27,
-    });
-  }
-  const resumed =
-    beforeEscape === 6 &&
-    (await until(async () => {
-      const status = await evaluate(page, `crcbl.status()`);
-      return status === 3 ? status : null;
-    }));
-  check(
-    'E',
-    'Escape resumes the demo',
-    resumed === 3,
-    beforeEscape === 6
-      ? `status ${await evaluate(page, `crcbl.status()`)}`
-      : `the demo was not paused going in (status ${beforeEscape}), so Escape ` +
-          `pausing and Escape resuming are indistinguishable here`
-  );
-  const afterResume = await heartbeats();
-  check(
-    'E',
-    'the simulation runs again after resuming',
-    afterResume > 0,
-    `${afterResume} HUD line(s) in ${windowMs} ms`
-  );
-
-  laterScenarios: {
-    if (SLUG === 'puppet') {
-      let recovered = false;
-      try {
-        recovered = await queuedKeyChecks({
-          page,
-          browser,
-          hud,
-          until,
-          check,
-          sendKey,
-          loopFrames,
-          focus: async () => clickAt(await focusPoint()),
-          heartbeats,
-          advance: WALK_ADVANCE_M,
-          beats: WALK_STILL_BEATS,
-        });
-      } catch (error) {
-        check('E', 'queued-input checks completed', false, error.message);
-      }
-      if (!recovered) {
-        for (const skipped of ['E (remaining pad checks)', 'F', 'G', 'H']) {
-          check(
-            skipped,
-            'later scenarios executed',
-            false,
-            'not executed: queued-input recovery failed; proceeding to GPU teardown'
-          );
-        }
-        break laterScenarios;
-      }
-    }
-
-    // **A PAD, SHOWN TO THE PAGE THROUGH ITS OWN `navigator.getGamepads`.** CDP
-    // has no gamepad to dispatch, and a browser hides a real one until a button
-    // is pressed on it anyway, so the page's own API is replaced for the length
-    // of this block by one answering a single standard-mapped pad this script
-    // owns. Everything past that function is the real path: `pumpGamepads` in
-    // `web/engine/gamepad.js` copies it into wasm once a frame, the engine's
-    // `web_gamepad` poller maps it, and the loop pauses on Start exactly as it
-    // pauses on Escape. The id carries Sony's USB vendor, so the connect line
-    // naming PlayStation is the proof the id crossed, and the pause is the proof
-    // a button did.
-    const padId =
-      'crcbl-e2e DualSense (STANDARD GAMEPAD Vendor: 054c Product: 0ce6)';
-    const padsBefore = consoleLines.length;
-    const padLine = (/** @type {string} */ needle) =>
-      consoleLines
-        .slice(padsBefore)
-        .find(
-          (line) => line.includes('gamepads: pad') && line.includes(needle)
-        );
-    await evaluate(
-      page,
-      `(() => {
-       const buttons = Array.from({ length: 17 }, () => ({
-         pressed: false, touched: false, value: 0,
-       }));
-       const pad = {
-         id: ${JSON.stringify(padId)}, index: 0, connected: true,
-         mapping: 'standard', timestamp: 0, axes: [0, 0, 0, 0], buttons,
-       };
-       globalThis.__crcblE2ePads = [pad];
-       Object.defineProperty(navigator, 'getGamepads', {
-         configurable: true,
-         value: () => globalThis.__crcblE2ePads,
-       });
-       return true;
-     })()`
-    );
-    const padConnected = await until(async () =>
-      padLine('connected (PlayStation)') ? true : null
-    );
-    check(
-      'E',
-      'a pad the page reports is connected with the family its id names',
-      padConnected === true,
-      padLine('connected') ??
-        'no "gamepads: pad … connected (PlayStation)" line — the shim did not ' +
-          'pump the pad, or the engine did not poll it'
-    );
-
-    // Start is `buttons[9]` in the standard mapping. Held until the status
-    // answers, then let go, because the pause toggles on the press and a second
-    // press has to be a second edge.
-    const holdStart = (/** @type {boolean} */ held) =>
-      evaluate(
-        page,
-        `(globalThis.__crcblE2ePads[0].buttons[9] = {
-         pressed: ${held}, touched: ${held}, value: ${held ? 1 : 0},
-       }, true)`
+      check(
+        'E',
+        'blurring the canvas pauses the demo',
+        paused === 6,
+        `status ${await evaluate(page, `crcbl.status()`)}`
       );
-    const statusBecomes = (/** @type {number} */ wanted) =>
-      until(async () => {
-        const status = await evaluate(page, `crcbl.status()`);
-        return status === wanted ? status : null;
-      });
-    const beforePad = await evaluate(page, `crcbl.status()`);
-    await holdStart(true);
-    const padPaused = beforePad === 3 && (await statusBecomes(6));
-    await holdStart(false);
-    await loopFrames(page);
-    check(
-      'E',
-      "the pad's Start pauses the demo",
-      padPaused === 6,
-      beforePad === 3
-        ? `status ${await evaluate(page, `crcbl.status()`)}`
-        : `the demo was not running going in (status ${beforePad}), so a pause ` +
-            'is not something Start could be seen to do'
-    );
-    await holdStart(true);
-    const padResumed = padPaused === 6 && (await statusBecomes(3));
-    await holdStart(false);
-    check(
-      'E',
-      "the pad's Start resumes it",
-      padResumed === 3,
-      padPaused === 6
-        ? `status ${await evaluate(page, `crcbl.status()`)}`
-        : 'the pad never paused the demo, so there was nothing to resume'
-    );
 
-    await evaluate(page, `(globalThis.__crcblE2ePads = [], true)`);
-    const padGone = await until(async () =>
-      padLine('disconnected') ? true : null
-    );
-    // The page's own API back, so nothing after this block is steered by a pad.
-    await evaluate(
-      page,
-      `(delete navigator.getGamepads, delete globalThis.__crcblE2ePads, true)`
-    );
-    check(
-      'E',
-      'a pad that leaves the list is disconnected',
-      padGone === true,
-      padLine('disconnected') ?? 'no "gamepads: pad … disconnected" line'
-    );
+      const whilePaused = await heartbeats();
+      check(
+        'E',
+        'a paused demo runs no ticks at all',
+        whilePaused === 0,
+        `${whilePaused} HUD line(s) in ${windowMs} ms`
+      );
 
-    group('F — a finger');
+      // Clicking back in deliberately does not resume — the pause menu is
+      // dismissed on purpose — so this is two steps and the first one must not
+      // be enough.
+      //
+      // **Not the canvas centre**, which is where this check used to click and
+      // is the whole of why this group read 23/25. The pause menu is laid out
+      // centred in the framebuffer and `RESUME` is the item the centre lands
+      // in, so a click there is a click on `RESUME` — the demo resumed,
+      // correctly, and the check read it as focus handling having regressed. It
+      // had not: `a_click_on_resume_- resumes_the_game` in each sample's
+      // `app.rs` requires exactly that. A corner is the part of the canvas
+      // least likely to be a widget in any sample, which is what a check about
+      // *focus* rather than about a button needs.
+      // `a_focusing_click_off_every_button_leaves_the_game_paused` pins the
+      // inset used here as being outside every button, in a place a layout
+      // change will trip over.
+      const corner = {
+        x: Math.round(rect.left + FOCUS_CLICK_INSET),
+        y: Math.round(rect.top + FOCUS_CLICK_INSET),
+      };
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await page.send('Input.dispatchMouseEvent', {
+          type,
+          x: corner.x,
+          y: corner.y,
+          button: 'left',
+          clickCount: 1,
+          buttons: type === 'mousePressed' ? 1 : 0,
+        });
+      }
 
-    // **Every wall-clock budget below is this machine's, not this desktop's.**
-    // Each of these was a bare constant until 2026-08-20, chosen where the
-    // slowdown is 1, and `PADDLE_SETTLE_MS`'s 1500 ms was the one that failed on a
-    // GitHub runner: the two contacts it waits to see lift had not been logged
-    // yet. Scaling them all by the measured `slowdown` is what stops the next one
-    // costing its own red run. `TICK_WINDOW_MS`'s two uses here take `windowMs`,
-    // which is the same number arrived at one step earlier.
-    //
-    // **`TAP_INTERVAL_MS` is deliberately not scaled.** It is the gap between two
-    // synthetic taps — an input cadence rather than a budget for observing a
-    // result — and the loops that tap are bounded by `climbMs` and `lifeMs`, so a
-    // slow machine already gets *more* taps rather than fewer. Untested at a
-    // slowdown above 1: if a tap sequence ever fails on a slow runner where the
-    // deadline plainly did not expire, coalescing is the first thing to suspect.
-    const settleMs = budget(PADDLE_SETTLE_MS);
-    const lifeMs = budget(LIFE_MS);
-    const climbMs = budget(CLIMB_MS);
-    const walkMs = budget(WALK_MS);
+      // The click has to have *reached the engine* before "it is still paused"
+      // means anything: read the status too early and a demo that would have
+      // resumed still reports 6, and the check passes for the reason it exists
+      // to rule out. A sleep cannot establish that — it only makes the wrong
+      // answer less likely — so wait on the observable instead, which is the
+      // loop's own count. The shim's `pointerdown` listener runs synchronously
+      // while `Input.dispatchMouseEvent` is in flight, so the event is already
+      // queued in the wasm backend by the time the command returns; `frame()`
+      // in `web/engine/demo.js` drains that queue and applies any menu action,
+      // so two of its frames is the engine having had, and taken, its chance to
+      // resume.
+      const ranAfterClick = await loopFrames(page);
+      check(
+        'E',
+        'the demo loops again once the canvas has the focus back',
+        ranAfterClick !== null,
+        ranAfterClick === null
+          ? 'the frame loop ran fewer than two more frames after the click, so ' +
+              'nothing below can say the engine had its chance'
+          : `${ranAfterClick} more frame(s)`
+      );
 
-    // **Nothing above this line has ever sent a touch.**
-    // `Input.dispatchMouseEvent` is a mouse all the way down: it arrives as a
-    // `pointerdown` whose `pointerType` is "mouse", `isPrimary` is never false, no
-    // `pointercancel` is ever raised, and the browser does not consult
-    // `touch-action` on the way. So the shim's touch handling, and the CSS that
-    // decides whether the browser hands a gesture to the page at all, were shipped
-    // with a green gate that could not see them.
-    //
-    // `Emulation.setTouchEmulationEnabled` is what makes the browser build touch
-    // pointers for `Input.dispatchTouchEvent`, and it also flips `(hover: none)`
-    // and `(pointer: coarse)` — the pair the demo pages swap their copy on — so
-    // one call sets up both halves of this group.
+      // The other half of "the click reached the engine": it also has to have
+      // done the job it was dispatched for, or this is a check about a click
+      // that missed the canvas entirely.
+      const refocused = await evaluate(
+        page,
+        `document.activeElement?.id ?? ''`
+      );
+      check(
+        'E',
+        'a click in the corner hands the canvas its keyboard back',
+        refocused === 'canvas',
+        `activeElement is "${refocused}"`
+      );
 
-    /** Both counts, so a check cannot pass on a selector that matches nothing. */
-    const copyState = () =>
-      evaluate(
+      check(
+        'E',
+        'focus coming back does not resume on its own',
+        (await evaluate(page, `crcbl.status()`)) === 6,
+        `status ${await evaluate(page, `crcbl.status()`)}`
+      );
+
+      // **Read before the key, and required to be 6.** `until` returns the
+      // moment it sees a 3, including the 3 that was already there — so if
+      // anything above left the demo running, this check passes without Escape
+      // doing a thing, and the two checks after it fail instead with no hint of
+      // why. That is exactly how the centred click hid: "focus coming back does
+      // not resume" went red, "Escape resumes the demo" went green off the
+      // stale status, and Escape then *paused* a running demo and took the
+      // heartbeat check down with it. A check that cannot fail is not a check,
+      // and neither is one that cannot be reached.
+      const beforeEscape = await evaluate(page, `crcbl.status()`);
+      for (const type of ['keyDown', 'keyUp']) {
+        await page.send('Input.dispatchKeyEvent', {
+          type,
+          code: 'Escape',
+          key: 'Escape',
+          windowsVirtualKeyCode: 27,
+          nativeVirtualKeyCode: 27,
+        });
+      }
+      const resumed =
+        beforeEscape === 6 &&
+        (await until(async () => {
+          const status = await evaluate(page, `crcbl.status()`);
+          return status === 3 ? status : null;
+        }));
+      check(
+        'E',
+        'Escape resumes the demo',
+        resumed === 3,
+        beforeEscape === 6
+          ? `status ${await evaluate(page, `crcbl.status()`)}`
+          : `the demo was not paused going in (status ${beforeEscape}), so Escape ` +
+              `pausing and Escape resuming are indistinguishable here`
+      );
+      const afterResume = await heartbeats();
+      check(
+        'E',
+        'the simulation runs again after resuming',
+        afterResume > 0,
+        `${afterResume} HUD line(s) in ${windowMs} ms`
+      );
+
+      if (SLUG === 'puppet') {
+        let recovered = false;
+        try {
+          recovered = await queuedKeyChecks({
+            page,
+            browser,
+            hud,
+            until,
+            check,
+            sendKey,
+            loopFrames,
+            focus: async () => clickAt(await focusPoint()),
+            heartbeats,
+            advance: WALK_ADVANCE_M,
+            beats: WALK_STILL_BEATS,
+          });
+        } catch (error) {
+          check('E', 'queued-input checks completed', false, error.message);
+        }
+        if (!recovered) {
+          const unrun = ['E (remaining pad checks)', 'F', 'G', 'H'];
+          for (const skipped of unrun.filter((label) => runs(label[0]))) {
+            check(
+              skipped,
+              'later scenarios executed',
+              false,
+              'not executed: queued-input recovery failed; proceeding to GPU teardown'
+            );
+          }
+          break laterScenarios;
+        }
+      }
+
+      // **A PAD, SHOWN TO THE PAGE THROUGH ITS OWN `navigator.getGamepads`.**
+      // CDP has no gamepad to dispatch, and a browser hides a real one until a
+      // button is pressed on it anyway, so the page's own API is replaced for
+      // the length of this block by one answering a single standard-mapped pad
+      // this script owns. Everything past that function is the real path:
+      // `pumpGamepads` in `web/engine/gamepad.js` copies it into wasm once a
+      // frame, the engine's `web_gamepad` poller maps it, and the loop pauses
+      // on Start exactly as it pauses on Escape. The id carries Sony's USB
+      // vendor, so the connect line naming PlayStation is the proof the id
+      // crossed, and the pause is the proof a button did.
+      const padId =
+        'crcbl-e2e DualSense (STANDARD GAMEPAD Vendor: 054c Product: 0ce6)';
+      const padsBefore = consoleLines.length;
+      const padLine = (/** @type {string} */ needle) =>
+        consoleLines
+          .slice(padsBefore)
+          .find(
+            (line) => line.includes('gamepads: pad') && line.includes(needle)
+          );
+      await evaluate(
         page,
         `(() => {
-         const count = (selector) => {
-           const all = [...document.querySelectorAll(selector)];
-           return {
-             total: all.length,
-             shown: all.filter((el) => getComputedStyle(el).display !== 'none')
-               .length,
-           };
+         const buttons = Array.from({ length: 17 }, () => ({
+           pressed: false, touched: false, value: 0,
+         }));
+         const pad = {
+           id: ${JSON.stringify(padId)}, index: 0, connected: true,
+           mapping: 'standard', timestamp: 0, axes: [0, 0, 0, 0], buttons,
          };
-         return {
-           touch: count('.touch-only'),
-           pointer: count('.pointer-only'),
-           coarse: matchMedia('(hover: none) and (pointer: coarse)').matches,
-           contacts: navigator.maxTouchPoints,
-         };
+         globalThis.__crcblE2ePads = [pad];
+         Object.defineProperty(navigator, 'getGamepads', {
+           configurable: true,
+           value: () => globalThis.__crcblE2ePads,
+         });
+         return true;
        })()`
       );
+      const padConnected = await until(async () =>
+        padLine('connected (PlayStation)') ? true : null
+      );
+      check(
+        'E',
+        'a pad the page reports is connected with the family its id names',
+        padConnected === true,
+        padLine('connected') ??
+          'no "gamepads: pad … connected (PlayStation)" line — the shim did not ' +
+            'pump the pad, or the engine did not poll it'
+      );
 
-    const withMouse = await copyState();
-    check(
-      'F',
-      'a mouse gets the keyboard copy and none of the touch copy',
-      withMouse.touch.total > 0 &&
-        withMouse.touch.shown === 0 &&
-        withMouse.pointer.total > 0 &&
-        withMouse.pointer.shown === withMouse.pointer.total,
-      `${withMouse.touch.shown}/${withMouse.touch.total} touch-only and ` +
-        `${withMouse.pointer.shown}/${withMouse.pointer.total} pointer-only elements showing`
-    );
-
-    await page.send('Emulation.setTouchEmulationEnabled', {
-      enabled: true,
-      maxTouchPoints: MAX_TOUCH_POINTS,
-    });
-
-    const withFinger = await copyState();
-    // The precondition for everything below, asserted rather than assumed: an
-    // emulation call that silently did nothing would leave every touch check
-    // dispatching events no browser would ever build, and they would fail as if
-    // the engine had.
-    check(
-      'F',
-      'touch emulation reports a coarse pointer with contacts',
-      withFinger.coarse && withFinger.contacts > 0,
-      `(hover: none) and (pointer: coarse) is ${withFinger.coarse}, ` +
-        `maxTouchPoints ${withFinger.contacts}`
-    );
-    check(
-      'F',
-      'a coarse pointer swaps the keyboard copy for the touch copy',
-      withFinger.touch.total > 0 &&
-        withFinger.touch.shown === withFinger.touch.total &&
-        withFinger.pointer.shown === 0,
-      `${withFinger.touch.shown}/${withFinger.touch.total} touch-only and ` +
-        `${withFinger.pointer.shown}/${withFinger.pointer.total} pointer-only elements showing`
-    );
-
-    // **A fresh page, booted with touch already on.** What follows is a phone's
-    // visit, and by this point groups C to E have launched the ball, spent lives,
-    // paused the demo and left whichever menu that ended on. Navigating to the
-    // same URL is the whole reset: the shim's `pagehide` teardown runs and the
-    // next document starts from the top.
-    const beforeReload = hud().length;
-    await page.send('Page.navigate', { url });
-    await until(async () =>
-      evaluate(page, `document.readyState === 'complete'`)
-    );
-    const rebooted = await until(async () => {
-      const status = await evaluate(page, `crcbl.status()`);
-      return status === 3 ? status : null;
-    });
-    /** The demo's HUD lines since the reload, so nothing reads the old run's. */
-    const fresh = () => hud().slice(beforeReload);
-    await until(async () => fresh().length > 0);
-    check(
-      'F',
-      'the demo boots again with touch emulation on',
-      rebooted === 3 && fresh().length > 0,
-      fresh().at(0)?.trim() ??
-        `status ${rebooted ?? 'never settled'}, no HUD line`
-    );
-
-    const canvas = await evaluate(
-      page,
-      `(() => { const c = document.getElementById('canvas');
-              c.scrollIntoView({ block: 'center', behavior: 'instant' });
-              const r = c.getBoundingClientRect();
-              return { x: r.x, y: r.y, width: r.width, height: r.height }; })()`
-    );
-    /** A point on the canvas, as fractions of its box. */
-    const spot = (fx, fy) => ({
-      x: Math.round(canvas.x + fx * canvas.width),
-      y: Math.round(canvas.y + fy * canvas.height),
-    });
-    const contact = (point, id = 0) => ({ x: point.x, y: point.y, id });
-    const touch = (type, touchPoints = []) =>
-      page.send('Input.dispatchTouchEvent', { type, touchPoints });
-
-    /**
-     * A tap, with the press and the release in **one** pump.
-     *
-     * Both messages go out before either is awaited. A finger is on the glass for
-     * a fraction of a frame, so a real tap's press and release reach the engine in
-     * the same batch — and a loop that only forwards a release it already believed
-     * in drops that one, leaves the game holding the button and eats the *next*
-     * tap. Awaiting the press first would let a frame run in between and hide
-     * exactly the case a phone always takes.
-     */
-    const tap = async (point) =>
-      Promise.all([touch('touchStart', [contact(point)]), touch('touchEnd')]);
-
-    // What the browser delivered, counted in the page. This is about the browser
-    // rather than the engine — whether a gesture was handed to the canvas at all —
-    // and there is nowhere else to see it. The listeners are passive, so they
-    // cannot change what the shim's own listeners then do with the same events.
-    await evaluate(
-      page,
-      `(() => {
-       const seen = { moves: 0, cancels: 0, secondary: 0 };
-       globalThis.__crcblGateTouch = seen;
-       const canvas = document.getElementById('canvas');
-       const on = (type, handler) =>
-         canvas.addEventListener(type, handler, { passive: true });
-       on('pointermove', () => { seen.moves += 1; });
-       on('pointercancel', () => { seen.cancels += 1; });
-       on('pointerdown', (e) => { if (!e.isPrimary) seen.secondary += 1; });
-       return true;
-     })()`
-    );
-    const delivered = () =>
-      evaluate(page, `({ ...globalThis.__crcblGateTouch, scroll: scrollY })`);
-
-    /** A drag as a real one arrives: down, a run of moves, up. */
-    const drag = async (from, to, steps = DRAG_STEPS) => {
-      await touch('touchStart', [contact(spot(from.x, from.y))]);
-      for (let i = 1; i <= steps; i += 1) {
-        const at = spot(
-          from.x + ((to.x - from.x) * i) / steps,
-          from.y + ((to.y - from.y) * i) / steps
+      // Start is `buttons[9]` in the standard mapping. Held until the status
+      // answers, then let go, because the pause toggles on the press and a
+      // second press has to be a second edge.
+      const holdStart = (/** @type {boolean} */ held) =>
+        evaluate(
+          page,
+          `(globalThis.__crcblE2ePads[0].buttons[9] = {
+           pressed: ${held}, touched: ${held}, value: ${held ? 1 : 0},
+         }, true)`
         );
-        await touch('touchMove', [contact(at)]);
-      }
-      await touch('touchEnd');
-    };
+      const statusBecomes = (/** @type {number} */ wanted) =>
+        until(async () => {
+          const status = await evaluate(page, `crcbl.status()`);
+          return status === wanted ? status : null;
+        });
+      const beforePad = await evaluate(page, `crcbl.status()`);
+      await holdStart(true);
+      const padPaused = beforePad === 3 && (await statusBecomes(6));
+      await holdStart(false);
+      await loopFrames(page);
+      check(
+        'E',
+        "the pad's Start pauses the demo",
+        padPaused === 6,
+        beforePad === 3
+          ? `status ${await evaluate(page, `crcbl.status()`)}`
+          : `the demo was not running going in (status ${beforePad}), so a pause ` +
+              'is not something Start could be seen to do'
+      );
+      await holdStart(true);
+      const padResumed = padPaused === 6 && (await statusBecomes(3));
+      await holdStart(false);
+      check(
+        'E',
+        "the pad's Start resumes it",
+        padResumed === 3,
+        padPaused === 6
+          ? `status ${await evaluate(page, `crcbl.status()`)}`
+          : 'the pad never paused the demo, so there was nothing to resume'
+      );
 
-    // **`touch-action: none`, asserted on the browser's behaviour and not on the
-    // stylesheet.** Reading the rule back out of `getComputedStyle` would pass on
-    // a declaration the browser ignores, which is the half that matters: the
-    // property's whole job is to stop the *browser* claiming the gesture for
-    // scrolling. A drag with a large vertical component is the one that gets
-    // claimed — the demo page scrolls — so this drags up and across, and then
-    // asks the three questions a stolen gesture answers differently. Measured with
-    // the declaration overridden to `auto`: the moves stop after the first, a
-    // `pointercancel` arrives, and the page scrolls instead.
-    //
-    // It starts low on the canvas and finishes above the middle, so the press that
-    // begins it lands below any centred menu and cannot fire a widget on the way.
-    const beforeDrag = await delivered();
-    await drag({ x: 0.5, y: 0.85 }, { x: 0.35, y: 0.35 });
-    const afterDrag = await delivered();
-    check(
-      'F',
-      'the canvas keeps a drag the browser would otherwise take for scrolling',
-      afterDrag.moves - beforeDrag.moves === DRAG_STEPS &&
-        afterDrag.cancels === beforeDrag.cancels &&
-        afterDrag.scroll === beforeDrag.scroll,
-      `${afterDrag.moves - beforeDrag.moves}/${DRAG_STEPS} moves delivered, ` +
-        `${afterDrag.cancels - beforeDrag.cancels} cancel(s), ` +
-        `scrollY ${beforeDrag.scroll} -> ${afterDrag.scroll}`
-    );
+      await evaluate(page, `(globalThis.__crcblE2ePads = [], true)`);
+      const padGone = await until(async () =>
+        padLine('disconnected') ? true : null
+      );
+      // The page's own API back, so nothing after this block is steered by a
+      // pad.
+      await evaluate(
+        page,
+        `(delete navigator.getGamepads, delete globalThis.__crcblE2ePads, true)`
+      );
+      check(
+        'E',
+        'a pad that leaves the list is disconnected',
+        padGone === true,
+        padLine('disconnected') ?? 'no "gamepads: pad … disconnected" line'
+      );
+    } else if (runs('F')) {
+      // **Not a check: the window group F's touch block waits out.** Group E
+      // measures the heartbeat as its own control and derives `windowMs` from
+      // it; a run that skips E still owes F the window E would have handed it,
+      // taken at the same point and in the same way, rather than group B's
+      // calibration or the bare floor.
+      windowMs = tickWindow((await tickControl()).pace);
+    }
 
-    // **Two fingers, and the seam has room for both.**
-    //
-    // This is the multi-touch claim itself and it is about the *engine*, not about
-    // any game: every demo runs the same loop, so it is asserted for every demo
-    // rather than only for the ones that bind a pointer. Until `ShellEvent::Touch`
-    // existed the shim dropped every non-primary contact on the floor, and the
-    // check that stood here asserted exactly that — a second contact moving
-    // nothing.
-    //
-    // The observable is the engine's own debug log of the events it folded, which
-    // is the only place a contact is visible from a browser: the demos bind the
-    // pointer, and none of them draws an on-screen control yet. `Pending::observe`
-    // writes those lines, so a contact appearing there has crossed the browser,
-    // the shim, the wasm ABI and the shell queue.
-    const contactsFrom = (mark) =>
-      consoleLines
-        .slice(mark)
-        .map((line) => TOUCH_LINE.exec(line))
-        .filter((found) => found !== null)
-        .map(([, id, phase, x, y]) => ({
-          id: Number(id),
-          phase,
-          x: Number(x),
-          y: Number(y),
-        }));
+    if (runs('F')) {
+      group('F — a finger');
 
-    const dpr = await evaluate(page, `devicePixelRatio`);
-    /** Where a dispatched point should turn up, in the canvas's device pixels. */
-    const inCanvas = (point) => ({
-      x: (point.x - canvas.x) * dpr,
-      y: (point.y - canvas.y) * dpr,
-    });
-    const near = (got, want) =>
-      Math.abs(got.x - want.x) <= CONTACT_TOLERANCE &&
-      Math.abs(got.y - want.y) <= CONTACT_TOLERANCE;
+      // **Every wall-clock budget below is this machine's, not this
+      // desktop's.** Each of these was a bare constant until 2026-08-20, chosen
+      // where the slowdown is 1, and `PADDLE_SETTLE_MS`'s 1500 ms was the one
+      // that failed on a GitHub runner: the two contacts it waits to see lift
+      // had not been logged yet. Scaling them all by the measured `slowdown` is
+      // what stops the next one costing its own red run. `TICK_WINDOW_MS`'s two
+      // uses here take `windowMs`, which is the same number arrived at one step
+      // earlier.
+      //
+      // **`TAP_INTERVAL_MS` is deliberately not scaled.** It is the gap between
+      // two synthetic taps — an input cadence rather than a budget for
+      // observing a result — and the loops that tap are bounded by `climbMs`
+      // and `lifeMs`, so a slow machine already gets *more* taps rather than
+      // fewer. Untested at a slowdown above 1: if a tap sequence ever fails on
+      // a slow runner where the deadline plainly did not expire, coalescing is
+      // the first thing to suspect.
+      const settleMs = budget(PADDLE_SETTLE_MS);
+      const lifeMs = budget(LIFE_MS);
+      const climbMs = budget(CLIMB_MS);
+      const walkMs = budget(WALK_MS);
 
-    const debugOn = await evaluate(page, `crcbl.logLevel(${LOG_DEBUG})`);
-    const contactMark = consoleLines.length;
-    const first = spot(CONTACT_A, CONTACT_BAND);
-    const second = spot(CONTACT_B, CONTACT_BAND);
-    const secondMoved = spot(CONTACT_B_MOVED, CONTACT_BAND);
-    await touch('touchStart', [contact(first, 1)]);
-    await touch('touchStart', [contact(first, 1), contact(second, 2)]);
-    // Only the second point changes, which is what makes "moving one moves only
-    // that one" a question with two possible answers.
-    await touch('touchMove', [contact(first, 1), contact(secondMoved, 2)]);
-    await touch('touchEnd');
-    // Found by *position*, not by counting: the gesture before this one is still
-    // flushing its own lines through the log queue when the mark is taken, so the
-    // window can legitimately open on a stray `Ended` from the drag above. Which
-    // id landed where is the claim, and it is one a leftover line cannot answer.
-    const idsOf = (seen) => {
-      const began = seen.filter((c) => c.phase === 'Began');
-      const idAt = (point) =>
-        began.find((c) => near(c, inCanvas(point)))?.id ?? null;
-      return { firstId: idAt(first), secondId: idAt(second) };
-    };
-    const endedIn = (seen) =>
-      new Set(seen.filter((c) => c.phase === 'Ended').map((c) => c.id));
+      // **Nothing above this line has ever sent a touch.**
+      // `Input.dispatchMouseEvent` is a mouse all the way down: it arrives as a
+      // `pointerdown` whose `pointerType` is "mouse", `isPrimary` is never
+      // false, no `pointercancel` is ever raised, and the browser does not
+      // consult `touch-action` on the way. So the shim's touch handling, and
+      // the CSS that decides whether the browser hands a gesture to the page at
+      // all, were shipped with a green gate that could not see them.
+      //
+      // `Emulation.setTouchEmulationEnabled` is what makes the browser build
+      // touch pointers for `Input.dispatchTouchEvent`, and it also flips
+      // `(hover: none)` and `(pointer: coarse)` — the pair the demo pages swap
+      // their copy on — so one call sets up both halves of this group.
 
-    // The lines arrive a frame later — the engine folds the batch on its next
-    // pump and the page drains the log queue after that.
-    //
-    // **Waiting on these two contacts, not on a count of `Ended`s.** A count lets
-    // the stray the comment above anticipates fill the quota, so the wait returns
-    // one contact early and the claim below reads a line that had not arrived yet
-    // as a contact the engine dropped. Seen in CI as `34/35` with the second
-    // contact holding a `Began` and a `Moved` and no `Ended`.
-    await until(async () => {
-      const seen = contactsFrom(contactMark);
-      const { firstId, secondId } = idsOf(seen);
-      if (firstId === null || secondId === null || firstId === secondId) {
-        return null;
-      }
-      const ended = endedIn(seen);
-      return ended.has(firstId) && ended.has(secondId) ? seen : null;
-    }, settleMs);
-    await evaluate(page, `crcbl.logLevel(${LOG_INFO})`);
-
-    const seen = contactsFrom(contactMark);
-    const { firstId, secondId } = idsOf(seen);
-    // Every later report of the first contact, which must still be where it was
-    // put: a move credited to the wrong contact shows up here as the held finger
-    // having jumped across the canvas.
-    const heldStrayed = seen.some(
-      (c) =>
-        c.id === firstId && c.phase !== 'Began' && !near(c, inCanvas(first))
-    );
-    const movedSecond = seen.filter(
-      (c) => c.phase === 'Moved' && near(c, inCanvas(secondMoved))
-    );
-    const ended = endedIn(seen);
-    check(
-      'F',
-      'a second contact arrives as its own contact and moves only itself',
-      debugOn === 1 &&
-        firstId !== null &&
-        secondId !== null &&
-        firstId !== secondId &&
-        !heldStrayed &&
-        movedSecond.length > 0 &&
-        movedSecond.every((c) => c.id === secondId) &&
-        ended.has(firstId) &&
-        ended.has(secondId),
-      debugOn === 1
-        ? `contacts ${JSON.stringify(seen.map((c) => [c.id, c.phase, Math.round(c.x)]))}` +
-            ` — held ${firstId}, moved ${secondId}`
-        : 'the engine refused the debug log level, so no contact could be seen'
-    );
-
-    // Everything past here is about what the *game* does with a finger, so a demo
-    // that binds no pointer input stops at the page-level claims above rather than
-    // dispatching taps and asserting they did something. `EXPECTATIONS` says
-    // which, the same way `key: null` says a demo takes no keyboard.
-    if (EXPECTED.touch) {
-      const paddleAt = async () => evaluate(page, SAMPLE_PADDLE('#canvas'));
-
-      /**
-       * Polls the frame until the paddle is where the finger asked for it.
-       *
-       * A drag ends when the last `touchMove` is acknowledged, which is before the
-       * engine has pumped it and long before the frame carrying the result has
-       * been composited — so a single read after the drag is a race, and the
-       * reading it loses with is the paddle's *previous* position. Returns the
-       * last sample either way, so a failure can say where the paddle actually
-       * was.
-       */
-      const paddleReaches = async (target) => {
-        let last = null;
-        const reached = await until(async () => {
-          last = await paddleAt();
-          return last?.count > 0 &&
-            Math.abs(last.at - target) <= PADDLE_TOLERANCE
-            ? last
-            : null;
-        }, settleMs);
-        return { reached: Boolean(reached), last };
-      };
-
-      if (EXPECTED.touch.paddle) {
-        await drag(
-          { x: FIRST_DRAG.from, y: PADDLE_BAND },
-          { x: FIRST_DRAG.to, y: PADDLE_BAND }
-        );
-        const firstDrag = await paddleReaches(FIRST_DRAG.to);
-        check(
-          'F',
-          'a drag puts the paddle under the finger',
-          firstDrag.reached,
-          firstDrag.last?.count
-            ? `asked for ${FIRST_DRAG.to}, paddle at ${firstDrag.last.at.toFixed(3)}`
-            : 'no paddle in the bottom band of the frame'
+      /** Both counts, so a check cannot pass on a selector that matches nothing. */
+      const copyState = () =>
+        evaluate(
+          page,
+          `(() => {
+           const count = (selector) => {
+             const all = [...document.querySelectorAll(selector)];
+             return {
+               total: all.length,
+               shown: all.filter((el) => getComputedStyle(el).display !== 'none')
+                 .length,
+             };
+           };
+           return {
+             touch: count('.touch-only'),
+             pointer: count('.pointer-only'),
+             coarse: matchMedia('(hover: none) and (pointer: coarse)').matches,
+             contacts: navigator.maxTouchPoints,
+           };
+         })()`
         );
 
-        // **The re-grab.** A finger that lifts and lands somewhere else is the
-        // case a delta-composed drag cannot do: composed on the last position it
-        // would move by the length of this drag instead of to its end, and land
-        // nowhere near.
-        await drag(
-          { x: SECOND_DRAG.from, y: PADDLE_BAND },
-          { x: SECOND_DRAG.to, y: PADDLE_BAND }
-        );
-        const secondDrag = await paddleReaches(SECOND_DRAG.to);
-        check(
-          'F',
-          'a second drag from somewhere else moves it again',
-          secondDrag.reached,
-          secondDrag.last?.count
-            ? `asked for ${SECOND_DRAG.to}, paddle at ${secondDrag.last.at.toFixed(3)}`
-            : 'no paddle in the bottom band of the frame'
-        );
+      const withMouse = await copyState();
+      check(
+        'F',
+        'a mouse gets the keyboard copy and none of the touch copy',
+        withMouse.touch.total > 0 &&
+          withMouse.touch.shown === 0 &&
+          withMouse.pointer.total > 0 &&
+          withMouse.pointer.shown === withMouse.pointer.total,
+        `${withMouse.touch.shown}/${withMouse.touch.total} touch-only and ` +
+          `${withMouse.pointer.shown}/${withMouse.pointer.total} pointer-only elements showing`
+      );
 
-        // **The `isPrimary` filter, which is now about the pointer only.** A
-        // second finger does not move the mouse — that is the browser's own rule
-        // for its emulated pointer events and the shim keeps it — so the paddle,
-        // which binds `Binding::PointerPosition`, stays with the first contact
-        // while a second one lands elsewhere and moves.
-        //
-        // The contact check above is what proves the second finger was not
-        // *dropped*; this one is what proves it did not reach the pointer, and the
-        // pair is the whole design: a game bound to a mouse plays with one finger
-        // exactly as it did before multi-touch landed.
-        //
-        // Two things keep the negative claim honest. The page's count of
-        // non-primary presses says the browser really did deliver a second
-        // contact, so this cannot pass on a fumble that never happened. And the
-        // first contact then moves, inside the same window, to somewhere the
-        // second one never was: a window too short to show a move would fail
-        // there rather than making "nothing moved" true for free.
-        const held = spot(FIRST_DRAG.to, PADDLE_BAND);
-        const second = spot(SECOND_DRAG.from, PADDLE_BAND);
-        const moved = spot(SECOND_DRAG.to, PADDLE_BAND);
-        await touch('touchStart', [contact(held, 1)]);
-        const anchored = await paddleReaches(FIRST_DRAG.to);
-        await touch('touchStart', [contact(held, 1), contact(second, 2)]);
-        await touch('touchMove', [contact(held, 1), contact(moved, 2)]);
-        await pause(settleMs);
-        const fumbled = await paddleAt();
-        await touch('touchMove', [
-          contact(spot(FIRST_DRAG.from, PADDLE_BAND), 1),
-          contact(moved, 2),
-        ]);
-        const followed = await paddleReaches(FIRST_DRAG.from);
-        await touch('touchEnd');
-        const secondary = (await delivered()).secondary;
-        check(
-          'F',
-          'a second contact leaves the emulated pointer alone',
-          secondary > 0 &&
-            anchored.reached &&
-            fumbled?.count > 0 &&
-            Math.abs(fumbled.at - anchored.last.at) <= PADDLE_TOLERANCE &&
-            followed.reached,
-          secondary > 0
-            ? `paddle at ${anchored.last?.at?.toFixed(3)} on one contact, ` +
-                `${fumbled?.at?.toFixed(3)} while a second moved to ${SECOND_DRAG.to}, ` +
-                `${followed.last?.at?.toFixed(3)} when the first moved to ${FIRST_DRAG.from}`
-            : 'the browser delivered no non-primary press, so nothing was filtered'
-        );
-      }
+      await page.send('Emulation.setTouchEmulationEnabled', {
+        enabled: true,
+        maxTouchPoints: MAX_TOUCH_POINTS,
+      });
 
-      // **A tap on the menu.** Every demo here opens on a start panel, and a menu
-      // on screen owns the button — so this is the first thing a phone visitor
-      // touches, and until it works nothing else in the game can be reached by
-      // finger at all. The centre of the canvas is where the panel's first item
-      // is laid out, which is why every other check in this file deliberately
-      // clicks a corner.
-      const startMark = fresh().length;
-      await tap(spot(0.5, 0.5));
-      const startedByTap = await until(
-        async () => fresh().slice(startMark).find(EXPECTED.started),
-        lifeMs
+      const withFinger = await copyState();
+      // The precondition for everything below, asserted rather than assumed: an
+      // emulation call that silently did nothing would leave every touch check
+      // dispatching events no browser would ever build, and they would fail as
+      // if the engine had.
+      check(
+        'F',
+        'touch emulation reports a coarse pointer with contacts',
+        withFinger.coarse && withFinger.contacts > 0,
+        `(hover: none) and (pointer: coarse) is ${withFinger.coarse}, ` +
+          `maxTouchPoints ${withFinger.contacts}`
       );
       check(
         'F',
-        'a tap on the start menu starts the run',
-        Boolean(startedByTap),
-        (startedByTap ?? EXPECTED.startedFailure).trim()
+        'a coarse pointer swaps the keyboard copy for the touch copy',
+        withFinger.touch.total > 0 &&
+          withFinger.touch.shown === withFinger.touch.total &&
+          withFinger.pointer.shown === 0,
+        `${withFinger.touch.shown}/${withFinger.touch.total} touch-only and ` +
+          `${withFinger.pointer.shown}/${withFinger.pointer.total} pointer-only elements showing`
       );
 
-      if (EXPECTED.touch.lives) {
-        const lives = (line) =>
-          Number(line?.match(EXPECTED.touch.lives)?.[1] ?? NaN);
-        const startingLives = lives(fresh().at(0));
+      // **A fresh page, booted with touch already on.** What follows is a
+      // phone's visit, and by this point groups C to E have launched the ball,
+      // spent lives, paused the demo and left whichever menu that ended on.
+      // Navigating to the same URL is the whole reset: the shim's `pagehide`
+      // teardown runs and the next document starts from the top.
+      const beforeReload = hud().length;
+      await page.send('Page.navigate', { url });
+      await until(async () =>
+        evaluate(page, `document.readyState === 'complete'`)
+      );
+      const rebooted = await until(async () => {
+        const status = await evaluate(page, `crcbl.status()`);
+        return status === 3 ? status : null;
+      });
+      /** The demo's HUD lines since the reload, so nothing reads the old run's. */
+      const fresh = () => hud().slice(beforeReload);
+      await until(async () => fresh().length > 0);
+      check(
+        'F',
+        'the demo boots again with touch emulation on',
+        rebooted === 3 && fresh().length > 0,
+        fresh().at(0)?.trim() ??
+          `status ${rebooted ?? 'never settled'}, no HUD line`
+      );
 
-        // Park the paddle at one edge so the ball, which starts in the middle, is
-        // not caught by it. Waiting for a life to be lost is not a detour: the
-        // start menu stays up until the run is under way, and the state a tap can
-        // serve from is the one a lost life comes back to.
-        await drag({ x: 0.4, y: PADDLE_BAND }, { x: PARK_X, y: PADDLE_BAND });
+      const canvas = await evaluate(
+        page,
+        `(() => { const c = document.getElementById('canvas');
+                c.scrollIntoView({ block: 'center', behavior: 'instant' });
+                const r = c.getBoundingClientRect();
+                return { x: r.x, y: r.y, width: r.width, height: r.height }; })()`
+      );
+      /** A point on the canvas, as fractions of its box. */
+      const spot = (fx, fy) => ({
+        x: Math.round(canvas.x + fx * canvas.width),
+        y: Math.round(canvas.y + fy * canvas.height),
+      });
+      const contact = (point, id = 0) => ({ x: point.x, y: point.y, id });
+      const touch = (type, touchPoints = []) =>
+        page.send('Input.dispatchTouchEvent', { type, touchPoints });
 
-        // **A gesture the browser took away.** `pointercancel` fires *instead of*
-        // `pointerup`, so a shim that does not translate it leaves the engine
-        // holding the button — and a held button raises no press edge, so the
-        // symptom is not a stuck control but a tap that silently stops working.
-        // Two frames between the press and the cancel keep this about the cancel
-        // rather than about a press and release landing in one pump, which is the
-        // check below.
-        await touch('touchStart', [contact(spot(PARK_X, PADDLE_BAND))]);
-        await loopFrames(page);
-        await touch('touchCancel');
+      /**
+       * A tap, with the press and the release in **one** pump.
+       *
+       * Both messages go out before either is awaited. A finger is on the glass
+       * for a fraction of a frame, so a real tap's press and release reach the
+       * engine in the same batch — and a loop that only forwards a release it
+       * already believed in drops that one, leaves the game holding the button
+       * and eats the *next* tap. Awaiting the press first would let a frame run
+       * in between and hide exactly the case a phone always takes.
+       */
+      const tap = async (point) =>
+        Promise.all([touch('touchStart', [contact(point)]), touch('touchEnd')]);
 
-        const lostOne = await until(
-          async () =>
-            fresh().find(
-              (line) => EXPECTED.waiting(line) && lives(line) < startingLives
-            ),
-          lifeMs
-        );
-        const afterCancel = fresh().length;
-        await tap(spot(PARK_X, PADDLE_BAND));
-        const servedAfterCancel = await until(
-          async () => fresh().slice(afterCancel).find(EXPECTED.started),
-          lifeMs
-        );
-        check(
-          'F',
-          'a tap after a cancelled gesture still serves',
-          Boolean(lostOne) && Boolean(servedAfterCancel),
-          lostOne
-            ? (servedAfterCancel ?? 'the tap raised no edge').trim()
-            : `no life was lost inside ${lifeMs} ms, so there was never a tap to make`
-        );
+      // What the browser delivered, counted in the page. This is about the
+      // browser rather than the engine — whether a gesture was handed to the
+      // canvas at all — and there is nowhere else to see it. The listeners are
+      // passive, so they cannot change what the shim's own listeners then do
+      // with the same events.
+      await evaluate(
+        page,
+        `(() => {
+         const seen = { moves: 0, cancels: 0, secondary: 0 };
+         globalThis.__crcblGateTouch = seen;
+         const canvas = document.getElementById('canvas');
+         const on = (type, handler) =>
+           canvas.addEventListener(type, handler, { passive: true });
+         on('pointermove', () => { seen.moves += 1; });
+         on('pointercancel', () => { seen.cancels += 1; });
+         on('pointerdown', (e) => { if (!e.isPrimary) seen.secondary += 1; });
+         return true;
+       })()`
+      );
+      const delivered = () =>
+        evaluate(page, `({ ...globalThis.__crcblGateTouch, scroll: scrollY })`);
 
-        // **Two taps in a row.** The second is the one that matters: a tap is one
-        // pump's press *and* release, and a loop that drops the release keeps the
-        // button down, so the first tap works and the second does nothing. A
-        // single tap and an assertion cannot tell those apart.
-        const lostTwo = await until(
-          async () =>
-            fresh()
-              .slice(afterCancel)
-              .find(
-                (line) =>
-                  EXPECTED.waiting(line) && lives(line) < startingLives - 1
-              ),
-          lifeMs
-        );
-        const afterSecond = fresh().length;
-        await tap(spot(PARK_X, PADDLE_BAND));
-        const servedAgain = await until(
-          async () => fresh().slice(afterSecond).find(EXPECTED.started),
-          lifeMs
-        );
-        check(
-          'F',
-          'a second tap in a row serves it again',
-          Boolean(lostTwo) && Boolean(servedAgain),
-          lostTwo
-            ? (servedAgain ?? 'the second tap raised no edge').trim()
-            : `no second life was lost inside ${lifeMs} ms`
-        );
-      }
+      /** A drag as a real one arrives: down, a run of moves, up. */
+      const drag = async (from, to, steps = DRAG_STEPS) => {
+        await touch('touchStart', [contact(spot(from.x, from.y))]);
+        for (let i = 1; i <= steps; i += 1) {
+          const at = spot(
+            from.x + ((to.x - from.x) * i) / steps,
+            from.y + ((to.y - from.y) * i) / steps
+          );
+          await touch('touchMove', [contact(at)]);
+        }
+        await touch('touchEnd');
+      };
 
-      if (EXPECTED.touch.height) {
-        // **A tap is a flap**, and the bird's height is the observable: gravity is
-        // the only other thing that touches it and gravity only ever lowers it.
-        //
-        // **`CLIMB_ABOVE` and not "higher than it was"**, which is the version
-        // this check shipped as for an afternoon and which passed with the game's
-        // tap binding cut out of the build. The run's *own start* is a flap — the
-        // menu button is bound to the same action — so the arc it throws the bird
-        // through is above the starting height for a third of a second, and the
-        // HUD's every-sixtieth-tick line lands in that arc often enough to look
-        // like a tap that worked. A height one flap cannot reach is what tells the
-        // two apart.
-        const height = (line) =>
-          Number(line?.match(EXPECTED.touch.height)?.[1] ?? NaN);
-        const bar = height(fresh().at(-1)) + CLIMB_ABOVE;
-        const climbMark = fresh().length;
-        const climbed = await until(async () => {
-          await tap(spot(0.5, 0.5));
-          await pause(TAP_INTERVAL_MS);
-          const above = fresh()
-            .slice(climbMark)
-            .map(height)
-            .find((y) => y > bar);
-          return above === undefined ? null : { above };
-        }, climbMs);
-        check(
-          'F',
-          'a tap lifts the bird',
-          Boolean(climbed),
-          climbed
-            ? `y reached ${climbed.above}, over the ${bar} one flap could manage`
-            : `y never passed ${bar} in ${climbMs} ms of tapping, which is ` +
-                'what the flap the run started with does on its own'
-        );
-      }
+      // **`touch-action: none`, asserted on the browser's behaviour and not on
+      // the stylesheet.** Reading the rule back out of `getComputedStyle` would
+      // pass on a declaration the browser ignores, which is the half that
+      // matters: the property's whole job is to stop the *browser* claiming the
+      // gesture for scrolling. A drag with a large vertical component is the
+      // one that gets claimed — the demo page scrolls — so this drags up and
+      // across, and then asks the three questions a stolen gesture answers
+      // differently. Measured with the declaration overridden to `auto`: the
+      // moves stop after the first, a `pointercancel` arrives, and the page
+      // scrolls instead.
+      //
+      // It starts low on the canvas and finishes above the middle, so the press
+      // that begins it lands below any centred menu and cannot fire a widget on
+      // the way.
+      const beforeDrag = await delivered();
+      await drag({ x: 0.5, y: 0.85 }, { x: 0.35, y: 0.35 });
+      const afterDrag = await delivered();
+      check(
+        'F',
+        'the canvas keeps a drag the browser would otherwise take for scrolling',
+        afterDrag.moves - beforeDrag.moves === DRAG_STEPS &&
+          afterDrag.cancels === beforeDrag.cancels &&
+          afterDrag.scroll === beforeDrag.scroll,
+        `${afterDrag.moves - beforeDrag.moves}/${DRAG_STEPS} moves delivered, ` +
+          `${afterDrag.cancels - beforeDrag.cancels} cancel(s), ` +
+          `scrollY ${beforeDrag.scroll} -> ${afterDrag.scroll}`
+      );
 
-      if (EXPECTED.touch.walk) {
-        // **The on-screen stick**, and the first thing in this file that is not
-        // the emulated pointer: a `crcbl-ui` widget takes the raw contacts, and
-        // reports through `Binding::Virtual` into the same `move` action `WASD`
-        // drives. The pointer cannot express this — a stick is a direction held
-        // continuously, and `Binding::PointerPosition` is a place.
-        const walkAt = (line) =>
-          Number(line?.match(EXPECTED.touch.walk)?.[1] ?? NaN);
-        /** The most recent position the HUD printed, or `NaN` if it never has. */
-        const wizardX = () => {
-          const seen = fresh().map(walkAt).filter(Number.isFinite);
-          return seen.at(-1) ?? NaN;
+      // **Two fingers, and the seam has room for both.**
+      //
+      // This is the multi-touch claim itself and it is about the *engine*, not
+      // about any game: every demo runs the same loop, so it is asserted for
+      // every demo rather than only for the ones that bind a pointer. Until
+      // `ShellEvent::Touch` existed the shim dropped every non-primary contact
+      // on the floor, and the check that stood here asserted exactly that — a
+      // second contact moving nothing.
+      //
+      // The observable is the engine's own debug log of the events it folded,
+      // which is the only place a contact is visible from a browser: the demos
+      // bind the pointer, and none of them draws an on-screen control yet.
+      // `Pending::observe` writes those lines, so a contact appearing there has
+      // crossed the browser, the shim, the wasm ABI and the shell queue.
+      const contactsFrom = (mark) =>
+        consoleLines
+          .slice(mark)
+          .map((line) => TOUCH_LINE.exec(line))
+          .filter((found) => found !== null)
+          .map(([, id, phase, x, y]) => ({
+            id: Number(id),
+            phase,
+            x: Number(x),
+            y: Number(y),
+          }));
+
+      const dpr = await evaluate(page, `devicePixelRatio`);
+      /** Where a dispatched point should turn up, in the canvas's device pixels. */
+      const inCanvas = (point) => ({
+        x: (point.x - canvas.x) * dpr,
+        y: (point.y - canvas.y) * dpr,
+      });
+      const near = (got, want) =>
+        Math.abs(got.x - want.x) <= CONTACT_TOLERANCE &&
+        Math.abs(got.y - want.y) <= CONTACT_TOLERANCE;
+
+      const debugOn = await evaluate(page, `crcbl.logLevel(${LOG_DEBUG})`);
+      const contactMark = consoleLines.length;
+      const first = spot(CONTACT_A, CONTACT_BAND);
+      const second = spot(CONTACT_B, CONTACT_BAND);
+      const secondMoved = spot(CONTACT_B_MOVED, CONTACT_BAND);
+      await touch('touchStart', [contact(first, 1)]);
+      await touch('touchStart', [contact(first, 1), contact(second, 2)]);
+      // Only the second point changes, which is what makes "moving one moves
+      // only that one" a question with two possible answers.
+      await touch('touchMove', [contact(first, 1), contact(secondMoved, 2)]);
+      await touch('touchEnd');
+      // Found by *position*, not by counting: the gesture before this one is
+      // still flushing its own lines through the log queue when the mark is
+      // taken, so the window can legitimately open on a stray `Ended` from the
+      // drag above. Which id landed where is the claim, and it is one a
+      // leftover line cannot answer.
+      const idsOf = (seen) => {
+        const began = seen.filter((c) => c.phase === 'Began');
+        const idAt = (point) =>
+          began.find((c) => near(c, inCanvas(point)))?.id ?? null;
+        return { firstId: idAt(first), secondId: idAt(second) };
+      };
+      const endedIn = (seen) =>
+        new Set(seen.filter((c) => c.phase === 'Ended').map((c) => c.id));
+
+      // The lines arrive a frame later — the engine folds the batch on its next
+      // pump and the page drains the log queue after that.
+      //
+      // **Waiting on these two contacts, not on a count of `Ended`s.** A count
+      // lets the stray the comment above anticipates fill the quota, so the
+      // wait returns one contact early and the claim below reads a line that
+      // had not arrived yet as a contact the engine dropped. Seen in CI as
+      // `34/35` with the second contact holding a `Began` and a `Moved` and no
+      // `Ended`.
+      await until(async () => {
+        const seen = contactsFrom(contactMark);
+        const { firstId, secondId } = idsOf(seen);
+        if (firstId === null || secondId === null || firstId === secondId) {
+          return null;
+        }
+        const ended = endedIn(seen);
+        return ended.has(firstId) && ended.has(secondId) ? seen : null;
+      }, settleMs);
+      await evaluate(page, `crcbl.logLevel(${LOG_INFO})`);
+
+      const seen = contactsFrom(contactMark);
+      const { firstId, secondId } = idsOf(seen);
+      // Every later report of the first contact, which must still be where it
+      // was put: a move credited to the wrong contact shows up here as the held
+      // finger having jumped across the canvas.
+      const heldStrayed = seen.some(
+        (c) =>
+          c.id === firstId && c.phase !== 'Began' && !near(c, inCanvas(first))
+      );
+      const movedSecond = seen.filter(
+        (c) => c.phase === 'Moved' && near(c, inCanvas(secondMoved))
+      );
+      const ended = endedIn(seen);
+      check(
+        'F',
+        'a second contact arrives as its own contact and moves only itself',
+        debugOn === 1 &&
+          firstId !== null &&
+          secondId !== null &&
+          firstId !== secondId &&
+          !heldStrayed &&
+          movedSecond.length > 0 &&
+          movedSecond.every((c) => c.id === secondId) &&
+          ended.has(firstId) &&
+          ended.has(secondId),
+        debugOn === 1
+          ? `contacts ${JSON.stringify(seen.map((c) => [c.id, c.phase, Math.round(c.x)]))}` +
+              ` — held ${firstId}, moved ${secondId}`
+          : 'the engine refused the debug log level, so no contact could be seen'
+      );
+
+      // Everything past here is about what the *game* does with a finger, so a
+      // demo that binds no pointer input stops at the page-level claims above
+      // rather than dispatching taps and asserting they did something.
+      // `EXPECTATIONS` says which, the same way `key: null` says a demo takes
+      // no keyboard.
+      if (EXPECTED.touch) {
+        const paddleAt = async () => evaluate(page, SAMPLE_PADDLE('#canvas'));
+
+        /**
+         * Polls the frame until the paddle is where the finger asked for it.
+         *
+         * A drag ends when the last `touchMove` is acknowledged, which is
+         * before the engine has pumped it and long before the frame carrying
+         * the result has been composited — so a single read after the drag is a
+         * race, and the reading it loses with is the paddle's *previous*
+         * position. Returns the last sample either way, so a failure can say
+         * where the paddle actually was.
+         */
+        const paddleReaches = async (target) => {
+          let last = null;
+          const reached = await until(async () => {
+            last = await paddleAt();
+            return last?.count > 0 &&
+              Math.abs(last.at - target) <= PADDLE_TOLERANCE
+              ? last
+              : null;
+          }, settleMs);
+          return { reached: Boolean(reached), last };
         };
-        // Boxed, because `until` polls for something *truthy* and the wizard
-        // starts the run standing at exactly zero.
-        const found = await until(
-          async () => (Number.isFinite(wizardX()) ? { at: wizardX() } : null),
-          walkMs
-        );
-        const start = found?.at ?? NaN;
 
-        const grab = spot(STICK_FROM, STICK_BAND);
-        const pushed = spot(STICK_TO, STICK_BAND);
-        await touch('touchStart', [contact(grab, 1)]);
-        await touch('touchMove', [contact(pushed, 1)]);
-        // **The thumb stays down for the rest of this block.** A stick is a level
-        // and not an edge: the finger reports nothing while it rests, so a game
-        // that centred the stick between events would stop the wizard here.
-        const walked = await until(async () => {
-          const at = wizardX();
-          return at > start + WALK_MARGIN ? at : null;
-        }, walkMs);
+        if (EXPECTED.touch.paddle) {
+          await drag(
+            { x: FIRST_DRAG.from, y: PADDLE_BAND },
+            { x: FIRST_DRAG.to, y: PADDLE_BAND }
+          );
+          const firstDrag = await paddleReaches(FIRST_DRAG.to);
+          check(
+            'F',
+            'a drag puts the paddle under the finger',
+            firstDrag.reached,
+            firstDrag.last?.count
+              ? `asked for ${FIRST_DRAG.to}, paddle at ${firstDrag.last.at.toFixed(3)}`
+              : 'no paddle in the bottom band of the frame'
+          );
+
+          // **The re-grab.** A finger that lifts and lands somewhere else is
+          // the case a delta-composed drag cannot do: composed on the last
+          // position it would move by the length of this drag instead of to its
+          // end, and land nowhere near.
+          await drag(
+            { x: SECOND_DRAG.from, y: PADDLE_BAND },
+            { x: SECOND_DRAG.to, y: PADDLE_BAND }
+          );
+          const secondDrag = await paddleReaches(SECOND_DRAG.to);
+          check(
+            'F',
+            'a second drag from somewhere else moves it again',
+            secondDrag.reached,
+            secondDrag.last?.count
+              ? `asked for ${SECOND_DRAG.to}, paddle at ${secondDrag.last.at.toFixed(3)}`
+              : 'no paddle in the bottom band of the frame'
+          );
+
+          // **The `isPrimary` filter, which is now about the pointer only.** A
+          // second finger does not move the mouse — that is the browser's own
+          // rule for its emulated pointer events and the shim keeps it — so the
+          // paddle, which binds `Binding::PointerPosition`, stays with the
+          // first contact while a second one lands elsewhere and moves.
+          //
+          // The contact check above is what proves the second finger was not
+          // *dropped*; this one is what proves it did not reach the pointer,
+          // and the pair is the whole design: a game bound to a mouse plays
+          // with one finger exactly as it did before multi-touch landed.
+          //
+          // Two things keep the negative claim honest. The page's count of
+          // non-primary presses says the browser really did deliver a second
+          // contact, so this cannot pass on a fumble that never happened. And
+          // the first contact then moves, inside the same window, to somewhere
+          // the second one never was: a window too short to show a move would
+          // fail there rather than making "nothing moved" true for free.
+          const held = spot(FIRST_DRAG.to, PADDLE_BAND);
+          const second = spot(SECOND_DRAG.from, PADDLE_BAND);
+          const moved = spot(SECOND_DRAG.to, PADDLE_BAND);
+          await touch('touchStart', [contact(held, 1)]);
+          const anchored = await paddleReaches(FIRST_DRAG.to);
+          await touch('touchStart', [contact(held, 1), contact(second, 2)]);
+          await touch('touchMove', [contact(held, 1), contact(moved, 2)]);
+          await pause(settleMs);
+          const fumbled = await paddleAt();
+          await touch('touchMove', [
+            contact(spot(FIRST_DRAG.from, PADDLE_BAND), 1),
+            contact(moved, 2),
+          ]);
+          const followed = await paddleReaches(FIRST_DRAG.from);
+          await touch('touchEnd');
+          const secondary = (await delivered()).secondary;
+          check(
+            'F',
+            'a second contact leaves the emulated pointer alone',
+            secondary > 0 &&
+              anchored.reached &&
+              fumbled?.count > 0 &&
+              Math.abs(fumbled.at - anchored.last.at) <= PADDLE_TOLERANCE &&
+              followed.reached,
+            secondary > 0
+              ? `paddle at ${anchored.last?.at?.toFixed(3)} on one contact, ` +
+                  `${fumbled?.at?.toFixed(3)} while a second moved to ${SECOND_DRAG.to}, ` +
+                  `${followed.last?.at?.toFixed(3)} when the first moved to ${FIRST_DRAG.from}`
+              : 'the browser delivered no non-primary press, so nothing was filtered'
+          );
+        }
+
+        // **A tap on the menu.** Every demo here opens on a start panel, and a
+        // menu on screen owns the button — so this is the first thing a phone
+        // visitor touches, and until it works nothing else in the game can be
+        // reached by finger at all. The centre of the canvas is where the
+        // panel's first item is laid out, which is why every other check in
+        // this file deliberately clicks a corner.
+        const startMark = fresh().length;
+        await tap(spot(0.5, 0.5));
+        const startedByTap = await until(
+          async () => fresh().slice(startMark).find(EXPECTED.started),
+          lifeMs
+        );
         check(
           'F',
-          'a thumb on the field walks the wizard',
-          walked !== null,
-          walked === null
-            ? `x stayed at ${start} for ${walkMs} ms with a thumb pushing right`
-            : `x ${start} -> ${walked}, pushed right`
+          'a tap on the start menu starts the run',
+          Boolean(startedByTap),
+          (startedByTap ?? EXPECTED.startedFailure).trim()
         );
+
+        if (EXPECTED.touch.lives) {
+          const lives = (line) =>
+            Number(line?.match(EXPECTED.touch.lives)?.[1] ?? NaN);
+          const startingLives = lives(fresh().at(0));
+
+          // Park the paddle at one edge so the ball, which starts in the
+          // middle, is not caught by it. Waiting for a life to be lost is not a
+          // detour: the start menu stays up until the run is under way, and the
+          // state a tap can serve from is the one a lost life comes back to.
+          await drag({ x: 0.4, y: PADDLE_BAND }, { x: PARK_X, y: PADDLE_BAND });
+
+          // **A gesture the browser took away.** `pointercancel` fires *instead
+          // of* `pointerup`, so a shim that does not translate it leaves the
+          // engine holding the button — and a held button raises no press edge,
+          // so the symptom is not a stuck control but a tap that silently stops
+          // working. Two frames between the press and the cancel keep this
+          // about the cancel rather than about a press and release landing in
+          // one pump, which is the check below.
+          await touch('touchStart', [contact(spot(PARK_X, PADDLE_BAND))]);
+          await loopFrames(page);
+          await touch('touchCancel');
+
+          const lostOne = await until(
+            async () =>
+              fresh().find(
+                (line) => EXPECTED.waiting(line) && lives(line) < startingLives
+              ),
+            lifeMs
+          );
+          const afterCancel = fresh().length;
+          await tap(spot(PARK_X, PADDLE_BAND));
+          const servedAfterCancel = await until(
+            async () => fresh().slice(afterCancel).find(EXPECTED.started),
+            lifeMs
+          );
+          check(
+            'F',
+            'a tap after a cancelled gesture still serves',
+            Boolean(lostOne) && Boolean(servedAfterCancel),
+            lostOne
+              ? (servedAfterCancel ?? 'the tap raised no edge').trim()
+              : `no life was lost inside ${lifeMs} ms, so there was never a tap to make`
+          );
+
+          // **Two taps in a row.** The second is the one that matters: a tap is
+          // one pump's press *and* release, and a loop that drops the release
+          // keeps the button down, so the first tap works and the second does
+          // nothing. A single tap and an assertion cannot tell those apart.
+          const lostTwo = await until(
+            async () =>
+              fresh()
+                .slice(afterCancel)
+                .find(
+                  (line) =>
+                    EXPECTED.waiting(line) && lives(line) < startingLives - 1
+                ),
+            lifeMs
+          );
+          const afterSecond = fresh().length;
+          await tap(spot(PARK_X, PADDLE_BAND));
+          const servedAgain = await until(
+            async () => fresh().slice(afterSecond).find(EXPECTED.started),
+            lifeMs
+          );
+          check(
+            'F',
+            'a second tap in a row serves it again',
+            Boolean(lostTwo) && Boolean(servedAgain),
+            lostTwo
+              ? (servedAgain ?? 'the second tap raised no edge').trim()
+              : `no second life was lost inside ${lifeMs} ms`
+          );
+        }
+
+        if (EXPECTED.touch.height) {
+          // **A tap is a flap**, and the bird's height is the observable:
+          // gravity is the only other thing that touches it and gravity only
+          // ever lowers it.
+          //
+          // **`CLIMB_ABOVE` and not "higher than it was"**, which is the
+          // version this check shipped as for an afternoon and which passed
+          // with the game's tap binding cut out of the build. The run's *own
+          // start* is a flap — the menu button is bound to the same action — so
+          // the arc it throws the bird through is above the starting height for
+          // a third of a second, and the HUD's every-sixtieth-tick line lands
+          // in that arc often enough to look like a tap that worked. A height
+          // one flap cannot reach is what tells the two apart.
+          const height = (line) =>
+            Number(line?.match(EXPECTED.touch.height)?.[1] ?? NaN);
+          const bar = height(fresh().at(-1)) + CLIMB_ABOVE;
+          const climbMark = fresh().length;
+          const climbed = await until(async () => {
+            await tap(spot(0.5, 0.5));
+            await pause(TAP_INTERVAL_MS);
+            const above = fresh()
+              .slice(climbMark)
+              .map(height)
+              .find((y) => y > bar);
+            return above === undefined ? null : { above };
+          }, climbMs);
+          check(
+            'F',
+            'a tap lifts the bird',
+            Boolean(climbed),
+            climbed
+              ? `y reached ${climbed.above}, over the ${bar} one flap could manage`
+              : `y never passed ${bar} in ${climbMs} ms of tapping, which is ` +
+                  'what the flap the run started with does on its own'
+          );
+        }
+
+        if (EXPECTED.touch.walk) {
+          // **The on-screen stick**, and the first thing in this file that is
+          // not the emulated pointer: a `crcbl-ui` widget takes the raw
+          // contacts, and reports through `Binding::Virtual` into the same
+          // `move` action `WASD` drives. The pointer cannot express this — a
+          // stick is a direction held continuously, and
+          // `Binding::PointerPosition` is a place.
+          const walkAt = (line) =>
+            Number(line?.match(EXPECTED.touch.walk)?.[1] ?? NaN);
+          /** The most recent position the HUD printed, or `NaN` if it never has. */
+          const wizardX = () => {
+            const seen = fresh().map(walkAt).filter(Number.isFinite);
+            return seen.at(-1) ?? NaN;
+          };
+          // Boxed, because `until` polls for something *truthy* and the wizard
+          // starts the run standing at exactly zero.
+          const found = await until(
+            async () => (Number.isFinite(wizardX()) ? { at: wizardX() } : null),
+            walkMs
+          );
+          const start = found?.at ?? NaN;
+
+          const grab = spot(STICK_FROM, STICK_BAND);
+          const pushed = spot(STICK_TO, STICK_BAND);
+          await touch('touchStart', [contact(grab, 1)]);
+          await touch('touchMove', [contact(pushed, 1)]);
+          // **The thumb stays down for the rest of this block.** A stick is a
+          // level and not an edge: the finger reports nothing while it rests,
+          // so a game that centred the stick between events would stop the
+          // wizard here.
+          const walked = await until(async () => {
+            const at = wizardX();
+            return at > start + WALK_MARGIN ? at : null;
+          }, walkMs);
+          check(
+            'F',
+            'a thumb on the field walks the wizard',
+            walked !== null,
+            walked === null
+              ? `x stayed at ${start} for ${walkMs} ms with a thumb pushing right`
+              : `x ${start} -> ${walked}, pushed right`
+          );
+
+          if (EXPECTED.touch.pause) {
+            // **Two fingers doing two things at once**, which no earlier demo
+            // could be asked to do: the thumb above is the *primary* contact,
+            // so the second finger raises no pointer event at all and its
+            // control is reached through the contact stream or not at all.
+            const box = await evaluate(
+              page,
+              `(() => { const c = document.getElementById('canvas');
+                      return { w: c.width, h: c.height }; })()`
+            );
+            const pauseSpot = spot(
+              1 - PAUSE_INSET / box.w,
+              PAUSE_INSET / box.h
+            );
+            const running = await evaluate(page, `crcbl.status()`);
+            const beforeSecond = wizardX();
+            await touch('touchStart', [
+              contact(pushed, 1),
+              contact(pauseSpot, 2),
+            ]);
+            // The control on the negative claim below: with *both* fingers
+            // down, the wizard is still walking — so the second contact neither
+            // stole the stick nor centred it, and a pause that follows cannot
+            // be the first finger having been dropped.
+            const bothDown = await until(async () => {
+              const at = wizardX();
+              return at > beforeSecond + WALK_MARGIN ? at : null;
+            }, walkMs);
+            // **Only the second finger lifts**, which is what makes the pause
+            // the *second* one's doing. `Input.dispatchTouchEvent`'s `touchEnd`
+            // takes the points being **released** — an empty list is the
+            // "release everything" every other gesture in this file uses, and
+            // naming one point lifts that one and leaves the rest of the hand
+            // where it is.
+            await touch('touchEnd', [contact(pauseSpot, 2)]);
+            const paused = await until(async () => {
+              const status = await evaluate(page, `crcbl.status()`);
+              return status === STATUS_PAUSED ? status : null;
+            }, walkMs);
+            const stoppedAt = wizardX();
+            await pause(windowMs);
+            const stillStopped = wizardX();
+            check(
+              'F',
+              'a second finger pauses the run while the first keeps walking',
+              running === STATUS_RUNNING &&
+                bothDown !== null &&
+                paused === STATUS_PAUSED &&
+                stoppedAt === stillStopped,
+              running !== STATUS_RUNNING
+                ? `the demo was not running going in (status ${running})`
+                : bothDown === null
+                  ? 'the second finger stopped the first one walking, so the ' +
+                    'pause below says nothing about two fingers'
+                  : `x reached ${bothDown} with two fingers down, status ` +
+                    `${paused ?? (await evaluate(page, `crcbl.status()`))}, ` +
+                    `x ${stoppedAt} -> ${stillStopped} while paused`
+            );
+
+            // **The panel is tapped shut with the thumb still on the stick**,
+            // which is the lockout this whole contact route exists for: only
+            // the primary contact drives the emulated pointer, so while this
+            // thumb is down no other finger raises one, and `RESUME` could not
+            // be pressed by anybody until the stick was let go. The third
+            // contact is a finger that never touches the pointer at all.
+            const lockedMark = consoleLines.length;
+            await touch('touchStart', [
+              contact(pushed, 1),
+              contact(spot(0.5, 0.5), 3),
+            ]);
+            await touch('touchEnd', [contact(spot(0.5, 0.5), 3)]);
+            const unlocked = await until(async () => {
+              const status = await evaluate(page, `crcbl.status()`);
+              return status === STATUS_RUNNING ? status : null;
+            }, walkMs);
+            check(
+              'F',
+              'a second finger taps the pause menu shut while the first holds the stick',
+              unlocked === STATUS_RUNNING,
+              unlocked === STATUS_RUNNING
+                ? `resumed with contact 1 still down (${consoleLines.length - lockedMark} lines)`
+                : `status ${await evaluate(page, `crcbl.status()`)} — the menu ` +
+                    'could not be reached while a control was held'
+            );
+
+            // **And the thumb that never lifted takes the stick back**, on its
+            // next move rather than after being lifted and landed again. The
+            // panel released the stick when it opened — deliberately, so the
+            // wizard does not walk behind it — and a floating stick re-centres
+            // wherever the thumb has got to, which is why this moves twice:
+            // once to take it, once to push it.
+            const regrabbed = wizardX();
+            await touch('touchMove', [contact(spot(0.68, STICK_BAND), 1)]);
+            await touch('touchMove', [contact(spot(0.95, STICK_BAND), 1)]);
+            const walkedAgain = await until(async () => {
+              const at = wizardX();
+              return at > regrabbed + WALK_MARGIN ? at : null;
+            }, walkMs);
+            check(
+              'F',
+              'the thumb that never lifted walks again once the panel has gone',
+              walkedAgain !== null,
+              walkedAgain === null
+                ? `x stayed at ${regrabbed} for ${walkMs} ms with a thumb that ` +
+                    'never left the glass pushing right'
+                : `x ${regrabbed} -> ${walkedAgain} without lifting`
+            );
+
+            // Back into the pause menu for the stray-lift check below, with the
+            // thumb still down — which is the state that makes that check about
+            // anything at all — and back where it started, because where it
+            // *lifts* is what that check is about.
+            await touch('touchMove', [contact(pushed, 1)]);
+            await touch('touchStart', [
+              contact(pushed, 1),
+              contact(pauseSpot, 2),
+            ]);
+            await touch('touchEnd', [contact(pauseSpot, 2)]);
+            await until(async () => {
+              const status = await evaluate(page, `crcbl.status()`);
+              return status === STATUS_PAUSED ? status : null;
+            }, walkMs);
+
+            // **The thumb that was already down lifts, over a panel it never
+            // pressed.** It is the primary contact, so its lift is also a
+            // `pointerup`, and it lands wherever the panel happened to open —
+            // which for a centred menu is on a button. Nothing may fire: the
+            // press was made on the field, before this panel existed.
+            //
+            // Found here rather than reasoned about: this run asked for
+            // fullscreen when that thumb came off, and `crcbl::engine`'s
+            // `a_press_made_before_a_panel_opened_does_not_fire_its_buttons` is
+            // the fast test that came out of it.
+            const strayMark = consoleLines.length;
+            await touch('touchEnd');
+            await pause(windowMs);
+            const strayLines = consoleLines
+              .slice(strayMark)
+              .filter((line) => STRAY_MENU_ACTION.test(line));
+            const stillPaused = await evaluate(page, `crcbl.status()`);
+            check(
+              'F',
+              'a thumb that was down before the panel opened presses nothing',
+              strayLines.length === 0 && stillPaused === STATUS_PAUSED,
+              strayLines.length
+                ? `the lift fired ${strayLines.length} menu action(s): ${strayLines[0]}`
+                : `status ${stillPaused} after the stray lift`
+            );
+
+            // …and out through the pause menu's own button, which is what a
+            // phone can reach now that something can open the panel. The demo
+            // is left running, as every other group here leaves it.
+            await tap(spot(0.5, 0.5));
+            const resumed = await until(async () => {
+              const status = await evaluate(page, `crcbl.status()`);
+              return status === STATUS_RUNNING ? status : null;
+            });
+            check(
+              'F',
+              'the pause menu the button opened can be tapped shut again',
+              resumed === STATUS_RUNNING,
+              `status ${resumed ?? (await evaluate(page, `crcbl.status()`))}`
+            );
+          }
+        }
 
         if (EXPECTED.touch.pause) {
-          // **Two fingers doing two things at once**, which no earlier demo could
-          // be asked to do: the thumb above is the *primary* contact, so the
-          // second finger raises no pointer event at all and its control is
-          // reached through the contact stream or not at all.
+          // **One finger, the whole round trip**, for every demo that draws the
+          // button rather than only for the one with two controls: tap the
+          // corner, the loop stops; tap the panel, it starts again. On breakout
+          // and flappy that finger is also the emulated pointer the game binds
+          // its paddle and its flap to, so this is the check that the button is
+          // not merely *present* — a run that served or flapped on the way to
+          // pausing would pause here too, and `crcbl.status()` alone would call
+          // that a pass. The sample tests carry that half, where the paddle and
+          // the bird can be read directly.
+          //
+          // Each attempt taps the middle first, which starts or restarts a run
+          // whenever a panel is up: flappy's bird dies on its own clock, and a
+          // corner tap under a death screen presses nothing at all.
           const box = await evaluate(
             page,
             `(() => { const c = document.getElementById('canvas');
                     return { w: c.width, h: c.height }; })()`
           );
-          const pauseSpot = spot(1 - PAUSE_INSET / box.w, PAUSE_INSET / box.h);
-          const running = await evaluate(page, `crcbl.status()`);
-          const beforeSecond = wizardX();
-          await touch('touchStart', [
-            contact(pushed, 1),
-            contact(pauseSpot, 2),
-          ]);
-          // The control on the negative claim below: with *both* fingers down,
-          // the wizard is still walking — so the second contact neither stole the
-          // stick nor centred it, and a pause that follows cannot be the first
-          // finger having been dropped.
-          const bothDown = await until(async () => {
-            const at = wizardX();
-            return at > beforeSecond + WALK_MARGIN ? at : null;
-          }, walkMs);
-          // **Only the second finger lifts**, which is what makes the pause the
-          // *second* one's doing. `Input.dispatchTouchEvent`'s `touchEnd` takes
-          // the points being **released** — an empty list is the "release
-          // everything" every other gesture in this file uses, and naming one
-          // point lifts that one and leaves the rest of the hand where it is.
-          await touch('touchEnd', [contact(pauseSpot, 2)]);
-          const paused = await until(async () => {
+          const corner = spot(1 - PAUSE_INSET / box.w, PAUSE_INSET / box.h);
+          const pausedByButton = await until(async () => {
+            await tap(spot(0.5, 0.5));
+            await pause(TAP_INTERVAL_MS);
+            await tap(corner);
+            await pause(TAP_INTERVAL_MS);
             const status = await evaluate(page, `crcbl.status()`);
             return status === STATUS_PAUSED ? status : null;
-          }, walkMs);
-          const stoppedAt = wizardX();
-          await pause(windowMs);
-          const stillStopped = wizardX();
+          }, lifeMs);
           check(
             'F',
-            'a second finger pauses the run while the first keeps walking',
-            running === STATUS_RUNNING &&
-              bothDown !== null &&
-              paused === STATUS_PAUSED &&
-              stoppedAt === stillStopped,
-            running !== STATUS_RUNNING
-              ? `the demo was not running going in (status ${running})`
-              : bothDown === null
-                ? 'the second finger stopped the first one walking, so the ' +
-                  'pause below says nothing about two fingers'
-                : `x reached ${bothDown} with two fingers down, status ` +
-                  `${paused ?? (await evaluate(page, `crcbl.status()`))}, ` +
-                  `x ${stoppedAt} -> ${stillStopped} while paused`
+            'a tap on the pause button stops the run',
+            pausedByButton === STATUS_PAUSED,
+            pausedByButton === STATUS_PAUSED
+              ? `status ${pausedByButton} after a tap ${PAUSE_INSET} px inside the corner`
+              : `status ${await evaluate(page, `crcbl.status()`)} — the corner ` +
+                  `was tapped for ${lifeMs} ms and the loop never stopped`
           );
 
-          // **The panel is tapped shut with the thumb still on the stick**, which
-          // is the lockout this whole contact route exists for: only the primary
-          // contact drives the emulated pointer, so while this thumb is down no
-          // other finger raises one, and `RESUME` could not be pressed by anybody
-          // until the stick was let go. The third contact is a finger that never
-          // touches the pointer at all.
-          const lockedMark = consoleLines.length;
-          await touch('touchStart', [
-            contact(pushed, 1),
-            contact(spot(0.5, 0.5), 3),
-          ]);
-          await touch('touchEnd', [contact(spot(0.5, 0.5), 3)]);
-          const unlocked = await until(async () => {
-            const status = await evaluate(page, `crcbl.status()`);
-            return status === STATUS_RUNNING ? status : null;
-          }, walkMs);
-          check(
-            'F',
-            'a second finger taps the pause menu shut while the first holds the stick',
-            unlocked === STATUS_RUNNING,
-            unlocked === STATUS_RUNNING
-              ? `resumed with contact 1 still down (${consoleLines.length - lockedMark} lines)`
-              : `status ${await evaluate(page, `crcbl.status()`)} — the menu ` +
-                  'could not be reached while a control was held'
-          );
-
-          // **And the thumb that never lifted takes the stick back**, on its next
-          // move rather than after being lifted and landed again. The panel
-          // released the stick when it opened — deliberately, so the wizard does
-          // not walk behind it — and a floating stick re-centres wherever the
-          // thumb has got to, which is why this moves twice: once to take it, once
-          // to push it.
-          const regrabbed = wizardX();
-          await touch('touchMove', [contact(spot(0.68, STICK_BAND), 1)]);
-          await touch('touchMove', [contact(spot(0.95, STICK_BAND), 1)]);
-          const walkedAgain = await until(async () => {
-            const at = wizardX();
-            return at > regrabbed + WALK_MARGIN ? at : null;
-          }, walkMs);
-          check(
-            'F',
-            'the thumb that never lifted walks again once the panel has gone',
-            walkedAgain !== null,
-            walkedAgain === null
-              ? `x stayed at ${regrabbed} for ${walkMs} ms with a thumb that ` +
-                  'never left the glass pushing right'
-              : `x ${regrabbed} -> ${walkedAgain} without lifting`
-          );
-
-          // Back into the pause menu for the stray-lift check below, with the
-          // thumb still down — which is the state that makes that check about
-          // anything at all — and back where it started, because where it *lifts*
-          // is what that check is about.
-          await touch('touchMove', [contact(pushed, 1)]);
-          await touch('touchStart', [
-            contact(pushed, 1),
-            contact(pauseSpot, 2),
-          ]);
-          await touch('touchEnd', [contact(pauseSpot, 2)]);
-          await until(async () => {
-            const status = await evaluate(page, `crcbl.status()`);
-            return status === STATUS_PAUSED ? status : null;
-          }, walkMs);
-
-          // **The thumb that was already down lifts, over a panel it never
-          // pressed.** It is the primary contact, so its lift is also a
-          // `pointerup`, and it lands wherever the panel happened to open — which
-          // for a centred menu is on a button. Nothing may fire: the press was
-          // made on the field, before this panel existed.
-          //
-          // Found here rather than reasoned about: this run asked for fullscreen
-          // when that thumb came off, and `crcbl::engine`'s
-          // `a_press_made_before_a_panel_opened_does_not_fire_its_buttons` is the
-          // fast test that came out of it.
-          const strayMark = consoleLines.length;
-          await touch('touchEnd');
-          await pause(windowMs);
-          const strayLines = consoleLines
-            .slice(strayMark)
-            .filter((line) => STRAY_MENU_ACTION.test(line));
-          const stillPaused = await evaluate(page, `crcbl.status()`);
-          check(
-            'F',
-            'a thumb that was down before the panel opened presses nothing',
-            strayLines.length === 0 && stillPaused === STATUS_PAUSED,
-            strayLines.length
-              ? `the lift fired ${strayLines.length} menu action(s): ${strayLines[0]}`
-              : `status ${stillPaused} after the stray lift`
-          );
-
-          // …and out through the pause menu's own button, which is what a phone
-          // can reach now that something can open the panel. The demo is left
-          // running, as every other group here leaves it.
+          // …and out again, which leaves the demo running as every other group
+          // here leaves it.
           await tap(spot(0.5, 0.5));
-          const resumed = await until(async () => {
+          const runningAgain = await until(async () => {
             const status = await evaluate(page, `crcbl.status()`);
             return status === STATUS_RUNNING ? status : null;
           });
           check(
             'F',
-            'the pause menu the button opened can be tapped shut again',
-            resumed === STATUS_RUNNING,
-            `status ${resumed ?? (await evaluate(page, `crcbl.status()`))}`
+            'the panel that button opened can be tapped shut',
+            runningAgain === STATUS_RUNNING,
+            `status ${runningAgain ?? (await evaluate(page, `crcbl.status()`))}`
           );
         }
-      }
 
-      if (EXPECTED.touch.pause) {
-        // **One finger, the whole round trip**, for every demo that draws the
-        // button rather than only for the one with two controls: tap the corner,
-        // the loop stops; tap the panel, it starts again. On breakout and flappy
-        // that finger is also the emulated pointer the game binds its paddle and
-        // its flap to, so this is the check that the button is not merely
-        // *present* — a run that served or flapped on the way to pausing would
-        // pause here too, and `crcbl.status()` alone would call that a pass. The
-        // sample tests carry that half, where the paddle and the bird can be read
-        // directly.
+        // **THE DEBUG CONSOLE, OPENED AND TYPED AT BY A FINGER ALONE.**
         //
-        // Each attempt taps the middle first, which starts or restarts a run
-        // whenever a panel is up: flappy's bird dies on its own clock, and a
-        // corner tap under a death screen presses nothing at all.
-        const box = await evaluate(
-          page,
-          `(() => { const c = document.getElementById('canvas');
-                  return { w: c.width, h: c.height }; })()`
-        );
-        const corner = spot(1 - PAUSE_INSET / box.w, PAUSE_INSET / box.h);
-        const pausedByButton = await until(async () => {
-          await tap(spot(0.5, 0.5));
-          await pause(TAP_INTERVAL_MS);
-          await tap(corner);
-          await pause(TAP_INTERVAL_MS);
-          const status = await evaluate(page, `crcbl.status()`);
-          return status === STATUS_PAUSED ? status : null;
-        }, lifeMs);
-        check(
-          'F',
-          'a tap on the pause button stops the run',
-          pausedByButton === STATUS_PAUSED,
-          pausedByButton === STATUS_PAUSED
-            ? `status ${pausedByButton} after a tap ${PAUSE_INSET} px inside the corner`
-            : `status ${await evaluate(page, `crcbl.status()`)} — the corner ` +
-                `was tapped for ${lifeMs} ms and the loop never stopped`
-        );
-
-        // …and out again, which leaves the demo running as every other group here
-        // leaves it.
-        await tap(spot(0.5, 0.5));
-        const runningAgain = await until(async () => {
-          const status = await evaluate(page, `crcbl.status()`);
-          return status === STATUS_RUNNING ? status : null;
-        });
-        check(
-          'F',
-          'the panel that button opened can be tapped shut',
-          runningAgain === STATUS_RUNNING,
-          `status ${runningAgain ?? (await evaluate(page, `crcbl.status()`))}`
-        );
-      }
-
-      // **THE DEBUG CONSOLE, OPENED AND TYPED AT BY A FINGER ALONE.**
-      //
-      // Group C already types at quarry's console — with a **keyboard**, through
-      // `Input.dispatchKeyEvent`. Every one of those checks passes on a build
-      // where a phone cannot reach the console at all, which is what shipped:
-      // `crcbl::engine::CONSOLE_KEY` is the backtick and nothing else, and the
-      // panel had no on-screen keys. So this block presses no key. It taps the
-      // engine's own `ConsoleButton`, taps letters on
-      // `crcbl_ui::console::TouchKeyboard`, and taps its return key, and the
-      // console's echo of the whole line is what says the taps arrived in order.
-      //
-      // **Aimed by arithmetic, and deliberately.** The keyboard's rectangles are
-      // a pure function of the canvas size, exactly as the pause button's are —
-      // `PAUSE_INSET` above is the same trade. The three row strings below are
-      // `LOWER_ROWS` in `crates/crcbl-ui/src/console/keyboard.rs` and the
-      // fraction is `KEYBOARD_HEIGHT_FRACTION`; moving either without moving
-      // these lands the taps between keys and reds this check rather than
-      // quietly missing.
-      if (EXPECTED.touch.console) {
-        const spec = EXPECTED.touch.console;
-        const box = await evaluate(
-          page,
-          `(() => { const c = document.getElementById('canvas');
-                  return { w: c.width, h: c.height }; })()`
-        );
-
-        const consoleSpot = spot(
-          1 - CONSOLE_BUTTON_CENTRE.right / box.w,
-          CONSOLE_BUTTON_CENTRE.down / box.h
-        );
-        // The keyboard is bottom-anchored and every row is this tall.
-        const rowHeight =
-          KEYBOARD_HEIGHT_FRACTION / (KEYBOARD_LETTER_ROWS.length + 1);
-        /** The centre of `character`'s key, as fractions of the canvas box. */
-        const keySpot = (character) => {
-          if (character === ' ')
-            return spot(SPACE_BAR_CENTRE, 1 - rowHeight / 2);
-          if (character === '\n')
-            return spot(RETURN_KEY_CENTRE, 1 - rowHeight / 2);
-          const row = KEYBOARD_LETTER_ROWS.findIndex((keys) =>
-            keys.includes(character)
+        // Group C already types at quarry's console — with a **keyboard**,
+        // through `Input.dispatchKeyEvent`. Every one of those checks passes on
+        // a build where a phone cannot reach the console at all, which is what
+        // shipped: `crcbl::engine::CONSOLE_KEY` is the backtick and nothing
+        // else, and the panel had no on-screen keys. So this block presses no
+        // key. It taps the engine's own `ConsoleButton`, taps letters on
+        // `crcbl_ui::console::TouchKeyboard`, and taps its return key, and the
+        // console's echo of the whole line is what says the taps arrived in
+        // order.
+        //
+        // **Aimed by arithmetic, and deliberately.** The keyboard's rectangles
+        // are a pure function of the canvas size, exactly as the pause button's
+        // are — `PAUSE_INSET` above is the same trade. The three row strings
+        // below are `LOWER_ROWS` in `crates/crcbl-ui/src/console/keyboard.rs`
+        // and the fraction is `KEYBOARD_HEIGHT_FRACTION`; moving either without
+        // moving these lands the taps between keys and reds this check rather
+        // than quietly missing.
+        if (EXPECTED.touch.console) {
+          const spec = EXPECTED.touch.console;
+          const box = await evaluate(
+            page,
+            `(() => { const c = document.getElementById('canvas');
+                    return { w: c.width, h: c.height }; })()`
           );
-          if (row < 0)
-            throw new Error(
-              `browser-e2e: ${JSON.stringify(character)} is not on the keyboard's ` +
-                'letter layer; the touched console line is lower-case letters and spaces'
+
+          const consoleSpot = spot(
+            1 - CONSOLE_BUTTON_CENTRE.right / box.w,
+            CONSOLE_BUTTON_CENTRE.down / box.h
+          );
+          // The keyboard is bottom-anchored and every row is this tall.
+          const rowHeight =
+            KEYBOARD_HEIGHT_FRACTION / (KEYBOARD_LETTER_ROWS.length + 1);
+          /** The centre of `character`'s key, as fractions of the canvas box. */
+          const keySpot = (character) => {
+            if (character === ' ')
+              return spot(SPACE_BAR_CENTRE, 1 - rowHeight / 2);
+            if (character === '\n')
+              return spot(RETURN_KEY_CENTRE, 1 - rowHeight / 2);
+            const row = KEYBOARD_LETTER_ROWS.findIndex((keys) =>
+              keys.includes(character)
             );
-          const keys = KEYBOARD_LETTER_ROWS[row];
-          const columns = KEYBOARD_LETTER_ROWS[0].length;
-          const inset = (columns - keys.length) / 2;
-          return spot(
-            (inset + keys.indexOf(character) + 0.5) / columns,
-            1 - (KEYBOARD_LETTER_ROWS.length + 0.5 - row) * rowHeight
-          );
-        };
+            if (row < 0)
+              throw new Error(
+                `browser-e2e: ${JSON.stringify(character)} is not on the keyboard's ` +
+                  'letter layer; the touched console line is lower-case letters and spaces'
+              );
+            const keys = KEYBOARD_LETTER_ROWS[row];
+            const columns = KEYBOARD_LETTER_ROWS[0].length;
+            const inset = (columns - keys.length) / 2;
+            return spot(
+              (inset + keys.indexOf(character) + 0.5) / columns,
+              1 - (KEYBOARD_LETTER_ROWS.length + 0.5 - row) * rowHeight
+            );
+          };
 
-        // **The control, and it comes first.** Nothing has touched this canvas
-        // since the reload above except the taps this group made, so the button
-        // is up — but a build that drew it for everyone would pass every check
-        // below and would also put it in every desktop demo's corner. The
-        // untouched case is `an_untouched_run_keeps_every_click_the_console_would_have_taken`
-        // in `crates/crcbl/src/engine.rs`, which a browser cannot stage: this
-        // page has already been tapped.
-        const beforeOpen = consoleLines.length;
-        await tap(consoleSpot);
-        await pause(TAP_INTERVAL_MS);
-        for (const character of `${spec.typed}\n`) {
-          await tap(keySpot(character));
+          // **The control, and it comes first.** Nothing has touched this
+          // canvas since the reload above except the taps this group made, so
+          // the button is up — but a build that drew it for everyone would pass
+          // every check below and would also put it in every desktop demo's
+          // corner. The untouched case is
+          // `an_untouched_run_keeps_every_click_the_console_would_have_taken`
+          // in `crates/crcbl/src/engine.rs`, which a browser cannot stage: this
+          // page has already been tapped.
+          const beforeOpen = consoleLines.length;
+          await tap(consoleSpot);
+          await pause(TAP_INTERVAL_MS);
+          for (const character of `${spec.typed}\n`) {
+            await tap(keySpot(character));
+            await pause(TAP_INTERVAL_MS);
+          }
+          const echoed = await until(async () =>
+            consoleLines
+              .slice(beforeOpen)
+              .find((line) => line.includes(`] ${spec.typed}`))
+          );
+          check(
+            'F',
+            'a finger opens the console and types a whole line at it',
+            Boolean(echoed),
+            echoed?.trim() ??
+              `nothing the page logged in ${pollCeiling()} ms echoed "] ${spec.typed}"; ` +
+                'either the CONSOLE button did not open the panel or the on-screen ' +
+                'keyboard did not put the taps in its field'
+          );
+
+          // And what the line *did*, which the echo cannot say: the echo is the
+          // field's contents, and a return key that never submitted would print
+          // it and run nothing.
+          const answered = await until(async () =>
+            consoleLines
+              .slice(beforeOpen)
+              .find((line) => spec.answer.test(line.trim()))
+          );
+          check(
+            'F',
+            "the line a finger typed is run by the keyboard's own return key",
+            Boolean(answered),
+            answered?.trim() ??
+              `nothing the page logged in ${pollCeiling()} ms was the console ` +
+                `answering "${spec.answerLabel}"; the line reached the field and ` +
+                'the return key sent it nowhere'
+          );
+
+          // Shut again, so the groups after this one find the demo as they
+          // expect it — the same courtesy group C's console block pays.
+          await tap(consoleSpot);
           await pause(TAP_INTERVAL_MS);
         }
-        const echoed = await until(async () =>
-          consoleLines
-            .slice(beforeOpen)
-            .find((line) => line.includes(`] ${spec.typed}`))
-        );
-        check(
-          'F',
-          'a finger opens the console and types a whole line at it',
-          Boolean(echoed),
-          echoed?.trim() ??
-            `nothing the page logged in ${pollCeiling()} ms echoed "] ${spec.typed}"; ` +
-              'either the CONSOLE button did not open the panel or the on-screen ' +
-              'keyboard did not put the taps in its field'
-        );
-
-        // And what the line *did*, which the echo cannot say: the echo is the
-        // field's contents, and a return key that never submitted would print it
-        // and run nothing.
-        const answered = await until(async () =>
-          consoleLines
-            .slice(beforeOpen)
-            .find((line) => spec.answer.test(line.trim()))
-        );
-        check(
-          'F',
-          "the line a finger typed is run by the keyboard's own return key",
-          Boolean(answered),
-          answered?.trim() ??
-            `nothing the page logged in ${pollCeiling()} ms was the console ` +
-              `answering "${spec.answerLabel}"; the line reached the field and ` +
-              'the return key sent it nowhere'
-        );
-
-        // Shut again, so the groups after this one find the demo as they expect
-        // it — the same courtesy group C's console block pays.
-        await tap(consoleSpot);
-        await pause(TAP_INTERVAL_MS);
       }
     }
 
     // **THE ONE CHECK HERE THAT IS ABOUT THE COLOUR OF THE FRAME RATHER THAN
-    // ABOUT THERE BEING ONE**, and the gap the rest of this file left open. Group
-    // D asks whether the canvas has more than one colour and whether it changes;
-    // both of those pass identically on a frame that is a transfer function too
-    // dark, which is exactly what the demo site shipped — a canvas configured
-    // without its `-srgb` viewFormat, so every value the engine wrote went out
-    // unencoded. `crcbl-golden` and the render harness compare pixels but render
-    // *offscreen*, through `Replayer#configureOffscreenSwapchain`, which owns its
-    // own textures and never calls `context.configure` — the path that was never
-    // broken.
+    // ABOUT THERE BEING ONE**, and the gap the rest of this file left open.
+    // Group D asks whether the canvas has more than one colour and whether it
+    // changes; both of those pass identically on a frame that is a transfer
+    // function too dark, which is exactly what the demo site shipped — a canvas
+    // configured without its `-srgb` viewFormat, so every value the engine
+    // wrote went out unencoded. `crcbl-golden` and the render harness compare
+    // pixels but render *offscreen*, through
+    // `Replayer#configureOffscreenSwapchain`, which owns its own textures and
+    // never calls `context.configure` — the path that was never broken.
     //
-    // **A FLAT CLEAR AT A MID-RANGE COLOUR IS THE WHOLE DESIGN.** 0.0 and 1.0 are
-    // fixed points of the sRGB transfer function and encode to themselves, so a
-    // clear to black or white reads back the same whether the encode happened or
-    // not — the shape of a check that cannot fail, and the reason the probe's own
-    // present gate stopped clearing to red. Every colour in `EXPECTATIONS` is
-    // mid-range in at least one channel and none is a fixed point in any. A flat
-    // fill also needs no per-platform tolerance and no expected-fail list: it is
-    // one clear, so every rasteriser produces the same bytes, and both of the ones
-    // this gate has run against produced them exactly.
+    // **A FLAT CLEAR AT A MID-RANGE COLOUR IS THE WHOLE DESIGN.** 0.0 and 1.0
+    // are fixed points of the sRGB transfer function and encode to themselves,
+    // so a clear to black or white reads back the same whether the encode
+    // happened or not — the shape of a check that cannot fail, and the reason
+    // the probe's own present gate stopped clearing to red. Every colour in
+    // `EXPECTATIONS` is mid-range in at least one channel and none is a fixed
+    // point in any. A flat fill also needs no per-platform tolerance and no
+    // expected-fail list: it is one clear, so every rasteriser produces the
+    // same bytes, and both of the ones this gate has run against produced them
+    // exactly.
     //
-    // **AND IT IS A PICTURE, WHICH IS WHAT THE PROBE'S GROUPS I AND X ARE NOT.**
-    // Those two are not a gap this fills — reintroduce the shipped bug and group I
-    // goes red on its own — but every byte they compare is copied out on the GPU
-    // by `crcbl-webgpu` and handed to wasm over the reply channel, and both drive
-    // the probe exports on a page with no engine running. Neither asks the browser
-    // what it *composited*, and neither is a demo. This reads the result off the
-    // element a visitor looks at, through the same `toDataURL` the header measured
-    // as the one spelling that reports a WebGPU canvas at all.
+    // **AND IT IS A PICTURE, WHICH IS WHAT THE PROBE'S GROUPS I AND X ARE
+    // NOT.** Those two are not a gap this fills — reintroduce the shipped bug
+    // and group I goes red on its own — but every byte they compare is copied
+    // out on the GPU by `crcbl-webgpu` and handed to wasm over the reply
+    // channel, and both drive the probe exports on a page with no engine
+    // running. Neither asks the browser what it *composited*, and neither is a
+    // demo. This reads the result off the element a visitor looks at, through
+    // the same `toDataURL` the header measured as the one spelling that reports
+    // a WebGPU canvas at all.
     //
     // The canvas written below is this group's evidence: it is the same
-    // `toDataURL` of the same element a moment later, so a failure here comes with
-    // the picture that produced it.
-    if (EXPECTED.backdrop) {
+    // `toDataURL` of the same element a moment later, so a failure here comes
+    // with the picture that produced it.
+    if (EXPECTED.backdrop && runs('G')) {
       group('G — the frame is sRGB-encoded');
 
-      // **THE DEMO IS PUT IN PLAY FIRST, AND THAT IS NOT LENIENCY.** A game decides
-      // for itself what covers its clear colour, and by this point in the run it
-      // has been played: flappy's bird is usually dead and its death screen dims
-      // the whole sky. Read in that state the check went red on the Pages run of
-      // 2026-08-20 with `rgb(63,105,141)` against the expected `rgb(107,173,229)`,
-      // and the numbers say what that was — a **uniform 0.61 multiply**, an
-      // overlay. A transfer-function error is a power curve, and the expected
-      // colour decoded is `rgb(37,107,200)`, nothing like what arrived. Six
-      // consecutive samples here printed `[HUD] Dead score: 0` beside that colour.
+      // **THE DEMO IS PUT IN PLAY FIRST, AND THAT IS NOT LENIENCY.** A game
+      // decides for itself what covers its clear colour, and by this point in
+      // the run it has been played: flappy's bird is usually dead and its death
+      // screen dims the whole sky. Read in that state the check went red on the
+      // Pages run of 2026-08-20 with `rgb(63,105,141)` against the expected
+      // `rgb(107,173,229)`, and the numbers say what that was — a **uniform
+      // 0.61 multiply**, an overlay. A transfer-function error is a power
+      // curve, and the expected colour decoded is `rgb(37,107,200)`, nothing
+      // like what arrived. Six consecutive samples here printed `[HUD] Dead
+      // score: 0` beside that colour.
       //
-      // Pressing the demo's own start key until its own `started` line appears is
-      // the same state group C establishes, and it makes this the *only* check
-      // here that does not race the simulation. It cannot hide a broken encode: a
-      // run with no encode shows the linear colour on a live frame too, which is
-      // what `unencoded` in the row below is compared against.
+      // Pressing the demo's own start key until its own `started` line appears
+      // is the same state group C establishes, and it makes this the *only*
+      // check here that does not race the simulation. It cannot hide a broken
+      // encode: a run with no encode shows the linear colour on a live frame
+      // too, which is what `unencoded` in the row below is compared against.
       //
       // Rebooting the page instead was tried and is worse — `crcbl.status()`
-      // reaches RUNNING before the first frame is presented, so the sample is an
-      // all-black canvas, and breakout's clear is only uncovered once its start
-      // menu has been dismissed.
+      // reaches RUNNING before the first frame is presented, so the sample is
+      // an all-black canvas, and breakout's clear is only uncovered once its
+      // start menu has been dismissed.
       if (EXPECTED.started) {
         let playing = false;
         for (
@@ -11153,186 +11305,193 @@ try {
       );
     }
 
-    // **THREE OF THE CHECKS ABOVE ASSERT A SILENCE, AND A CLOSED CHANNEL REPORTS
-    // SILENCE TOO.** Group A's "the page raised no uncaught exception", group B's
-    // "every asset the page asked for exists" and group D's "the browser reported
-    // no WebGPU device errors" each read an array that a listener somewhere is
-    // supposed to fill. A listener that was never attached, a filter that swallows
-    // everything, a server that stopped recording its 404s: every one of those
-    // presents as an empty array, which is exactly what a passing run looks like.
+    // **THREE OF THE CHECKS ABOVE ASSERT A SILENCE, AND A CLOSED CHANNEL
+    // REPORTS SILENCE TOO.** Group A's "the page raised no uncaught exception",
+    // group B's "every asset the page asked for exists" and group D's "the
+    // browser reported no WebGPU device errors" each read an array that a
+    // listener somewhere is supposed to fill. A listener that was never
+    // attached, a filter that swallows everything, a server that stopped
+    // recording its 404s: every one of those presents as an empty array, which
+    // is exactly what a passing run looks like.
     //
-    // That is not hypothetical. `crcbl-vk`'s suites asserted the validation layer
-    // had been silent across a 66,836-line job log in which the layer's own
-    // deliberate-violation test also produced nothing, because no `log::Log` was
-    // installed — the whole suite green and proving nothing.
-    // `vk_e2e::validation_gate::a_deliberate_violation_is_caught_by_the_layer` is
-    // the fix and the precedent for this group: commit the violation, then assert
-    // the channel noticed.
+    // That is not hypothetical. `crcbl-vk`'s suites asserted the validation
+    // layer had been silent across a 66,836-line job log in which the layer's
+    // own deliberate-violation test also produced nothing, because no
+    // `log::Log` was installed — the whole suite green and proving nothing.
+    // `vk_e2e::validation_gate::a_deliberate_violation_is_caught_by_the_layer`
+    // is the fix and the precedent for this group: commit the violation, then
+    // assert the channel noticed.
     //
-    // **IT RUNS LAST, AND THAT IS THE WHOLE OF ITS PLACEMENT.** Every provocation
-    // below deliberately dirties one of the three arrays, so all of them have to
-    // happen after the last check that reads one. It needs no `EXPECTATIONS` row
-    // either, and deliberately: nothing here is about the game, so every demo
-    // makes all three claims.
+    // **IT RUNS LAST, AND THAT IS THE WHOLE OF ITS PLACEMENT.** Every
+    // provocation below deliberately dirties one of the three arrays, so all of
+    // them have to happen after the last check that reads one. It needs no
+    // `EXPECTATIONS` row either, and deliberately: nothing here is about the
+    // game, so every demo makes all three claims.
     //
-    // **WHAT READS THOSE ARRAYS AFTERWARDS.** `pageErrors` and `site.misses` have
-    // no reader past their own check, so a deliberate entry in either is inert.
-    // `deviceErrors` has one — the failure report at the bottom of this file
-    // prints it in full whenever any check fails. It cannot turn a run red, since
-    // only `checks` decides that, but it would print this group's own error beside
-    // real ones, so that reader filters [`PROVOCATION`] out and says so there.
-    // **Nothing is removed from any of the three**: groups A, B and D have already
-    // read them, and an array edited behind a check that has run is the shape of
-    // trick this group exists to rule out.
-    group('H — the reporting channels are open');
+    // **WHAT READS THOSE ARRAYS AFTERWARDS.** `pageErrors` and `site.misses`
+    // have no reader past their own check, so a deliberate entry in either is
+    // inert. `deviceErrors` has one — the failure report at the bottom of this
+    // file prints it in full whenever any check fails. It cannot turn a run
+    // red, since only `checks` decides that, but it would print this group's
+    // own error beside real ones, so that reader filters [`PROVOCATION`] out
+    // and says so there. **Nothing is removed from any of the three**: groups
+    // A, B and D have already read them, and an array edited behind a check
+    // that has run is the shape of trick this group exists to rule out.
+    if (runs('H')) {
+      group('H — the reporting channels are open');
 
-    // **Thrown from a timer rather than from the `evaluate` itself.** An
-    // expression that throws comes back as this file's own rejection —
-    // [`evaluate`] turns `exceptionDetails` into an `Error` — and never reaches
-    // the page's uncaught channel at all. A `setTimeout` callback has no caller to
-    // catch it, so it goes where a real bug in the shim would go:
-    // `Runtime.exceptionThrown`, which is the event the run subscribed to when it
-    // opened the page.
-    const errorsBefore = pageErrors.length;
-    const thrown = `${PROVOCATION} page exception`;
-    await evaluate(
-      page,
-      `(setTimeout(() => { throw new Error(${JSON.stringify(thrown)}); }, 0), true)`
-    );
-    const raised = await until(
-      async () =>
-        pageErrors.length > errorsBefore
-          ? pageErrors.slice(errorsBefore)
-          : null,
-      PROVOCATION_MS
-    );
-    check(
-      'H',
-      'a deliberate uncaught exception reaches the page-error channel',
-      raised !== null && raised.some((line) => String(line).includes(thrown)),
-      raised === null
-        ? `nothing arrived in ${PROVOCATION_MS} ms — group A's "the page raised ` +
-            'no uncaught exception" is reading an array nothing fills'
-        : raised.some((line) => String(line).includes(thrown))
-          ? String(raised.find((line) => String(line).includes(thrown)))
-              .split('\n')[0]
-              .trim()
-          : `${raised.length} entr(y/ies) arrived and none names "${thrown}": ` +
-            `${String(raised[0]).split('\n')[0].trim()}`
-    );
+      // **Thrown from a timer rather than from the `evaluate` itself.** An
+      // expression that throws comes back as this file's own rejection —
+      // [`evaluate`] turns `exceptionDetails` into an `Error` — and never
+      // reaches the page's uncaught channel at all. A `setTimeout` callback has
+      // no caller to catch it, so it goes where a real bug in the shim would
+      // go: `Runtime.exceptionThrown`, which is the event the run subscribed to
+      // when it opened the page.
+      const errorsBefore = pageErrors.length;
+      const thrown = `${PROVOCATION} page exception`;
+      await evaluate(
+        page,
+        `(setTimeout(() => { throw new Error(${JSON.stringify(thrown)}); }, 0), true)`
+      );
+      const raised = await until(
+        async () =>
+          pageErrors.length > errorsBefore
+            ? pageErrors.slice(errorsBefore)
+            : null,
+        PROVOCATION_MS
+      );
+      check(
+        'H',
+        'a deliberate uncaught exception reaches the page-error channel',
+        raised !== null && raised.some((line) => String(line).includes(thrown)),
+        raised === null
+          ? `nothing arrived in ${PROVOCATION_MS} ms — group A's "the page raised ` +
+              'no uncaught exception" is reading an array nothing fills'
+          : raised.some((line) => String(line).includes(thrown))
+            ? String(raised.find((line) => String(line).includes(thrown)))
+                .split('\n')[0]
+                .trim()
+            : `${raised.length} entr(y/ies) arrived and none names "${thrown}": ` +
+              `${String(raised[0]).split('\n')[0].trim()}`
+      );
 
-    // A path under the demo's own directory, so the request goes to the server the
-    // page's assets come from and `serve.mjs` records it in the same `misses`
-    // array group B reads. **Not a `favicon.ico`**: [`isRealMiss`] drops that one
-    // name, and a provocation the check under test filters back out would be a
-    // control its own filter could swallow — so the name is deliberately chosen to
-    // survive that predicate, and the predicate is applied here to prove it did.
-    const missesBefore = site.misses.length;
-    const missingAsset = `${PROVOCATION}-missing-asset.bin`;
-    const missStatus = await evaluate(
-      page,
-      `fetch(${JSON.stringify(missingAsset)}).then((response) => response.status)`
-    );
-    const recorded = await until(
-      async () =>
-        site.misses.length > missesBefore
-          ? site.misses.slice(missesBefore).filter(isRealMiss)
-          : null,
-      PROVOCATION_MS
-    );
-    const missSeen =
-      recorded?.filter((path) => path.endsWith(missingAsset)) ?? [];
-    check(
-      'H',
-      'a request for an asset that is not there is recorded as a miss',
-      missStatus === 404 && missSeen.length > 0,
-      missStatus !== 404
-        ? `the server answered ${missStatus} for ${missingAsset}, so nothing was ` +
-            'missing and this control provoked nothing'
-        : missSeen.length > 0
-          ? missSeen[0]
-          : `the fetch 404'd and ${recorded?.length ?? 0} miss(es) were recorded ` +
-            `in ${PROVOCATION_MS} ms, none of them ${missingAsset} — group B's ` +
-            '"every asset the page asked for exists" is reading an array nothing fills'
-    );
+      // A path under the demo's own directory, so the request goes to the
+      // server the page's assets come from and `serve.mjs` records it in the
+      // same `misses` array group B reads. **Not a `favicon.ico`**:
+      // [`isRealMiss`] drops that one name, and a provocation the check under
+      // test filters back out would be a control its own filter could swallow —
+      // so the name is deliberately chosen to survive that predicate, and the
+      // predicate is applied here to prove it did.
+      const missesBefore = site.misses.length;
+      const missingAsset = `${PROVOCATION}-missing-asset.bin`;
+      const missStatus = await evaluate(
+        page,
+        `fetch(${JSON.stringify(missingAsset)}).then((response) => response.status)`
+      );
+      const recorded = await until(
+        async () =>
+          site.misses.length > missesBefore
+            ? site.misses.slice(missesBefore).filter(isRealMiss)
+            : null,
+        PROVOCATION_MS
+      );
+      const missSeen =
+        recorded?.filter((path) => path.endsWith(missingAsset)) ?? [];
+      check(
+        'H',
+        'a request for an asset that is not there is recorded as a miss',
+        missStatus === 404 && missSeen.length > 0,
+        missStatus !== 404
+          ? `the server answered ${missStatus} for ${missingAsset}, so nothing was ` +
+              'missing and this control provoked nothing'
+          : missSeen.length > 0
+            ? missSeen[0]
+            : `the fetch 404'd and ${recorded?.length ?? 0} miss(es) were recorded ` +
+              `in ${PROVOCATION_MS} ms, none of them ${missingAsset} — group B's ` +
+              '"every asset the page asked for exists" is reading an array nothing fills'
+      );
 
-    // **A device this page opens for the purpose, and not the engine's.**
-    // `deviceErrors` is filled from one place: the `Log.entryAdded` handler above,
-    // for an entry whose `source` is `rendering` — Chrome's own report of an
-    // uncaptured WebGPU error, whichever device in this page raised it. So a
-    // throwaway device exercises the whole of what that array reads, from Dawn's
-    // validation through the browser's console to the handler and the array.
-    //
-    // Provoking the *engine's* device instead was the other candidate and is
-    // rejected on purpose. `crcbl.gpu.replayer.device` is reachable from here, but
-    // an error on it also travels a second path: `gpu-replay.js`'s
-    // `uncapturederror` listener files it in the replayer's error log, wasm drains
-    // that through `Command::TakeError`, and `Gpu::acquire` in
-    // `crates/crcbl/src/engine.rs` turns the next frame into a `GpuError` — so the
-    // control would end the run by taking the demo to FAILED, and the canvas and
-    // page log written a few lines below would be evidence for a demo the gate
-    // broke itself.
-    //
-    // **WHAT THIS THEREFORE DOES NOT PROVE**: that the engine's own device is
-    // reported through the same console. It would not be if something called
-    // `preventDefault()` on the `uncapturederror` event; nothing does — that
-    // listener in `web/engine/gpu-replay.js` only files the message — and there is
-    // no other listener on that device. That reasoning is the seam this control
-    // leaves uncovered, and reading the listener is the whole of the evidence for
-    // it.
-    //
-    // **THE TICK IS LOAD-BEARING.** Dawn queues an uncaptured error and dispatches
-    // it when the device next ticks, so a device given no work does not report for
-    // seconds — measured here at over four, and at nothing at all inside the
-    // window this check would have allowed it. `onSubmittedWorkDone` is a tick
-    // with nothing else attached to it: with the await in place the entry arrived
-    // 2–4 ms later on every run. **And no `pushErrorScope`**, which is the other
-    // half: an error inside a scope is *captured*, so the console never hears
-    // about it and this control would provoke a silence of its own.
-    const deviceErrorsBefore = deviceErrors.length;
-    const badBuffer = `${PROVOCATION} device error`;
-    const provoked = await evaluate(
-      page,
-      `(async () => {
-       const adapter = await navigator.gpu.requestAdapter();
-       if (!adapter) return 'no adapter';
-       const device = await adapter.requestDevice({
-         label: ${JSON.stringify(`${PROVOCATION} control device`)},
-       });
-       // MAP_READ may only be combined with COPY_DST and MAP_WRITE only with
-       // COPY_SRC, so the pair is a validation error in the call itself — no
-       // command is recorded and nothing is submitted, which is the same reason
-       // the Vulkan gate provokes its layer with a copy it throws away.
-       device.createBuffer({
-         label: ${JSON.stringify(badBuffer)},
-         size: 4,
-         usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.MAP_WRITE,
-       });
-       await device.queue.onSubmittedWorkDone();
-       return 'provoked';
-     })()`
-    );
-    const reported = await until(
-      async () =>
-        deviceErrors.length > deviceErrorsBefore
-          ? deviceErrors.slice(deviceErrorsBefore)
-          : null,
-      PROVOCATION_MS
-    );
-    const named = reported?.filter((text) => text.includes(badBuffer)) ?? [];
-    check(
-      'H',
-      'a deliberate WebGPU validation error reaches the device-error channel',
-      provoked === 'provoked' && named.length > 0,
-      provoked !== 'provoked'
-        ? `no device to provoke: ${provoked}`
-        : named.length > 0
-          ? named[0].split('\n')[0].trim()
-          : `${reported?.length ?? 0} device error(s) arrived in ` +
-            `${PROVOCATION_MS} ms and none names "${badBuffer}" — group D's ` +
-            '"the browser reported no WebGPU device errors" is reading an array ' +
-            'nothing fills'
-    );
+      // **A device this page opens for the purpose, and not the engine's.**
+      // `deviceErrors` is filled from one place: the `Log.entryAdded` handler
+      // above, for an entry whose `source` is `rendering` — Chrome's own report
+      // of an uncaptured WebGPU error, whichever device in this page raised it.
+      // So a throwaway device exercises the whole of what that array reads,
+      // from Dawn's validation through the browser's console to the handler and
+      // the array.
+      //
+      // Provoking the *engine's* device instead was the other candidate and is
+      // rejected on purpose. `crcbl.gpu.replayer.device` is reachable from
+      // here, but an error on it also travels a second path: `gpu-replay.js`'s
+      // `uncapturederror` listener files it in the replayer's error log, wasm
+      // drains that through `Command::TakeError`, and `Gpu::acquire` in
+      // `crates/crcbl/src/engine.rs` turns the next frame into a `GpuError` —
+      // so the control would end the run by taking the demo to FAILED, and the
+      // canvas and page log written a few lines below would be evidence for a
+      // demo the gate broke itself.
+      //
+      // **WHAT THIS THEREFORE DOES NOT PROVE**: that the engine's own device is
+      // reported through the same console. It would not be if something called
+      // `preventDefault()` on the `uncapturederror` event; nothing does — that
+      // listener in `web/engine/gpu-replay.js` only files the message — and
+      // there is no other listener on that device. That reasoning is the seam
+      // this control leaves uncovered, and reading the listener is the whole of
+      // the evidence for it.
+      //
+      // **THE TICK IS LOAD-BEARING.** Dawn queues an uncaptured error and
+      // dispatches it when the device next ticks, so a device given no work
+      // does not report for seconds — measured here at over four, and at
+      // nothing at all inside the window this check would have allowed it.
+      // `onSubmittedWorkDone` is a tick with nothing else attached to it: with
+      // the await in place the entry arrived 2–4 ms later on every run. **And
+      // no `pushErrorScope`**, which is the other half: an error inside a scope
+      // is *captured*, so the console never hears about it and this control
+      // would provoke a silence of its own.
+      const deviceErrorsBefore = deviceErrors.length;
+      const badBuffer = `${PROVOCATION} device error`;
+      const provoked = await evaluate(
+        page,
+        `(async () => {
+         const adapter = await navigator.gpu.requestAdapter();
+         if (!adapter) return 'no adapter';
+         const device = await adapter.requestDevice({
+           label: ${JSON.stringify(`${PROVOCATION} control device`)},
+         });
+         // MAP_READ may only be combined with COPY_DST and MAP_WRITE only with
+         // COPY_SRC, so the pair is a validation error in the call itself — no
+         // command is recorded and nothing is submitted, which is the same
+         // reason the Vulkan gate provokes its layer with a copy it throws
+         // away.
+         device.createBuffer({
+           label: ${JSON.stringify(badBuffer)},
+           size: 4,
+           usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.MAP_WRITE,
+         });
+         await device.queue.onSubmittedWorkDone();
+         return 'provoked';
+       })()`
+      );
+      const reported = await until(
+        async () =>
+          deviceErrors.length > deviceErrorsBefore
+            ? deviceErrors.slice(deviceErrorsBefore)
+            : null,
+        PROVOCATION_MS
+      );
+      const named = reported?.filter((text) => text.includes(badBuffer)) ?? [];
+      check(
+        'H',
+        'a deliberate WebGPU validation error reaches the device-error channel',
+        provoked === 'provoked' && named.length > 0,
+        provoked !== 'provoked'
+          ? `no device to provoke: ${provoked}`
+          : named.length > 0
+            ? named[0].split('\n')[0].trim()
+            : `${reported?.length ?? 0} device error(s) arrived in ` +
+              `${PROVOCATION_MS} ms and none names "${badBuffer}" — group D's ` +
+              '"the browser reported no WebGPU device errors" is reading an array ' +
+              'nothing fills'
+      );
+    }
   }
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and
@@ -11347,359 +11506,373 @@ try {
     page,
     `document.getElementById('canvas').toDataURL().slice(22)`
   );
-  const shotPath = join(OUT, `${SLUG}-${chosen.mode}.png`);
+  const shotPath = join(OUT, `${EVIDENCE}-${chosen.mode}.png`);
   writeFileSync(shotPath, Buffer.from(png, 'base64'));
 
-  group('I — the demo lets go of what it took');
+  if (runs('I')) {
+    group('I — the demo lets go of what it took');
 
-  // `crcbl-vk`'s teardown warning, asked of the browser side.
-  //
-  // `crates/crcbl-vk/src/device.rs`'s `Drop for DeviceInner` names every object
-  // a caller never destroyed, by kind and count, and the vk e2e runners fail on
-  // that line rather than logging it. `crcbl-dx12` and `crcbl-mtl` carry the
-  // same warning. `crcbl-webgpu` has none — but the browser side of it is a
-  // handle table like any other, one per kind, and an object the stream created
-  // and never destroyed is a slot still occupied. `Replayer#liveObjects` reads
-  // those tables; this is the gate that asks.
-  //
-  // **IT RUNS FOR EVERY DEMO**, and last, for two reasons of its own. Every
-  // demo, because the question is about the engine's own resource discipline
-  // rather than about anything one game does — a leak on the acquire path
-  // belongs to all of them and a leak in a game's own pipelines belongs to one,
-  // and a per-demo count is what tells those apart. Last, because it stops the
-  // demo, and every check above needs a demo that is still running.
-  const naming = (held) =>
-    held.map(({ kind, count }) => `${count} ${kind}`).join(', ');
+    // `crcbl-vk`'s teardown warning, asked of the browser side.
+    //
+    // `crates/crcbl-vk/src/device.rs`'s `Drop for DeviceInner` names every
+    // object a caller never destroyed, by kind and count, and the vk e2e
+    // runners fail on that line rather than logging it. `crcbl-dx12` and
+    // `crcbl-mtl` carry the same warning. `crcbl-webgpu` has none — but the
+    // browser side of it is a handle table like any other, one per kind, and an
+    // object the stream created and never destroyed is a slot still occupied.
+    // `Replayer#liveObjects` reads those tables; this is the gate that asks.
+    //
+    // **IT RUNS FOR EVERY DEMO**, and last, for two reasons of its own. Every
+    // demo, because the question is about the engine's own resource discipline
+    // rather than about anything one game does — a leak on the acquire path
+    // belongs to all of them and a leak in a game's own pipelines belongs to
+    // one, and a per-demo count is what tells those apart. Last, because it
+    // stops the demo, and every check above needs a demo that is still running.
+    const naming = (held) =>
+      held.map(({ kind, count }) => `${count} ${kind}`).join(', ');
 
-  // **THE OBSERVATION IS CHECKED BEFORE THE VERDICT IS READ OFF IT.** The
-  // failure that costs the most here is not a leak: it is `liveObjects()`
-  // answering an empty list because it is reading nothing — a renamed getter, a
-  // handle to a replayer that never replayed, an `evaluate` that came back
-  // `undefined`. Every one of those reads as a clean teardown, which is the
-  // exact shape of check this repository keeps throwing out. So the first thing
-  // asked is whether it can see anything at all, of a demo that has been
-  // rendering for the whole run and therefore certainly holds a surface, a
-  // swapchain and the pipelines it drew with.
-  const heldRunning = await evaluate(page, `crcbl.gpu.replayer.liveObjects()`);
-  const observing =
-    Array.isArray(heldRunning) &&
-    heldRunning.length > 0 &&
-    heldRunning.every(
-      (entry) => typeof entry?.kind === 'string' && entry.count > 0
+    // **THE OBSERVATION IS CHECKED BEFORE THE VERDICT IS READ OFF IT.** The
+    // failure that costs the most here is not a leak: it is `liveObjects()`
+    // answering an empty list because it is reading nothing — a renamed getter,
+    // a handle to a replayer that never replayed, an `evaluate` that came back
+    // `undefined`. Every one of those reads as a clean teardown, which is the
+    // exact shape of check this repository keeps throwing out. So the first
+    // thing asked is whether it can see anything at all, of a demo that has
+    // been rendering for the whole run and therefore certainly holds a surface,
+    // a swapchain and the pipelines it drew with.
+    const heldRunning = await evaluate(
+      page,
+      `crcbl.gpu.replayer.liveObjects()`
     );
-  check(
-    'I',
-    'the replayer can say what it is holding while the demo runs',
-    observing,
-    observing
-      ? naming(heldRunning)
-      : `liveObjects() answered ${JSON.stringify(heldRunning)} for a demo that ` +
-          'has been rendering all run — the leak check below would read that as ' +
-          'a clean teardown, so it is not one'
-  );
-
-  // **A STEADY-STATE FRAME MUST TAKE NOTHING IT DOES NOT GIVE BACK**, which is
-  // the half of this group's question the teardown check cannot ask. A run that
-  // hands the replayer one more object every frame and destroys them all at
-  // shutdown passes the check below and is still a page that grows without
-  // bound for as long as somebody looks at it — which is exactly what the
-  // acquire path did until 2026-08-23, minting a fresh image and image-view
-  // handle per frame that nothing ever retired. It was measured at 581 of each
-  // after one second of breakout, and a shutdown-only gate saw nothing wrong.
-  //
-  // Counted in **frames rather than seconds**, because a frame is the unit the
-  // growth was in and a slow runner would otherwise watch a shorter run. The
-  // demo has been drawing for the whole suite by now, so nothing here is
-  // warm-up: a kind that climbs at this point is climbing for good.
-  // **GROWTH HAS TO BE SUSTAINED, NOT MERELY OBSERVED ONCE.** This used to take
-  // one sample, wait, take another, and fail on any kind that had risen. That
-  // cannot tell a leak from a fixed-size ring filling up, and one of the kinds
-  // here is ring-shaped: `readbacks` is the instantaneous occupancy of
-  // `CullStatsRing`, which holds `FRAMES_IN_FLIGHT + 1` slots per renderer and
-  // whose `take_slot` will not reuse a slot that is still polling — so it is
-  // bounded at three per renderer and legitimately *rises* when a readback's
-  // round trip takes more frames, which is exactly what a loaded CI runner
-  // does. It failed twice that way (lantern 2 -> 5 against a ceiling of six,
-  // quarry 1 -> 2 against three), both strictly inside the bound.
-  //
-  // **THE WINDOW IS SMALL BECAUSE EACH ONE IS BOUNDED BY `pollCeiling`, AND
-  // THE SLOWEST DEMO SETS THE SIZE.** Every window polls through `until`, so a
-  // window that the demo cannot finish inside the poll ceiling fails the check
-  // for want of frames rather than for anything it holds on to. quarry draws at
-  // roughly two frames every three seconds under SwiftShader on a CI runner —
-  // measured, not guessed: a 60-frame window took 91.7 s there against a 90 s
-  // ceiling, and the run before this comment failed with `drew fewer than 60
-  // more frames`. Three windows of this size cost the same total frames as the
-  // single 60-frame window that preceded them, so the step's wall clock is
-  // unchanged, while each window now finishes in about a third of its ceiling
-  // instead of just over it. Raising it buys no teeth — a leak that mints one
-  // object per frame moves the count by the window size, and any size at all
-  // makes it climb — so the size exists to fit the ceiling, not to catch more.
-  //
-  // **shard is the slowest demo now, not quarry**, and it is what moved the
-  // ceiling rather than this number. It drew 15 of these 20 frames in 90 s on
-  // 2026-08-28 — six wall seconds a frame — so the window needs 120 s and the
-  // unscaled ceiling could never have given it to them. Shrinking the window to
-  // fit was the alternative and was not taken: a window has to outrun the ring
-  // depths above by enough that a saturating ring and a climbing leak are told
-  // apart, and trading that margin for a green light is not a measurement.
-  //
-  // So the question asked is whether a kind climbs in **every** window rather
-  // than in one. A ring saturates and stops; a leak does not, and the leak this
-  // check exists for — a fresh image and view minted per frame and never
-  // retired — climbs in all of them, at 581 per second. The teeth are the same
-  // and the false positive is gone. Per-kind ceilings were the alternative and
-  // were not taken: they would put the engine's ring depths in this file, to be
-  // silently wrong the day one changed.
-  //
-  // **And three windows were not enough either. This is four, and it is a
-  // stopgap.** The Pages run for `d0bc715` failed lantern here on `readbacks
-  // 2 -> 4 -> 5 -> 6` — the third false failure of this check across two demos,
-  // and the same ring saturating as the two above it: six is the ceiling the
-  // paragraph above names for lantern, the run stopped at exactly it, and the
-  // increments decelerated on the way there. A leak does not stop at a bound.
-  // What the runner's load had changed was the readback round trip, stretching
-  // it until occupancy took three whole windows to saturate — so three no
-  // longer contained the flat step that is what says it stopped.
-  //
-  // **A fourth window buys room for that step and buys nothing else.** It is
-  // still a number tuned against how loaded a runner happens to be, and a
-  // slower one moves it again. What ends this is the fix the paragraph above
-  // turns down only in its copied form: per-kind ceilings **read from the
-  // engine** — `liveObjects()` reporting each kind's own bound beside its
-  // count, so this check compares a count against a bound the engine states
-  // rather than inferring saturation from the shape of a curve, and the ring
-  // depths stay where they are declared instead of being duplicated here.
-  //
-  // The cost is another `FRAMES_WATCHED` frames per demo, which on the slowest
-  // of them is another two wall minutes — shard drew 15 of these 20 frames in
-  // 90 s, above. `FRAMES_WATCHED` is the wrong knob to have reached for
-  // instead: a longer window is longer in *every* window, and what was missing
-  // was one more chance for the ring to show a flat step rather than a longer
-  // look at the same one.
-  const FRAMES_WATCHED = 20;
-  const WINDOWS = 4;
-  const replayedNow = () => evaluate(page, `crcbl.gpu.stats().replayed`);
-  const countsOf = (held) =>
-    new Map((held ?? []).map(({ kind, count }) => [kind, count]));
-  const heldSamples = [heldRunning];
-  // **WHAT A FRAME OF THIS DEMO COSTS, ON THIS ADAPTER, IN WALL CLOCK.** A
-  // reading rather than a check: `docs/plan/sample/15-shard.md`'s milestone 1
-  // asks for a recorded browser budget, and the windows below are the only
-  // stretch of a run where the demo is doing nothing but drawing — the groups
-  // before them are dispatching input and waiting on the simulation, so their
-  // elapsed says more about the driver than about the frame.
-  //
-  // It is the page loop's wall clock and not the engine's own accounting: the
-  // per-pass `p50 / p95` table `crcbl::engine` prints at exit is the finer
-  // instrument and it is in this run's page log already. This one is the
-  // end-to-end figure that table cannot give — command replay, the browser's
-  // own scheduling and the rAF cadence included — and it is bounded above by
-  // `until`'s 16 ms poll on each window's last frame.
-  const watchedFrom = await replayedNow();
-  const watchedAt = Date.now();
-  let watched = true;
-  // What the window that ran out actually managed, for the message below. "The
-  // demo drew fewer than 20" was true of every slow runner and told a reader
-  // nothing about how much slower: 19 frames and 2 need different answers, and
-  // this is the only place that number can be read.
-  let drewInWindow = null;
-  for (let window = 0; window < WINDOWS && watched; window += 1) {
-    const framesBefore = await replayedNow();
-    const drewMore = await until(async () => {
-      const now = await replayedNow();
-      drewInWindow =
-        typeof now === 'number' && typeof framesBefore === 'number'
-          ? now - framesBefore
-          : null;
-      return typeof now === 'number' && now >= framesBefore + FRAMES_WATCHED
-        ? { now }
-        : null;
-    });
-    watched = Boolean(drewMore);
-    heldSamples.push(
-      watched ? await evaluate(page, `crcbl.gpu.replayer.liveObjects()`) : null
-    );
-  }
-  const watchedFor = Date.now() - watchedAt;
-  const watchedFrames = await replayedNow();
-  const drewWatched =
-    typeof watchedFrames === 'number' && typeof watchedFrom === 'number'
-      ? watchedFrames - watchedFrom
-      : 0;
-  say(
-    drewWatched > 0
-      ? `web e2e: steady state: ${drewWatched} replayed frame(s) in ` +
-          `${(watchedFor / 1000).toFixed(1)} s — ` +
-          `${(watchedFor / drewWatched).toFixed(1)} ms/frame on the ` +
-          `"${chosen.mode}" adapter`
-      : `web e2e: steady state: no frame was replayed in ` +
-          `${(watchedFor / 1000).toFixed(1)} s, so this run records no ` +
-          'browser budget'
-  );
-  const readSamples = heldSamples.every((held) => Array.isArray(held));
-  // A kind counts as growing only if it rose across every window in turn.
-  const grew = readSamples
-    ? [...countsOf(heldSamples[heldSamples.length - 1])]
-        .filter(([kind]) =>
-          heldSamples.every(
-            (held, index) =>
-              index === 0 ||
-              (countsOf(held).get(kind) ?? 0) >
-                (countsOf(heldSamples[index - 1]).get(kind) ?? 0)
-          )
-        )
-        .map(
-          ([kind]) =>
-            `${kind} ${heldSamples
-              .map((held) => countsOf(held).get(kind) ?? 0)
-              .join(' -> ')}`
-        )
-    : [];
-  check(
-    'I',
-    'a steady-state frame gives back everything it takes',
-    watched && readSamples && grew.length === 0,
-    !watched
-      ? `the demo drew ${drewInWindow ?? 'an unreadable number of'} of the ` +
-          `${FRAMES_WATCHED} frames this window wanted, in ${pollCeiling()} ms, ` +
-          'so nothing here is a verdict about what a frame holds on to'
-      : !readSamples
-        ? `liveObjects() answered ${JSON.stringify(heldSamples.find((held) => !Array.isArray(held)))} on one of the heldSamples`
-        : grew.length === 0
-          ? `nothing climbed across all ${WINDOWS} windows of ${FRAMES_WATCHED} frames`
-          : `over ${WINDOWS} windows of ${FRAMES_WATCHED} frames: ${grew.join(', ')} — a frame that ` +
-            'takes one more of something every time is a page that grows for as ' +
-            'long as it is open, whatever its teardown then destroys'
-  );
-
-  // **THE PAGE'S OWN STOP BUTTON, AND NOT `crcbl.exports`.** `demo.js` wires it
-  // to `shell.requestClose()`, which asks the engine to close the way a
-  // compositor's close button does on the desktop: the next `api.frame()` runs
-  // `Flow::Stop`, tears the loop down and reports STOPPED, and `pumpGpu()` runs
-  // *after* that call in the same iteration — so any command the teardown
-  // encodes is drained before the loop ends. Reaching past the page to the wasm
-  // exports would skip that drain and blame the engine for a frame the shim
-  // never delivered.
-  //
-  // Not `pagehide` either, which is the other teardown `demo.js` has: it calls
-  // `api.shutdown()` with no frame left to follow it, so nothing pumps what the
-  // teardown wrote and the tables could not empty however clean the engine was.
-  await evaluate(page, `(document.getElementById('stop').click(), true)`);
-  const settledStop = await until(async () => {
-    const status = await evaluate(page, `crcbl.status()`);
-    // 4 is STATUS_STOPPED and 5 STATUS_FAILED; both are terminal, so stop
-    // asking, and the check below still insists on 4.
-    return [4, 5].includes(status) ? { status } : null;
-  });
-  const shutDown = check(
-    'I',
-    'the demo shuts down when its own stop button is pressed',
-    settledStop?.status === 4,
-    settledStop?.status === 4
-      ? 'STATUS_STOPPED'
-      : settledStop?.status === 5
-        ? `status 5 (FAILED) — ${await evaluate(page, `document.getElementById('detail')?.textContent ?? ''`)}`
-        : `status ${(await evaluate(page, `crcbl.status()`)) ?? 'unreadable'} after ` +
-          `${pollCeiling()} ms — the demo never reached a terminal state`
-  );
-
-  const heldAfter = await evaluate(page, `crcbl.gpu.replayer.liveObjects()`);
-  const stillHeld = Array.isArray(heldAfter)
-    ? heldAfter.reduce((total, entry) => total + entry.count, 0)
-    : -1;
-  check(
-    'I',
-    'the demo destroyed every GPU object it created',
-    shutDown && stillHeld === 0,
-    !shutDown
-      ? 'the demo never stopped, so nothing here is a verdict about its teardown'
-      : stillHeld === 0
-        ? 'every handle table is empty'
-        : `${stillHeld} object(s) still held after shutdown (${naming(heldAfter)})` +
-          ' — see crcbl-vk\'s "still alive at device teardown" warning for the' +
-          ' same finding on the same engine'
-  );
-
-  // **THE ENGINE'S OWN REPORTER, ASKED WHETHER IT RAN.** The check above is
-  // this harness reading the tables; the one below is about the page reporting
-  // for itself, with nothing driving it. `Replayer#replay` warns
-  // `N object(s) still alive at device teardown (…)` — the line `crcbl-vk`,
-  // `crcbl-dx12` and `crcbl-mtl` each write from their device's destructor, and
-  // the line every e2e runner greps — when the stream ends holding anything, and
-  // `web/run-browser-e2e.sh` fails this run on it exactly as `run-vk-e2e.sh`
-  // does.
-  //
-  // **THAT GREP CANNOT PROVE ITSELF**, which is the whole reason this check
-  // exists. A clean run produces no line, and so does a run where the reporter
-  // never fired at all: a `WebGpuDevice::drop` that did not `retain`, a shim
-  // that stopped pumping, a final frame that threw. `Replayer#teardownReport` is
-  // the receipt that tells those apart — `null` until the stream ends, and then
-  // the list it reported on, empty or not. A gate reading only the console is
-  // the "green light wired to nothing" this group was built to remove.
-  const teardownReport = shutDown
-    ? await evaluate(page, `crcbl.gpu.replayer.teardownReport`)
-    : null;
-  check(
-    'I',
-    'the engine reported for itself that its command stream ended',
-    Array.isArray(teardownReport),
-    !shutDown
-      ? 'the demo never stopped, so its stream never ended'
-      : Array.isArray(teardownReport)
-        ? teardownReport.length === 0
-          ? 'the stream ended holding nothing, and said so'
-          : `the stream ended holding ${naming(teardownReport)}`
-        : 'teardownReport is null after a demo that stopped — the stream never ' +
-          'reported its own end, so the "still alive at device teardown" line ' +
-          'web/run-browser-e2e.sh greps for could never have been written'
-  );
-
-  // **HOW CLOSE THE BUILD CAME TO THE ADDRESS SPACE IT RUNS IN**, asked of the
-  // one demo whose plan asks it. `web/demos/shard/main.js` prints the peak on
-  // growth and once on its last frame; this reads the last such line back and
-  // holds it against `WASM_HEAP_CEILING`.
-  //
-  // Read off the page log rather than only off `crcbl.memory` because the log
-  // is what CI keeps: the `web-e2e-shard` artifact is this console, and a
-  // figure that exists only in a driver's memory is a figure no Pages run
-  // records. The live reading is taken as well, and the two are compared — a
-  // logged peak *above* the live `byteLength` is a page reporting a heap it
-  // does not have, and a line nobody cross-checks is how a reading drifts from
-  // the thing it names.
-  //
-  // Asked after the stop, deliberately: memory only ever grows, so the last
-  // frame's reading is the run's peak and every earlier moment would understate
-  // it.
-  if (EXPECTED.wasmHeap) {
-    const heapLines = consoleLines.filter((line) => HEAP_LINE.test(line));
-    const logged = Number(heapLines.at(-1)?.match(HEAP_LINE)?.[1] ?? NaN);
-    const live = await evaluate(page, `crcbl.memory.buffer.byteLength`);
-    const mib = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-    const read = Number.isFinite(logged) && logged > 0;
-    const alive = typeof live === 'number' && live > 0;
+    const observing =
+      Array.isArray(heldRunning) &&
+      heldRunning.length > 0 &&
+      heldRunning.every(
+        (entry) => typeof entry?.kind === 'string' && entry.count > 0
+      );
     check(
       'I',
-      'the page reports the peak wasm heap it grew to',
-      read && alive && logged <= live && live < WASM_HEAP_CEILING,
-      !read
-        ? `${heapLines.length} page line(s) matched ${HEAP_LINE}, and none of ` +
-            'them states a byte count — the peak wasm heap this demo is ' +
-            'measured on is not being reported at all'
-        : !alive
-          ? `crcbl.memory.buffer.byteLength answered ${JSON.stringify(live)}, ` +
-            `so the logged ${mib(logged)} has nothing to be checked against`
-          : logged > live
-            ? `the page logged ${mib(logged)} but its memory holds ` +
-              `${mib(live)} — a linear memory cannot shrink, so one of the two ` +
-              'is not this page'
-            : live < WASM_HEAP_CEILING
-              ? `${logged} bytes (${mib(logged)}) at the last frame, against a ` +
-                `ceiling of ${mib(WASM_HEAP_CEILING)}, off ${heapLines.length} ` +
-                'reading(s) — every page this run opened, not only the last'
-              : `${mib(live)} against a ceiling of ${mib(WASM_HEAP_CEILING)} — ` +
-                'this build is closing on the address space a wasm32 module has'
+      'the replayer can say what it is holding while the demo runs',
+      observing,
+      observing
+        ? naming(heldRunning)
+        : `liveObjects() answered ${JSON.stringify(heldRunning)} for a demo that ` +
+            'has been rendering all run — the leak check below would read that as ' +
+            'a clean teardown, so it is not one'
     );
+
+    // **A STEADY-STATE FRAME MUST TAKE NOTHING IT DOES NOT GIVE BACK**, which
+    // is the half of this group's question the teardown check cannot ask. A run
+    // that hands the replayer one more object every frame and destroys them all
+    // at shutdown passes the check below and is still a page that grows without
+    // bound for as long as somebody looks at it — which is exactly what the
+    // acquire path did until 2026-08-23, minting a fresh image and image-view
+    // handle per frame that nothing ever retired. It was measured at 581 of
+    // each after one second of breakout, and a shutdown-only gate saw nothing
+    // wrong.
+    //
+    // Counted in **frames rather than seconds**, because a frame is the unit
+    // the growth was in and a slow runner would otherwise watch a shorter run.
+    // The demo has been drawing for the whole suite by now, so nothing here is
+    // warm-up: a kind that climbs at this point is climbing for good. **GROWTH
+    // HAS TO BE SUSTAINED, NOT MERELY OBSERVED ONCE.** This used to take one
+    // sample, wait, take another, and fail on any kind that had risen. That
+    // cannot tell a leak from a fixed-size ring filling up, and one of the
+    // kinds here is ring-shaped: `readbacks` is the instantaneous occupancy of
+    // `CullStatsRing`, which holds `FRAMES_IN_FLIGHT + 1` slots per renderer
+    // and whose `take_slot` will not reuse a slot that is still polling — so it
+    // is bounded at three per renderer and legitimately *rises* when a
+    // readback's round trip takes more frames, which is exactly what a loaded
+    // CI runner does. It failed twice that way (lantern 2 -> 5 against a
+    // ceiling of six, quarry 1 -> 2 against three), both strictly inside the
+    // bound.
+    //
+    // **THE WINDOW IS SMALL BECAUSE EACH ONE IS BOUNDED BY `pollCeiling`, AND
+    // THE SLOWEST DEMO SETS THE SIZE.** Every window polls through `until`, so
+    // a window that the demo cannot finish inside the poll ceiling fails the
+    // check for want of frames rather than for anything it holds on to. quarry
+    // draws at roughly two frames every three seconds under SwiftShader on a CI
+    // runner — measured, not guessed: a 60-frame window took 91.7 s there
+    // against a 90 s ceiling, and the run before this comment failed with `drew
+    // fewer than 60 more frames`. Three windows of this size cost the same
+    // total frames as the single 60-frame window that preceded them, so the
+    // step's wall clock is unchanged, while each window now finishes in about a
+    // third of its ceiling instead of just over it. Raising it buys no teeth —
+    // a leak that mints one object per frame moves the count by the window
+    // size, and any size at all makes it climb — so the size exists to fit the
+    // ceiling, not to catch more.
+    //
+    // **shard is the slowest demo now, not quarry**, and it is what moved the
+    // ceiling rather than this number. It drew 15 of these 20 frames in 90 s on
+    // 2026-08-28 — six wall seconds a frame — so the window needs 120 s and the
+    // unscaled ceiling could never have given it to them. Shrinking the window
+    // to fit was the alternative and was not taken: a window has to outrun the
+    // ring depths above by enough that a saturating ring and a climbing leak
+    // are told apart, and trading that margin for a green light is not a
+    // measurement.
+    //
+    // So the question asked is whether a kind climbs in **every** window rather
+    // than in one. A ring saturates and stops; a leak does not, and the leak
+    // this check exists for — a fresh image and view minted per frame and never
+    // retired — climbs in all of them, at 581 per second. The teeth are the
+    // same and the false positive is gone. Per-kind ceilings were the
+    // alternative and were not taken: they would put the engine's ring depths
+    // in this file, to be silently wrong the day one changed.
+    //
+    // **And three windows were not enough either. This is four, and it is a
+    // stopgap.** The Pages run for `d0bc715` failed lantern here on `readbacks
+    // 2 -> 4 -> 5 -> 6` — the third false failure of this check across two
+    // demos, and the same ring saturating as the two above it: six is the
+    // ceiling the paragraph above names for lantern, the run stopped at exactly
+    // it, and the increments decelerated on the way there. A leak does not stop
+    // at a bound. What the runner's load had changed was the readback round
+    // trip, stretching it until occupancy took three whole windows to saturate
+    // — so three no longer contained the flat step that is what says it
+    // stopped.
+    //
+    // **A fourth window buys room for that step and buys nothing else.** It is
+    // still a number tuned against how loaded a runner happens to be, and a
+    // slower one moves it again. What ends this is the fix the paragraph above
+    // turns down only in its copied form: per-kind ceilings **read from the
+    // engine** — `liveObjects()` reporting each kind's own bound beside its
+    // count, so this check compares a count against a bound the engine states
+    // rather than inferring saturation from the shape of a curve, and the ring
+    // depths stay where they are declared instead of being duplicated here.
+    //
+    // The cost is another `FRAMES_WATCHED` frames per demo, which on the
+    // slowest of them is another two wall minutes — shard drew 15 of these 20
+    // frames in 90 s, above. `FRAMES_WATCHED` is the wrong knob to have reached
+    // for instead: a longer window is longer in *every* window, and what was
+    // missing was one more chance for the ring to show a flat step rather than
+    // a longer look at the same one.
+    const FRAMES_WATCHED = 20;
+    const WINDOWS = 4;
+    const replayedNow = () => evaluate(page, `crcbl.gpu.stats().replayed`);
+    const countsOf = (held) =>
+      new Map((held ?? []).map(({ kind, count }) => [kind, count]));
+    const heldSamples = [heldRunning];
+    // **WHAT A FRAME OF THIS DEMO COSTS, ON THIS ADAPTER, IN WALL CLOCK.** A
+    // reading rather than a check: `docs/plan/sample/15-shard.md`'s milestone 1
+    // asks for a recorded browser budget, and the windows below are the only
+    // stretch of a run where the demo is doing nothing but drawing — the groups
+    // before them are dispatching input and waiting on the simulation, so their
+    // elapsed says more about the driver than about the frame.
+    //
+    // It is the page loop's wall clock and not the engine's own accounting: the
+    // per-pass `p50 / p95` table `crcbl::engine` prints at exit is the finer
+    // instrument and it is in this run's page log already. This one is the
+    // end-to-end figure that table cannot give — command replay, the browser's
+    // own scheduling and the rAF cadence included — and it is bounded above by
+    // `until`'s 16 ms poll on each window's last frame.
+    const watchedFrom = await replayedNow();
+    const watchedAt = Date.now();
+    let watched = true;
+    // What the window that ran out actually managed, for the message below.
+    // "The demo drew fewer than 20" was true of every slow runner and told a
+    // reader nothing about how much slower: 19 frames and 2 need different
+    // answers, and this is the only place that number can be read.
+    let drewInWindow = null;
+    for (let window = 0; window < WINDOWS && watched; window += 1) {
+      const framesBefore = await replayedNow();
+      const drewMore = await until(async () => {
+        const now = await replayedNow();
+        drewInWindow =
+          typeof now === 'number' && typeof framesBefore === 'number'
+            ? now - framesBefore
+            : null;
+        return typeof now === 'number' && now >= framesBefore + FRAMES_WATCHED
+          ? { now }
+          : null;
+      });
+      watched = Boolean(drewMore);
+      heldSamples.push(
+        watched
+          ? await evaluate(page, `crcbl.gpu.replayer.liveObjects()`)
+          : null
+      );
+    }
+    const watchedFor = Date.now() - watchedAt;
+    const watchedFrames = await replayedNow();
+    const drewWatched =
+      typeof watchedFrames === 'number' && typeof watchedFrom === 'number'
+        ? watchedFrames - watchedFrom
+        : 0;
+    say(
+      drewWatched > 0
+        ? `web e2e: steady state: ${drewWatched} replayed frame(s) in ` +
+            `${(watchedFor / 1000).toFixed(1)} s — ` +
+            `${(watchedFor / drewWatched).toFixed(1)} ms/frame on the ` +
+            `"${chosen.mode}" adapter`
+        : `web e2e: steady state: no frame was replayed in ` +
+            `${(watchedFor / 1000).toFixed(1)} s, so this run records no ` +
+            'browser budget'
+    );
+    const readSamples = heldSamples.every((held) => Array.isArray(held));
+    // A kind counts as growing only if it rose across every window in turn.
+    const grew = readSamples
+      ? [...countsOf(heldSamples[heldSamples.length - 1])]
+          .filter(([kind]) =>
+            heldSamples.every(
+              (held, index) =>
+                index === 0 ||
+                (countsOf(held).get(kind) ?? 0) >
+                  (countsOf(heldSamples[index - 1]).get(kind) ?? 0)
+            )
+          )
+          .map(
+            ([kind]) =>
+              `${kind} ${heldSamples
+                .map((held) => countsOf(held).get(kind) ?? 0)
+                .join(' -> ')}`
+          )
+      : [];
+    check(
+      'I',
+      'a steady-state frame gives back everything it takes',
+      watched && readSamples && grew.length === 0,
+      !watched
+        ? `the demo drew ${drewInWindow ?? 'an unreadable number of'} of the ` +
+            `${FRAMES_WATCHED} frames this window wanted, in ${pollCeiling()} ms, ` +
+            'so nothing here is a verdict about what a frame holds on to'
+        : !readSamples
+          ? `liveObjects() answered ${JSON.stringify(heldSamples.find((held) => !Array.isArray(held)))} on one of the heldSamples`
+          : grew.length === 0
+            ? `nothing climbed across all ${WINDOWS} windows of ${FRAMES_WATCHED} frames`
+            : `over ${WINDOWS} windows of ${FRAMES_WATCHED} frames: ${grew.join(', ')} — a frame that ` +
+              'takes one more of something every time is a page that grows for as ' +
+              'long as it is open, whatever its teardown then destroys'
+    );
+
+    // **THE PAGE'S OWN STOP BUTTON, AND NOT `crcbl.exports`.** `demo.js` wires
+    // it to `shell.requestClose()`, which asks the engine to close the way a
+    // compositor's close button does on the desktop: the next `api.frame()`
+    // runs `Flow::Stop`, tears the loop down and reports STOPPED, and
+    // `pumpGpu()` runs *after* that call in the same iteration — so any command
+    // the teardown encodes is drained before the loop ends. Reaching past the
+    // page to the wasm exports would skip that drain and blame the engine for a
+    // frame the shim never delivered.
+    //
+    // Not `pagehide` either, which is the other teardown `demo.js` has: it
+    // calls `api.shutdown()` with no frame left to follow it, so nothing pumps
+    // what the teardown wrote and the tables could not empty however clean the
+    // engine was.
+    await evaluate(page, `(document.getElementById('stop').click(), true)`);
+    const settledStop = await until(async () => {
+      const status = await evaluate(page, `crcbl.status()`);
+      // 4 is STATUS_STOPPED and 5 STATUS_FAILED; both are terminal, so stop
+      // asking, and the check below still insists on 4.
+      return [4, 5].includes(status) ? { status } : null;
+    });
+    const shutDown = check(
+      'I',
+      'the demo shuts down when its own stop button is pressed',
+      settledStop?.status === 4,
+      settledStop?.status === 4
+        ? 'STATUS_STOPPED'
+        : settledStop?.status === 5
+          ? `status 5 (FAILED) — ${await evaluate(page, `document.getElementById('detail')?.textContent ?? ''`)}`
+          : `status ${(await evaluate(page, `crcbl.status()`)) ?? 'unreadable'} after ` +
+            `${pollCeiling()} ms — the demo never reached a terminal state`
+    );
+
+    const heldAfter = await evaluate(page, `crcbl.gpu.replayer.liveObjects()`);
+    const stillHeld = Array.isArray(heldAfter)
+      ? heldAfter.reduce((total, entry) => total + entry.count, 0)
+      : -1;
+    check(
+      'I',
+      'the demo destroyed every GPU object it created',
+      shutDown && stillHeld === 0,
+      !shutDown
+        ? 'the demo never stopped, so nothing here is a verdict about its teardown'
+        : stillHeld === 0
+          ? 'every handle table is empty'
+          : `${stillHeld} object(s) still held after shutdown (${naming(heldAfter)})` +
+            ' — see crcbl-vk\'s "still alive at device teardown" warning for the' +
+            ' same finding on the same engine'
+    );
+
+    // **THE ENGINE'S OWN REPORTER, ASKED WHETHER IT RAN.** The check above is
+    // this harness reading the tables; the one below is about the page
+    // reporting for itself, with nothing driving it. `Replayer#replay` warns `N
+    // object(s) still alive at device teardown (…)` — the line `crcbl-vk`,
+    // `crcbl-dx12` and `crcbl-mtl` each write from their device's destructor,
+    // and the line every e2e runner greps — when the stream ends holding
+    // anything, and `web/run-browser-e2e.sh` fails this run on it exactly as
+    // `run-vk-e2e.sh` does.
+    //
+    // **THAT GREP CANNOT PROVE ITSELF**, which is the whole reason this check
+    // exists. A clean run produces no line, and so does a run where the
+    // reporter never fired at all: a `WebGpuDevice::drop` that did not
+    // `retain`, a shim that stopped pumping, a final frame that threw.
+    // `Replayer#teardownReport` is the receipt that tells those apart — `null`
+    // until the stream ends, and then the list it reported on, empty or not. A
+    // gate reading only the console is the "green light wired to nothing" this
+    // group was built to remove.
+    const teardownReport = shutDown
+      ? await evaluate(page, `crcbl.gpu.replayer.teardownReport`)
+      : null;
+    check(
+      'I',
+      'the engine reported for itself that its command stream ended',
+      Array.isArray(teardownReport),
+      !shutDown
+        ? 'the demo never stopped, so its stream never ended'
+        : Array.isArray(teardownReport)
+          ? teardownReport.length === 0
+            ? 'the stream ended holding nothing, and said so'
+            : `the stream ended holding ${naming(teardownReport)}`
+          : 'teardownReport is null after a demo that stopped — the stream never ' +
+            'reported its own end, so the "still alive at device teardown" line ' +
+            'web/run-browser-e2e.sh greps for could never have been written'
+    );
+
+    // **HOW CLOSE THE BUILD CAME TO THE ADDRESS SPACE IT RUNS IN**, asked of
+    // the one demo whose plan asks it. `web/demos/shard/main.js` prints the
+    // peak on growth and once on its last frame; this reads the last such line
+    // back and holds it against `WASM_HEAP_CEILING`.
+    //
+    // Read off the page log rather than only off `crcbl.memory` because the log
+    // is what CI keeps: shard's `web-e2e-shard-*` artifacts hold this console, and a
+    // figure that exists only in a driver's memory is a figure no Pages run
+    // records. The live reading is taken as well, and the two are compared — a
+    // logged peak *above* the live `byteLength` is a page reporting a heap it
+    // does not have, and a line nobody cross-checks is how a reading drifts
+    // from the thing it names.
+    //
+    // Asked after the stop, deliberately: memory only ever grows, so the last
+    // frame's reading is the run's peak and every earlier moment would
+    // understate it.
+    if (EXPECTED.wasmHeap) {
+      const heapLines = consoleLines.filter((line) => HEAP_LINE.test(line));
+      const logged = Number(heapLines.at(-1)?.match(HEAP_LINE)?.[1] ?? NaN);
+      const live = await evaluate(page, `crcbl.memory.buffer.byteLength`);
+      const mib = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+      const read = Number.isFinite(logged) && logged > 0;
+      const alive = typeof live === 'number' && live > 0;
+      check(
+        'I',
+        'the page reports the peak wasm heap it grew to',
+        read && alive && logged <= live && live < WASM_HEAP_CEILING,
+        !read
+          ? `${heapLines.length} page line(s) matched ${HEAP_LINE}, and none of ` +
+              'them states a byte count — the peak wasm heap this demo is ' +
+              'measured on is not being reported at all'
+          : !alive
+            ? `crcbl.memory.buffer.byteLength answered ${JSON.stringify(live)}, ` +
+              `so the logged ${mib(logged)} has nothing to be checked against`
+            : logged > live
+              ? `the page logged ${mib(logged)} but its memory holds ` +
+                `${mib(live)} — a linear memory cannot shrink, so one of the two ` +
+                'is not this page'
+              : live < WASM_HEAP_CEILING
+                ? `${logged} bytes (${mib(logged)}) at the last frame, against a ` +
+                  `ceiling of ${mib(WASM_HEAP_CEILING)}, off ${heapLines.length} ` +
+                  'reading(s) — every page this run opened, not only the last'
+                : `${mib(live)} against a ceiling of ${mib(WASM_HEAP_CEILING)} — ` +
+                  'this build is closing on the address space a wasm32 module has'
+      );
+    }
   }
 
   // Lifted out of the page log and onto this run's own output, because the
@@ -11711,11 +11884,11 @@ try {
     say(`web e2e: ${line}`);
 
   writeFileSync(
-    join(OUT, `${SLUG}-${chosen.mode}.log`),
+    join(OUT, `${EVIDENCE}-${chosen.mode}.log`),
     consoleLines.join('\n')
   );
   say(`\nweb e2e: canvas  ${shotPath}`);
-  say(`web e2e: page log ${join(OUT, `${SLUG}-${chosen.mode}.log`)}`);
+  say(`web e2e: page log ${join(OUT, `${EVIDENCE}-${chosen.mode}.log`)}`);
 
   page.close();
   exitCode = 0;
@@ -11742,7 +11915,11 @@ if (checks.length === 0) {
   process.exit(1);
 }
 
-say(`web e2e: ${checks.length - failed.length}/${checks.length} checks passed`);
+say(
+  `web e2e: ${checks.length - failed.length}/${checks.length} checks passed ` +
+    `in groups ${SELECTION}` +
+    (runs('C') ? '' : ", with C's opening")
+);
 
 // **What the run spent its time on**, in the order that matters when a step is
 // about to hit a CI timeout. The elapsed is the wall clock from the previous
@@ -11784,6 +11961,32 @@ if (failed.length) {
     if (realDeviceErrors.length > 4)
       warn(`    … and ${realDeviceErrors.length - 4} more`);
   }
+  process.exit(1);
+}
+
+// **A selection that bought nothing is a failure, not a short run.** A and B
+// and C's opening are made whatever was asked, so a count above zero says
+// nothing about the groups that were — a split job whose share recorded no
+// check of its own would otherwise go green having checked only the boot. So
+// the checks past C's opening must exist, and each selected group that every
+// demo makes a check in must have made one. C's per-demo blocks and G are
+// absent for most demos by design, which is why they are not in that list; the
+// first condition still catches a selection of only those.
+const ALWAYS_CHECKED = ['D', 'E', 'F', 'H', 'I'];
+const silent = ALWAYS_CHECKED.filter(
+  (letter) => runs(letter) && !checks.some((c) => c.group[0] === letter)
+);
+if (
+  exitCode === 0 &&
+  (afterOpening === null || checks.length === afterOpening || silent.length)
+) {
+  warn(
+    `web e2e: groups ${SELECTION} were selected and ` +
+      (silent.length
+        ? `${silent.join(', ')} recorded no check`
+        : "nothing past C's opening recorded a check") +
+      ' — the selection is not gating.'
+  );
   process.exit(1);
 }
 

@@ -167,8 +167,15 @@ site `build.sh` already produced, or pass `--build`:
 
 Anything past `--build`, `--headless` and `--hardware` goes to
 `tools/browser-e2e.mjs`, which takes `--site`, `--demo`, `--adapter`,
-`--timeout`, `--out` and `--no-isolation` and **refuses anything else** by name
-— a flag borrowed from another gate used to be accepted and silently ignored.
+`--timeout`, `--out`, `--no-isolation` and `--groups` and **refuses anything
+else** by name — a flag borrowed from another gate used to be accepted and
+silently ignored.
+
+`--groups C,D` runs only the named check groups after the ones every run needs
+(A, B and the opening of C, which starts the demo); the Pages workflow uses it
+to split each heavy demo across two jobs. An unknown letter, or a selection that
+checks nothing past C's opening, fails the run, and the verdict line names the
+groups that ran.
 
 It starts its own Xvfb, serves the site through `web/tools/serve.mjs` — the same
 server `build.sh --serve` runs, so the origin the gate checks is the origin a

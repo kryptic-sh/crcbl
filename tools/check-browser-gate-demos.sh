@@ -27,6 +27,12 @@
 #   in that job's `matrix.demo` list rather than in fourteen `run:` lines. The
 #   macOS job is still a list of steps and is still grepped for one.
 #
+#   A demo heavy enough to be split is not in that list: it is two or more rows
+#   of the matrix's `include`, each a `demo:` with the `groups:` it makes, and
+#   counts as run by the Linux job only if those rows' groups add up to every
+#   group the driver has after A and B. A split that dropped a letter is a demo
+#   whose share of the gate nothing runs, and it would read here as covered.
+#
 # It fails when it parses nothing, rather than passing on an empty set — a
 # guard whose scope silently matches nothing is the trap this whole family of
 # scripts exists to avoid.
@@ -74,12 +80,79 @@ if [ "${#matrix[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# The `include` rows, as `demo groups` pairs: each `- demo:` line, then the
+# `groups:` line under it. The groups each row of a split demo makes are
+# gathered per demo and checked against the full set below.
+split=()
+while IFS= read -r row; do
+  split+=("$row")
+done < <(sed -n '/^        include:$/,/^    [a-z]/p' "$workflow" |
+  sed -n -e 's/^          - demo: \([a-z0-9_-]*\)$/\1/p' \
+    -e 's/^            groups: \([A-Z, ]*\)$/\1/p' |
+  tr -d ' ' | paste -d' ' - -)
+
+# The groups a split demo's rows must add up to: every one the driver defines
+# after A and B, which each row makes whatever it names. Read from the driver's
+# own `GROUPS`, so a group added there is one every split must cover.
+driver="$repo/web/tools/browser-e2e.mjs"
+all_groups=$(sed -n "s/^const GROUPS = \[\(.*\)\];$/\1/p" "$driver" |
+  tr -d "' " | tr ',' '\n' | grep -vx -e A -e B | tr '\n' ' ')
+if [ -z "$all_groups" ]; then
+  echo "check-browser-gate-demos: could not read GROUPS from $driver" >&2
+  exit 1
+fi
+split_bad=0
+split_demos=()
+for row in "${split[@]}"; do
+  demo="${row%% *}"
+  case " ${split_demos[*]} " in
+    *" $demo "*) ;;
+    *) split_demos+=("$demo") ;;
+  esac
+done
+for demo in "${split_demos[@]}"; do
+  made=""
+  rows=0
+  for row in "${split[@]}"; do
+    if [ "${row%% *}" = "$demo" ]; then
+      made="$made,${row#* }"
+      rows=$((rows + 1))
+    fi
+  done
+  for letter in $all_groups; do
+    case ",$made," in
+      *",$letter,"*) ;;
+      *)
+        echo "check-browser-gate-demos: $demo is split across $rows include row(s)" >&2
+        echo "  of the demos job's matrix and none of them makes group $letter," >&2
+        echo "  so that part of its browser gate runs nowhere." >&2
+        split_bad=1
+        ;;
+    esac
+  done
+  if [ "$rows" -lt 2 ]; then
+    echo "check-browser-gate-demos: $demo has a single include row; a demo that" >&2
+    echo "  is not split belongs in the matrix's demo list." >&2
+    split_bad=1
+  fi
+  for named in "${matrix[@]}"; do
+    if [ "$named" = "$demo" ]; then
+      echo "check-browser-gate-demos: $demo is both in the demos job's matrix" >&2
+      echo "  list and split under its include, so its groups run twice." >&2
+      split_bad=1
+    fi
+  done
+done
+if [ "$split_bad" -ne 0 ]; then
+  exit 1
+fi
+
 missing=0
 for demo in "${demos[@]}"; do
   # The windowed job and the headless one. Counted separately rather than
   # together, so a demo named twice in one job cannot stand in for the other.
   windowed=0
-  for named in "${matrix[@]}"; do
+  for named in "${matrix[@]}" "${split_demos[@]}"; do
     if [ "$named" = "$demo" ]; then
       windowed=$((windowed + 1))
     fi
@@ -108,4 +181,5 @@ echo ".github/workflows/pages.yml. A demo the" >&2
   exit 1
 fi
 
-echo "check-browser-gate-demos: ${#demos[@]} demos, each run by both browser-gate jobs"
+echo "check-browser-gate-demos: ${#demos[@]} demos, each run by both browser-gate jobs" \
+  "(${#split_demos[@]} of them split across the Linux job's include rows)"

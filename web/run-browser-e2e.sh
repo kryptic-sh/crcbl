@@ -13,7 +13,7 @@
 #     --hardware   pin the adapter mode instead of letting it choose
 #
 #   Everything after those is passed to `web/tools/browser-e2e.mjs`, which reads
-#   six options and **refuses any other**:
+#   the options below and **refuses any other**:
 #
 #     --site <dir>       the built site to serve. Set for you from $SITE_DIR
 #     --demo <path>      the demo directory inside it. Set for you from
@@ -23,6 +23,14 @@
 #     --out <dir>        where the screenshot and the page log are written
 #     --no-isolation     serve without the COOP/COEP pair, and expect the
 #                        document to say so. Set by the second run below
+#     --groups <letters> make only these of the driver's lettered groups, comma
+#                        separated: `--groups C` or `--groups D,E,F,G,H,I`. A
+#                        and B always run, and so does the opening of C every
+#                        later group stands on. The named-check guards below
+#                        each belong to a group and are asked only of a run
+#                        that selected it. Default: every group. CI's `demos`
+#                        job in `.github/workflows/pages.yml` splits its
+#                        heaviest demos into two jobs with it
 #
 #   The refusal is the point of writing them out here. This script recognises
 #   three flags and forwards the rest without looking at them, so a flag from a
@@ -444,6 +452,25 @@ if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
     exit 1
 fi
 
+# Which groups the driver was told to make, from the driver rather than from
+# this script's own reading of `--groups`: the flag is forwarded with the rest,
+# and the driver is the one list of what it means. Every named guard below
+# belongs to one group and is asked only when that group was selected, so a CI
+# job running half of a demo's groups is held to its half and no less. A run
+# that never said is a driver that does not know the flag, and nothing below
+# could tell what to insist on.
+SELECTED="$(sed -n 's/^web e2e: groups selected: \([A-I ]*\)$/\1/p' "${OUTPUT}.plain" | head -1)"
+if [ -z "$SELECTED" ]; then
+    echo "crcbl web e2e: the driver never said which groups it was making" >&2
+    exit 1
+fi
+selected() {
+    case " $SELECTED " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # The isolation assertion by name, not just by count — beside the count guard
 # rather than after the verdict, because both are about the harness rather than
 # about the engine, and a harness that stopped gating is worth saying whichever
@@ -463,11 +490,13 @@ fi
 # whose shim drops every contact — a mouse is not a finger and nothing else here
 # sends one. This one drag is the check every demo makes, so its absence means
 # the touch group did not run rather than that this demo has no bindings.
-TOUCH="$(grep -F 'the canvas keeps a drag the browser would otherwise take' "${OUTPUT}.plain" || true)"
-if [ -z "$TOUCH" ]; then
-    echo "crcbl web e2e: the driver never dragged a finger across the canvas;" >&2
-    echo "               'touch-action: none' in web/style.css is ungated" >&2
-    exit 1
+if selected F; then
+    TOUCH="$(grep -F 'the canvas keeps a drag the browser would otherwise take' "${OUTPUT}.plain" || true)"
+    if [ -z "$TOUCH" ]; then
+        echo "crcbl web e2e: the driver never dragged a finger across the canvas;" >&2
+        echo "               'touch-action: none' in web/style.css is ungated" >&2
+        exit 1
+    fi
 fi
 
 # And the same argument for the sRGB encode, which is the one claim in the
@@ -482,16 +511,18 @@ fi
 # to fail somewhere rather than shrink the gate. Every other demo in
 # `EXPECTATIONS` cannot make the claim at all, and the driver says why per row. Renaming the check in the driver
 # is meant to fail here and be renamed here too.
-case "$DEMO" in
-    breakout | flappy | hud)
-        ENCODE="$(grep -F 'clear reaches the canvas sRGB-encoded' "${OUTPUT}.plain" || true)"
-        if [ -z "$ENCODE" ]; then
-            echo "crcbl web e2e: the driver never compared $DEMO's clear colour against its sRGB encode;" >&2
-            echo "               the canvas viewFormats in web/engine/gpu-replay.js are ungated on the demo path" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected G; then
+    case "$DEMO" in
+        breakout | flappy | hud)
+            ENCODE="$(grep -F 'clear reaches the canvas sRGB-encoded' "${OUTPUT}.plain" || true)"
+            if [ -z "$ENCODE" ]; then
+                echo "crcbl web e2e: the driver never compared $DEMO's clear colour against its sRGB encode;" >&2
+                echo "               the canvas viewFormats in web/engine/gpu-replay.js are ungated on the demo path" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the same argument for the viewer's drop target, which is the one thing on
 # this page a visitor brings themselves. Every other check passes against a page
@@ -503,16 +534,18 @@ esac
 # One name is matched rather than four, because they are one block in the driver
 # and cannot go missing separately. Renaming it there is meant to fail here and
 # be renamed here too.
-case "$DEMO" in
-    viewer)
-        DROPPED="$(grep -F 'a dropped document replaces the one the page opened with' "${OUTPUT}.plain" || true)"
-        if [ -z "$DROPPED" ]; then
-            echo "crcbl web e2e: the driver never dropped a document onto the canvas;" >&2
-            echo "               the drop target in web/demos/viewer/main.js is ungated" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected C; then
+    case "$DEMO" in
+        viewer)
+            DROPPED="$(grep -F 'a dropped document replaces the one the page opened with' "${OUTPUT}.plain" || true)"
+            if [ -z "$DROPPED" ]; then
+                echo "crcbl web e2e: the driver never dropped a document onto the canvas;" >&2
+                echo "               the drop target in web/demos/viewer/main.js is ungated" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the same argument for the clip the viewer plays, which is the only gate
 # anywhere on the browser path that `crcbl-anim` has a consumer at all. Every
@@ -526,16 +559,18 @@ esac
 # it reads the turntable, which is the page's own camera and turns over a
 # skeleton that was never posed. Renaming the check in the driver is meant to
 # fail here and be renamed here too.
-case "$DEMO" in
-    viewer)
-        PLAYED="$(grep -F 'the clip in the document plays under its own steam' "${OUTPUT}.plain" || true)"
-        if [ -z "$PLAYED" ]; then
-            echo "crcbl web e2e: the driver never asked whether the document's own clip is playing;" >&2
-            echo "               the rig conversion and the clip player in apps/viewer/src/anim.rs are ungated" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected C; then
+    case "$DEMO" in
+        viewer)
+            PLAYED="$(grep -F 'the clip in the document plays under its own steam' "${OUTPUT}.plain" || true)"
+            if [ -z "$PLAYED" ]; then
+                echo "crcbl web e2e: the driver never asked whether the document's own clip is playing;" >&2
+                echo "               the rig conversion and the clip player in apps/viewer/src/anim.rs are ungated" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the same argument again for the *geometry* that clip deforms, which the
 # check above cannot make. `pose` is a number `apps/viewer` computes on the CPU
@@ -549,17 +584,19 @@ esac
 # It is also the check most worth deleting when it goes red on a slow machine,
 # which is exactly why its name is matched here. `viewer` alone, because it is
 # the only demo that opens a rigged document.
-case "$DEMO" in
-    viewer)
-        DEFORMED="$(grep -F 'the document is deformed by its own clip, with the camera held still' "${OUTPUT}.plain" || true)"
-        if [ -z "$DEFORMED" ]; then
-            echo "crcbl web e2e: the driver never asked whether the skinned geometry moved;" >&2
-            echo "               the skinning seam in apps/viewer/src/gpu.rs is ungated, and" >&2
-            echo "               the clip check above passes over a bind pose" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected C; then
+    case "$DEMO" in
+        viewer)
+            DEFORMED="$(grep -F 'the document is deformed by its own clip, with the camera held still' "${OUTPUT}.plain" || true)"
+            if [ -z "$DEFORMED" ]; then
+                echo "crcbl web e2e: the driver never asked whether the skinned geometry moved;" >&2
+                echo "               the skinning seam in apps/viewer/src/gpu.rs is ungated, and" >&2
+                echo "               the clip check above passes over a bind pose" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the same argument for the engine's debug console, which is the only thing
 # on the browser path where a character a visitor pressed reaches a text field
@@ -584,31 +621,33 @@ esac
 #
 # Renaming either check in the driver is meant to fail here and be renamed here
 # too.
-case "$DEMO" in
-    quarry)
-        TYPED="$(grep -F 'a command typed at the console changes the frame the demo draws' "${OUTPUT}.plain" || true)"
-        if [ -z "$TYPED" ]; then
-            echo "crcbl web e2e: the driver never typed a command at $DEMO's console;" >&2
-            echo "               ShellEvent::TextCommit in crates/crcbl-shell/src/web/mod.rs is" >&2
-            echo "               ungated, and the console cannot be typed at in a browser" >&2
-            exit 1
-        fi
-        SHORTCUT="$(grep -F 'the page keeps the console key when a devtools modifier is held' "${OUTPUT}.plain" || true)"
-        if [ -z "$SHORTCUT" ]; then
-            echo "crcbl web e2e: the driver never checked that Ctrl and the console key stay" >&2
-            echo "               the browser's; 'the shim swallows the bare console key' has no" >&2
-            echo "               control, and it passes for a shim that swallows every backquote" >&2
-            exit 1
-        fi
-        PASTE="$(grep -F 'the console says so when a browser has no clipboard to paste from' "${OUTPUT}.plain" || true)"
-        if [ -z "$PASTE" ]; then
-            echo "crcbl web e2e: the driver never pressed the console's paste key; the one" >&2
-            echo "               tier whose clipboard read is refused is the one tier nothing" >&2
-            echo "               asks, and a silent paste there reads as an empty clipboard" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected C; then
+    case "$DEMO" in
+        quarry)
+            TYPED="$(grep -F 'a command typed at the console changes the frame the demo draws' "${OUTPUT}.plain" || true)"
+            if [ -z "$TYPED" ]; then
+                echo "crcbl web e2e: the driver never typed a command at $DEMO's console;" >&2
+                echo "               ShellEvent::TextCommit in crates/crcbl-shell/src/web/mod.rs is" >&2
+                echo "               ungated, and the console cannot be typed at in a browser" >&2
+                exit 1
+            fi
+            SHORTCUT="$(grep -F 'the page keeps the console key when a devtools modifier is held' "${OUTPUT}.plain" || true)"
+            if [ -z "$SHORTCUT" ]; then
+                echo "crcbl web e2e: the driver never checked that Ctrl and the console key stay" >&2
+                echo "               the browser's; 'the shim swallows the bare console key' has no" >&2
+                echo "               control, and it passes for a shim that swallows every backquote" >&2
+                exit 1
+            fi
+            PASTE="$(grep -F 'the console says so when a browser has no clipboard to paste from' "${OUTPUT}.plain" || true)"
+            if [ -z "$PASTE" ]; then
+                echo "crcbl web e2e: the driver never pressed the console's paste key; the one" >&2
+                echo "               tier whose clipboard read is refused is the one tier nothing" >&2
+                echo "               asks, and a silent paste there reads as an empty clipboard" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the same argument once more for the console a **finger** reaches, which is
 # a different path from every line above: those all press keys, and a phone has
@@ -627,24 +666,26 @@ esac
 #
 # Renaming either check in the driver is meant to fail here and be renamed here
 # too.
-case "$DEMO" in
-    breakout)
-        TOUCH_TYPED="$(grep -F 'a finger opens the console and types a whole line at it' "${OUTPUT}.plain" || true)"
-        if [ -z "$TOUCH_TYPED" ]; then
-            echo "crcbl web e2e: the driver never opened $DEMO's console with a finger;" >&2
-            echo "               ConsoleButton and TouchKeyboard are ungated, and a phone" >&2
-            echo "               cannot reach the console at all" >&2
-            exit 1
-        fi
-        TOUCH_RAN="$(grep -F "the line a finger typed is run by the keyboard's own return key" "${OUTPUT}.plain" || true)"
-        if [ -z "$TOUCH_RAN" ]; then
-            echo "crcbl web e2e: the driver never checked that a tapped line runs; the echo" >&2
-            echo "               check beside it passes for a keyboard that fills the field" >&2
-            echo "               and a return key that submits nothing" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected F; then
+    case "$DEMO" in
+        breakout)
+            TOUCH_TYPED="$(grep -F 'a finger opens the console and types a whole line at it' "${OUTPUT}.plain" || true)"
+            if [ -z "$TOUCH_TYPED" ]; then
+                echo "crcbl web e2e: the driver never opened $DEMO's console with a finger;" >&2
+                echo "               ConsoleButton and TouchKeyboard are ungated, and a phone" >&2
+                echo "               cannot reach the console at all" >&2
+                exit 1
+            fi
+            TOUCH_RAN="$(grep -F "the line a finger typed is run by the keyboard's own return key" "${OUTPUT}.plain" || true)"
+            if [ -z "$TOUCH_RAN" ]; then
+                echo "crcbl web e2e: the driver never checked that a tapped line runs; the echo" >&2
+                echo "               check beside it passes for a keyboard that fills the field" >&2
+                echo "               and a return key that submits nothing" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the same argument for the character controller, which is the one thing on
 # puppet's page that a visitor's own keys reach. Every other check in the driver
@@ -661,55 +702,57 @@ esac
 # useless without its control, so a run that reported only the positives is a
 # run this has to fail. Renaming either check in the driver is meant to fail
 # here and be renamed here too.
-case "$DEMO" in
-    puppet)
-        WALKED="$(grep -F 'and stops where it is when the key is released' "${OUTPUT}.plain" || true)"
-        if [ -z "$WALKED" ]; then
-            echo "crcbl web e2e: the driver never let go of $DEMO's walk key;" >&2
-            echo "               'the character advances' has no control, and it passes" >&2
-            echo "               for a demo that drifts on its own" >&2
-            exit 1
-        fi
-        REFUSED="$(grep -F 'and is refused by the step above that offset' "${OUTPUT}.plain" || true)"
-        if [ -z "$REFUSED" ]; then
-            echo "crcbl web e2e: the driver never asked whether $DEMO refused the step it" >&2
-            echo "               cannot climb; 'the controller climbs the step' has no" >&2
-            echo "               control, and it passes for a controller that climbs" >&2
-            echo "               anything at all" >&2
-            exit 1
-        fi
-        # And the same argument a third time for the locomotion blend, which is
-        # milestone 2's half of this demo. Every check above passes against a
-        # page drawing a rigid capsule: they are about where the character is,
-        # and none of them can see what it is posed as. The two matched here are
-        # again the *controls*, and both would be the ones to delete when a slow
-        # machine made them flake:
-        #
-        #  - 'sweeps back to the idle end' is what says the weight came down
-        #    with the measured speed, and it carries the anti-snap claim through
-        #    the demo's between-the-stops frame counter. Without it, 'follows the
-        #    measured speed to the walk end' passes for a demo pinned at the walk
-        #    for ever — which is what this one looks like while it paces its
-        #    circuit.
-        #  - 'settles into its idle stance' is what says the pose is being
-        #    composed rather than merely varying. Without it, 'the character is
-        #    posed by its own clip' passes for a rig that jitters.
-        SWEPT="$(grep -F 'and sweeps back to the idle end rather than snapping to it' "${OUTPUT}.plain" || true)"
-        if [ -z "$SWEPT" ]; then
-            echo "crcbl web e2e: the driver never watched $DEMO's blend weight come back to" >&2
-            echo "               idle; 'the blend weight follows the measured speed' has no" >&2
-            echo "               control, and it passes for a demo pinned at the walk" >&2
-            exit 1
-        fi
-        SETTLED="$(grep -F 'and settles into its idle stance when it stands' "${OUTPUT}.plain" || true)"
-        if [ -z "$SETTLED" ]; then
-            echo "crcbl web e2e: the driver never asked whether $DEMO's pose settles;" >&2
-            echo "               'the character is posed by its own clip' has no control," >&2
-            echo "               and it passes for a rig that jitters" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected C; then
+    case "$DEMO" in
+        puppet)
+            WALKED="$(grep -F 'and stops where it is when the key is released' "${OUTPUT}.plain" || true)"
+            if [ -z "$WALKED" ]; then
+                echo "crcbl web e2e: the driver never let go of $DEMO's walk key;" >&2
+                echo "               'the character advances' has no control, and it passes" >&2
+                echo "               for a demo that drifts on its own" >&2
+                exit 1
+            fi
+            REFUSED="$(grep -F 'and is refused by the step above that offset' "${OUTPUT}.plain" || true)"
+            if [ -z "$REFUSED" ]; then
+                echo "crcbl web e2e: the driver never asked whether $DEMO refused the step it" >&2
+                echo "               cannot climb; 'the controller climbs the step' has no" >&2
+                echo "               control, and it passes for a controller that climbs" >&2
+                echo "               anything at all" >&2
+                exit 1
+            fi
+            # And the same argument a third time for the locomotion blend, which is
+            # milestone 2's half of this demo. Every check above passes against a
+            # page drawing a rigid capsule: they are about where the character is,
+            # and none of them can see what it is posed as. The two matched here are
+            # again the *controls*, and both would be the ones to delete when a slow
+            # machine made them flake:
+            #
+            #  - 'sweeps back to the idle end' is what says the weight came down
+            #    with the measured speed, and it carries the anti-snap claim through
+            #    the demo's between-the-stops frame counter. Without it, 'follows the
+            #    measured speed to the walk end' passes for a demo pinned at the walk
+            #    for ever — which is what this one looks like while it paces its
+            #    circuit.
+            #  - 'settles into its idle stance' is what says the pose is being
+            #    composed rather than merely varying. Without it, 'the character is
+            #    posed by its own clip' passes for a rig that jitters.
+            SWEPT="$(grep -F 'and sweeps back to the idle end rather than snapping to it' "${OUTPUT}.plain" || true)"
+            if [ -z "$SWEPT" ]; then
+                echo "crcbl web e2e: the driver never watched $DEMO's blend weight come back to" >&2
+                echo "               idle; 'the blend weight follows the measured speed' has no" >&2
+                echo "               control, and it passes for a demo pinned at the walk" >&2
+                exit 1
+            fi
+            SETTLED="$(grep -F 'and settles into its idle stance when it stands' "${OUTPUT}.plain" || true)"
+            if [ -z "$SETTLED" ]; then
+                echo "crcbl web e2e: the driver never asked whether $DEMO's pose settles;" >&2
+                echo "               'the character is posed by its own clip' has no control," >&2
+                echo "               and it passes for a rig that jitters" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the same argument for the other end of that controller, which is breach's
 # whole subject. Every other check in the driver passes against a page whose
@@ -768,123 +811,125 @@ esac
 #
 # Renaming any of them in the driver is meant to fail here and be renamed here
 # too.
-case "$DEMO" in
-    breach)
-        STOPPED="$(grep -F 'and stops where they are when the key is released' "${OUTPUT}.plain" || true)"
-        if [ -z "$STOPPED" ]; then
-            echo "crcbl web e2e: the driver never let go of $DEMO's walk key;" >&2
-            echo "               'the player advances' has no control, and it passes" >&2
-            echo "               for a demo that drifts on its own" >&2
-            exit 1
-        fi
-        MISSED="$(grep -F 'and a shot aimed away from every plate does not score' "${OUTPUT}.plain" || true)"
-        if [ -z "$MISSED" ]; then
-            echo "crcbl web e2e: the driver never fired $DEMO's pistol at anything but a" >&2
-            echo "               target; 'a shot at a plate scores a hit' has no control," >&2
-            echo "               and it passes for a build that scores on every trigger" >&2
-            echo "               pull" >&2
-            exit 1
-        fi
-        LOOKED="$(grep -F 'a look key turns the view' "${OUTPUT}.plain" || true)"
-        if [ -z "$LOOKED" ]; then
-            echo "crcbl web e2e: the driver never asked whether $DEMO's view can be" >&2
-            echo "               turned from the keyboard; nothing else on that page" >&2
-            echo "               reads the angle the shot is aimed along" >&2
-            exit 1
-        fi
-        CAPTURED="$(grep -F 'a mouse click takes the browser pointer lock' "${OUTPUT}.plain" || true)"
-        if [ -z "$CAPTURED" ]; then
-            echo "crcbl web e2e: the driver never checked that $DEMO's page holds the" >&2
-            echo "               pointer lock; with a visible cursor the demo is meant" >&2
-            echo "               to ignore the mouse, so both mouse checks below pass" >&2
-            echo "               for the wrong reason on a page that never took it" >&2
-            exit 1
-        fi
-        FREE_LOOK="$(grep -F 'mouse movement with a visible cursor turns nothing' "${OUTPUT}.plain" || true)"
-        if [ -z "$FREE_LOOK" ]; then
-            echo "crcbl web e2e: the driver never moved $DEMO's mouse with the cursor" >&2
-            echo "               visible; 'the mouse turns the view' has no control, and" >&2
-            echo "               it passes for a build that turns on every movement" >&2
-            echo "               whether the pointer is captured or not" >&2
-            exit 1
-        fi
-        FREE_CLICK="$(grep -F 'and the click that took it was not a shot' "${OUTPUT}.plain" || true)"
-        if [ -z "$FREE_CLICK" ]; then
-            echo "crcbl web e2e: the driver never asked what $DEMO did with the click" >&2
-            echo "               that grabbed the pointer; 'a click pulls the trigger'" >&2
-            echo "               has no control, and it passes for a build that fires on" >&2
-            echo "               the press that was reaching for the lock" >&2
-            exit 1
-        fi
-        RIG="$(grep -F 'opening the loadout gives the pointer lock back and the demo plays on' "${OUTPUT}.plain" || true)"
-        if [ -z "$RIG" ]; then
-            echo "crcbl web e2e: the driver never opened $DEMO's loadout; nothing asks a" >&2
-            echo "               browser to act on the PointerMode::Free that panel wants," >&2
-            echo "               so apps/breach/src/panel.rs is gated by cargo test alone" >&2
-            echo "               — where no lock is ever taken and none can be given back" >&2
-            exit 1
-        fi
-        # And the same argument once more for the *other map*, which is
-        # milestone 0's other half. Everything above is the firing range; the
-        # practice map is reached only by this driver navigating to
-        # `?map=practice`, and if that block goes missing the whole of
-        # `apps/breach/src/bots.rs` and `apps/breach/src/map/practice.rs` is
-        # ungated in a browser while every check above stays green — because
-        # every check above is about a different room.
-        #
-        # Four names are matched rather than seven. The first says the query
-        # string reached the game at all, without which the other six are being
-        # asked of the firing range and pass or fail for reasons that have
-        # nothing to do with bots. The other three are the block's *controls* —
-        # the halves worth deleting when a slow machine makes them flake, and
-        # each is what stops a positive passing for the wrong reason:
-        #
-        #  - 'and it is a bot that moved, not the player and not the other map'
-        #    is what says the moving reading belongs to a patrol. Without it,
-        #    'a bot walks its patrol' passes for the range's travelling plate.
-        #  - 'and a bot behind cover does not, though it is near enough to' is
-        #    what says the sighting is a ray. Without it, 'a bot notices the
-        #    player' passes for a build that noticed everything in range.
-        #  - 'and a round with cover in the way never arrives' is what says the
-        #    cover stops a shot. Without it, 'a bot's round reaches the player'
-        #    passes for bots that hit whatever they fire at.
-        #
-        # Renaming any of them in the driver is meant to fail here and be
-        # renamed here too.
-        OPENED="$(grep -F "the practice map opens from the page's own query string" "${OUTPUT}.plain" || true)"
-        if [ -z "$OPENED" ]; then
-            echo "crcbl web e2e: the driver never opened $DEMO's second map;" >&2
-            echo "               milestone 0's bot practice map is not reached by any" >&2
-            echo "               browser gate, and every check above is about the" >&2
-            echo "               firing range instead" >&2
-            exit 1
-        fi
-        PATROLLED="$(grep -F 'and it is a bot that moved, not the player and not the other map' "${OUTPUT}.plain" || true)"
-        if [ -z "$PATROLLED" ]; then
-            echo "crcbl web e2e: the driver never asked whose position moved on" >&2
-            echo "               $DEMO's practice map; 'a bot walks its patrol' has no" >&2
-            echo "               control, and it passes for the other map's travelling" >&2
-            echo "               plate" >&2
-            exit 1
-        fi
-        COVERED="$(grep -F 'and a bot behind cover does not, though it is near enough to' "${OUTPUT}.plain" || true)"
-        if [ -z "$COVERED" ]; then
-            echo "crcbl web e2e: the driver never asked whether cover stops $DEMO's" >&2
-            echo "               bots seeing; 'a bot notices the player' has no control," >&2
-            echo "               and it passes for a build that noticed everything" >&2
-            echo "               inside its range without casting a ray at all" >&2
-            exit 1
-        fi
-        STOPPED_ROUND="$(grep -F 'and a round with cover in the way never arrives' "${OUTPUT}.plain" || true)"
-        if [ -z "$STOPPED_ROUND" ]; then
-            echo "crcbl web e2e: the driver never asked whether cover stops a round on" >&2
-            echo "               $DEMO's practice map; 'a bot's round reaches the" >&2
-            echo "               player' has no control, and it passes for bots that hit" >&2
-            echo "               whatever they fire at" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected C; then
+    case "$DEMO" in
+        breach)
+            STOPPED="$(grep -F 'and stops where they are when the key is released' "${OUTPUT}.plain" || true)"
+            if [ -z "$STOPPED" ]; then
+                echo "crcbl web e2e: the driver never let go of $DEMO's walk key;" >&2
+                echo "               'the player advances' has no control, and it passes" >&2
+                echo "               for a demo that drifts on its own" >&2
+                exit 1
+            fi
+            MISSED="$(grep -F 'and a shot aimed away from every plate does not score' "${OUTPUT}.plain" || true)"
+            if [ -z "$MISSED" ]; then
+                echo "crcbl web e2e: the driver never fired $DEMO's pistol at anything but a" >&2
+                echo "               target; 'a shot at a plate scores a hit' has no control," >&2
+                echo "               and it passes for a build that scores on every trigger" >&2
+                echo "               pull" >&2
+                exit 1
+            fi
+            LOOKED="$(grep -F 'a look key turns the view' "${OUTPUT}.plain" || true)"
+            if [ -z "$LOOKED" ]; then
+                echo "crcbl web e2e: the driver never asked whether $DEMO's view can be" >&2
+                echo "               turned from the keyboard; nothing else on that page" >&2
+                echo "               reads the angle the shot is aimed along" >&2
+                exit 1
+            fi
+            CAPTURED="$(grep -F 'a mouse click takes the browser pointer lock' "${OUTPUT}.plain" || true)"
+            if [ -z "$CAPTURED" ]; then
+                echo "crcbl web e2e: the driver never checked that $DEMO's page holds the" >&2
+                echo "               pointer lock; with a visible cursor the demo is meant" >&2
+                echo "               to ignore the mouse, so both mouse checks below pass" >&2
+                echo "               for the wrong reason on a page that never took it" >&2
+                exit 1
+            fi
+            FREE_LOOK="$(grep -F 'mouse movement with a visible cursor turns nothing' "${OUTPUT}.plain" || true)"
+            if [ -z "$FREE_LOOK" ]; then
+                echo "crcbl web e2e: the driver never moved $DEMO's mouse with the cursor" >&2
+                echo "               visible; 'the mouse turns the view' has no control, and" >&2
+                echo "               it passes for a build that turns on every movement" >&2
+                echo "               whether the pointer is captured or not" >&2
+                exit 1
+            fi
+            FREE_CLICK="$(grep -F 'and the click that took it was not a shot' "${OUTPUT}.plain" || true)"
+            if [ -z "$FREE_CLICK" ]; then
+                echo "crcbl web e2e: the driver never asked what $DEMO did with the click" >&2
+                echo "               that grabbed the pointer; 'a click pulls the trigger'" >&2
+                echo "               has no control, and it passes for a build that fires on" >&2
+                echo "               the press that was reaching for the lock" >&2
+                exit 1
+            fi
+            RIG="$(grep -F 'opening the loadout gives the pointer lock back and the demo plays on' "${OUTPUT}.plain" || true)"
+            if [ -z "$RIG" ]; then
+                echo "crcbl web e2e: the driver never opened $DEMO's loadout; nothing asks a" >&2
+                echo "               browser to act on the PointerMode::Free that panel wants," >&2
+                echo "               so apps/breach/src/panel.rs is gated by cargo test alone" >&2
+                echo "               — where no lock is ever taken and none can be given back" >&2
+                exit 1
+            fi
+            # And the same argument once more for the *other map*, which is
+            # milestone 0's other half. Everything above is the firing range; the
+            # practice map is reached only by this driver navigating to
+            # `?map=practice`, and if that block goes missing the whole of
+            # `apps/breach/src/bots.rs` and `apps/breach/src/map/practice.rs` is
+            # ungated in a browser while every check above stays green — because
+            # every check above is about a different room.
+            #
+            # Four names are matched rather than seven. The first says the query
+            # string reached the game at all, without which the other six are being
+            # asked of the firing range and pass or fail for reasons that have
+            # nothing to do with bots. The other three are the block's *controls* —
+            # the halves worth deleting when a slow machine makes them flake, and
+            # each is what stops a positive passing for the wrong reason:
+            #
+            #  - 'and it is a bot that moved, not the player and not the other map'
+            #    is what says the moving reading belongs to a patrol. Without it,
+            #    'a bot walks its patrol' passes for the range's travelling plate.
+            #  - 'and a bot behind cover does not, though it is near enough to' is
+            #    what says the sighting is a ray. Without it, 'a bot notices the
+            #    player' passes for a build that noticed everything in range.
+            #  - 'and a round with cover in the way never arrives' is what says the
+            #    cover stops a shot. Without it, 'a bot's round reaches the player'
+            #    passes for bots that hit whatever they fire at.
+            #
+            # Renaming any of them in the driver is meant to fail here and be
+            # renamed here too.
+            OPENED="$(grep -F "the practice map opens from the page's own query string" "${OUTPUT}.plain" || true)"
+            if [ -z "$OPENED" ]; then
+                echo "crcbl web e2e: the driver never opened $DEMO's second map;" >&2
+                echo "               milestone 0's bot practice map is not reached by any" >&2
+                echo "               browser gate, and every check above is about the" >&2
+                echo "               firing range instead" >&2
+                exit 1
+            fi
+            PATROLLED="$(grep -F 'and it is a bot that moved, not the player and not the other map' "${OUTPUT}.plain" || true)"
+            if [ -z "$PATROLLED" ]; then
+                echo "crcbl web e2e: the driver never asked whose position moved on" >&2
+                echo "               $DEMO's practice map; 'a bot walks its patrol' has no" >&2
+                echo "               control, and it passes for the other map's travelling" >&2
+                echo "               plate" >&2
+                exit 1
+            fi
+            COVERED="$(grep -F 'and a bot behind cover does not, though it is near enough to' "${OUTPUT}.plain" || true)"
+            if [ -z "$COVERED" ]; then
+                echo "crcbl web e2e: the driver never asked whether cover stops $DEMO's" >&2
+                echo "               bots seeing; 'a bot notices the player' has no control," >&2
+                echo "               and it passes for a build that noticed everything" >&2
+                echo "               inside its range without casting a ray at all" >&2
+                exit 1
+            fi
+            STOPPED_ROUND="$(grep -F 'and a round with cover in the way never arrives' "${OUTPUT}.plain" || true)"
+            if [ -z "$STOPPED_ROUND" ]; then
+                echo "crcbl web e2e: the driver never asked whether cover stops a round on" >&2
+                echo "               $DEMO's practice map; 'a bot's round reaches the" >&2
+                echo "               player' has no control, and it passes for bots that hit" >&2
+                echo "               whatever they fire at" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the same argument once more for the zone, which is shard's whole subject.
 # Every other check in that driver reads a number the demo printed about itself,
@@ -913,174 +958,178 @@ esac
 # too.
 case "$DEMO" in
     shard)
-        STOPPED_WALK="$(grep -F 'and stops where they are when it is released' "${OUTPUT}.plain" || true)"
-        if [ -z "$STOPPED_WALK" ]; then
-            echo "crcbl web e2e: the driver never let go of $DEMO's walk key;" >&2
-            echo "               'the character walks the zone' has no control, and it" >&2
-            echo "               passes for a demo that drifts on its own" >&2
-            exit 1
+        if selected C; then
+            STOPPED_WALK="$(grep -F 'and stops where they are when it is released' "${OUTPUT}.plain" || true)"
+            if [ -z "$STOPPED_WALK" ]; then
+                echo "crcbl web e2e: the driver never let go of $DEMO's walk key;" >&2
+                echo "               'the character walks the zone' has no control, and it" >&2
+                echo "               passes for a demo that drifts on its own" >&2
+                exit 1
+            fi
+            DOUSED="$(grep -F 'and dousing them leaves a still frame that is darker but not blank' "${OUTPUT}.plain" || true)"
+            if [ -z "$DOUSED" ]; then
+                echo "crcbl web e2e: the driver never put $DEMO's torches out; 'the picture" >&2
+                echo "               keeps changing' has no control, and it passes for a page" >&2
+                echo "               drawing noise — nothing else on this site asks whether" >&2
+                echo "               the lighting is computed rather than declared" >&2
+                exit 1
+            fi
+            RELIT="$(grep -F 'and lighting them again brings the flicker back' "${OUTPUT}.plain" || true)"
+            if [ -z "$RELIT" ]; then
+                echo "crcbl web e2e: the driver never lit $DEMO's torches again; 'the frame" >&2
+                echo "               holds still when they are out' passes for a page that" >&2
+                echo "               died with its heartbeat still ticking" >&2
+                exit 1
+            fi
+            # And once more for the fight, which is slice 2 and the second of that
+            # plan's six verbs. Everything above is a character walking a room and a
+            # light going out, and all of it passes on a zone with nothing alive in
+            # it.
+            #
+            # Three names, one per pair, and each carries its own control in the
+            # verdict it prints:
+            #
+            #  - 'a blow swung with nothing in reach fells nothing' is the control
+            #    for the kill below. Without it, 'a blow fells a foe' passes for a
+            #    build that counted key presses instead of resolving a cleave
+            #    against `PhysicsWorld::cast_ray`.
+            #  - 'a foe engages the character once they come at it' requires every
+            #    heartbeat before the walk key to have reported nothing engaged.
+            #    Without that half, the check passes for a zone that opens with its
+            #    foes already coming.
+            #  - "and a foe's ability costs them health" requires the character to
+            #    have taken nothing on all of those beats. Without that half, "the
+            #    damage counter went up" passes for a number that only ever counts
+            #    up.
+            #
+            # Renaming any of them in the driver is meant to fail here and be
+            # renamed here too.
+            MISSED_BLOW="$(grep -F 'a blow swung with nothing in reach fells nothing' "${OUTPUT}.plain" || true)"
+            if [ -z "$MISSED_BLOW" ]; then
+                echo "crcbl web e2e: the driver never swung $DEMO's blow at nothing;" >&2
+                echo "               'a blow fells a foe' has no control, and it passes for" >&2
+                echo "               a build that counts key presses rather than resolving" >&2
+                echo "               the cleave against the world" >&2
+                exit 1
+            fi
+            ENGAGED="$(grep -F 'a foe engages the character once they come at it' "${OUTPUT}.plain" || true)"
+            if [ -z "$ENGAGED" ]; then
+                echo "crcbl web e2e: the driver never walked $DEMO's character at a foe;" >&2
+                echo "               nothing on that page asks whether a sighting happens at" >&2
+                echo "               all, and the whole of apps/shard/src/foe.rs is ungated" >&2
+                echo "               in a browser" >&2
+                exit 1
+            fi
+            HURT="$(grep -F "and a foe's ability costs them health" "${OUTPUT}.plain" || true)"
+            if [ -z "$HURT" ]; then
+                echo "crcbl web e2e: the driver never asked whether $DEMO's character can" >&2
+                echo "               be hurt; a zone whose foes cannot touch you is scenery," >&2
+                echo "               and every other fight check would still be green" >&2
+                exit 1
+            fi
+            # And once more for loot and level, which are the two of that plan's six
+            # verbs the block above leaves lying on the floor. Everything up to here
+            # is a foe going down, and all of it passes on a build where a corpse
+            # leaves nothing and a character learns nothing —
+            # `docs/plan/sample/15-shard.md`'s milestone 1 asks for a session that
+            # plays all six through, and these two are what that criterion was
+            # waiting on.
+            #
+            # Two names, one per verb, and each is the whole of its claim:
+            #
+            #  - 'the pickup key takes the stack it left' is the only thing anywhere
+            #    that presses `F` in a browser. Without it the loot loop — the drop,
+            #    the reach, the grid — is ungated on the page, and the driver's own
+            #    fight checks are green either way.
+            #  - 'the kill and the find together turn the level over' is the only
+            #    thing that reads the level pair off the heartbeat. Without it, a
+            #    build whose level ran ahead of its own experience, or never moved
+            #    at all, passes every other check here.
+            #
+            # Renaming either of them in the driver is meant to fail here and be
+            # renamed here too.
+            TOOK="$(grep -F 'the pickup key takes the stack it left' "${OUTPUT}.plain" || true)"
+            if [ -z "$TOOK" ]; then
+                echo "crcbl web e2e: the driver never pressed $DEMO's pickup key; the loot" >&2
+                echo "               verb is ungated in a browser, and a build whose felled" >&2
+                echo "               foes left nothing would be green" >&2
+                exit 1
+            fi
+            LEVELLED="$(grep -F 'the kill and the find together turn the level over' "${OUTPUT}.plain" || true)"
+            if [ -z "$LEVELLED" ]; then
+                echo "crcbl web e2e: the driver never read $DEMO's level off the heartbeat;" >&2
+                echo "               the level verb is ungated in a browser, and a character" >&2
+                echo "               who learns nothing from a kill would be green" >&2
+                exit 1
+            fi
+            # And once more for the save, which is slice 3 and the last two of that
+            # plan's six verbs. Everything above happens inside one session, and all
+            # of it passes on a page that keeps nothing: a document that is never
+            # reloaded never has to answer for what it wrote.
+            #
+            # Three names, and the two below the first are each other's control:
+            #
+            #  - "a reloaded page resumes the character the last one saved" is the
+            #    claim. On its own it passes for a build that saves nothing and
+            #    always starts in the same place.
+            #  - "and the same page with the store cleared comes up fresh" is what
+            #    rules that out: the same page, the same reload, an emptied store,
+            #    and a character back on the spawn with the zone intact.
+            #  - "the character is on the browser's own file system, not in the
+            #    page" is what says the bytes left wasm at all. Without it both
+            #    checks above would pass for a page that held the save in memory
+            #    for the life of the document — which is exactly what a reload is
+            #    supposed to destroy, and which nothing else here would notice.
+            #
+            # Renaming any of them in the driver is meant to fail here and be
+            # renamed here too.
+            ON_DISK="$(grep -F "the character is on the browser's own file system" "${OUTPUT}.plain" || true)"
+            if [ -z "$ON_DISK" ]; then
+                echo "crcbl web e2e: the driver never looked in $DEMO's OPFS directory;" >&2
+                echo "               'a reloaded page resumes' passes for a save held in" >&2
+                echo "               memory for the life of the document, and nothing else" >&2
+                echo "               on this site reads a byte back off browser storage" >&2
+                exit 1
+            fi
+            RESUMED="$(grep -F 'a reloaded page resumes the character the last one saved' "${OUTPUT}.plain" || true)"
+            if [ -z "$RESUMED" ]; then
+                echo "crcbl web e2e: the driver never reloaded $DEMO's page; the save half" >&2
+                echo "               of milestone 1 is ungated in a browser, and a build" >&2
+                echo "               that wrote a file nobody reads would be green" >&2
+                exit 1
+            fi
+            FRESH="$(grep -F 'and the same page with the store cleared comes up fresh' "${OUTPUT}.plain" || true)"
+            if [ -z "$FRESH" ]; then
+                echo "crcbl web e2e: the driver never cleared $DEMO's store; 'a reloaded" >&2
+                echo "               page resumes the character' has no control, and it" >&2
+                echo "               passes for a demo that always opens in the same place" >&2
+                exit 1
+            fi
         fi
-        DOUSED="$(grep -F 'and dousing them leaves a still frame that is darker but not blank' "${OUTPUT}.plain" || true)"
-        if [ -z "$DOUSED" ]; then
-            echo "crcbl web e2e: the driver never put $DEMO's torches out; 'the picture" >&2
-            echo "               keeps changing' has no control, and it passes for a page" >&2
-            echo "               drawing noise — nothing else on this site asks whether" >&2
-            echo "               the lighting is computed rather than declared" >&2
-            exit 1
-        fi
-        RELIT="$(grep -F 'and lighting them again brings the flicker back' "${OUTPUT}.plain" || true)"
-        if [ -z "$RELIT" ]; then
-            echo "crcbl web e2e: the driver never lit $DEMO's torches again; 'the frame" >&2
-            echo "               holds still when they are out' passes for a page that" >&2
-            echo "               died with its heartbeat still ticking" >&2
-            exit 1
-        fi
-        # And once more for the fight, which is slice 2 and the second of that
-        # plan's six verbs. Everything above is a character walking a room and a
-        # light going out, and all of it passes on a zone with nothing alive in
-        # it.
-        #
-        # Three names, one per pair, and each carries its own control in the
-        # verdict it prints:
-        #
-        #  - 'a blow swung with nothing in reach fells nothing' is the control
-        #    for the kill below. Without it, 'a blow fells a foe' passes for a
-        #    build that counted key presses instead of resolving a cleave
-        #    against `PhysicsWorld::cast_ray`.
-        #  - 'a foe engages the character once they come at it' requires every
-        #    heartbeat before the walk key to have reported nothing engaged.
-        #    Without that half, the check passes for a zone that opens with its
-        #    foes already coming.
-        #  - "and a foe's ability costs them health" requires the character to
-        #    have taken nothing on all of those beats. Without that half, "the
-        #    damage counter went up" passes for a number that only ever counts
-        #    up.
-        #
-        # Renaming any of them in the driver is meant to fail here and be
-        # renamed here too.
-        MISSED_BLOW="$(grep -F 'a blow swung with nothing in reach fells nothing' "${OUTPUT}.plain" || true)"
-        if [ -z "$MISSED_BLOW" ]; then
-            echo "crcbl web e2e: the driver never swung $DEMO's blow at nothing;" >&2
-            echo "               'a blow fells a foe' has no control, and it passes for" >&2
-            echo "               a build that counts key presses rather than resolving" >&2
-            echo "               the cleave against the world" >&2
-            exit 1
-        fi
-        ENGAGED="$(grep -F 'a foe engages the character once they come at it' "${OUTPUT}.plain" || true)"
-        if [ -z "$ENGAGED" ]; then
-            echo "crcbl web e2e: the driver never walked $DEMO's character at a foe;" >&2
-            echo "               nothing on that page asks whether a sighting happens at" >&2
-            echo "               all, and the whole of apps/shard/src/foe.rs is ungated" >&2
-            echo "               in a browser" >&2
-            exit 1
-        fi
-        HURT="$(grep -F "and a foe's ability costs them health" "${OUTPUT}.plain" || true)"
-        if [ -z "$HURT" ]; then
-            echo "crcbl web e2e: the driver never asked whether $DEMO's character can" >&2
-            echo "               be hurt; a zone whose foes cannot touch you is scenery," >&2
-            echo "               and every other fight check would still be green" >&2
-            exit 1
-        fi
-        # And once more for loot and level, which are the two of that plan's six
-        # verbs the block above leaves lying on the floor. Everything up to here
-        # is a foe going down, and all of it passes on a build where a corpse
-        # leaves nothing and a character learns nothing —
-        # `docs/plan/sample/15-shard.md`'s milestone 1 asks for a session that
-        # plays all six through, and these two are what that criterion was
-        # waiting on.
-        #
-        # Two names, one per verb, and each is the whole of its claim:
-        #
-        #  - 'the pickup key takes the stack it left' is the only thing anywhere
-        #    that presses `F` in a browser. Without it the loot loop — the drop,
-        #    the reach, the grid — is ungated on the page, and the driver's own
-        #    fight checks are green either way.
-        #  - 'the kill and the find together turn the level over' is the only
-        #    thing that reads the level pair off the heartbeat. Without it, a
-        #    build whose level ran ahead of its own experience, or never moved
-        #    at all, passes every other check here.
-        #
-        # Renaming either of them in the driver is meant to fail here and be
-        # renamed here too.
-        TOOK="$(grep -F 'the pickup key takes the stack it left' "${OUTPUT}.plain" || true)"
-        if [ -z "$TOOK" ]; then
-            echo "crcbl web e2e: the driver never pressed $DEMO's pickup key; the loot" >&2
-            echo "               verb is ungated in a browser, and a build whose felled" >&2
-            echo "               foes left nothing would be green" >&2
-            exit 1
-        fi
-        LEVELLED="$(grep -F 'the kill and the find together turn the level over' "${OUTPUT}.plain" || true)"
-        if [ -z "$LEVELLED" ]; then
-            echo "crcbl web e2e: the driver never read $DEMO's level off the heartbeat;" >&2
-            echo "               the level verb is ungated in a browser, and a character" >&2
-            echo "               who learns nothing from a kill would be green" >&2
-            exit 1
-        fi
-        # And once more for the save, which is slice 3 and the last two of that
-        # plan's six verbs. Everything above happens inside one session, and all
-        # of it passes on a page that keeps nothing: a document that is never
-        # reloaded never has to answer for what it wrote.
-        #
-        # Three names, and the two below the first are each other's control:
-        #
-        #  - "a reloaded page resumes the character the last one saved" is the
-        #    claim. On its own it passes for a build that saves nothing and
-        #    always starts in the same place.
-        #  - "and the same page with the store cleared comes up fresh" is what
-        #    rules that out: the same page, the same reload, an emptied store,
-        #    and a character back on the spawn with the zone intact.
-        #  - "the character is on the browser's own file system, not in the
-        #    page" is what says the bytes left wasm at all. Without it both
-        #    checks above would pass for a page that held the save in memory
-        #    for the life of the document — which is exactly what a reload is
-        #    supposed to destroy, and which nothing else here would notice.
-        #
-        # Renaming any of them in the driver is meant to fail here and be
-        # renamed here too.
-        ON_DISK="$(grep -F "the character is on the browser's own file system" "${OUTPUT}.plain" || true)"
-        if [ -z "$ON_DISK" ]; then
-            echo "crcbl web e2e: the driver never looked in $DEMO's OPFS directory;" >&2
-            echo "               'a reloaded page resumes' passes for a save held in" >&2
-            echo "               memory for the life of the document, and nothing else" >&2
-            echo "               on this site reads a byte back off browser storage" >&2
-            exit 1
-        fi
-        RESUMED="$(grep -F 'a reloaded page resumes the character the last one saved' "${OUTPUT}.plain" || true)"
-        if [ -z "$RESUMED" ]; then
-            echo "crcbl web e2e: the driver never reloaded $DEMO's page; the save half" >&2
-            echo "               of milestone 1 is ungated in a browser, and a build" >&2
-            echo "               that wrote a file nobody reads would be green" >&2
-            exit 1
-        fi
-        FRESH="$(grep -F 'and the same page with the store cleared comes up fresh' "${OUTPUT}.plain" || true)"
-        if [ -z "$FRESH" ]; then
-            echo "crcbl web e2e: the driver never cleared $DEMO's store; 'a reloaded" >&2
-            echo "               page resumes the character' has no control, and it" >&2
-            echo "               passes for a demo that always opens in the same place" >&2
-            exit 1
-        fi
-        # And once more for the measurement, which is not a verb at all.
-        # `docs/plan/sample/15-shard.md`'s milestone 1 asks for the peak wasm
-        # memory figure as an exit criterion, and a figure is only taken for as
-        # long as something keeps taking it: the number in that doc came off a
-        # run, and the day the page stops printing `[MEM]` lines the doc goes on
-        # stating it while nothing measures it any more.
-        #
-        # One name, and it is the whole of that half of the criterion — every
-        # other check on this page is green whether or not the heap was read.
-        # The check is the only thing that reads `web/demos/shard/main.js`'s
-        # readings back, so a build whose page printed none would leave a
-        # recorded figure with nothing behind it.
-        #
-        # Renaming it in the driver is meant to fail here and be renamed here
-        # too.
-        HEAP="$(grep -F 'the page reports the peak wasm heap it grew to' "${OUTPUT}.plain" || true)"
-        if [ -z "$HEAP" ]; then
-            echo "crcbl web e2e: the driver never read $DEMO's peak wasm heap; the" >&2
-            echo "               address-space figure milestone 1 records is not being" >&2
-            echo "               taken by anything, and the number in the plan is a" >&2
-            echo "               claim about a run nobody repeats" >&2
-            exit 1
+        if selected I; then
+            # And once more for the measurement, which is not a verb at all.
+            # `docs/plan/sample/15-shard.md`'s milestone 1 asks for the peak wasm
+            # memory figure as an exit criterion, and a figure is only taken for as
+            # long as something keeps taking it: the number in that doc came off a
+            # run, and the day the page stops printing `[MEM]` lines the doc goes on
+            # stating it while nothing measures it any more.
+            #
+            # One name, and it is the whole of that half of the criterion — every
+            # other check on this page is green whether or not the heap was read.
+            # The check is the only thing that reads `web/demos/shard/main.js`'s
+            # readings back, so a build whose page printed none would leave a
+            # recorded figure with nothing behind it.
+            #
+            # Renaming it in the driver is meant to fail here and be renamed here
+            # too.
+            HEAP="$(grep -F 'the page reports the peak wasm heap it grew to' "${OUTPUT}.plain" || true)"
+            if [ -z "$HEAP" ]; then
+                echo "crcbl web e2e: the driver never read $DEMO's peak wasm heap; the" >&2
+                echo "               address-space figure milestone 1 records is not being" >&2
+                echo "               taken by anything, and the number in the plan is a" >&2
+                echo "               claim about a run nobody repeats" >&2
+                exit 1
+            fi
         fi
         ;;
 esac
@@ -1104,39 +1153,43 @@ esac
 #
 # Renaming either check in the driver is meant to fail here and be renamed here
 # too.
-case "$DEMO" in
-    sparks)
-        DRAINED="$(grep -F 'and falls back to nothing once its emitter stops' "${OUTPUT}.plain" || true)"
-        if [ -z "$DRAINED" ]; then
-            echo "crcbl web e2e: the driver never watched $DEMO's emitter drain;" >&2
-            echo "               'the count climbs while it runs' has no control, and it" >&2
-            echo "               passes for a demo that never retires a particle" >&2
-            exit 1
-        fi
-        CLAMPED="$(grep -F 'and its emitter is being refused rather than merely idle' "${OUTPUT}.plain" || true)"
-        if [ -z "$CLAMPED" ]; then
-            echo "crcbl web e2e: the driver never asked whether $DEMO's greedy effect is" >&2
-            echo "               being refused; 'it holds at its pool share' has no control," >&2
-            echo "               and it passes for an emitter asking for exactly its share" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected C; then
+    case "$DEMO" in
+        sparks)
+            DRAINED="$(grep -F 'and falls back to nothing once its emitter stops' "${OUTPUT}.plain" || true)"
+            if [ -z "$DRAINED" ]; then
+                echo "crcbl web e2e: the driver never watched $DEMO's emitter drain;" >&2
+                echo "               'the count climbs while it runs' has no control, and it" >&2
+                echo "               passes for a demo that never retires a particle" >&2
+                exit 1
+            fi
+            CLAMPED="$(grep -F 'and its emitter is being refused rather than merely idle' "${OUTPUT}.plain" || true)"
+            if [ -z "$CLAMPED" ]; then
+                echo "crcbl web e2e: the driver never asked whether $DEMO's greedy effect is" >&2
+                echo "               being refused; 'it holds at its pool share' has no control," >&2
+                echo "               and it passes for an emitter asking for exactly its share" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And once more for the hash, which is tumble's cross-target claim. Every other
 # check in the driver passes against a page whose wasm build reaches different
 # bits than the native one, so the determinism block must have run: a renamed
 # check or a heartbeat that lost its fields would otherwise skip it silently.
-case "$DEMO" in
-    tumble)
-        PINNED="$(grep -F "the wasm build's state hash at the check tick is the one the native test pins" "${OUTPUT}.plain" || true)"
-        if [ -z "$PINNED" ]; then
-            echo "crcbl web e2e: the driver never compared $DEMO's hash with the pinned" >&2
-            echo "               one; the native-against-wasm determinism claim went unchecked" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected C; then
+    case "$DEMO" in
+        tumble)
+            PINNED="$(grep -F "the wasm build's state hash at the check tick is the one the native test pins" "${OUTPUT}.plain" || true)"
+            if [ -z "$PINNED" ]; then
+                echo "crcbl web e2e: the driver never compared $DEMO's hash with the pinned" >&2
+                echo "               one; the native-against-wasm determinism claim went unchecked" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the same argument for the one demo on this site that is a client and a
 # server at once. towers seals `PlaceTower` and `StartWave` into bytes and hands
@@ -1158,24 +1211,26 @@ esac
 #
 # Renaming either check in the driver is meant to fail here and be renamed here
 # too.
-case "$DEMO" in
-    towers)
-        REFUSED="$(grep -F 'and a second build on the same plot is refused rather than served' "${OUTPUT}.plain" || true)"
-        if [ -z "$REFUSED" ]; then
-            echo "crcbl web e2e: the driver never asked whether $DEMO's server refuses a" >&2
-            echo "               plot it has already built on; 'a tower goes up' has no" >&2
-            echo "               control, and it passes for a client that never asked" >&2
-            exit 1
-        fi
-        SOONER="$(grep -F 'the wave key sends the next wave sooner than the table had it due' "${OUTPUT}.plain" || true)"
-        if [ -z "$SOONER" ]; then
-            echo "crcbl web e2e: the driver never measured $DEMO's wave against the tick it" >&2
-            echo "               was due on; waves arrive on their own, so a wave starting" >&2
-            echo "               says nothing about the key that was pressed" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected C; then
+    case "$DEMO" in
+        towers)
+            REFUSED="$(grep -F 'and a second build on the same plot is refused rather than served' "${OUTPUT}.plain" || true)"
+            if [ -z "$REFUSED" ]; then
+                echo "crcbl web e2e: the driver never asked whether $DEMO's server refuses a" >&2
+                echo "               plot it has already built on; 'a tower goes up' has no" >&2
+                echo "               control, and it passes for a client that never asked" >&2
+                exit 1
+            fi
+            SOONER="$(grep -F 'the wave key sends the next wave sooner than the table had it due' "${OUTPUT}.plain" || true)"
+            if [ -z "$SOONER" ]; then
+                echo "crcbl web e2e: the driver never measured $DEMO's wave against the tick it" >&2
+                echo "               was due on; waves arrive on their own, so a wave starting" >&2
+                echo "               says nothing about the key that was pressed" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the same argument for the `autoexec.cfg` the driver seeds into quarry's
 # OPFS, which is the only thing anywhere that asks whether a console variable can
@@ -1195,16 +1250,18 @@ esac
 # One name is matched rather than four, because they are one block in the driver
 # and cannot go missing separately. Renaming it there is meant to fail here and
 # be renamed here too. `quarry` alone, because it is the demo the driver seeds.
-case "$DEMO" in
-    quarry)
-        SEEDED="$(grep -F 'a variable the seeded autoexec set is in force before the first frame' "${OUTPUT}.plain" || true)"
-        if [ -z "$SEEDED" ]; then
-            echo "crcbl web e2e: the driver never seeded an autoexec into the page's store;" >&2
-            echo "               the start-up config file in crates/crcbl/src/console_config.rs is ungated in a browser" >&2
-            exit 1
-        fi
-        ;;
-esac
+if selected C; then
+    case "$DEMO" in
+        quarry)
+            SEEDED="$(grep -F 'a variable the seeded autoexec set is in force before the first frame' "${OUTPUT}.plain" || true)"
+            if [ -z "$SEEDED" ]; then
+                echo "crcbl web e2e: the driver never seeded an autoexec into the page's store;" >&2
+                echo "               the start-up config file in crates/crcbl/src/console_config.rs is ungated in a browser" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # And the strongest form of the same argument, for group H. Three of the driver's
 # checks assert that *nothing* was reported — no uncaught exception, no missing
@@ -1217,11 +1274,13 @@ esac
 # One name is matched rather than three, because they are one block in the driver
 # and cannot go missing separately. Renaming it there is meant to fail here and
 # be renamed here too.
-CHANNELS="$(grep -F 'a deliberate uncaught exception reaches the page-error channel' "${OUTPUT}.plain" || true)"
-if [ -z "$CHANNELS" ]; then
-    echo "crcbl web e2e: the driver never provoked its own reporting channels;" >&2
-    echo "               the three silences it asserts are unproven, and a closed channel reports silence too" >&2
-    exit 1
+if selected H; then
+    CHANNELS="$(grep -F 'a deliberate uncaught exception reaches the page-error channel' "${OUTPUT}.plain" || true)"
+    if [ -z "$CHANNELS" ]; then
+        echo "crcbl web e2e: the driver never provoked its own reporting channels;" >&2
+        echo "               the three silences it asserts are unproven, and a closed channel reports silence too" >&2
+        exit 1
+    fi
 fi
 
 # And for group I, which is the only gate anywhere on what `crcbl-webgpu` never
@@ -1233,11 +1292,13 @@ fi
 # while every other check here went on passing, because nothing else in the
 # repository looks at those tables at all. Every demo runs it. Renaming the
 # check in the driver is meant to fail here and be renamed here too.
-RELEASED="$(grep -F 'the demo destroyed every GPU object it created' "${OUTPUT}.plain" || true)"
-if [ -z "$RELEASED" ]; then
-    echo "crcbl web e2e: the driver never asked what the replayer was still holding after shutdown;" >&2
-    echo "               the handle tables in web/engine/gpu-replay.js are ungated" >&2
-    exit 1
+if selected I; then
+    RELEASED="$(grep -F 'the demo destroyed every GPU object it created' "${OUTPUT}.plain" || true)"
+    if [ -z "$RELEASED" ]; then
+        echo "crcbl web e2e: the driver never asked what the replayer was still holding after shutdown;" >&2
+        echo "               the handle tables in web/engine/gpu-replay.js are ungated" >&2
+        exit 1
+    fi
 fi
 
 # And the named guard for the half of group I that is about the *engine*
@@ -1251,12 +1312,14 @@ fi
 # list in the first, so it is the one thing that can tell them apart. Without it
 # the grep below is a green light wired to nothing. Renaming the check in the
 # driver is meant to fail here and be renamed here too.
-REPORTED="$(grep -F 'the engine reported for itself that its command stream ended' "${OUTPUT}.plain" || true)"
-if [ -z "$REPORTED" ]; then
-    echo "crcbl web e2e: the driver never asked whether the command stream reported its own end;" >&2
-    echo "               the teardown warning in web/engine/gpu-replay.js is ungated, and the" >&2
-    echo "               leak grep below cannot tell a clean run from a reporter that never ran" >&2
-    exit 1
+if selected I; then
+    REPORTED="$(grep -F 'the engine reported for itself that its command stream ended' "${OUTPUT}.plain" || true)"
+    if [ -z "$REPORTED" ]; then
+        echo "crcbl web e2e: the driver never asked whether the command stream reported its own end;" >&2
+        echo "               the teardown warning in web/engine/gpu-replay.js is ungated, and the" >&2
+        echo "               leak grep below cannot tell a clean run from a reporter that never ran" >&2
+        exit 1
+    fi
 fi
 
 # **The teardown leak report, read rather than left in the log**, spelled the
@@ -1389,14 +1452,24 @@ if [ -z "$CONFIG" ]; then
     exit 1
 fi
 echo "crcbl web e2e: $RAN checks ran in a real browser, ${CONFIG#running against the }"
+# Which share of the groups those were, so a CI job that ran half of a demo's
+# says so in its last lines rather than reading like the whole of it.
+echo "crcbl web e2e: in groups ${SELECTED// /,}$(selected C || echo " and C's opening")"
 # The key event is not part of this sentence any more, because it is not part of
 # every run: `apps/hud` takes no input at all and `apps/lantern` has no run to
 # begin, and both say so in their `EXPECTATIONS` row, so the driver dispatches no
 # key for either. What every demo does do is the three
 # claims left here, and the per-check lines above name the key where there was
-# one.
-echo "crcbl web e2e: $DEMO booted, opened a WebGPU device, and drew moving frames"
-echo "crcbl web e2e: its command stream ended with nothing left alive"
+# one. The second and third belong to groups D and I, so a run that did not
+# select them does not claim them.
+if selected D; then
+    echo "crcbl web e2e: $DEMO booted, opened a WebGPU device, and drew moving frames"
+else
+    echo "crcbl web e2e: $DEMO booted and opened a WebGPU device"
+fi
+if selected I; then
+    echo "crcbl web e2e: its command stream ended with nothing left alive"
+fi
 echo "crcbl web e2e:${ISOLATION#*ok  }"
 # Set only by the second run above, so this line is absent for every demo that
 # does not make the claim rather than being printed for all of them.

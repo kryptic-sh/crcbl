@@ -386,7 +386,9 @@ jobs:
   # ever does stop, the live page log `web/tools/browser-e2e.mjs` writes as
   # lines arrive is what says where.
   demos:
-    name: render ${{ matrix.demo }} in a real browser
+    name:
+      render ${{ matrix.demo }}${{ matrix.groups && format(' ({0})',
+      matrix.groups) || '' }} in a real browser
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 150
@@ -438,18 +440,7 @@ jobs:
           # the engine's own heartbeat says they did; sundial's row is the
           # other.
           - alcove
-          # sundial is the fourth 3D fixture and it sits with alcove: one open
-          # plaza, flat-shaded, a fixed camera, and a shadow atlas rendered
-          # ahead of a scene pass that samples it — so what it costs is the
-          # shadow chain rather than the scene, and the seam its gate raises
-          # runs a second filter through the same pass rather than a second
-          # pass. Its `EXPECTATIONS` row does *not* carry `still`: the sun
-          # sweeps on the fixed step, so the picture moves by construction and
-          # group D reads a changed frame the way every other 3D demo does. It
-          # is the second demo whose *page* controls are gated — `knobs` in
-          # that row presses them and reads what the engine's own heartbeat says
-          # they did, and here that includes stopping the sun and scrubbing it.
-          - sundial
+          # sundial sits with alcove and runs as two jobs: see `include`.
           # tide is a 3D fixture and it sits with sundial: one small
           # flat-shaded courtyard, a fixed sun and a fixed camera, so what it
           # costs is the two water passes over the frame rather than the scene.
@@ -471,17 +462,7 @@ jobs:
           # for the loop's own frame counter — see that row.
           - options
           - bracket
-          - puppet
           - sparks
-          - breach
-          # shard is the heaviest scene the site ships and the slowest thing
-          # here: 88 s locally on the same software rasteriser, and "every later
-          # budget scaled 87.0x" in the one CI log that reached it. It has never
-          # completed in this workflow — every run before `e010015` was
-          # cancelled by a later push while it was still going, and every run
-          # since died at a demo ahead of it. This job is what gives it a clock
-          # of its own.
-          - shard
           # towers is the flagship sample and the newest demo here. It is a 3D
           # greybox field on a fixed overhead camera — a slab, a lane, five
           # build pads and a box per creep — so what it costs is closer to
@@ -496,6 +477,70 @@ jobs:
           # the check tick and compares it with the one the native test pins.
           # Its stage is a slab and three boxes, so it costs little.
           - tumble
+        # **THE HEAVY DEMOS RUN AS TWO JOBS EACH, SINCE 2026-10-31.** The
+        # driver makes its lettered groups in order on one page, and on this
+        # runner's software rasteriser breach, sundial, shard and puppet each
+        # spent longer in them than any other demo — so the slowest of them,
+        # not the sum, set the workflow's wall clock, and every push waited on
+        # it. `--groups` on `web/run-browser-e2e.sh` makes a share of them, and
+        # each demo below runs as two shares whose union is every group.
+        #
+        # **The cut is where the measured group times balance**, read off the
+        # timestamps of Pages runs 41163797261 and 41177732812, and only where
+        # the groups after the cut do not stand on what the groups before it
+        # leave. A and B, and the opening of C that every later group needs,
+        # run in both shares; `C` names C's per-demo blocks, which hand the page
+        # back as they found it for these demos — `browser-e2e.mjs` says where
+        # that holds and where it does not. In minutes on 41163797261:
+        #
+        #     breach   C 25.6 (its blocks)  |  D 4.9 E 5.6 F 3.9 H 1.0 I 8.0
+        #     sundial  C 15.4               |  D 2.1 E 6.5 F 3.1 H 0.7 I 5.1
+        #     shard    C 15.0 D 6.4         |  E 3.5 F 4.4 H 1.4 I 9.9
+        #     puppet   C 3.8 D 2.0 E 21.6   |  F 2.0 H 0.5 I 3.2
+        #
+        # with A, B and C's opening, two to four minutes, on both sides.
+        # **puppet is cut after E, not before it**: its `walk` block leaves the
+        # character at a step, and group E's queued-input checks start from
+        # there, so a share that ran E without C would be checking a different
+        # page. D stays with E for the same reason — D reads the frame the
+        # walk left.
+        #
+        # sundial is the fourth 3D fixture and it sits with alcove: one open
+        # plaza, flat-shaded, a fixed camera, and a shadow atlas rendered
+        # ahead of a scene pass that samples it — so what it costs is the
+        # shadow chain rather than the scene, and the seam its gate raises
+        # runs a second filter through the same pass rather than a second
+        # pass. Its `EXPECTATIONS` row does *not* carry `still`: the sun
+        # sweeps on the fixed step, so the picture moves by construction and
+        # group D reads a changed frame the way every other 3D demo does. It
+        # is the second demo whose *page* controls are gated — `knobs` in
+        # that row presses them and reads what the engine's own heartbeat says
+        # they did, and here that includes stopping the sun and scrubbing it.
+        #
+        # shard is the heaviest scene the site ships and the slowest thing
+        # here: 88 s locally on the same software rasteriser, and "every later
+        # budget scaled 87.0x" in the one CI log that reached it. It has never
+        # completed in this workflow — every run before `e010015` was
+        # cancelled by a later push while it was still going, and every run
+        # since died at a demo ahead of it. This job is what gives it a clock
+        # of its own.
+        include:
+          - demo: breach
+            groups: C
+          - demo: breach
+            groups: D,E,F,G,H,I
+          - demo: sundial
+            groups: C
+          - demo: sundial
+            groups: D,E,F,G,H,I
+          - demo: shard
+            groups: C,D
+          - demo: shard
+            groups: E,F,G,H,I
+          - demo: puppet
+            groups: C,D,E
+          - demo: puppet
+            groups: F,G,H,I
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -527,18 +572,30 @@ jobs:
           fi
           echo "Xvfb: $(command -v Xvfb)"
 
-      - name: Render ${{ matrix.demo }} in a real browser
-        run: CRCBL_WEB_E2E_DEMO=${{ matrix.demo }} ./web/run-browser-e2e.sh
+      # `groups` is set only on the rows under `include`; every other row runs
+      # every group, exactly as it did before the split. Through `env` rather
+      # than spliced into the command, and not named `GROUPS`, which is a bash
+      # variable of its own that ignores assignment.
+      - name:
+          Render ${{ matrix.demo }}${{ matrix.groups && format(' ({0})',
+          matrix.groups) || '' }} in a real browser
+        env:
+          SHARE: ${{ matrix.groups }}
+        run: |
+          CRCBL_WEB_E2E_DEMO=${{ matrix.demo }} ./web/run-browser-e2e.sh ${SHARE:+--groups "$SHARE"}
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed
-      # from the step log. Named per demo: one artifact name across the matrix
-      # would have fourteen jobs uploading over each other.
+      # from the step log. Named per demo, and per share for a split demo: one
+      # artifact name across the matrix would have every job uploading over
+      # the others.
       - name: Upload the browser evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: web-e2e-${{ matrix.demo }}
+          name:
+            web-e2e-${{ matrix.demo }}${{ matrix.groups && format('-{0}',
+            matrix.groups) || '' }}
           path: target/web-e2e
           if-no-files-found: warn
           retention-days: 7

@@ -847,71 +847,73 @@ with and without validation. What is still open:
   `SharedGpu::open` refuses a window its adapter cannot present to, and the
   caller opens that one with `Presenter::open`.
 
-## NEXT: speed up CI (asked by the owner, 2026-10-20)
+## NEXT: speed up CI (asked by the owner, 2026-10-20; re-measured 2026-10-31)
 
-Main's CI wall time grew from about 41 min (run 39088257372, 2026-10-18) to
-52–71 min (runs 39261359247 to 39301759963, 2026-10-19). The Metal job split,
-the dispatch `jobs` input and main-only cache saving landed in
-`ci: split Metal e2e, select dispatch jobs, save main`, whose message has their
-measurements. What is left:
+**Pages, not CI, is the push cycle.** CI took 21–28 min across main runs
+41104419613 to 41177732725 (down from 52–71 on 2026-10-19),
+`mtl e2e forward + mesh` last in every run. Pages took 57–72 min across
+41104419718 to 41177732812, and each push to main landed about 30 s after the
+previous Pages run ended. A heavy Pages demo job's time is all in
+`Render <demo> in a real browser`: SwiftShader frame cost (1.5–7 s a frame for
+the 3D demos) times the driver's budget scaling (breach 62–92×). The same demo
+varies 2–3× between runs on one runner image, unexplained. Check group C
+dominates (breach ~26 of 52 min, sundial ~18 of 38); puppet's time is group E
+(13–22 min). One push creates 68 jobs (42 CI + 26 Pages), filling all 20 slots
+until about +12 min, then 5–12 sit idle. Caches are fine (64 of 64 restored in
+run 41177732725) and build steps take 0.3–2.3 min. The heavy demos (breach,
+sundial, shard, puppet) now run as two `demos` rows each, split by check group
+with `--groups` (2026-10-31; predicted Pages ~39–42 min, to be read off the next
+runs). Left:
 
-- **Dispatches only get faster if they name their jobs.** `ci.yml` now takes
-  `gh workflow run ci.yml --ref <branch> -f jobs=wayland-e2e,x11-e2e`, and a
-  dispatch without `-f jobs=` still runs everything. Run 39336021406 proved a
-  one-job dispatch runs that job and `dispatch-selection` and skips the rest;
-  run 39336579245 proved a bad name fails the run. Mutant and platform-check
-  dispatches have to start passing it, or main keeps queueing behind them.
-- **The account allows 5 macOS jobs and 20 jobs in all at once** (GitHub Free).
-  A push run now has six macOS jobs — `mtl-hardware-e2e`, `mtl-e2e`,
-  `mtl-e2e-mesh`, the macOS `test-cross-platform` leg and two `build` legs — so
-  one waits for another, and 41 jobs ran in dispatched run 39337376757 against
-  20 slots. Reordering jobs so the longest start first is untried.
-- **The Metal halves are not balanced, measured once.** In run 39337376757
-  `mtl e2e (macos-15)` took 18.9 min and `mtl e2e forward + mesh (macos-15)`
-  28.1, against 40.9–48.9 min for the single job across six main runs. The
-  forward pass took 9.8 min there against 6.4 in run 39287773047, with its build
-  at 17.6 s, so execution got slower; whether two macOS-15 jobs at once contend
-  for something is unknown. Also untried: more nextest threads on the 3-vCPU
-  runner — nobody has measured whether these suites are CPU- or GPU-bound.
-- **A job whose `.deb` cache is cold cannot get past a stalling mirror.** On
-  2026-10-22 and 23 `mesa-vulkan-drivers` (17.5 MB) stalled downloading from
-  `azure.archive.ubuntu.com` in every attempt, so
-  `windowed swapchain e2e (Xvfb)` and both `vk-e2e` lavapipe halves died in
-  their install step across runs 39829049187, 39849528705 and 39857988611, while
-  the Wayland job, installing the same package from its restored archive,
-  passed. `.github/actions/apt-packages` saves the archive only after a
-  successful install, so a cold cache stays cold while the mirror stalls. Since
-  2026-10-23 the retry falls back to `archive.ubuntu.com` after the long first
-  attempt (`.github/actions/apt-packages`). **The fallback has not run on CI
-  yet:** on its branch run 39862227703 the Azure mirror delivered first time. It
-  was exercised in a simulation instead (2026-10-23): an `ubuntu:24.04`
-  container with the runner's `mirror+file:/etc/apt/apt-mirrors.txt` sources and
-  Azure's mirror first, lists fetched, then `azure.archive.ubuntu.com`
-  black-holed so a connection hangs as a stall does; the install failed, the
-  action's own fallback block (extracted verbatim, `sudo` dropped for the
-  container's root) rewrote the list, and the retry installed from
-  `archive.ubuntu.com` with no list refresh. The other option, seeding one
-  shared archive from a job that has it, is unbuilt.
-- **`vk e2e (lavapipe)` is split in two, like `mtl-e2e`.** As one job it took
-  16.1–28.0 min across main runs, every step slowing by about a third between
-  run 39088257372 (20.9 min) and 39287773047 (27.6 min) with nothing in the
-  repository to explain it, and on 2026-10-22 run 39779495825 crossed its
-  30-minute cap when the package install alone took 4.6 min; the viewer's suite
-  was cancelled. The ForwardRenderer, forward-pass and lit-mesh steps (13 of
-  27.6 min at `3a24c12f`) now run in `vk-e2e-mesh`, "vk e2e forward + mesh
-  (lavapipe)". Measured on main run 39791350330 (`ee8c7dde`): `vk-e2e` took 14.1
-  min and `vk-e2e-mesh` 14.5, both green. If either nears 30 min again, the
-  sample draws are the next piece to move.
-- **The `rust-cache` key can move with the runner image's own toolchain.** Its
-  environment hash covers every installed `rustc`, and on 2026-10-19 runners
-  carried 1.99.0 or 1.99.1 beside the pinned 1.98.1, so one scope saved under
-  two keys and a runner with the other restored nothing. **Re-checked
-  2026-10-23, main run 39865952451: 60 restores, 1 miss**
-  (`build x86_64-apple-darwin`, an eviction, not a split), every Linux job on
-  the pinned 1.98.1. Not recurring, so not changed; if it comes back,
-  `add-rust-environment-hash-key: false` with the pinned `rust-toolchain.toml`
-  hashed into the key fixes it without restoring stale artifacts after a
-  toolchain bump.
+- **Read the next two Pages runs' queue column** before splitting further: four
+  more matrix jobs could raise queue time. After the split the slowest single
+  row is projected to be quarry (35 min on run 41163797261: C 8.4, D 3.9, E 9.0,
+  F 3.6, I 6.8), then lantern (30). Splitting them needs their C blocks (quarry
+  `console` and `autoexec`) shown to hand the page back as they found it — the
+  comment at the end of C's opening in `web/tools/browser-e2e.mjs` says what to
+  look for.
+- **puppet's E cannot be split from its C.** Its `walk` block leaves the
+  character mid-circuit, and `queuedKeyChecks` in
+  `web/tools/browser-queued-input.mjs` starts from there, so puppet runs
+  `C,D,E | F,G,H,I` (~30 | 9 min). Giving `queuedKeyChecks` its own starting
+  position would make `C | D,E` sound.
+- **The split renamed four Pages checks** (`render breach in a real browser`
+  became `render breach (C) …` and `render breach (D,E,F,G,H,I) …`, likewise
+  sundial, shard, puppet). Branch protection, if it requires them, needs the new
+  names.
+- A `--groups` run that checks nothing past C's opening prints the shell's
+  generic "at least one failed" after the driver's own correct reason.
+
+- **Group I's four 20-frame windows** cost 8–10 min on breach and shard. The
+  code comment's own fix is per-kind limits reported by `liveObjects()`. Owner's
+  call: it changes how strict the leak check is.
+- **A smaller `--window-size` for the browser gate.** Unmeasured whether
+  SwiftShader is fragment-bound; pixel-count thresholds would move. Owner's
+  call.
+- **Merge the eight ~1-minute 2D demo rows** into one looping row, freeing 7
+  slots during the first 12 minutes.
+- **Print the runner's CPU in the demo jobs** (`nproc`, `lscpu` model, load
+  average) in `Check the browser gate's assumptions`, to explain the 2–3×
+  spread.
+- **Not waiting for Pages before the next push** would roughly halve the cycle;
+  `pages.yml` already cancels a superseded main run. A process change, the
+  owner's call.
+- **Dispatches only get faster if they name their jobs** (`-f jobs=…`); a
+  dispatch without it still runs everything.
+- **The account allows 5 macOS jobs and 20 in all**: a push now has seven macOS
+  jobs (CI's six plus Pages' `render-harness (macos)`).
+- **A cold `.deb` cache cannot get past a stalling mirror**: since 2026-10-23
+  `.github/actions/apt-packages` falls back to `archive.ubuntu.com` after the
+  first attempt; that fallback has still not run on CI.
+- **The `rust-cache` key can move with the runner's own toolchain**; re-checked
+  2026-10-31, 64 of 64 restored, not recurring.
+- **Moving `Check the forward pass on Metal` into `mtl-e2e` was declined
+  (2026-10-31):** the step (~7.3 min) is larger than half the gap between the
+  halves (17.6 vs 24.2 min), so `mtl-e2e` would become ~24.9 min, a longer
+  critical path. Balancing needs that step split or a smaller suite moved.
+- Considered and declined: building the wasm once (already done through the
+  `site` artifact), reordering the matrix (start order measured as random),
+  sccache or profile tweaks (compilation is not where the time goes).
 
 ## HIGH PRIORITY: what lyr and pikr still need (2026-10-15)
 
