@@ -13,6 +13,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`crcbl_anim::rotate_joints` — several model-space joint turns for one
+  palette update.**
+  `rotate_joints(skeleton, model, pose, palette, &[(joint, model_rotation)])`
+  runs each turn exactly as one `rotate_joint` call would — the same checks and
+  arithmetic, against the pose as the earlier turns left it — so the pose, the
+  palette, and on refusal the error and the turn that raised it, are
+  bit-identical to that call sequence. It recomputes the palette once instead of
+  after every turn, which was a full-skeleton recompute per joint. The turns are
+  made on a copy of the pose, so a refused batch writes nothing. On an 80-joint
+  skeleton with 8 turns per character it is about 4.5x faster than the per-call
+  path. `rotate_joint` is unchanged.
+
 ## [0.14.0] - 2026-10-31
 
 ### Breaking

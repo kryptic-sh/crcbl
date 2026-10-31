@@ -7,13 +7,14 @@
 //!
 //! ```text
 //! rotate_joint     turn one joint by a rotation spelled in model space
+//! rotate_joints    several such turns in order, one palette update for all
 //! solve_two_bone   upper, middle, end joint: put the end on a target, the
 //!                  middle bent towards a pole — two rotate_joint calls
 //! ```
 //!
 //! # Spaces
 //!
-//! Both functions take a `model` matrix, the skeleton's placement in the space
+//! Every function takes a `model` matrix, the skeleton's placement in the space
 //! the caller's targets are in. A joint's *model-space* transform is `model`
 //! times its global transform ([`Palette::globals`]); targets, poles and
 //! rotations are all given in that space. Pass [`Mat4::IDENTITY`] to work in
@@ -208,6 +209,8 @@ impl std::error::Error for IkError {}
 /// [`IkError`] for a mismatched pose or palette, a joint out of range, a
 /// non-finite `model`, `model_rotation` or pose, a zero `model_rotation`, or a
 /// parent frame that is not conformal. Nothing is written when it errors.
+///
+/// Several turns of one pose cost one palette update with [`rotate_joints`].
 pub fn rotate_joint(
     skeleton: &Skeleton,
     model: Mat4,
@@ -217,6 +220,58 @@ pub fn rotate_joint(
     model_rotation: Quat,
 ) -> Result<(), IkError> {
     check_sizes(skeleton, pose, palette)?;
+    turn_checked(skeleton, model, pose, joint, model_rotation)?;
+    palette.compute(skeleton, pose);
+    Ok(())
+}
+
+/// Applies `turns` in order, each `(joint, model_rotation)` exactly as
+/// [`rotate_joint`] would, then recomputes the palette once.
+///
+/// Each turn runs [`rotate_joint`]'s own checks and arithmetic against the
+/// pose as the turns before it left it, and parent frames are read from the
+/// pose, never from the palette — so the per-call palette updates this skips
+/// were never read by the next turn. The pose and the palette afterwards are
+/// bit for bit what one [`rotate_joint`] call per turn leaves. A joint may
+/// appear more than once, and the turns may come in any order across the
+/// hierarchy.
+///
+/// The palette is recomputed even for an empty `turns`, so it is current
+/// whenever this returns `Ok`. The turns are made on a copy of the pose, one
+/// allocation per call, which is what lets a refusal write nothing.
+///
+/// # Errors
+///
+/// The error the same sequence of [`rotate_joint`] calls would stop at, from
+/// the same turn. Unlike that sequence, which keeps the turns before its
+/// refusal, a refused batch writes nothing: the pose and the palette are left
+/// exactly as they were.
+pub fn rotate_joints(
+    skeleton: &Skeleton,
+    model: Mat4,
+    pose: &mut Pose,
+    palette: &mut Palette,
+    turns: &[(usize, Quat)],
+) -> Result<(), IkError> {
+    check_sizes(skeleton, pose, palette)?;
+    let mut turned = pose.clone();
+    for &(joint, model_rotation) in turns {
+        turn_checked(skeleton, model, &mut turned, joint, model_rotation)?;
+    }
+    *pose = turned;
+    palette.compute(skeleton, pose);
+    Ok(())
+}
+
+/// [`rotate_joint`] without the size check or the palette update: every other
+/// check, then the turn. Nothing is written when it errors.
+fn turn_checked(
+    skeleton: &Skeleton,
+    model: Mat4,
+    pose: &mut Pose,
+    joint: usize,
+    model_rotation: Quat,
+) -> Result<(), IkError> {
     check_joint(skeleton, joint)?;
     check_finite(model.is_finite(), IkInput::Model)?;
     check_finite(model_rotation.is_finite(), IkInput::Rotation)?;
@@ -227,7 +282,6 @@ pub fn rotate_joint(
     check_finite(pose.locals()[joint].rotation.is_finite(), IkInput::Pose)?;
     let frame = parent_frame(skeleton, pose, model, joint)?;
     turn(pose, joint, frame, rotation);
-    palette.compute(skeleton, pose);
     Ok(())
 }
 

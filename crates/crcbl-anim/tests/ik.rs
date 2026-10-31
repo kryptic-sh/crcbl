@@ -2,7 +2,8 @@
 //! own palette rather than a hand copy of the hierarchy.
 
 use crcbl_anim::{
-    IkError, IkInput, Joint, Palette, Pose, Skeleton, Trs, rotate_joint, solve_two_bone,
+    IkError, IkInput, Joint, Palette, Pose, Skeleton, Trs, rotate_joint, rotate_joints,
+    solve_two_bone,
 };
 use glam::{Mat3, Mat4, Quat, Vec3};
 use std::f32::consts::FRAC_PI_2;
@@ -727,4 +728,280 @@ fn rotate_joint_matches_ew_on_a_proper_frame() {
     rotate_joint(&skeleton, model(), &mut pose, &mut palette, ELBOW, delta)
         .expect("a conformal frame");
     assert!(pose.locals()[ELBOW].rotation.dot(ew).abs() > 1.0 - 1e-6);
+}
+
+/// A spine of three with two arms off its top and a head, the left arm under
+/// a mirror and the right under a uniform scale, so the turns below cross
+/// proper, mirrored and scaled parent frames.
+fn torso() -> Skeleton {
+    let mut chest = joint(Some(1), Vec3::new(0.0, 1.5, 0.2));
+    chest.rest.rotation = Quat::from_rotation_x(0.2);
+    let mut left = joint(Some(2), Vec3::new(-1.0, 0.0, 0.0));
+    left.rest.scale = Vec3::new(-1.0, 1.0, 1.0);
+    let mut right = joint(Some(2), Vec3::new(1.0, 0.0, 0.0));
+    right.rest.scale = Vec3::splat(1.5);
+    right.rest.rotation = Quat::from_rotation_z(-0.3);
+    Skeleton::new(vec![
+        joint(None, Vec3::new(0.0, 4.0, 0.0)),
+        joint(Some(0), Vec3::new(0.0, 1.0, 0.0)),
+        chest,
+        left,
+        joint(Some(3), Vec3::new(0.0, -2.0, 0.0)),
+        joint(Some(4), Vec3::new(0.0, -1.5, 0.0)),
+        right,
+        joint(Some(6), Vec3::new(0.0, -2.0, 0.0)),
+        joint(Some(7), Vec3::new(0.0, -1.5, 0.0)),
+        joint(Some(2), Vec3::new(0.0, 0.8, 0.0)),
+    ])
+    .expect("parents precede children")
+}
+
+/// A model that mirrors, scales, turns and moves.
+fn mirrored_model() -> Mat4 {
+    Mat4::from_scale_rotation_translation(
+        Vec3::new(-2.0, 2.0, 2.0),
+        Quat::from_rotation_y(1.1),
+        Vec3::new(3.0, -1.0, 0.5),
+    )
+}
+
+fn turn_about(axis: Vec3, angle: f32) -> Quat {
+    Quat::from_axis_angle(axis.normalize(), angle)
+}
+
+/// The same turns one [`rotate_joint`] call at a time.
+fn one_by_one(
+    skeleton: &Skeleton,
+    model: Mat4,
+    pose: &mut Pose,
+    turns: &[(usize, Quat)],
+) -> Palette {
+    let mut palette = Palette::new(skeleton);
+    for &(joint, rotation) in turns {
+        rotate_joint(skeleton, model, pose, &mut palette, joint, rotation)
+            .expect("every frame here is conformal");
+    }
+    palette
+}
+
+#[test]
+fn rotate_joints_is_bit_identical_to_one_call_per_turn() {
+    let skeleton = torso();
+    let mut start = Pose::new(&skeleton);
+    start.locals_mut()[4].rotation = Quat::from_rotation_x(0.5);
+    start.locals_mut()[7].rotation = Quat::from_rotation_z(-0.4);
+    let a = turn_about(Vec3::new(1.0, 2.0, 3.0), 0.9);
+    let b = turn_about(Vec3::new(-0.3, 1.0, 0.2), -0.6);
+    // Unnormalised, as a caller's composed rotation may well be.
+    let c = turn_about(Vec3::new(0.0, 0.4, -1.0), 1.3) * 1.25;
+    let batches: [&[(usize, Quat)]; 5] = [
+        // Parent before child down each arm, crossing the mirror and the scale.
+        &[
+            (1, a),
+            (2, b),
+            (3, c),
+            (4, a),
+            (5, b),
+            (6, c),
+            (7, a),
+            (8, b),
+        ],
+        // Child before parent.
+        &[
+            (8, b),
+            (7, a),
+            (6, c),
+            (5, b),
+            (4, a),
+            (3, c),
+            (2, b),
+            (1, a),
+        ],
+        // Interleaved across branches, a joint turned twice, a root turn.
+        &[(4, a), (9, c), (2, b), (4, c), (0, a), (7, b), (2, a)],
+        &[(5, c)],
+        &[],
+    ];
+    for model in [Mat4::IDENTITY, model(), mirrored_model()] {
+        for turns in batches {
+            let mut expected = start.clone();
+            let mut expected_palette = one_by_one(&skeleton, model, &mut expected, turns);
+            if turns.is_empty() {
+                expected_palette.compute(&skeleton, &expected);
+            }
+            let mut pose = start.clone();
+            let mut palette = Palette::new(&skeleton);
+            rotate_joints(&skeleton, model, &mut pose, &mut palette, turns)
+                .expect("every frame here is conformal");
+            assert_eq!(
+                printed(&pose),
+                printed(&expected),
+                "pose after {turns:?} under {model:?}"
+            );
+            assert_eq!(
+                printed(&palette),
+                printed(&expected_palette),
+                "palette after {turns:?}"
+            );
+        }
+    }
+
+    // A local rotation that is not unit length skews its children's frames
+    // until a turn of that joint normalises it: refused before the turn,
+    // accepted after it, in a batch exactly as in a call sequence.
+    let mut skewed = start.clone();
+    skewed.locals_mut()[3].rotation = Quat::from_xyzw(0.3, 0.6, 0.0, 1.0);
+    assert_eq!(
+        rotate_joint(
+            &skeleton,
+            model(),
+            &mut skewed.clone(),
+            &mut Palette::new(&skeleton),
+            4,
+            a
+        ),
+        Err(IkError::NonConformalFrame { joint: 4 })
+    );
+    let turns = [(3, c), (4, a), (5, b)];
+    let mut expected = skewed.clone();
+    let expected_palette = one_by_one(&skeleton, model(), &mut expected, &turns);
+    let mut palette = Palette::new(&skeleton);
+    rotate_joints(&skeleton, model(), &mut skewed, &mut palette, &turns)
+        .expect("joint 3 is normalised before joint 4 turns");
+    assert_eq!(printed(&skewed), printed(&expected), "the skewed pose");
+    assert_eq!(printed(&palette), printed(&expected_palette), "its palette");
+}
+
+/// `Debug` prints every `f32` so it parses back to the same value, and a
+/// `NaN` as `NaN`, so this compares bits where `==` would call `NaN` unequal.
+fn printed(value: &impl std::fmt::Debug) -> String {
+    format!("{value:?}")
+}
+
+/// A turn refused anywhere in a batch refuses the batch with the error a call
+/// sequence stops at, and leaves the pose and the palette as they were — even
+/// after turns before it that succeeded.
+#[test]
+fn rotate_joints_writes_nothing_when_any_turn_is_refused() {
+    let skeleton = torso();
+    let good = turn_about(Vec3::new(1.0, 2.0, 3.0), 0.9);
+    let mut squashed = Pose::new(&skeleton);
+    squashed.locals_mut()[6].scale = Vec3::new(1.0, 2.0, 1.0);
+    let mut unfinished = Pose::new(&skeleton);
+    unfinished.locals_mut()[5].rotation = Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0);
+    // A zero local rotation is finite, so turning its joint is accepted — and
+    // writes a `NaN` that the child's turn then refuses.
+    let mut collapsed = Pose::new(&skeleton);
+    collapsed.locals_mut()[3].rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+    // Not unit length: joint 4's frame is skewed until joint 3 is turned.
+    let mut skewed = Pose::new(&skeleton);
+    skewed.locals_mut()[3].rotation = Quat::from_xyzw(0.3, 0.6, 0.0, 1.0);
+    let cases = [
+        (
+            collapsed,
+            model(),
+            vec![(1, good), (3, good), (4, good)],
+            IkError::NotFinite {
+                input: IkInput::Pose,
+            },
+        ),
+        (
+            skewed,
+            model(),
+            vec![(1, good), (4, good), (3, good)],
+            IkError::NonConformalFrame { joint: 4 },
+        ),
+        (
+            Pose::new(&skeleton),
+            model(),
+            vec![(1, good), (3, good), (10, good)],
+            IkError::JointOutOfRange {
+                joint: 10,
+                joints: 10,
+            },
+        ),
+        (
+            Pose::new(&skeleton),
+            model(),
+            vec![(1, good), (4, Quat::from_xyzw(0.0, 0.0, 0.0, 0.0))],
+            IkError::ZeroRotation,
+        ),
+        (
+            Pose::new(&skeleton),
+            model(),
+            vec![
+                (2, good),
+                (4, Quat::from_xyzw(f32::INFINITY, 0.0, 0.0, 1.0)),
+            ],
+            IkError::NotFinite {
+                input: IkInput::Rotation,
+            },
+        ),
+        (
+            Pose::new(&skeleton),
+            Mat4::from_scale(Vec3::new(f32::NAN, 1.0, 1.0)),
+            vec![(2, good)],
+            IkError::NotFinite {
+                input: IkInput::Model,
+            },
+        ),
+        (
+            unfinished,
+            model(),
+            vec![(2, good), (5, good)],
+            IkError::NotFinite {
+                input: IkInput::Pose,
+            },
+        ),
+        // Joint 6's own non-uniform scale is fine; it is joint 7's frame.
+        (
+            squashed,
+            model(),
+            vec![(1, good), (6, good), (7, good)],
+            IkError::NonConformalFrame { joint: 7 },
+        ),
+    ];
+    for (start, model, turns, error) in cases {
+        let mut pose = start.clone();
+        let palette = posed(&skeleton, &start);
+        let mut after = palette.clone();
+        assert_eq!(
+            rotate_joints(&skeleton, model, &mut pose, &mut after, &turns),
+            Err(error),
+            "{turns:?}"
+        );
+        // Printed, since one case's pose holds a `NaN`.
+        assert_eq!(
+            printed(&pose),
+            printed(&start),
+            "the pose after a refused {turns:?}"
+        );
+        assert_eq!(
+            printed(&after),
+            printed(&palette),
+            "the palette after a refused {turns:?}"
+        );
+
+        // The same first error a call per turn reaches.
+        let mut pose = start.clone();
+        let mut palette = Palette::new(&skeleton);
+        let first = turns
+            .iter()
+            .map(|&(joint, rotation)| {
+                rotate_joint(&skeleton, model, &mut pose, &mut palette, joint, rotation)
+            })
+            .find(Result::is_err);
+        assert_eq!(first, Some(Err(error)), "{turns:?} one call at a time");
+    }
+
+    let small = Skeleton::new(vec![joint(None, Vec3::ZERO)]).expect("one joint");
+    let mut pose = Pose::new(&skeleton);
+    let mut palette = Palette::new(&small);
+    assert_eq!(
+        rotate_joints(&skeleton, model(), &mut pose, &mut palette, &[]),
+        Err(IkError::PaletteMismatch {
+            palette: 1,
+            skeleton: 10
+        })
+    );
 }

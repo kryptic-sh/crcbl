@@ -24,6 +24,7 @@
 //! BlendSpace1d    clips on one axis — idle, walk, run — picked by speed
 //!
 //! rotate_joint    one joint turned by a rotation spelled in model space
+//! rotate_joints   several of those in order, for one palette update
 //! solve_two_bone  a limb's end put on a target, bent towards a pole
 //!
 //! StateMachine    the RON asset: states, transitions, parameters, events
@@ -105,7 +106,10 @@ pub mod trs;
 
 pub use blend::{Blend, BlendSpace1d, BlendSpaceError, blend_into};
 pub use clip::{Channel, Clip, ClipError, Interpolation, Track};
-pub use ik::{FRAME_TOLERANCE, IkError, IkInput, PARALLEL_TOLERANCE, rotate_joint, solve_two_bone};
+pub use ik::{
+    FRAME_TOLERANCE, IkError, IkInput, PARALLEL_TOLERANCE, rotate_joint, rotate_joints,
+    solve_two_bone,
+};
 pub use machine::{
     Advance, BoolParam, EventId, Fade, FloatParam, MAX_PARAMETERS, Machine, MachineError,
     MachineState, ParameterKind, Sampler, Span, StateId, StateMachine, TriggerParam,
