@@ -18037,6 +18037,27 @@ path; `Editor::overwrite_as`'s branch for a save-as that moved the asset source
 cannot be reached (onto the scene's own directory `Document::save_as` moves
 nothing) and has no test.
 
+### The scene-lock test races under threaded `cargo test` (2026-11-01)
+
+`the_editor_cannot_open_a_scene_another_holder_has` in
+`crates/crcbl-cli/tests/scene.rs` fails under plain
+`cargo test -p crcbl-cli --test scene`: `editor_holding`'s `lock_scene` gets
+`Locked` after `drop(run)`, with the holder being the test's own process.
+Measured on mxaddict-pc on 2026-11-01: 2 of 3 runs failed at low load; an agent
+saw 4 of 6 threaded failures, 6 of 6 passes run alone and 3 of 3 with
+`--test-threads=1`. CI never sees it, because nextest runs each test in its own
+process.
+
+The suspected mechanism is unconfirmed. `lock_scene` takes a `flock`, which
+belongs to the open file description. Other tests in the binary spawn `crcbl`
+children, and a child created while the lock file is open holds a copy of that
+description until it execs (`O_CLOEXEC` closes it only at exec). So the lock can
+outlive `drop(run)`. To confirm: run the test alone with the spawning tests
+filtered out and see whether it fails. To fix: make the release wait-free for
+the test, for example by spawning nothing while a lock is open in-process, or by
+retrying the re-open until a deadline. Then decide whether a real editor that
+spawns processes while holding the lock has the same window.
+
 ### Scene edits over the transport: the server slice and what it leaves (2026-10-04)
 
 **Built**: `crcbl_net::edit` (an `EditRequest` as a command of kind `EDIT_KIND`,
