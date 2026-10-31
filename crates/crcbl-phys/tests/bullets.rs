@@ -16,8 +16,9 @@
 use crcbl_core::trig;
 use crcbl_ecs::{Entity, SystemTrait as _};
 use crcbl_phys::{
-    ColliderComponent, CompoundPart, CompoundShape, ContactSettings, GravityForce, MassProperties,
-    PhysicsSystem, RigidBody, SurfaceMaterial, Transform, rotation_from_scaled_axis,
+    ColliderComponent, CollisionFilter, CompoundPart, CompoundShape, ContactSettings,
+    DistanceJoint, GravityForce, Joint, JointKind, MassProperties, PhysicsSystem, RigidBody,
+    SurfaceMaterial, Transform, rotation_from_scaled_axis,
 };
 use glam::{DMat3, DQuat, DVec3};
 
@@ -419,4 +420,203 @@ fn a_scene_with_sweeps_hashes_the_same_twice() {
     let (first, hits) = run();
     assert!(hits >= 3, "the sweeps stopped {hits} bodies");
     assert_eq!(run(), (first, hits), "two runs disagreed");
+}
+
+/// A shot's filter, as EW's grenade has it: its own category, colliding with
+/// everything but [`WALL`]'s.
+const SHOT: CollisionFilter = CollisionFilter {
+    category: 1 << 1,
+    mask: !(1 << 2),
+};
+/// A plate's filter that parts it from [`SHOT`], as EW's ragdoll has it.
+const WALL: CollisionFilter = CollisionFilter {
+    category: 1 << 2,
+    mask: !(1 << 1),
+};
+/// A plate's filter that parts it from [`SHOT`] by its own mask alone: its
+/// category is one [`SHOT`]'s mask lets in.
+const SHUT: CollisionFilter = CollisionFilter {
+    category: 1 << 4,
+    mask: !(1 << 1),
+};
+/// A plate's filter that is not the default but still meets [`SHOT`].
+const OPEN: CollisionFilter = CollisionFilter {
+    category: 1 << 3,
+    mask: u32::MAX,
+};
+
+/// What stands in a shot's way in [`shot_track`].
+#[derive(Clone, Copy, Debug)]
+enum Obstacle {
+    /// Nothing: the track every parted plate must leave alone.
+    Absent,
+    /// A plate whose filter parts it from the shot, both masks leaving the
+    /// other out.
+    Filtered,
+    /// A plate whose filter parts it from the shot by the plate's mask only.
+    OneSided,
+    /// A plate joined to the shot by a joint that keeps its bodies apart: a
+    /// rope far longer than the flight, anchored off its line, so it never
+    /// pulls.
+    Jointed,
+    /// A plate the shot is told to ignore.
+    Ignored,
+    /// A plate whose filter meets the shot's.
+    Met,
+}
+
+/// A ball with [`SHOT`]'s filter launched within a tick at a centimetre plate
+/// set up as `obstacle`, swept: a plain ball at a static plate, or a bullet at
+/// a floating, dynamic one, since only a bullet sweeps against a body that is
+/// not static. Returns the ball's position after every tick, the ticks it
+/// ended past the plate, and how many times a sweep stopped it.
+fn shot_track(obstacle: Obstacle, bullet: bool) -> (Vec<DVec3>, u32, usize) {
+    let mut phys = system(true);
+    let plate_half = DVec3::new(PLATE_HALF, 1.0, 1.0);
+    let plate = match obstacle {
+        Obstacle::Absent => None,
+        _ if bullet => Some(body(
+            &mut phys,
+            0,
+            DVec3::ZERO,
+            &box_collider(plate_half),
+            1000.0,
+            MassProperties::cuboid(1000.0, plate_half, DVec3::ZERO).inertia,
+        )),
+        _ => {
+            fixture(&mut phys, 0, DVec3::ZERO, plate_half);
+            Some(entity(0))
+        }
+    };
+    let shot = ball(&mut phys, 1, DVec3::new(-0.25, 0.0, 0.0));
+    let flagged = phys.body(shot).expect("a body").with_bullet(bullet);
+    phys.set_body(shot, flagged);
+    assert!(phys.set_collision_filter(shot, SHOT));
+    if let Some(plate) = plate {
+        match obstacle {
+            Obstacle::Filtered => assert!(phys.set_collision_filter(plate, WALL)),
+            Obstacle::OneSided => assert!(phys.set_collision_filter(plate, SHUT)),
+            Obstacle::Jointed => {
+                let rope = Joint::new(
+                    shot,
+                    plate,
+                    Transform::IDENTITY,
+                    // Anchored well off the flight line: a rope's lower limit
+                    // holds it at no shorter than zero, which the ball would
+                    // hit crossing an anchor on its path.
+                    Transform::from_position(DVec3::Y * 100.0),
+                    JointKind::Distance(DistanceJoint::rope(1000.0)),
+                );
+                assert!(!rope.collide_connected);
+                phys.add_joint(rope).expect("a joint");
+            }
+            Obstacle::Ignored => assert_eq!(phys.ignore_contacts(shot, plate), Ok(true)),
+            Obstacle::Met => assert!(phys.set_collision_filter(plate, OPEN)),
+            Obstacle::Absent => unreachable!("no plate is made for it"),
+        }
+    }
+    launch(&mut phys, shot);
+    let (mut track, mut through, mut hits) = (Vec::new(), 0, 0);
+    for _ in 0..60 {
+        phys.step(DT);
+        hits += phys.contact_counters().sweep_hits;
+        let at = phys.transform(shot).expect("placed").position;
+        let plate_x = plate.map_or(0.0, |p| phys.transform(p).expect("placed").position.x);
+        through += u32::from(at.x > plate_x + PLATE_HALF);
+        track.push(at);
+    }
+    (track, through, hits)
+}
+
+/// **A sweep does not stop a body against one its collision filter parts it
+/// from.** A ball launched within a tick at a centimetre plate whose filter
+/// leaves the ball's category out — a plain ball at a static plate, and a
+/// bullet at a dynamic one — flies exactly as it does with no plate there:
+/// contact generation never pairs the two, and the sweep must not either.
+/// This is EW's grenade held back by a falling ragdoll body.
+#[test]
+fn a_sweep_passes_a_body_through_one_its_filter_parts_it_from() {
+    assert!(!SHOT.collides_with(WALL));
+    // One-sided: the shot's mask lets the plate in, the plate's leaves it out.
+    const { assert!(SHOT.mask & SHUT.category != 0 && SHUT.mask & SHOT.category == 0) };
+    for bullet in [false, true] {
+        let (alone, through, hits) = shot_track(Obstacle::Absent, bullet);
+        assert!(
+            through > 0 && hits == 0,
+            "bullet {bullet}: {through} {hits}"
+        );
+        for obstacle in [Obstacle::Filtered, Obstacle::OneSided] {
+            let (track, _, hits) = shot_track(obstacle, bullet);
+            assert_eq!(
+                hits, 0,
+                "bullet {bullet}, {obstacle:?}: the sweep stopped it"
+            );
+            assert_eq!(
+                track, alone,
+                "bullet {bullet}, {obstacle:?}: the plate moved it"
+            );
+        }
+    }
+}
+
+/// **A sweep does not stop a body against one it is told to ignore**: as the
+/// filtered plate, but parted by [`PhysicsSystem::ignore_contacts`].
+#[test]
+fn a_sweep_passes_a_body_through_an_ignored_one() {
+    for bullet in [false, true] {
+        let (alone, through, _) = shot_track(Obstacle::Absent, bullet);
+        assert!(
+            through > 0,
+            "bullet {bullet}: the lone ball never passed the plate"
+        );
+        let (track, _, hits) = shot_track(Obstacle::Ignored, bullet);
+        assert_eq!(
+            hits, 0,
+            "bullet {bullet}: the sweep stopped an ignored pair"
+        );
+        assert_eq!(
+            track, alone,
+            "bullet {bullet}: the ignored plate moved the ball"
+        );
+    }
+}
+
+/// **A sweep does not stop a body against one a joint keeps it apart from**:
+/// as the filtered plate, but joined to the ball by a slack rope whose bodies
+/// do not collide, [`Joint::collide_connected`] being off by default. The
+/// plain ball's rope is to a static plate, a fixed anchor.
+#[test]
+fn a_sweep_passes_a_body_through_one_a_joint_keeps_it_apart_from() {
+    for bullet in [false, true] {
+        let (alone, ..) = shot_track(Obstacle::Absent, bullet);
+        let (track, through, hits) = shot_track(Obstacle::Jointed, bullet);
+        assert_eq!(hits, 0, "bullet {bullet}: the sweep stopped a jointed pair");
+        assert!(
+            through > 0,
+            "bullet {bullet}: the ball never passed the plate"
+        );
+        assert_eq!(
+            track, alone,
+            "bullet {bullet}: the jointed plate moved the ball"
+        );
+    }
+}
+
+/// **A sweep still stops a body against one its filter meets.** The control
+/// for the three above: the same shot at a plate in another category, which
+/// the masks let touch, is stopped by the sweep and never ends a tick past
+/// the plate.
+#[test]
+fn a_sweep_stops_a_body_at_one_its_filter_meets() {
+    assert!(SHOT.collides_with(OPEN));
+    for bullet in [false, true] {
+        let (alone, ..) = shot_track(Obstacle::Absent, bullet);
+        let (track, through, hits) = shot_track(Obstacle::Met, bullet);
+        assert!(
+            hits > 0,
+            "bullet {bullet}: the sweep never stopped the ball"
+        );
+        assert_eq!(through, 0, "bullet {bullet}: the ball passed the plate");
+        assert_ne!(track, alone, "bullet {bullet}");
+    }
 }

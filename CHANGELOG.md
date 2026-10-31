@@ -124,6 +124,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   than taking the app's copy, which predated the write and undid it on the next
   frame. `tide`'s `effects` row in its panel and headless summary now follows a
   write too.
+- **The continuous sweep (`ContactSettings::continuous`) no longer stops a fast
+  body or bullet against a body it can never touch.** It now skips pairs whose
+  `CollisionFilter`s part them, pairs set with `PhysicsSystem::ignore_contacts`,
+  and pairs a joint keeps apart (`Joint::collide_connected` off), using the same
+  test contact generation uses. Before, two bodies the filters parted, like a
+  falling ragdoll limb and a grenade, still caught each other whenever one was a
+  bullet, and a fast body still caught on static geometry its filter parted it
+  from.
 
 ## [0.14.0] - 2026-10-31
 

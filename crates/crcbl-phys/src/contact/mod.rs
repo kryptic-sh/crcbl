@@ -169,6 +169,21 @@ fn filters_collide(records: &Pool<BodyRecord>, a: BodyId, b: BodyId) -> bool {
     filter(a).collides_with(filter(b))
 }
 
+/// Whether bodies `a` and `b` may touch at all: not one body (two parts of a
+/// compound are one rigid body), not kept apart by a joint, not an ignored
+/// pair, and not parted by their collision filters. Contact generation asks
+/// it before it makes a pair and the continuous sweep before it stops a body
+/// against another, so neither lets a pair touch the other refuses.
+fn bodies_may_touch(
+    joints: &joint::Joints,
+    ignored: &ignored::IgnoredPairs,
+    records: &Pool<BodyRecord>,
+    a: BodyId,
+    b: BodyId,
+) -> bool {
+    a != b && !joints.keeps_apart(a, b) && !ignored.contains(a, b) && filters_collide(records, a, b)
+}
+
 /// The contact pipeline's knobs, with the values
 /// contact-solver decision 1 and Box2D v3 settled on as
 /// defaults.
@@ -792,21 +807,12 @@ impl ContactPipeline {
         new_pairs.clear();
         broadphase.find_new_pairs(
             |a, b| {
-                // Two parts of one compound are one rigid body: they never
-                // collide.
                 let body = |proxy: ProxyId| match owners.get(proxy as usize) {
                     Some(Some(Owner::Body(id, _))) => Some(*id),
                     _ => None,
                 };
-                if body(a).is_some() && body(a) == body(b) {
-                    return false;
-                }
-                // Nor do two bodies a joint keeps apart, that were told to
-                // ignore each other, or whose collision filters part them.
                 if let (Some(ba), Some(bb)) = (body(a), body(b))
-                    && (joints.keeps_apart(ba, bb)
-                        || ignored.contains(ba, bb)
-                        || !filters_collide(bodies.records, ba, bb))
+                    && !bodies_may_touch(joints, ignored, bodies.records, ba, bb)
                 {
                     return false;
                 }

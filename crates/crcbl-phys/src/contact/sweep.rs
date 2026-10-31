@@ -48,6 +48,12 @@
 //! the awake set and is never swept; a kinematic body goes where it is told
 //! and is never swept either.
 //!
+//! Nor does a sweep stop a body against one it could never touch. Contact
+//! generation refuses two bodies a joint keeps apart, two told to ignore each
+//! other, and two whose collision filters part them; the sweep skips the same
+//! pairs by the same test, so a fast body passes through what its slow self
+//! would.
+//!
 //! # Time of impact: conservative advancement
 //!
 //! The path is the body's centre moved in a straight line from where it
@@ -130,7 +136,7 @@ use super::broadphase::ProxyId;
 use super::island::Islands;
 use super::manifold::{LINEAR_SLOP, gap};
 use super::shape::ContactShape;
-use super::{Bodies, ContactPipeline, Owner, owner_side};
+use super::{Bodies, ContactPipeline, Owner, bodies_may_touch, owner_side};
 use crate::collider::Aabb;
 use crate::components::{ColliderComponent, Transform};
 use crate::system::{AwakeSet, BodyRecord, StaticSet};
@@ -338,7 +344,11 @@ impl ContactPipeline {
                 };
                 let mut fraction = 1.0;
                 for &proxy in &scratch.candidates {
-                    if matches!(self.owners.get(proxy as usize), Some(Some(Owner::Body(other, _))) if *other == id)
+                    // The pairs contact generation would never make — itself,
+                    // a joint's or an ignored pair, or one its filter parts it
+                    // from — do not stop it either.
+                    if let Some(Some(Owner::Body(other, _))) = self.owners.get(proxy as usize)
+                        && !bodies_may_touch(&self.joints, &self.ignored, records, id, *other)
                     {
                         continue;
                     }
