@@ -540,6 +540,17 @@ impl Gpu {
     /// resolved once at open would go on printing the command line's answer
     /// after a menu row changed it.
     pub fn set_effect_request(&mut self, request: EffectRequest) {
+        // **The player's layers are not the caller's to move**, the video
+        // layer and the antialiasing tier: `apply_video` put them into force
+        // on both renderers, at start-up and on every settings write since,
+        // and the app's copy predates both — taking it would undo a console
+        // write on the next frame.
+        let player = self.renderer.effect_request();
+        let request = EffectRequest {
+            video: player.video,
+            antialiasing: player.antialiasing,
+            ..request
+        };
         // **The camera layer is not the caller's to move.** What arrives here is
         // the main view's request with one of the *other* layers edited — the
         // pause menu writes the programmatic one and leaves the rest alone — so
@@ -936,8 +947,13 @@ impl Gpu {
         // half-applied. Each renderer keeps its own `camera` layer — the monitor
         // asks for no reflections — because `apply_video_to` writes only the
         // `video` and `antialiasing` layers.
-        crcbl::settings::apply_video_to(&mut self.renderer, self.ctx.device(), video)?;
-        crcbl::settings::apply_video_to(&mut self.monitor, self.ctx.device(), video)
+        //
+        // Both before either answer is looked at: a device that refused the
+        // main view's anisotropy sampler still takes the monitor's scale and
+        // effects, and each refusal is already logged by `apply_video_to`.
+        let main = crcbl::settings::apply_video_to(&mut self.renderer, self.ctx.device(), video);
+        let monitor = crcbl::settings::apply_video_to(&mut self.monitor, self.ctx.device(), video);
+        main.and(monitor)
     }
 
     /// Draw `view` instead of the shaded picture.

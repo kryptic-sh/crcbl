@@ -1,6 +1,6 @@
 //! The renderer half of a [`GameGpu`](crate::engine::GameGpu) forward: the
 //! bodies every bundle's `apply_video` and `set_debug_view` call, and the
-//! process-global video convars they move.
+//! process-global video convars a live write moves beside them.
 
 use crcbl_console::{Kind, Value};
 use crcbl_render::{
@@ -75,12 +75,24 @@ fn applicable_ssao_integer(key: &str, kind: Kind, value: i64, default: i64) -> i
     }
 }
 
-/// Put the process-global video knobs into force.
+/// Put the process-global video knobs into force: `r_shadow_filter`, the SSAO
+/// convars and `r_ssr_resolution`.
 ///
 /// Called when a context reads its startup settings and when a live write hands
-/// the whole section to a renderer. `r_shadow_filter` is process-global, so it
-/// has to move before the renderer records its first frame.
-pub(crate) fn apply_process_video(video: &VideoSettings) {
+/// the whole section to a bundle, through [`GpuStage`](super::stage::GpuStage).
+/// `r_shadow_filter` is process-global, so it has to move before the renderer
+/// records its first frame. Public for a caller that holds a
+/// [`ForwardRenderer`](crcbl_render::ForwardRenderer) of its own rather than a
+/// [`GameGpu`](crate::engine::GameGpu): it calls this beside
+/// [`apply_video_to`] on a live write.
+///
+/// **Not from [`apply_video_to`]**, which the loop also calls at start-up: by
+/// then the context has applied these once and a sample may have overridden
+/// one from its own command line (`sundial --filter box`), and a second
+/// application would put the settings file's value back over it. That
+/// protects the override at start-up only: the next live write of any
+/// `[engine.video]` key runs this and puts the file's value back.
+pub fn apply_process_video(video: &VideoSettings) {
     r_shadow_filter
         .set(&Value::Enum(video.shadow_filter.label()))
         .expect("`VideoSettings` holds a `Filter`, so its label is in `r_shadow_filter`'s domain");
@@ -130,8 +142,10 @@ pub(crate) fn apply_process_video(video: &VideoSettings) {
 ///
 /// It writes all four of the renderer's player-facing knobs rather than the one
 /// that moved, because [`VideoSettings`] is the section and a caller holding one
-/// does not know which key produced it. Setting a knob to the value it already
-/// holds costs nothing —
+/// does not know which key produced it. It writes **only** those: the
+/// process-global half of the section is [`apply_process_video`]'s, which a
+/// live write runs beside this. Setting a knob to the value it already holds
+/// costs nothing —
 /// [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy)
 /// returns early on a bit-equal ask, and the other two are field writes.
 ///
@@ -153,7 +167,6 @@ pub fn apply_video_to(
     video: &VideoSettings,
 ) -> Result<(), Unsupported> {
     renderer.set_render_scale(video.render_scale);
-    apply_process_video(video);
     let mut request = renderer.effect_request();
     request.video = video.effects;
     request.antialiasing = video.antialiasing;
@@ -309,10 +322,17 @@ mod tests {
         }
     }
 
-    /// A live renderer application moves the process-global SSAO bundle and
-    /// the reflection march's share.
+    /// **Applying a section to a renderer moves the renderer's knobs and none
+    /// of the process's.**
+    ///
+    /// The loop calls this at start-up, after the context has applied the
+    /// process-global half and a sample may have overridden a knob of it; a
+    /// body that moved them again would undo the override. A live write moves
+    /// them through [`GpuStage`](super::super::stage::GpuStage) instead, which
+    /// `a_live_write_moves_the_process_video_convars` in `crate::engine`
+    /// asserts.
     #[test]
-    fn applying_video_to_a_renderer_updates_ssao_convars() {
+    fn applying_video_to_a_renderer_leaves_the_process_convars_alone() {
         use crate::hal::null::NullInstance;
         use crate::hal::{DeviceDesc, Format, Instance as _, QueueKind};
 
@@ -326,18 +346,29 @@ mod tests {
         let mut renderer =
             crcbl_render::ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
                 .expect("the null backend accepts every descriptor");
-        let video = VideoSettings {
-            anisotropic_filtering: 1.0,
+        let in_force = VideoSettings {
             ssao_slices: 2,
             ssao_blur_passes: 1,
             ssao_bent_normals: false,
             ssr_resolution: 0.5,
             ..VideoSettings::unrestricted()
         };
+        apply_process_video(&in_force);
+        let video = VideoSettings {
+            anisotropic_filtering: 1.0,
+            render_scale: 0.5,
+            antialiasing: Some(crcbl_render::Antialiasing::Fxaa),
+            ..VideoSettings::unrestricted()
+        };
 
         apply_video_to(&mut renderer, device.as_ref(), &video)
             .expect("the null backend accepts disabled anisotropy");
 
+        assert!((renderer.render_scale() - 0.5).abs() < f32::EPSILON);
+        assert_eq!(
+            renderer.effect_request().antialiasing,
+            Some(crcbl_render::Antialiasing::Fxaa)
+        );
         assert_eq!(
             (
                 r_ssao_slices.get_i64(),
@@ -345,6 +376,7 @@ mod tests {
                 r_ssao_bent_normals.get_bool(),
             ),
             (2, 1, false),
+            "the renderer's application moved the process's SSAO convars"
         );
         assert!((r_ssr_resolution.get_f32() - 0.5).abs() < f32::EPSILON);
         renderer.destroy(device.as_ref());

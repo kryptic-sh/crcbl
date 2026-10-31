@@ -72,14 +72,42 @@ kernel): 1.876 → 1.057 ms on the iGPU. Ranked fixes left:
 - Harness with each variant, timed on HAL timestamps: outside the repo, in the
   2026-10-31 session scratchpad (`gpu-pass`).
 
-### `--set engine.video.render_scale` does not reach the renderer at start-up
+## A headless run's GPU context reads the player's settings file (2026-11-01)
 
-In headless `quarry` and `lantern`, `--set engine.video.render_scale=0.75` alone
-produced no upscale pass, while `--set 'engine.video.antialiasing="fxaa"'` took
-effect at start-up and `--exec "quality low"` (0.75) did too. So the start-up
-render scale from the settings layers seems not to reach
-`ForwardRenderer::set_render_scale` until a settings write applies it. Cause not
-investigated; it misleads anyone measuring scale with `--set`.
+`SettingsSource::for_run` states the rule: a headless run is a golden run or a
+test and reads no settings file, so it is `SettingsSource::None` when headless.
+`Loop::new` follows it for the console. The GPU context does not:
+`GpuContextDesc::settings` defaults to `SettingsSource::Platform`, and
+`crate::args::Common::gpu` never sets it, so every sample's headless run reads
+`[engine.video]` from the user's platform settings file (for example
+`~/.config/<app>/settings.toml`) while its console reads nothing.
+
+It predates the start-up fix that made `Loop::new` hand that section to
+`GameGpu::apply_video`, but that fix widens it: a file's render scale and
+anisotropy now reach a headless run too, beside the effects ceiling, the
+antialiasing tier and the process-global knobs (shadow filter, SSAO, SSR
+resolution) that already did. Known from reading the code
+(`GpuContext::request_open` reads `desc.settings.video(desc.label)`), not from a
+run with a settings file in place. Fixing it means threading `headless` into
+`GpuOptions` so the context opens on `SettingsSource::for_run(headless)`. Check
+first whether `--set` still reaches a headless run, since `SettingsSource::None`
+reads no launch layers.
+
+## A sample's process-global video override lasts until the first live write (2026-11-01)
+
+`sundial --filter box` writes `r_shadow_filter` after its context opened, and
+`Loop::new`'s start-up application now leaves it alone (it sets the renderer
+half only;
+`a_process_knob_set_before_the_loop_survives_its_start_up_application` in
+`crcbl::engine` guards that). The first live write of **any** `[engine.video]`
+key — `--exec "render_scale 0.5"`, a console line, an options row — goes through
+`GpuStage::apply_video`, which runs `apply_process_video` over the whole section
+and puts the settings file's filter back. This is how it behaved before the
+start-up fix too. Seen on 2026-11-01: `sundial --headless --filter box` ends
+with `filter box (console)`, and adding `--exec "render_scale 0.5"` ends with
+`filter pcss (console)`. Closing it needs either a programmatic layer for the
+process-global convars (the way `EffectRequest` has one for effects) or a write
+that moves only the key that changed.
 
 ## Skinning's per-frame CPU after the binding compare (2026-10-31)
 
@@ -17611,6 +17639,28 @@ behavior. The engine regression must use redistributable synthetic rig data and
 run in ordinary CI; do not make EW's asset checkout or adoption an engine test
 prerequisite. Continue the remaining authored-runtime and delivery items in
 `docs/plan/35-ragdolls.md`; the synthetic pose/body bridge is already present.
+
+### A generated ragdoll on a plane creeps and rarely sleeps (EW, 2026-11-01)
+
+EW's rig is `RagdollRig::generate` with `GenerateSettings::DEFAULT` over a
+55-joint skeleton (IK joints removed): 40 bodies, 80 kg, under
+`ContactSettings::DEFAULT` and `GravityForce::EARTH`, on a plane with friction
+0.8, stepped at 1/60 s. Of five runs (no launch, plus strikes along ±x and ±z),
+none slept within 40 s. EW's variations, sleeping runs out of five:
+
+- Fingers, thumbs and toes collapsed: 3.
+- Substeps 24, 32 or 48: 0 (worse, not better).
+- `joint_friction` 0.01: 2.
+- Cone/twist limits 0.7/0.1 or 1.2/1.0: 3.
+- Floor friction 0.3 or 1.5: 2 and 3.
+- Self-collision ignored: no change.
+
+In a stuck run `spine_01` (a 0.96 kg capsule between a 2.6 kg pelvis sphere and
+`spine_02`) holds an angular velocity of about 0.17 rad/s, above
+`sleep_angular_speed` (0.1), while its orientation barely changes. EW's
+question: is this bias velocity left by a ball joint at its cone/twist limit
+(perhaps together with the floor contact) after the relax pass, and why do more
+substeps make it worse? Unmeasured by us; EW's settle timeout covers it.
 
 ### Player kit — `30-player-kit.md` (2026-08-27, re-verified 2026-09-24)
 

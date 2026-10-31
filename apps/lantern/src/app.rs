@@ -487,6 +487,10 @@ impl HostedGame for Lantern {
         // behind it. `set_effect_request` lands on this frame — `begin_frame`
         // has not run yet — and the frame in flight never moves.
         gpu.set_effect_request(self.effect_request);
+        // Read back, because the player's layers are the renderer's to keep
+        // (`Gpu::set_effect_request`): the menu resolves its rows against this
+        // copy, and a settings write since the last frame has moved them.
+        self.effect_request = gpu.effect_request();
         // Re-read rather than recomputed: the device clamps last, so what the
         // panel and the summary report comes back off the renderer.
         self.paths = gpu.paths();

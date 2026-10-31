@@ -191,15 +191,19 @@ pub trait Stage {
 /// The [`Stage`] a GPU bundle is: `[engine.video]` reaches the renderer through
 /// [`GameGpu::apply_video`](crate::engine::GameGpu::apply_video).
 ///
-/// One line of forwarding, and the whole of the path from a typed settings write
-/// to a live frame. A bundle with no renderer inherits that method's default and
-/// this reports [`Unsupported`] without the caller having to ask which kind of
-/// bundle it holds.
+/// The whole of the path from a typed settings write to a live frame: the
+/// process-global convars ([`apply_process_video`](super::apply_process_video))
+/// and then the bundle's renderers. The convars move whether or not the bundle
+/// has a renderer, because they are the process's, not the bundle's. A bundle
+/// with no renderer inherits that method's default and this reports
+/// [`Unsupported`] without the caller having to ask which kind of bundle it
+/// holds.
 #[derive(Debug)]
 pub struct GpuStage<'a, G: crate::engine::GameGpu>(pub &'a mut G);
 
 impl<G: crate::engine::GameGpu> Stage for GpuStage<'_, G> {
     fn apply_video(&mut self, video: &VideoSettings) -> Result<(), Unsupported> {
+        super::apply_process_video(video);
         self.0.apply_video(video)
     }
 }

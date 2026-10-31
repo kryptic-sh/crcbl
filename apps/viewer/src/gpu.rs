@@ -320,11 +320,9 @@ impl Gpu {
         // what it drew before. `reload` carries the answer across a document
         // change, beside the exposure and the wireframe.
         renderer.set_effect_request(ctx.effect_request());
-        // `[engine.video] render_scale`, from the same read. `1.0` for a player
-        // who has said nothing, which is the extent the surface already had and
-        // no upscale pass at all, so a run with no settings file draws what it
-        // drew before this line existed.
-        renderer.set_render_scale(ctx.render_scale());
+        // `[engine.video] render_scale` and `anisotropic_filtering` are not
+        // set here: `Loop::new` hands the whole section to `apply_video`
+        // before the first frame, as it does for every sample.
         // The viewer's milestone 1 grid floor — see the
         // [module docs](self) for why it is a pass rather than a mesh.
         //
@@ -342,18 +340,6 @@ impl Gpu {
             ctx.destroy()?;
             return Err(GpuError::Hal(error));
         }
-        // `[engine.video] anisotropic_filtering`, from the same read as the
-        // scale: the engine's default for a player who has said nothing, which
-        // is the sampler `with_scene` already built, so the call creates
-        // nothing. Before the first frame, so that frame's slot rebuilds its
-        // groups at its own `begin_frame` rather than a frame late. Unwound by
-        // hand for the grid's reason.
-        if let Err(error) = renderer.set_anisotropy(ctx.device(), ctx.anisotropic_filtering()) {
-            renderer.destroy(ctx.device());
-            ctx.destroy()?;
-            return Err(GpuError::Hal(error));
-        }
-
         // Unwound by hand, because `Gpu` has no `Drop`: a `?` here would leak
         // every pipeline and buffer the renderer just made.
         //

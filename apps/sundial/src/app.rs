@@ -695,6 +695,10 @@ impl HostedGame for Sundial {
         // that was just pressed is on a panel over a frame that has to change
         // behind it.
         gpu.set_effect_request(self.effect_request);
+        // Read back, because the player's layers are the renderer's to keep
+        // (`Gpu::set_effect_request`): the menu resolves its rows against this
+        // copy, and a settings write since the last frame has moved them.
+        self.effect_request = gpu.effect_request();
         // Re-read rather than recomputed: the device clamps last, so what the
         // panel and the summary report comes back off the renderer.
         self.paths = gpu.paths();

@@ -23,6 +23,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `INSTANCE_STRIDE`.
 - **`crcbl_render::cull::world_box` returns `Option<(Vec3, Vec3)>`**: `None` for
   a skinned instance with no box of its own, which every cull keeps whole.
+- **`crcbl::settings::apply_video_to` no longer moves the process-global video
+  convars** (`r_shadow_filter`, `r_ssao_*`, `r_ssr_resolution`).
+  `settings::GpuStage`, which every live write goes through, moves them instead,
+  so the loop's start-up application leaves a sample's own override
+  (`sundial --filter box`) in force; the next live write of an `[engine.video]`
+  key still replaces it, as before. `crcbl::settings::apply_process_video` is
+  now public: a caller that holds its own `ForwardRenderer` and relied on
+  `apply_video_to` to move the convars calls it beside `apply_video_to`.
 
 ### Added
 
@@ -92,6 +100,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   cold first frame with water and grass on an RX 7900 XTX under radv went from
   about 166 ms to about 112 ms (medians). A view still builds water and grass on
   its first frame with a body or a field, and never builds them otherwise.
+
+### Fixed
+
+- **`[engine.video]` from start-up layers reaches the renderer before the first
+  frame.** `Loop::new` now hands the section the bundle opened with to
+  `GameGpu::apply_video`, the seam console writes already used. Before, the
+  render scale and `anisotropic_filtering` from `--set` or a settings file were
+  ignored until a settings write (`--exec`, the console, an options row) resent
+  the section, so headless `quarry` and `lantern` drew no upscale pass at
+  `--set engine.video.render_scale=0.75`. Only `viewer` had applied them itself;
+  it now leaves them to `Loop::new` too, so a device that refuses its start-up
+  anisotropy sampler is logged and the run continues instead of failing the
+  open. Samples that built their effect request without the player's
+  antialiasing tier now draw it from the first frame: `breach`, `puppet`,
+  `sparks`, `towers`, `tumble` and `tide`, and `alcove` and `sundial`, which
+  also used to put their own copy of the request back over the tier every frame.
+  The effects ceiling also reaches `breach`, `puppet`, `sparks`, `towers` and
+  `tumble` from the first frame.
+- **A console or settings write of the antialiasing tier or the effects ceiling
+  sticks in `alcove`, `sundial` and `lantern`.** Each app's
+  `Gpu::set_effect_request` now keeps the renderer's video layer and tier rather
+  than taking the app's copy, which predated the write and undid it on the next
+  frame. `tide`'s `effects` row in its panel and headless summary now follows a
+  write too.
 
 ## [0.14.0] - 2026-10-31
 

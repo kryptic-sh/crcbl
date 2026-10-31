@@ -1294,9 +1294,10 @@ impl GpuContext {
     /// while this context opened.
     ///
     /// `1.0` for a run whose player has said nothing, which is the whole
-    /// extent and no upscale pass at all. A sample hands it to
-    /// [`ForwardRenderer::set_render_scale`](crcbl_render::ForwardRenderer::set_render_scale),
-    /// which is where the bound this shares with it is enforced.
+    /// extent and no upscale pass at all. [`Loop::new`] hands it to
+    /// [`ForwardRenderer::set_render_scale`](crcbl_render::ForwardRenderer::set_render_scale)
+    /// through [`GameGpu::apply_video`] before the first frame, and that is
+    /// where the bound this shares with it is enforced.
     ///
     /// **Not on [`GpuContext::effect_request`]**, because that carries
     /// [`RenderEffects`] bits and a scale is not one: the request answers which
@@ -1325,10 +1326,11 @@ impl GpuContext {
     ///
     /// [`DEFAULT_ANISOTROPY`](crcbl_render::DEFAULT_ANISOTROPY) for a run whose
     /// player has said nothing, which is the sampler a renderer builds on its
-    /// own. A sample hands it to
-    /// [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy),
-    /// whose clamp to the device's ceiling is the bound this layer's range
-    /// stops short of — see [`crate::settings::anisotropic_filtering`].
+    /// own. [`Loop::new`] hands it to
+    /// [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy)
+    /// through [`GameGpu::apply_video`] before the first frame, and its clamp
+    /// to the device's ceiling is the bound this layer's range stops short of
+    /// — see [`crate::settings::anisotropic_filtering`].
     ///
     /// **Not on [`GpuContext::effect_request`]**, for
     /// [`render_scale`](Self::render_scale)'s reason.
@@ -4310,18 +4312,22 @@ pub trait GameGpu: GpuSurface + Sized {
     /// Here rather than an accessor for the context itself because a bundle
     /// need not have one — the loop's own fixture opens no device — and
     /// because what the loop wants is the settings rather than the device that
-    /// read them. [`Loop::new`] takes the frame-rate ceiling off it.
+    /// read them. [`Loop::new`] takes the frame-rate ceiling off it and hands
+    /// the whole section to [`apply_video`](Self::apply_video).
     fn video(&self) -> &crate::settings::VideoSettings;
 
-    /// Put a `[engine.video]` section into force on this bundle's renderer,
-    /// **now** rather than at the next start-up.
+    /// Put a `[engine.video]` section into force on this bundle's renderers.
     ///
     /// The seam debug-console decision 3 (`docs/notes/tooling.md`) adds so that
     /// [`crcbl::settings::apply`](crate::settings::apply) has somewhere to send
     /// a write: the render scale, the page's anisotropy and the player's half of
     /// the effect resolution all live on a
     /// [`ForwardRenderer`](crcbl_render::ForwardRenderer), which nothing at
-    /// engine level could reach before.
+    /// engine level could reach before. [`Loop::new`] calls it once with the
+    /// section the bundle opened with, and every live write calls it again
+    /// through [`GpuStage`](crate::settings::GpuStage), which moves the
+    /// process-global half of the section beside it. This is the renderer half
+    /// only.
     ///
     /// **The default answers [`Unsupported`](crate::settings::Unsupported)**,
     /// because a bundle that draws no scene has nothing to put the section into
@@ -6098,6 +6104,15 @@ impl<S: Shell + ?Sized, G: HostedGame> std::fmt::Debug for Loop<S, G> {
     }
 }
 
+/// What the loop logs when a bundle's `apply_video` answers
+/// [`Unsupported`](crate::settings::Unsupported): the bundle has no renderer
+/// (`apps/options`, `apps/hud`), or the device refused the anisotropy's
+/// sampler, which [`apply_video_to`](crate::settings::apply_video_to) has
+/// already warned about with the device's answer. The answer does not say
+/// which, so the line names both.
+const VIDEO_NOT_IN_FORCE: &str = "`[engine.video]` is not all in force on this bundle: it has no \
+                                  renderer, or a refused value was logged above";
+
 impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// Assembles a loop around a game, on parts start-up already produced.
     ///
@@ -6116,6 +6131,25 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // `LoopConfig` and none of them would have remembered to do it.
         let mut clock_source = booted.clock_source;
         clock_source.set_limit(config.limit.clamped_to(booted.gpu.video().frame_limit));
+        // **The renderer half of the section, put into force before the first
+        // frame**, through the seam a console write uses. The effect request a
+        // bundle may build its renderer from carries the effects and the
+        // antialiasing tier and nothing else, so without this the render scale
+        // and the anisotropy every start-up layer (`--set`, the settings file)
+        // asked for waited for the first settings write to reach the frame —
+        // and a bundle that never reads the request lost the effects and the
+        // tier as well.
+        //
+        // **`GameGpu::apply_video` and not `GpuStage`**, which a live write
+        // goes through: the process-global half was applied while the context
+        // opened, and a sample may have overridden a knob of it since — from
+        // its own command line, between `Gpu::open` and here — which a second
+        // application would undo.
+        let mut gpu = booted.gpu;
+        let video = *gpu.video();
+        if gpu.apply_video(&video).is_err() {
+            log::debug!("settings: {VIDEO_NOT_IN_FORCE}");
+        }
         // **The console's gather, and the one place it happens.** The engine's
         // tables plus the game's, with `crcbl-console`'s own built-ins added by
         // `gather` itself. The settings stack is read here a second time
@@ -6161,7 +6195,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         Self {
             shell,
             window: booted.window,
-            gpu: booted.gpu,
+            gpu,
             game,
             clock_source,
             frame_clock: crcbl_core::FrameClock::new(config.tick_hz),
@@ -7489,11 +7523,16 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             self.ui_multiplier = multiplier;
         }
         if let Some(video) = video {
+            use crate::settings::Stage as _;
             // `Unsupported` is not a failure: a bundle with no renderer — the
             // options screen, hud — has nothing to put a section into force on,
-            // and the key is written either way.
-            if self.gpu.apply_video(&video).is_err() {
-                log::debug!("console: this bundle has no renderer to apply `[engine.video]` to");
+            // a refused anisotropy has been logged where it was refused, and
+            // the key is written either way.
+            if crate::settings::GpuStage(&mut self.gpu)
+                .apply_video(&video)
+                .is_err()
+            {
+                log::debug!("console: {VIDEO_NOT_IN_FORCE}");
             }
         }
         for (bus, gain) in crcbl_audio::mixer::Bus::ALL.into_iter().zip(gains) {
@@ -8467,6 +8506,42 @@ mod tests {
         /// loop's frame requests reach a presenter whose gate can close.
         /// `None`, the default, presents nothing and is never gated.
         context: Option<GpuContext>,
+        /// A forward renderer on the null device that
+        /// [`GameGpu::apply_video`] also hands its section to, through
+        /// [`crate::settings::apply_video_to`] — the body every sample's
+        /// forward calls — when a test gives it one. The only way a loop test
+        /// can see what that body does to the process beside recording the
+        /// section. `None`, the default, records and nothing else.
+        renderer: Option<NullRenderer>,
+    }
+
+    /// A [`crcbl_render::ForwardRenderer`] and the null device it was built
+    /// on, for [`FakeGpu::renderer`].
+    #[derive(Debug)]
+    struct NullRenderer {
+        device: Box<dyn Device>,
+        renderer: crcbl_render::ForwardRenderer,
+    }
+
+    impl NullRenderer {
+        fn new() -> Self {
+            use crcbl_hal::Instance as _;
+            let instance = crcbl_hal::null::NullInstance::gpu_driven();
+            let adapter = instance.adapters().remove(0);
+            let device = instance
+                .create_device(&crcbl_hal::DeviceDesc::for_adapter(adapter.id))
+                .expect("the null backend always opens");
+            let queue = device
+                .queue(crcbl_hal::QueueKind::Graphics)
+                .expect("always present");
+            let renderer = crcbl_render::ForwardRenderer::new(
+                device.as_ref(),
+                queue,
+                crcbl_hal::Format::Rgba8UnormSrgb,
+            )
+            .expect("the null backend accepts every descriptor");
+            Self { device, renderer }
+        }
     }
 
     impl FakeGpu {
@@ -8488,6 +8563,7 @@ mod tests {
                 pacing: Pacing::Auto,
                 pacings_asked: Vec::new(),
                 context: None,
+                renderer: None,
             }
         }
 
@@ -8599,7 +8675,12 @@ mod tests {
             video: &crate::settings::VideoSettings,
         ) -> Result<(), crate::settings::Unsupported> {
             self.applied_video.push(*video);
-            Ok(())
+            match &mut self.renderer {
+                Some(held) => {
+                    crate::settings::apply_video_to(&mut held.renderer, held.device.as_ref(), video)
+                }
+                None => Ok(()),
+            }
         }
 
         fn set_debug_view(
@@ -8652,6 +8733,9 @@ mod tests {
         }
 
         fn destroy(self) -> Result<(), GpuError> {
+            if let Some(held) = self.renderer {
+                held.renderer.destroy(held.device.as_ref());
+            }
             self.context.map_or(Ok(()), GpuContext::destroy)
         }
     }
@@ -8721,6 +8805,9 @@ mod tests {
     /// [`GameGpu::counters`] refuses a default over.
     #[test]
     fn a_bundle_with_no_renderer_reports_unsupported_for_both_video_seams() {
+        // `GpuStage` moves the process-global video convars, which other
+        // tests in this binary assert on.
+        let _process_video = crate::settings::process_video_test_guard();
         let mut gpu = BareGpu(FakeGpu::at((64, 64)));
         assert_eq!(
             gpu.apply_video(&crate::settings::VideoSettings::unrestricted()),
@@ -11039,6 +11126,9 @@ mod tests {
     /// state machine breaks both — which is the point of having only one.
     #[test]
     fn a_gpu_context_can_be_opened_by_polling_instead_of_blocking() {
+        // Opening a context applies the process-global video convars, which
+        // other tests in this binary assert on.
+        let _process_video = crate::settings::process_video_test_guard();
         use crcbl_shell::{HeadlessShell, WindowDesc};
 
         let mut shell = HeadlessShell::new();
@@ -11173,6 +11263,9 @@ mod tests {
     /// swapchain → acquire → submit → present → teardown.
     #[test]
     fn the_join_runs_end_to_end_on_the_null_backend() {
+        // Opening a context applies the process-global video convars, which
+        // other tests in this binary assert on.
+        let _process_video = crate::settings::process_video_test_guard();
         use crcbl_hal::CommandEncoderDesc;
         use crcbl_shell::{HeadlessShell, WindowDesc};
 
@@ -12142,6 +12235,147 @@ mod tests {
             .map(|record| record.message)
             .collect();
         assert_eq!(printed, ["from the command line", "--exec: 1 line"]);
+    }
+
+    /// **The section the bundle opened with reaches its renderer in
+    /// [`Loop::new`], before the first frame.**
+    ///
+    /// The bug this guards: a bundle builds its renderer from
+    /// [`GpuContext::effect_request`], which carries the effects and the
+    /// antialiasing tier, so `--set engine.video.render_scale=0.75` and a
+    /// settings file's anisotropy were read and then never applied until a
+    /// console write happened to resend the section. No frame is stepped, so a
+    /// loop that applied it lazily on its first frame fails here too.
+    #[test]
+    fn the_start_up_video_section_reaches_the_bundle_before_the_first_frame() {
+        let video = crate::settings::VideoSettings {
+            render_scale: 0.75,
+            anisotropic_filtering: 4.0,
+            ..crate::settings::VideoSettings::unrestricted()
+        };
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        let engine: Loop<_, FakeGame> = Loop::new(
+            Booted {
+                shell: Box::new(shell),
+                window,
+                gpu: FakeGpu {
+                    video,
+                    ..FakeGpu::at((640, 480))
+                },
+                clock_source: Clock::new(true),
+                events: 0,
+            },
+            FakeGame::default(),
+            hosted_config(Some(1)),
+        );
+        assert_eq!(engine.gpu.frames, 0, "no frame has run yet");
+        assert_eq!(
+            engine.gpu.applied_video,
+            [video],
+            "the start-up `[engine.video]` section did not reach `GameGpu::apply_video`"
+        );
+    }
+
+    /// **A process-global knob a sample set after its context opened survives
+    /// [`Loop::new`].**
+    ///
+    /// The context applies the section's process-global half while it opens
+    /// (`SettingsSource::video`), and a sample may override one of those
+    /// convars from its own command line before handing the bundle over —
+    /// `sundial --filter box` writes `r_shadow_filter` in its `assemble`. The
+    /// loop's start-up application is the renderer half only; one that ran the
+    /// whole of a live write would put the file's filter back. The bundle here
+    /// holds a real renderer, so the body every sample forwards to is the one
+    /// under test, and the renderer half is asserted to have arrived beside it.
+    ///
+    /// **Start-up only.** The first live write of any `[engine.video]` key
+    /// moves the whole process-global half through `GpuStage` and puts the
+    /// file's filter back; `docs/backlog.md` records that.
+    #[test]
+    fn a_process_knob_set_before_the_loop_survives_its_start_up_application() {
+        use crcbl_render::shadow::{Filter, filter, r_shadow_filter};
+
+        let _process_video = crate::settings::process_video_test_guard();
+        let video = crate::settings::VideoSettings {
+            render_scale: 0.75,
+            ..crate::settings::VideoSettings::unrestricted()
+        };
+        assert_ne!(
+            video.shadow_filter,
+            Filter::Box,
+            "the file has to disagree with the sample"
+        );
+        // What the context did while it opened…
+        crate::settings::apply_process_video(&video);
+        assert_eq!(filter(), video.shadow_filter);
+        // …and what the sample's command line did after.
+        r_shadow_filter
+            .set(&crcbl_console::Value::Enum(Filter::Box.label()))
+            .expect("a filter's label is in its own domain");
+
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        let engine: Loop<_, FakeGame> = Loop::new(
+            Booted {
+                shell: Box::new(shell),
+                window,
+                gpu: FakeGpu {
+                    video,
+                    renderer: Some(NullRenderer::new()),
+                    ..FakeGpu::at((640, 480))
+                },
+                clock_source: Clock::new(true),
+                events: 0,
+            },
+            FakeGame::default(),
+            hosted_config(Some(1)),
+        );
+        assert_eq!(
+            filter(),
+            Filter::Box,
+            "`Loop::new` put the settings file's shadow filter back over the sample's"
+        );
+        let held = engine.gpu.renderer.as_ref().expect("the test gave it one");
+        assert!(
+            (held.renderer.render_scale() - 0.75).abs() < f32::EPSILON,
+            "the renderer half of the start-up section did not arrive"
+        );
+        engine.gpu.destroy().expect("the null renderer tears down");
+    }
+
+    /// **A live write moves the process-global half of the section**, through
+    /// [`crate::settings::GpuStage`], whether or not the bundle has a renderer.
+    ///
+    /// The other half of the split the test above guards: the convars are no
+    /// longer moved by [`crate::settings::apply_video_to`], so a console or
+    /// options write that reached only the bundle would leave `ssao_slices`
+    /// written to the file and not in the frame.
+    #[test]
+    fn a_live_write_moves_the_process_video_convars() {
+        use crate::settings::Stage as _;
+
+        let _process_video = crate::settings::process_video_test_guard();
+        let video = crate::settings::VideoSettings {
+            ssao_slices: 2,
+            ..crate::settings::VideoSettings::unrestricted()
+        };
+        crate::settings::apply_process_video(&crate::settings::VideoSettings {
+            ssao_slices: 3,
+            ..video
+        });
+
+        let mut gpu = BareGpu(FakeGpu::at((64, 64)));
+        assert_eq!(
+            crate::settings::GpuStage(&mut gpu).apply_video(&video),
+            Err(crate::settings::Unsupported),
+            "a bundle with no renderer still says so"
+        );
+        assert_eq!(crcbl_render::r_ssao_slices.get_i64(), 2);
     }
 
     /// A loop hosting [`FakeGame`] on a headless shell.
@@ -15670,27 +15904,33 @@ mod tests {
     /// of them.
     #[test]
     fn setting_a_variable_through_the_console_reaches_the_bundle() {
+        // The drain moves the process-global video convars, which other tests
+        // assert on.
+        let _process_video = crate::settings::process_video_test_guard();
+        // Counted rather than read off `last()`: `Loop::new` already handed the
+        // bundle its start-up section, so a drain that called nothing would
+        // still leave a last entry behind.
         let mut engine = with_console_open();
+        let before = engine.gpu.applied_video.len();
         run_line(&mut engine, "antialiasing cmaa2");
         assert_eq!(
-            engine
-                .gpu
-                .applied_video
-                .last()
-                .expect("the drain reached the bundle")
-                .antialiasing,
-            Some(crcbl_render::Antialiasing::Cmaa2),
+            engine.gpu.applied_video.len(),
+            before + 1,
             "the console's write did not reach `GameGpu::apply_video`"
+        );
+        assert_eq!(
+            engine.gpu.applied_video[before].antialiasing,
+            Some(crcbl_render::Antialiasing::Cmaa2),
         );
 
         run_line(&mut engine, "antialiasing = fxaa");
         assert_eq!(
-            engine
-                .gpu
-                .applied_video
-                .last()
-                .expect("and again for the `=` spelling")
-                .antialiasing,
+            engine.gpu.applied_video.len(),
+            before + 2,
+            "the `=` spelling's write did not reach `GameGpu::apply_video`"
+        );
+        assert_eq!(
+            engine.gpu.applied_video[before + 1].antialiasing,
             Some(crcbl_render::Antialiasing::Fxaa),
         );
     }
@@ -16759,6 +16999,9 @@ mod tests {
     /// so** rather than reporting a write that went nowhere.
     #[test]
     fn a_headless_run_refuses_to_save_and_still_writes_its_stack() {
+        // The drain moves the process-global video convars, which other tests
+        // assert on.
+        let _process_video = crate::settings::process_video_test_guard();
         let logs = crcbl_core::log::capture();
         let mut engine = with_console_open();
         run_line(&mut engine, "render_scale 0.5");

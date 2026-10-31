@@ -33,8 +33,8 @@ use crcbl::hal::{
 };
 use crcbl::prelude::*;
 use crcbl::render::{
-    EffectRequest, ForwardRenderer, MAX_TIMED_PASSES, PassTimers, RenderEffects, RenderGraph,
-    TransientPool, UiRenderer,
+    ForwardRenderer, MAX_TIMED_PASSES, PassTimers, RenderEffects, RenderGraph, TransientPool,
+    UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -161,7 +161,8 @@ pub struct Gpu {
     /// `None` on a device without timestamp queries — the report degrades, the
     /// frame does not.
     timers: Option<PassTimers>,
-    /// Which selectors the frame is drawn through, resolved once at open.
+    /// Which selectors the frame is drawn through, resolved at open; the
+    /// effects are re-resolved whenever `apply_video` moves them.
     paths: Paths,
     /// Where the frame is seen from, written every frame by [`crate::app`].
     camera: crcbl::render::Camera,
@@ -279,10 +280,7 @@ impl Gpu {
             }
         };
 
-        renderer.set_effect_request(EffectRequest {
-            video: ctx.video_effects(),
-            ..EffectRequest::default()
-        });
+        renderer.set_effect_request(ctx.effect_request());
         // Resolved rather than requested: the device clamps last.
         let paths = Paths::of(
             &caps,
@@ -536,7 +534,12 @@ impl Gpu {
         &mut self,
         video: &crcbl::settings::VideoSettings,
     ) -> Result<(), crcbl::settings::Unsupported> {
-        crcbl::settings::apply_video_to(&mut self.renderer, self.ctx.device(), video)
+        let applied = crcbl::settings::apply_video_to(&mut self.renderer, self.ctx.device(), video);
+        // The panel's and the summary's `effects` row names what the frame
+        // draws, and a section can move it: the effects ceiling and the
+        // antialiasing tier are both in it.
+        self.paths.effects = self.renderer.resolved_effects();
+        applied
     }
 
     /// Draw `view` instead of the shaded picture — the console's `debug_view`,

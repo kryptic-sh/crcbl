@@ -166,10 +166,9 @@ pub use engine_video::{
     video_effects,
 };
 pub use key_catalogue::{CatalogueKey, KeyStatus, catalogue, catalogued};
-pub(crate) use renderer::apply_process_video;
 #[cfg(test)]
 pub(crate) use renderer::process_video_test_guard;
-pub use renderer::{apply_video_to, debug_view_switches, set_debug_view_on};
+pub use renderer::{apply_process_video, apply_video_to, debug_view_switches, set_debug_view_on};
 pub use stage::{Applied, Deferred, GpuStage, Landed, Stage, Unsupported, apply};
 
 // Re-imported for `presets`, which reads the same tier fallback the console's

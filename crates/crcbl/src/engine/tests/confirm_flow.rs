@@ -314,6 +314,9 @@ fn the_players_display_mode_is_put_into_force_before_the_first_frame() {
 /// not replace a pacing the caller named.**
 #[test]
 fn the_players_present_mode_replaces_auto_and_not_a_named_pacing() {
+    // Opening a context applies the process-global video convars, which
+    // other tests in this binary assert on.
+    let _process_video = crate::settings::process_video_test_guard();
     let storage = MemoryStorage::new();
     storage
         .write(

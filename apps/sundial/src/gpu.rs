@@ -51,8 +51,8 @@ use crcbl::hal::{
 };
 use crcbl::prelude::*;
 use crcbl::render::{
-    EffectOverride, EffectRequest, ForwardRenderer, MAX_TIMED_PASSES, PassTimers, RenderEffects,
-    RenderGraph, TransientPool, UiRenderer,
+    Antialiasing, EffectOverride, EffectRequest, ForwardRenderer, MAX_TIMED_PASSES, PassTimers,
+    RenderEffects, RenderGraph, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -352,7 +352,11 @@ impl Gpu {
         };
         crcbl::log::info!("sundial: {placed} object(s) placed in the plaza");
 
-        renderer.set_effect_request(request_for(ctx.video_effects(), effects));
+        renderer.set_effect_request(request_for(
+            ctx.video_effects(),
+            ctx.antialiasing(),
+            effects,
+        ));
         // Resolved rather than requested: the device clamps last, so what the
         // panel and the summary report has to come back off the renderer.
         let paths = Paths::of(
@@ -421,8 +425,20 @@ impl Gpu {
     }
 
     /// Replaces the requested layers, and re-resolves what [`Gpu::paths`] reports.
+    ///
+    /// **The player's layers are not the caller's to move.** The video layer
+    /// and the antialiasing tier are what `apply_video` put into force — at
+    /// start-up and on every settings write since — and the caller is the app
+    /// handing back a request it copied before either, with the programmatic
+    /// layer edited. Taking its copies of them would undo the player's
+    /// settings on the next frame.
     pub fn set_effect_request(&mut self, request: EffectRequest) {
-        self.renderer.set_effect_request(request);
+        let player = self.renderer.effect_request();
+        self.renderer.set_effect_request(EffectRequest {
+            video: player.video,
+            antialiasing: player.antialiasing,
+            ..request
+        });
         self.paths.effects = self.renderer.resolved_effects();
     }
 
@@ -633,12 +649,18 @@ impl Gpu {
 /// The requested layers, given what the command line asked for and what the
 /// player's settings allow.
 ///
-/// **The video layer is the player's and the programmatic layer is the run's.**
+/// **The video layer and the antialiasing tier are the player's, and the
+/// programmatic layer is the run's.**
 /// There is no camera layer to write: this fixture's two fixed poses want the
 /// same effect stack, so the layer a view would ask for is the default one.
-fn request_for(video: RenderEffects, effects: RenderEffects) -> EffectRequest {
+fn request_for(
+    video: RenderEffects,
+    antialiasing: Option<Antialiasing>,
+    effects: RenderEffects,
+) -> EffectRequest {
     EffectRequest {
         video,
+        antialiasing,
         programmatic: EffectOverride::none()
             .force(RenderEffects::all().difference(effects), Some(false)),
         ..EffectRequest::default()
