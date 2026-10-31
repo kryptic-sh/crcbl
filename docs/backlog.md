@@ -905,11 +905,14 @@ runs). Left:
   call.
 - **Merge the eight ~1-minute 2D demo rows** into one looping row, freeing 7
   slots during the first 12 minutes.
-- **The runner's CPU is now printed in each demo job**
-  (`Check the browser gate's assumptions`, since 2026-10-31): read it across a
-  few Pages runs to see whether the 2–3× spread per demo follows the host CPU
-  model. Run 41189560608 (e0ba9981) was slow across the board (alcove 45 min
-  against a ~26 mean).
+- **The runner's CPU is printed in each demo job**
+  (`Check the browser gate's assumptions`, since 2026-10-31). First reading,
+  Pages run for d463f51c (54 min): every demo runner had 4 vCPUs, on AMD EPYC
+  7763 (Zen 3), EPYC 9V74 or 9V45 (Zen 4/5), Xeon Platinum 8370C or 8573C. The
+  three slowest rows (puppet `E` 41 min, shard `E,F,G,H,I` 32, quarry
+  `D,F,G,H,I` 22) all ran on the EPYC 7763, which points the 2–3× spread at the
+  host CPU; one run, so read a few more before acting. GitHub does not let a job
+  pick a CPU model, so the lever is balance: rows sized for the slow host.
 - **Not waiting for Pages before the next push** would roughly halve the cycle;
   `pages.yml` already cancels a superseded main run. A process change, the
   owner's call.
