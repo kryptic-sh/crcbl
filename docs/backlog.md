@@ -875,8 +875,21 @@ runs). Left:
 - **puppet's E is the floor of its row** (27.3 min, 21.8 of it the three
   queued-input cases, ~7 min each at 48×). Splitting further needs those cases
   in a share of their own, or fewer beats per case; untried.
-- **tide is the next slowest row** (35.3 min unsplit on run 41186004585). Its C
-  blocks need checking before a split.
+- **alcove, tide and lantern are split too (2026-10-31)**: alcove
+  `C,D | E,F,G,H,I` (~25 | 26 min predicted from run 41193764643), tide
+  `C,E | D,F,G,H,I` (~19.5 | 20.5 from 41186004585), lantern `C,D,E | F,G,H,I`
+  (~18 | 17.5 from 41193764643). Each pair's check names equal its full run's,
+  checked locally on hardware. alcove's and tide's `knobs` blocks end on the
+  page reset and a resume; lantern has no per-demo C block.
+- **shard's `C,D` row is now the floor of Pages** (35.4 against 32.0 for
+  `E,F,G,H,I` on run 41189560608). Its C blocks alone are ~22.8 min there, and
+  no other cut by group balances better. Going lower means making shard's C
+  blocks separately selectable, or cheaper; untried.
+- **No share runs H or I without F yet**: every split keeps F, H and I together,
+  so whether I's teardown checks hold on a page F did not reload is unverified.
+- **The same row takes up to 2.5× as long from one Pages run to the next**
+  (lantern 10.4 and 10.6 against 29.8, the driver's budget scale 25× against
+  74×); predicted row times assume the slow runner.
 - **The split renamed the split demos' Pages checks**
   (`render breach in a real browser` became `render breach (C) …` and
   `render breach (D,E,F,G,H,I) …`, likewise sundial, shard, puppet). Branch

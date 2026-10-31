@@ -424,8 +424,7 @@ jobs:
           # 1.0x for the 2D demos, 51.1x for breach on `80022df`. If one of
           # these goes red, read **which** check failed before touching a
           # number: the cap says "out of wall clock", never "too slow".
-          # quarry runs as two jobs: see `include`.
-          - lantern
+          # quarry and lantern run as two jobs each: see `include`.
           # alcove is the third 3D fixture and it sits with lantern rather than
           # with shard: one small flat-shaded court, no animation and a fixed
           # camera, so what it costs is the occlusion chain rather than the
@@ -438,8 +437,7 @@ jobs:
           # exactly as options does. And it is the first demo whose *page*
           # controls are gated — `knobs` in that row presses them and reads what
           # the engine's own heartbeat says they did; sundial's row is the
-          # other.
-          - alcove
+          # other. It runs as two jobs: see `include`.
           # sundial sits with alcove and runs as two jobs: see `include`.
           # tide is a 3D fixture and it sits with sundial: one small
           # flat-shaded courtyard, a fixed sun and a fixed camera, so what it
@@ -449,8 +447,8 @@ jobs:
           # too — `knobs` in that row cycles the scene, the
           # medium preset and the camera and reads what the heartbeat says the
           # frame staged — and its heartbeat carries the water passes' cost,
-          # which is where their browser price is read.
-          - tide
+          # which is where their browser price is read. It runs as two jobs:
+          # see `include`.
           # viewer and orbit are the two samples whose subject does not move on
           # its own, and both answer group C off something the sample itself
           # advances — viewer's idle turntable, orbit's scripted ascent.
@@ -480,11 +478,11 @@ jobs:
         # **THE HEAVY DEMOS RUN AS TWO JOBS EACH, SINCE 2026-10-31.** The
         # driver makes its lettered groups in order on one page, and on this
         # runner's software rasteriser breach, sundial, shard and puppet each
-        # spent longer in them than any other demo, and quarry next — so the
-        # slowest of them, not the sum, set the workflow's wall clock, and
-        # every push waited on it. `--groups` on `web/run-browser-e2e.sh` makes
-        # a share of them, and each demo below runs as two shares whose union
-        # is every group.
+        # spent longer in them than any other demo, then quarry, then alcove,
+        # tide and lantern — so the slowest of them, not the sum, set the
+        # workflow's wall clock, and every push waited on it. `--groups` on
+        # `web/run-browser-e2e.sh` makes a share of them, and each demo below
+        # runs as two shares whose union is every group.
         #
         # **The cut is where the measured group times balance**, read off the
         # timestamps of Pages runs 41163797261 and 41177732812, and only where
@@ -511,6 +509,19 @@ jobs:
         # unattended circuit themselves when C's `walk` has not, so they do
         # not stand on C. quarry's `console` and `autoexec` blocks put the view,
         # the panel and the OPFS store back and hand the canvas its focus.
+        #
+        # And on 41193764643 (alcove, lantern) and 41186004585 (tide), the
+        # slowest runs of each since, with A, B and C's opening about five
+        # minutes on both sides:
+        #
+        #     alcove   C 15.7 (its knobs) D 4.3  |  E 9.5 F 3.8 H 0.9 I 6.4
+        #     tide     C 4.9 (its knobs) E 9.6   |  D 4.5 F 3.9 H 0.8 I 6.3
+        #     lantern  D 4.0 E 8.4               |  F 4.1 H 0.9 I 7.0
+        #
+        # alcove's and tide's `knobs` blocks end on the page's reset, checked
+        # against the engine's own defaults, and a click and Escape that put
+        # the run back in play with the canvas focused. lantern has no
+        # per-demo C block, so its `C` names nothing past the opening.
         #
         # sundial is the fourth 3D fixture and it sits with alcove: one open
         # plaza, flat-shaded, a fixed camera, and a shadow atlas rendered
@@ -552,6 +563,18 @@ jobs:
             groups: C,E
           - demo: quarry
             groups: D,F,G,H,I
+          - demo: alcove
+            groups: C,D
+          - demo: alcove
+            groups: E,F,G,H,I
+          - demo: tide
+            groups: C,E
+          - demo: tide
+            groups: D,F,G,H,I
+          - demo: lantern
+            groups: C,D,E
+          - demo: lantern
+            groups: F,G,H,I
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
