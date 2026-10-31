@@ -1824,7 +1824,7 @@ impl Device for NullDevice {
         for wait in waits {
             self.check(ObjectKind::Semaphore, wait.semaphore.to_bits(), "semaphore")?;
         }
-        let state = self.recorder.lock();
+        let mut state = self.recorder.lock();
         let mut reached = true;
         for wait in waits {
             let Some(Detail::Semaphore { timeline, value }) = state
@@ -1848,6 +1848,10 @@ impl Device for NullDevice {
                 reached = false;
             }
         }
+        state.events.push(Event::SemaphoresWaited {
+            waits: waits.to_vec(),
+            reached,
+        });
         Ok(reached)
     }
 

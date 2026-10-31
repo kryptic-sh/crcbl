@@ -165,8 +165,9 @@ use crcbl_hal::{
     Extent3d, FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError,
     ImageAspect, ImageSubresourceLayers, ImageUsage, ImageViewHandle, ImageViewType, IndexFormat,
     LoadOp, MemoryLocation, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
-    QueueHandle, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
-    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, check_portable_storage_buffers,
+    QueueHandle, QueueKind, ResourceState, SampleType, SamplerAddressMode, SamplerDesc,
+    SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp,
+    check_portable_storage_buffers,
 };
 
 use crcbl_shaders::{Stage, UI};
@@ -183,7 +184,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::counters::FrameCounters;
 use crate::graph::{ImageId, ImportedImage, InitialClaim, RenderGraph};
 use crate::texture::{
-    ClearedTextureDesc, TexturePatch, UploadBatch, UploadedTexture, stage_region,
+    ClearedTextureDesc, PendingUpload, TexturePatch, UploadBatch, UploadedTexture, stage_region,
 };
 use crate::transient::TransientImageDesc;
 
@@ -362,6 +363,11 @@ pub struct UiRenderer {
     /// a swapchain in a different format needs a different pipeline.
     target_format: Format,
 
+    /// The start-up textures' upload, submitted without a wait: retired by
+    /// the first [`begin_frame`](Self::begin_frame) that finds it has run,
+    /// and waited for by [`destroy`](Self::destroy) if none did.
+    startup: PendingUpload,
+
     destroyed: bool,
 }
 
@@ -380,15 +386,23 @@ impl UiRenderer {
     /// starts empty; [`with_images`](Self::with_images) starts it with pictures
     /// already registered.
     ///
+    /// The upload is submitted to `queue` and not waited for, so `queue` must
+    /// be the device's [`QueueKind::Graphics`] queue — the one frames are
+    /// submitted to, and the one the build refuses anything else for: queue
+    /// order is what puts the copies before the first frame that samples them
+    /// — see [`PendingUpload`]. Its staging is released by the first
+    /// [`begin_frame`](Self::begin_frame) after the copies have run.
+    ///
     /// This pass asks for no device feature of its own — its constants are a
     /// uniform buffer, which every target has — so a browser and a native
     /// Vulkan device build the same pipeline from the same artifact.
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. A failure part-way through releases
-    /// everything already created, so a caller that retries or exits leaves
-    /// nothing behind.
+    /// [`HalError::InvalidDescriptor`] for a `queue` that is not the device's
+    /// graphics queue, before anything is created, and [`HalError`] from any
+    /// seam call. A failure part-way through releases everything already
+    /// created, so a caller that retries or exits leaves nothing behind.
     pub fn new(
         device: &dyn Device,
         queue: QueueHandle,
@@ -442,6 +456,16 @@ impl UiRenderer {
                 "a UI pass needs at least one frame of buffers in flight".to_string(),
             ));
         }
+        // Enforced rather than documented: the start-up upload is not waited
+        // for, and only the frames' own queue orders its copies before them.
+        let graphics = device.queue(QueueKind::Graphics);
+        if graphics != Some(queue) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a UI pass must be built on the device's graphics queue ({graphics:?}), the one \
+                 its frames are submitted to, and was given {queue:?}: its start-up upload is \
+                 ordered before the first frame by that queue alone"
+            )));
+        }
         let mut rollback = Rollback::default();
         match Self::build(
             device,
@@ -472,8 +496,9 @@ impl UiRenderer {
         let atlas = FontAtlas::built_in();
         let (atlas_w, atlas_h, atlas_pixels) = atlas.glyph_bitmap();
 
-        // Every texture below is recorded into one batch and submitted with
-        // one wait, once the last of them is.
+        // Every texture below is recorded into one batch and submitted, with
+        // no wait, once the last of them is. A frame samples them later on the
+        // same queue, which is all the ordering they need; see `PendingUpload`.
         let mut uploads = UploadBatch::new(device, queue, "ui textures");
 
         // Upload glyph atlas texture via staging.
@@ -654,7 +679,7 @@ impl UiRenderer {
             patches: &[],
         })?;
         rollback.textures.push(blank);
-        uploads.submit()?;
+        rollback.startup = Some(uploads.submit_deferred()?);
         let blank_group = device.create_bind_group(&BindGroupDesc {
             label: Some("ui blank texture"),
             layout: texture_layout,
@@ -841,6 +866,10 @@ impl UiRenderer {
             last_index_count,
             last_overlay_index,
             target_format,
+            startup: rollback
+                .startup
+                .take()
+                .expect("submitted above, and only `run` takes it"),
             destroyed: false,
         })
     }
@@ -906,6 +935,7 @@ impl UiRenderer {
         atlas: &FontAtlas,
         scale: f32,
     ) -> Result<(), HalError> {
+        self.startup.poll(device)?;
         self.frame = (self.frame + 1) % self.frames_in_flight;
         let idx = self.frame;
         self.texture_groups.retire(device, idx);
@@ -1618,12 +1648,21 @@ impl UiRenderer {
 
     /// Destroys all GPU resources.
     ///
-    /// The device must be idle.
+    /// The device must be idle. The start-up upload is waited for first all
+    /// the same, so a renderer destroyed before any frame — whose upload
+    /// nothing else has waited for — does not destroy its textures under
+    /// their own copies.
     pub fn destroy(mut self, device: &dyn Device) {
         if self.destroyed {
             return;
         }
         self.destroyed = true;
+        if let Err(error) = self.startup.wait(device) {
+            crcbl_core::log::warn!(
+                "UiRenderer::destroy: the start-up upload's wait failed ({error}); its staging \
+                 buffers are leaked rather than freed under the GPU"
+            );
+        }
         for bg in self.frame_groups.drain(..) {
             device.destroy_bind_group(bg);
         }
@@ -1690,12 +1729,22 @@ struct Rollback {
     pipelines: Vec<GraphicsPipelineHandle>,
     samplers: Vec<SamplerHandle>,
     textures: Vec<UploadedTexture>,
+    /// The textures' upload, once submitted: waited for before they go.
+    startup: Option<PendingUpload>,
 }
 
 impl Rollback {
     /// Releases everything, in the same dependency order as
     /// [`UiRenderer::destroy`].
-    fn run(self, device: &dyn Device) {
+    fn run(mut self, device: &dyn Device) {
+        if let Some(mut startup) = self.startup.take()
+            && let Err(error) = startup.wait(device)
+        {
+            crcbl_core::log::warn!(
+                "UiRenderer: the start-up upload's wait failed ({error}) while rolling back a \
+                 failed build; its staging buffers are leaked rather than freed under the GPU"
+            );
+        }
         for handle in self.bind_groups {
             device.destroy_bind_group(handle);
         }

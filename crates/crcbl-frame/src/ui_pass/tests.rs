@@ -91,9 +91,9 @@ fn ui_renderer_builds_and_leaks_nothing() {
     recorder.assert_valid();
 }
 
-/// **Every start-up texture goes up in one submission.** A submit and its
-/// wait cost more on Mesa's ANV than the copies of an empty page, and the
-/// renderer builds several pages before its first frame.
+/// **Every start-up texture goes up in one submission.** A submission costs
+/// more on Mesa's ANV than the copies of an empty page, and the renderer
+/// builds several pages before its first frame.
 #[test]
 fn ui_renderer_submits_its_textures_once() {
     use crcbl_hal::null::Event;
@@ -114,6 +114,284 @@ fn ui_renderer_submits_its_textures_once() {
     assert_eq!(submitted.len(), 1, "one submission: {submitted:?}");
     assert_eq!(submitted[0].len(), 1, "of one command buffer");
     renderer.destroy(device.as_ref());
+}
+
+/// Every buffer the start-up submission's copies and clears read: the
+/// staging and zero buffers its [`PendingUpload`] owns.
+fn startup_upload_buffers(recorder: &crcbl_hal::null::Recorder) -> Vec<BufferHandle> {
+    use crcbl_hal::null::{Command, Event};
+
+    let events = recorder.events();
+    let submitted: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Submitted {
+                command_buffers, ..
+            } => Some(command_buffers.clone()),
+            _ => None,
+        })
+        .collect();
+    let [commands] = submitted.as_slice() else {
+        panic!("one start-up submission: {submitted:?}");
+    };
+    let mut buffers: Vec<BufferHandle> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Command {
+                command_buffer,
+                command,
+            } if commands.contains(command_buffer) => match command {
+                Command::CopyBufferToImage(copy) => Some(copy.buffer),
+                Command::ClearBuffer { buffer, .. } => Some(*buffer),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    buffers.sort_unstable_by_key(|buffer| buffer.to_bits());
+    buffers.dedup();
+    buffers
+}
+
+/// **The start-up upload is not waited for**, and the staging it reads lives
+/// until the GPU is past it: alive when `new` returns, destroyed by the first
+/// frame that finds the upload's semaphore signalled, and destroyed once.
+///
+/// The null backend signals a semaphore at submit, so the first frame is the
+/// completion point here; a real device reaches it a frame or two later. It
+/// cannot see a buffer destroyed under a submitted copy, which is why this
+/// asserts on liveness and order rather than on `assert_valid` alone.
+#[test]
+fn the_start_up_upload_is_not_waited_for_and_its_staging_outlives_the_build() {
+    use crcbl_hal::null::{Event, ObjectKind};
+
+    let (recorder, device, queue) = open_recorded();
+    let before = recorder.total_live_objects();
+    let mut renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
+        .expect("the null backend accepts everything");
+
+    let events = recorder.events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::WaitedIdle)),
+        "the build must not wait for its upload"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Submitted { signals, .. } if signals.iter().any(|signal| signal.value == PendingUpload::LANDED)
+        )),
+        "the upload signals the value its retirement waits for"
+    );
+    let staging = startup_upload_buffers(&recorder);
+    assert!(
+        staging.len() >= 3,
+        "the glyph atlas's staging and two pages' zero buffers at least: {staging:?}"
+    );
+    for buffer in &staging {
+        assert!(
+            recorder.buffer_size(*buffer).is_some(),
+            "{buffer:?} was destroyed before the GPU was known to be past it"
+        );
+    }
+    assert!(!renderer.startup.is_retired());
+
+    recorder.clear();
+    let atlas = FontAtlas::built_in();
+    renderer
+        .begin_frame(device.as_ref(), &DrawList::new(), &atlas, 1.0)
+        .expect("upload");
+    for buffer in &staging {
+        assert_eq!(
+            recorder.buffer_size(*buffer),
+            None,
+            "{buffer:?} outlived the frame that saw its copy land"
+        );
+    }
+    assert!(renderer.startup.is_retired());
+    let destroyed = recorder
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::Destroyed {
+                    kind: ObjectKind::Buffer
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        destroyed,
+        staging.len(),
+        "an empty frame destroys the start-up staging and nothing else"
+    );
+
+    renderer
+        .begin_frame(device.as_ref(), &DrawList::new(), &atlas, 1.0)
+        .expect("upload");
+    renderer.destroy(device.as_ref());
+    assert_eq!(recorder.total_live_objects(), before);
+    recorder.assert_valid();
+}
+
+/// **A device without timeline semaphores waits**, explicitly, because
+/// nothing else would say when the staging may go — WebGPU's case.
+#[test]
+fn without_timeline_semaphores_the_start_up_upload_waits() {
+    use crcbl_hal::null::Event;
+
+    let recorder = crcbl_hal::null::Recorder::new();
+    let instance = NullInstance::portable().with_recorder(recorder.clone());
+    let adapter = instance.adapters().remove(0);
+    let device = instance
+        .create_device(&DeviceDesc {
+            label: None,
+            adapter: adapter.id,
+            required_features: Features::COMPUTE,
+            optional_features: Features::empty(),
+            compatible_surface: None,
+        })
+        .expect("the portable null adapter opens");
+    assert!(!device.caps().supports(Features::TIMELINE_SEMAPHORE));
+    let queue = device.queue(QueueKind::Graphics).expect("always present");
+    let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+    let waits = recorder
+        .events()
+        .iter()
+        .filter(|event| matches!(event, Event::WaitedIdle))
+        .count();
+    assert_eq!(waits, 1);
+    assert!(renderer.startup.is_retired());
+    for buffer in startup_upload_buffers(&recorder) {
+        assert_eq!(recorder.buffer_size(buffer), None, "freed after the wait");
+    }
+    renderer.destroy(device.as_ref());
+    recorder.assert_valid();
+}
+
+/// Whether `recorder`'s stream submitted something, and if so whether a host
+/// wait on the start-up upload's semaphore came before the first image was
+/// destroyed — the order [`UiRenderer::destroy`] and the build's rollback
+/// promise, because those images are what the upload's copies write.
+fn waited_before_an_image_went(recorder: &crcbl_hal::null::Recorder) -> Option<bool> {
+    use crcbl_hal::null::{Event, ObjectKind};
+
+    let events = recorder.events();
+    events
+        .iter()
+        .any(|event| matches!(event, Event::Submitted { .. }))
+        .then(|| {
+            let waited = events.iter().position(|event| {
+                matches!(
+                    event,
+                    Event::SemaphoresWaited { waits, reached: true }
+                        if waits.iter().all(|wait| wait.value == PendingUpload::LANDED)
+                )
+            });
+            let image_gone = events.iter().position(|event| {
+                matches!(
+                    event,
+                    Event::Destroyed {
+                        kind: ObjectKind::Image
+                    }
+                )
+            });
+            matches!((waited, image_gone), (Some(waited), Some(gone)) if waited < gone)
+        })
+}
+
+/// **A renderer destroyed before its first frame waits for its upload**
+/// before destroying the textures the copies write — nothing else has.
+#[test]
+fn destroy_before_the_first_frame_waits_for_the_upload_first() {
+    let (recorder, device, queue) = open_recorded();
+    let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
+        .expect("the null backend accepts everything");
+    renderer.destroy(device.as_ref());
+    assert_eq!(waited_before_an_image_went(&recorder), Some(true));
+    recorder.assert_valid();
+}
+
+/// **Every creation failing in turn leaks nothing**, the semaphore's
+/// included, and a build that fails after its upload was submitted waits for
+/// it before rolling back the textures the copies write.
+#[test]
+fn a_build_failing_at_any_creation_leaks_nothing() {
+    let (recorder, device, queue) = open_recorded();
+    let before = recorder.total_live_objects();
+    let mut failed = 0;
+    let mut failed_after_the_submit = 0;
+    for creates in 0.. {
+        recorder.clear();
+        recorder.fail_create_after(creates);
+        match UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb) {
+            Err(_) => {
+                failed += 1;
+                assert_eq!(
+                    recorder.total_live_objects(),
+                    before,
+                    "a build failing at creation {creates} leaked"
+                );
+                if let Some(ordered) = waited_before_an_image_went(&recorder) {
+                    failed_after_the_submit += 1;
+                    assert!(
+                        ordered,
+                        "a build failing at creation {creates} destroyed a texture before \
+                         waiting for the upload that writes it"
+                    );
+                }
+                recorder.assert_valid();
+            }
+            Ok(renderer) => {
+                assert!(
+                    recorder.create_failure_pending(),
+                    "a build succeeded through its injected failure at creation {creates}"
+                );
+                recorder.cancel_create_failure();
+                renderer.destroy(device.as_ref());
+                break;
+            }
+        }
+    }
+    assert!(failed > 10, "every creation was failed once: {failed}");
+    assert!(
+        failed_after_the_submit > 0,
+        "no failure landed after the upload was submitted, so the rollback's wait went unchecked"
+    );
+    assert_eq!(recorder.total_live_objects(), before);
+    recorder.assert_valid();
+}
+
+/// **A queue other than the graphics queue is refused**, before anything is
+/// created: the start-up upload is not waited for, and only the frames' own
+/// queue orders its copies before them.
+#[test]
+fn a_ui_renderer_on_another_queue_is_refused() {
+    let (recorder, device, graphics) = open_recorded();
+    let before = recorder.total_live_objects();
+    let mut refused = 0;
+    for kind in [QueueKind::Compute, QueueKind::Transfer] {
+        let queue = device
+            .queue(kind)
+            .unwrap_or_else(|| panic!("the tier A null adapter models a {kind:?} queue"));
+        assert_ne!(queue, graphics);
+        match UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb) {
+            Err(HalError::InvalidDescriptor(message)) => {
+                assert!(message.contains("graphics queue"), "{message}");
+                refused += 1;
+            }
+            other => panic!("a {kind:?} queue was not refused: {other:?}"),
+        }
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "refused before creating"
+        );
+    }
+    assert_eq!(refused, 2);
+    recorder.assert_valid();
 }
 
 /// The glyph atlas upload moved to [`crate::texture`] and must not have

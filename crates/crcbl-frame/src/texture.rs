@@ -43,7 +43,11 @@
 //! them all into one [`UploadBatch`] instead, and pays for one submission and
 //! one wait. The batch also carries [`UploadBatch::fill`], the same staging
 //! copy into a device-local *buffer*, so a renderer's start-up state rides the
-//! same submission as its textures.
+//! same submission as its textures. A caller with work of its own to do before
+//! its first frame — [`crate::ui_pass`]'s renderer — submits the batch with
+//! [`UploadBatch::submit_deferred`] instead, which does not wait: the copies
+//! run under that work, and the [`PendingUpload`] it returns frees the staging
+//! once the GPU is past it.
 //!
 //! This is a **startup** path, not a frame path: it records its own barriers
 //! and blocks on [`Device::wait_idle`], which is only legal because no graph
@@ -52,7 +56,9 @@
 //! exceptions. Its barriers name only the image it creates, so a caller between
 //! two frames — `ForwardRenderer::replace_page`
 //! reloading a page — touches nothing a frame in flight reads, and the wait
-//! means no frame can bind the image before its copy has landed.
+//! means no frame can bind the image before its copy has landed. A deferred
+//! submit has no wait, and leans on queue order instead: see [`PendingUpload`]
+//! for why that holds for a frame on the same queue.
 //!
 //! # Why it is not in `ui_pass`
 //!
@@ -66,10 +72,10 @@
 
 use crcbl_hal::{
     BufferCopy, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoder, CommandEncoderDesc,
-    Device, Extent3d, Format, HalError, ImageAspect, ImageDesc, ImageHandle,
+    Device, Extent3d, Features, Format, HalError, ImageAspect, ImageDesc, ImageHandle,
     ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
     ImageViewHandle, ImageViewType, MemoryLocation, Offset3d, QueueHandle, ResourceState,
-    SubmitInfo,
+    SemaphoreDesc, SemaphoreKind, SemaphoreSignal, SubmitInfo,
 };
 
 use crate::mip::level_extent;
@@ -849,10 +855,13 @@ struct UploadArgs<'a> {
 ///
 /// The textures are the caller's from the moment they are returned, and
 /// neither they nor a filled buffer may be read until `submit` has returned
-/// `Ok`. Binding one into a bind group before then is fine: a descriptor names
-/// a resource, it does not read it. The staging and zero buffers are the
+/// `Ok` — or, after [`submit_deferred`](Self::submit_deferred), by anything
+/// but later work on the batch's queue until its [`PendingUpload`] retires.
+/// Binding one into a bind group before then is fine: a descriptor names a
+/// resource, it does not read it. The staging and zero buffers are the
 /// batch's, released when it drops: after the wait if it was submitted, and
-/// before any submission if an add or the caller failed first.
+/// before any submission if an add or the caller failed first. A deferred
+/// submit hands them to its [`PendingUpload`] instead.
 ///
 /// # No encoder until the submit
 ///
@@ -1026,6 +1035,91 @@ impl<'a> UploadBatch<'a> {
     /// [`HalError::InvalidDescriptor`] for an abandoned batch, which submits
     /// nothing. The textures and buffers stay the caller's to destroy.
     pub fn submit(mut self) -> Result<(), HalError> {
+        let commands = self.finish()?;
+        let submitted = self
+            .device
+            .submit(self.queue, &SubmitInfo::new(&[commands]))
+            .and_then(|()| self.device.wait_idle());
+        self.device.destroy_command_buffer(commands);
+        submitted
+    }
+
+    /// [`submit`](Self::submit) without the wait: the copies are submitted
+    /// and the staging and zero buffers, the command buffer and a timeline
+    /// semaphore the submission signals move into the returned
+    /// [`PendingUpload`], which releases them once the GPU is past them.
+    ///
+    /// For a start-up whose first submission is expensive — pikr measured the
+    /// first one on a fresh device at 7–10 ms on an Intel iGPU under Mesa's
+    /// ANV, on 2026-10-29 — and which has other work to do before its first
+    /// frame: the copies run under it instead of in front of it.
+    ///
+    /// The textures and filled buffers may be read by any work submitted
+    /// **to the same queue** after this returns, with no wait in between; see
+    /// [`PendingUpload`] for why that holds on every backend. Work on another
+    /// queue, or a host read, must wait for [`PendingUpload::wait`] first.
+    ///
+    /// # Without timeline semaphores it waits
+    ///
+    /// A device without [`Features::TIMELINE_SEMAPHORE`] has nothing that
+    /// says when the copies are done short of [`Device::wait_idle`], so this
+    /// is [`submit`](Self::submit) there, and the [`PendingUpload`] it returns
+    /// holds nothing. That is the WebGPU backend's case, and it costs nothing
+    /// there: `crcbl-webgpu`'s `wait_idle` does not block, because the browser
+    /// keeps a destroyed buffer alive for the work already queued against it.
+    ///
+    /// # Errors
+    ///
+    /// As [`submit`](Self::submit), and [`HalError`] from creating the
+    /// semaphore. On every error nothing is pending and the buffers have been
+    /// released: either nothing was submitted, or (on the waiting path) the
+    /// wait has already run or failed as [`submit`](Self::submit)'s does.
+    pub fn submit_deferred(mut self) -> Result<PendingUpload, HalError> {
+        let device = self.device;
+        if !device.caps().supports(Features::TIMELINE_SEMAPHORE) {
+            self.submit()?;
+            return Ok(PendingUpload { in_flight: None });
+        }
+        if self.uploads.is_none() {
+            return Err(self.abandoned(&self.label));
+        }
+        let semaphore = device.create_semaphore(&SemaphoreDesc {
+            label: Some(&self.label),
+            kind: SemaphoreKind::Timeline { initial_value: 0 },
+        })?;
+        let commands = match self.finish() {
+            Ok(commands) => commands,
+            Err(error) => {
+                device.destroy_semaphore(semaphore);
+                return Err(error);
+            }
+        };
+        let signals = [SemaphoreSignal {
+            semaphore,
+            value: PendingUpload::LANDED,
+        }];
+        let submit = SubmitInfo {
+            command_buffers: &[commands],
+            waits: &[],
+            signals: &signals,
+        };
+        if let Err(error) = device.submit(self.queue, &submit) {
+            device.destroy_command_buffer(commands);
+            device.destroy_semaphore(semaphore);
+            return Err(error);
+        }
+        Ok(PendingUpload {
+            in_flight: Some(InFlightUpload {
+                semaphore,
+                commands,
+                buffers: std::mem::take(&mut self.buffers),
+            }),
+        })
+    }
+
+    /// Records every queued upload into one encoder created here and finishes
+    /// it, for either submit.
+    fn finish(&mut self) -> Result<crcbl_hal::CommandBufferHandle, HalError> {
         let Some(uploads) = self.uploads.take() else {
             return Err(self.abandoned(&self.label));
         };
@@ -1036,13 +1130,7 @@ impl<'a> UploadBatch<'a> {
         for upload in &uploads {
             upload.record(encoder.as_mut());
         }
-        let commands = encoder.finish()?;
-        let submitted = self
-            .device
-            .submit(self.queue, &SubmitInfo::new(&[commands]))
-            .and_then(|()| self.device.wait_idle());
-        self.device.destroy_command_buffer(commands);
-        submitted
+        encoder.finish()
     }
 
     /// `Ok` while the batch is still recording; the refusal naming `label`
@@ -1129,6 +1217,140 @@ impl Drop for UploadBatch<'_> {
     fn drop(&mut self) {
         for buffer in self.buffers.drain(..) {
             self.device.destroy_buffer(buffer);
+        }
+    }
+}
+
+/// An [`UploadBatch`] submitted by
+/// [`submit_deferred`](UploadBatch::submit_deferred) and not yet known to
+/// have run: what it still owns, and the timeline value that says when it may
+/// go.
+///
+/// # Why the textures may be sampled before it retires
+///
+/// The batch's last barrier on each image leaves it in
+/// [`ResourceState::ShaderRead`], and what reads it next is a frame submitted
+/// to the same queue after it. That is ordered without a host wait on every
+/// backend here:
+///
+/// - **Vulkan**: a pipeline barrier's second synchronisation scope is every
+///   command later in *submission order* on the queue, which spans later
+///   `vkQueueSubmit`s, and the image's layout is a property of the image, not
+///   of the command buffer that transitioned it.
+/// - **D3D12**: a resource barrier's state persists past its command list, and
+///   command lists on one queue run in `ExecuteCommandLists` order. An image
+///   explicitly transitioned does not decay; a buffer does, to `COMMON`, the
+///   same as it does after [`UploadBatch::submit`]'s wait.
+/// - **Metal**: every resource `crcbl-mtl` allocates is hazard-tracked, and the
+///   driver orders tracked hazards between command buffers committed to one
+///   queue.
+/// - **WebGPU**: never reaches here — [`UploadBatch::submit_deferred`] waits
+///   on a device without timeline semaphores, which is every browser's — and
+///   `queue.submit` order is WebGPU's own guarantee anyway.
+///
+/// Another queue has none of these guarantees, which is why the batch's queue
+/// must be the one its readers submit to.
+///
+/// # What it still owns
+///
+/// The staging and zero buffers the copies read, the command buffer
+/// ([`Device::destroy_command_buffer`] may not run before its submission
+/// completes) and the semaphore. [`poll`](Self::poll) releases them once the
+/// semaphore has reached [`LANDED`](Self::LANDED), without blocking;
+/// [`wait`](Self::wait) blocks for it. One of the two must have released them
+/// before the device is destroyed: dropping a pending upload leaks them, and
+/// says so in the log, because releasing a buffer the GPU may still be reading
+/// is the worse failure.
+#[derive(Debug)]
+#[must_use = "the staging buffers live until the upload is polled or waited for"]
+pub struct PendingUpload {
+    /// [`None`] once released, and for an upload that waited at its submit.
+    in_flight: Option<InFlightUpload>,
+}
+
+/// What a [`PendingUpload`] releases.
+#[derive(Debug)]
+struct InFlightUpload {
+    semaphore: crcbl_hal::SemaphoreHandle,
+    commands: crcbl_hal::CommandBufferHandle,
+    buffers: Vec<crcbl_hal::BufferHandle>,
+}
+
+impl PendingUpload {
+    /// The value the submission signals its semaphore to once its copies have
+    /// run. The semaphore is the upload's own, so it is the first value.
+    pub const LANDED: u64 = 1;
+
+    /// Whether everything has been released — at once for an upload that
+    /// waited at its submit.
+    #[must_use]
+    pub const fn is_retired(&self) -> bool {
+        self.in_flight.is_none()
+    }
+
+    /// Releases everything if the copies have run, without blocking, and says
+    /// whether it is now retired.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from reading the semaphore — a lost device. Nothing is
+    /// released then.
+    pub fn poll(&mut self, device: &dyn Device) -> Result<bool, HalError> {
+        let Some(in_flight) = &self.in_flight else {
+            return Ok(true);
+        };
+        if device.semaphore_value(in_flight.semaphore)? < Self::LANDED {
+            return Ok(false);
+        }
+        self.release(device);
+        Ok(true)
+    }
+
+    /// Blocks until the copies have run, then releases everything. Returns at
+    /// once for one already retired.
+    ///
+    /// No timeout, like the [`Device::wait_idle`] it replaces: a GPU that
+    /// never finishes is a lost device, which the wait reports.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the wait. Nothing is released then.
+    pub fn wait(&mut self, device: &dyn Device) -> Result<(), HalError> {
+        let Some(in_flight) = &self.in_flight else {
+            return Ok(());
+        };
+        let wait = crcbl_hal::SemaphoreWait {
+            semaphore: in_flight.semaphore,
+            value: Self::LANDED,
+        };
+        if !device.wait_semaphores(&[wait], u64::MAX)? {
+            return Err(HalError::Backend(
+                "an upload's semaphore wait with no timeout reported a timeout".to_string(),
+            ));
+        }
+        self.release(device);
+        Ok(())
+    }
+
+    fn release(&mut self, device: &dyn Device) {
+        if let Some(in_flight) = self.in_flight.take() {
+            for buffer in in_flight.buffers {
+                device.destroy_buffer(buffer);
+            }
+            device.destroy_command_buffer(in_flight.commands);
+            device.destroy_semaphore(in_flight.semaphore);
+        }
+    }
+}
+
+impl Drop for PendingUpload {
+    fn drop(&mut self) {
+        if let Some(in_flight) = &self.in_flight {
+            crcbl_core::log::warn!(
+                "PendingUpload dropped before it was polled or waited for — {} staging buffers \
+                 leaked",
+                in_flight.buffers.len()
+            );
         }
     }
 }
@@ -2332,6 +2554,142 @@ mod tests {
         first.destroy(device.as_ref());
         second.destroy(device.as_ref());
         device.destroy_buffer(buffer);
+    }
+
+    /// A one-texture batch on `device`, submitted with
+    /// [`UploadBatch::submit_deferred`], and its staging buffer.
+    fn deferred_one(
+        recorder: &Recorder,
+        device: &dyn Device,
+        queue: QueueHandle,
+    ) -> (UploadedTexture, PendingUpload, crcbl_hal::BufferHandle) {
+        let mut batch = UploadBatch::new(device, queue, "deferred");
+        let texture = batch
+            .texture(
+                "one",
+                Format::R8Unorm,
+                (1, 1),
+                &[&[&[1]]],
+                ImageViewType::D2,
+            )
+            .expect("recorded");
+        let pending = batch.submit_deferred().expect("submitted");
+        let staging = the_copies(recorder)
+            .first()
+            .expect("the texture's copy")
+            .buffer;
+        (texture, pending, staging)
+    }
+
+    /// **A deferred submit waits for nothing and frees nothing** until it is
+    /// polled past its semaphore's value — and then frees the staging, the
+    /// command buffer and the semaphore, once.
+    #[test]
+    fn a_deferred_submit_keeps_its_staging_until_polled() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let before = recorder.total_live_objects();
+        let (texture, mut pending, staging) = deferred_one(&recorder, device.as_ref(), queue);
+
+        let events = recorder.events();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::WaitedIdle))
+        );
+        let signals: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Submitted { signals, .. } => Some(signals.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(signals.len(), 1, "one submission");
+        assert_eq!(signals[0].len(), 1, "signalling one semaphore");
+        assert_eq!(signals[0][0].value, PendingUpload::LANDED);
+        assert!(
+            recorder.buffer_size(staging).is_some(),
+            "alive until polled"
+        );
+        assert!(!pending.is_retired());
+
+        assert!(pending.poll(device.as_ref()).expect("polled"));
+        assert_eq!(recorder.buffer_size(staging), None, "freed by the poll");
+        assert!(pending.poll(device.as_ref()).expect("polled again"));
+        texture.destroy(device.as_ref());
+        assert_eq!(recorder.total_live_objects(), before);
+        recorder.assert_valid();
+    }
+
+    /// [`PendingUpload::wait`] frees what [`PendingUpload::poll`] would.
+    #[test]
+    fn waiting_for_a_deferred_submit_frees_it() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let before = recorder.total_live_objects();
+        let (texture, mut pending, staging) = deferred_one(&recorder, device.as_ref(), queue);
+        pending.wait(device.as_ref()).expect("waited");
+        assert!(pending.is_retired());
+        assert_eq!(recorder.buffer_size(staging), None);
+        pending
+            .wait(device.as_ref())
+            .expect("a second wait is a no-op");
+        texture.destroy(device.as_ref());
+        assert_eq!(recorder.total_live_objects(), before);
+        recorder.assert_valid();
+    }
+
+    /// **Without timeline semaphores a deferred submit is the waiting one**,
+    /// chosen by the capability, not by an error.
+    #[test]
+    fn a_deferred_submit_without_a_timeline_waits() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_b(&recorder);
+        assert!(!device.caps().supports(Features::TIMELINE_SEMAPHORE));
+        let (texture, pending, staging) = deferred_one(&recorder, device.as_ref(), queue);
+        let waits = recorder
+            .events()
+            .iter()
+            .filter(|event| matches!(event, Event::WaitedIdle))
+            .count();
+        assert_eq!(waits, 1);
+        assert!(pending.is_retired());
+        assert_eq!(recorder.buffer_size(staging), None);
+        texture.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// An abandoned batch refuses a deferred submit as it does a waiting one,
+    /// before creating a semaphore it would have to give back.
+    #[test]
+    fn an_abandoned_batch_refuses_a_deferred_submit() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let before = recorder.total_live_objects();
+        let mut batch = UploadBatch::new(device.as_ref(), queue, "abandoned");
+        let texture = batch
+            .texture(
+                "one",
+                Format::R8Unorm,
+                (1, 1),
+                &[&[&[1]]],
+                ImageViewType::D2,
+            )
+            .expect("recorded");
+        texture.destroy(device.as_ref());
+        batch.abandon();
+        assert!(matches!(
+            batch.submit_deferred(),
+            Err(HalError::InvalidDescriptor(_))
+        ));
+        assert_eq!(recorder.total_live_objects(), before);
+        assert!(
+            !recorder
+                .events()
+                .iter()
+                .any(|event| matches!(event, Event::Submitted { .. }))
+        );
+        recorder.assert_valid();
     }
 
     /// **A batch holds no encoder open while its caller records others.** A

@@ -45,6 +45,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_frame::UploadBatch::submit_deferred` and `PendingUpload`**: submit a
+  start-up batch without waiting and retire its staging once a timeline
+  semaphore says the GPU is past it.
+- **`crcbl_hal::null::Event::SemaphoresWaited`**, recorded for every accepted
+  `Device::wait_semaphores`, so a test can order a host wait against the events
+  around it.
 - **`crcbl_hal::null::Recorder::fail_create_after`**, with
   `cancel_create_failure` and `create_failure_pending`: fail the Nth object
   creation on the null backend, to drive a constructor's partial-failure path.
@@ -124,6 +130,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl_frame::UiRenderer::new` (and `with_images` / `with_ring`) no longer
+  blocks on `Device::wait_idle` for its start-up textures.** The upload is
+  submitted and ordered before the first frame by queue order; its staging is
+  freed by the first `begin_frame` that sees the upload's timeline semaphore
+  signalled, or by `destroy`, which waits for it. Building one on any queue
+  other than the device's graphics queue is now refused with
+  `HalError::InvalidDescriptor`. A device without timeline semaphores (WebGPU)
+  still waits. On an RDNA2 iGPU `UiRenderer::new` went from 1.40 ms to 0.55 ms.
 - **A left- or start-aligned `nowrap` text span no longer copies its laid-out
   text every frame to draw it**: `Ui::emit` draws the kept layout as it is when
   aligning would move nothing. That is 9 fewer allocations per label each frame

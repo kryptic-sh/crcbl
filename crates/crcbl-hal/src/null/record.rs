@@ -509,6 +509,20 @@ pub enum Event {
     },
     /// [`Device::wait_idle`](crate::Device::wait_idle) was called.
     WaitedIdle,
+    /// [`Device::wait_semaphores`](crate::Device::wait_semaphores) was called
+    /// and accepted every semaphore it named.
+    ///
+    /// Recorded so a test can put a host wait in order against the events
+    /// around it — a caller that must wait for a submission before destroying
+    /// what it wrote — which a wait leaving no trace made unobservable. A
+    /// refused call (a dead handle, a binary semaphore) records nothing, as a
+    /// refused submit does.
+    SemaphoresWaited {
+        /// The `(semaphore, value)` pairs waited for.
+        waits: Vec<SemaphoreWait>,
+        /// Whether every value had been reached — the call's answer.
+        reached: bool,
+    },
 }
 
 /// A rule the recorded stream broke.

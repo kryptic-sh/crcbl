@@ -542,12 +542,15 @@ did, so every presenter retired frames with `wait_idle`), and
 `crcbl-mtl`'s timeline reads waiting for the signalling command buffer, which
 the three Metal CI jobs passed with both in (run 40758600597). What is left:
 
-- **Don't wait at all.** The batch still ends in `Device::wait_idle`. Submitting
-  without waiting, and destroying the staging and zero buffers once the first
-  frame's timeline value has passed, would overlap the copies with the
-  presenter's swapchain creation and the first frame. It needs the batch to hand
-  its buffers to whoever owns a timeline (the `Presenter`, or the caller), which
-  `crcbl-frame` does not have today. Not started.
+- **The UI renderer no longer waits; the forward renderer still does.**
+  `UiRenderer` submits its batch with `UploadBatch::submit_deferred` and retires
+  the `PendingUpload` in `begin_frame` (2026-10-31). Release builds, load about
+  4.5: `UiRenderer::new` went from 1.40 ms to 0.55 ms (medians) on the RDNA2
+  iGPU and 0.77 to 0.65 ms on NAVI31; ANV's 7–10 ms first submission was not
+  measured (no ANV here). `ForwardRenderer`'s build batch and `upload_page`
+  still call `submit()`; moving them needs the same retire point in its frame
+  loop. The null backend signals timelines at submit, so only the Vulkan e2e
+  validation runs check that the staging outlives a real GPU's copies.
 - **ANV's first submission is the bulk of what remains.** Measured with a
   throwaway test on the iGPU (debug build, at a load average of about 8 to 9
   from a parallel build, not in a quiet window): the first upload on a fresh
