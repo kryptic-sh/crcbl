@@ -157,7 +157,10 @@ use crcbl_hal::{
     PipelineLayoutHandle, Rect2d, SampleType, ShaderStages, StoreOp,
     check_portable_storage_buffers,
 };
-use crcbl_shaders::{SSAO, SSAO_BLUR, SSAO_HEMISPHERE, SSAO_UPSAMPLE, ssao};
+use crcbl_shaders::{
+    SSAO, SSAO_BLUR, SSAO_BLUR_BENTLESS, SSAO_HEMISPHERE, SSAO_UPSAMPLE, SSAO_UPSAMPLE_BENTLESS,
+    ssao,
+};
 
 pub(crate) use crate::bind_group_cache::cached_group;
 use crate::graph::{ImageId, RenderGraph};
@@ -257,6 +260,22 @@ pub(crate) fn intensity() -> f32 {
 /// normal it already had — see `shaders/ssao.slang`'s `bent_normals`.
 pub(crate) fn bent_normals() -> bool {
     r_ssao_bent_normals.get_bool()
+}
+
+/// Whether a gather may write a bent direction on a frame whose near side runs
+/// `technique` with the switch at `bent`, where `compared` says the frame
+/// splits at [`r_ssao_split`]'s seam.
+///
+/// Only `ssao.slang` with its switch on measures one: `ssao_hemisphere.slang`
+/// writes the sentinel unconditionally, and so does `ssao.slang` with
+/// `camera.params.w` at zero. A comparing frame runs [`shipped`]'s side as
+/// well, and that side's answer is the shipped technique and switch, whatever
+/// the console holds — so the filters may skip the direction only when **both**
+/// sides wrote none. See [`Ssao::filters_for`].
+pub(crate) fn writes_bent(technique: Technique, bent: bool, compared: bool) -> bool {
+    let near = technique == Technique::Gtao && bent;
+    let far = compared && shipped_technique() == Technique::Gtao && shipped().3;
+    near || far
 }
 
 /// [`r_ssao_radius`] as the shader's uniform wants it.
@@ -553,6 +572,35 @@ pub(crate) struct Ssao {
     /// occlusion image from the blur that precedes it, so one cache shared
     /// between them would be rebuilt twice a frame.
     upsample_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
+    /// The blur and the reconstruction without the bent direction, for the
+    /// frames whose gathers wrote none — see [`writes_bent`].
+    ///
+    /// **Built by [`Ssao::prepare`] on the first frame that can use them**, not
+    /// by [`Ssao::new`]: the default stack measures a direction, so a renderer
+    /// that never switches it off never pays for the pair. The shaders
+    /// are `shaders/ssao_blur_bentless.slang` and
+    /// `shaders/ssao_upsample_bentless.slang`; each writes the parent's
+    /// visibility bit for bit and the sentinel the parent writes for a channel
+    /// of sentinels, so selecting them changes the cost of a frame and nothing
+    /// it draws.
+    bentless: Option<Filters>,
+    /// The bent-direction switch the block [`Ssao::begin_frame`] last wrote
+    /// carries, which is what the near side's gather reads.
+    ///
+    /// **Frozen there rather than read again by [`Ssao::add_passes`]**: a
+    /// console moved between the two calls would otherwise select the bent-free
+    /// filters over a gather told to measure a direction, and they would
+    /// overwrite it with the sentinel. `true` until a block is written, which
+    /// selects the filters that carry a direction — correct for any gather.
+    frame_bent: bool,
+}
+
+/// The filter pipelines one frame runs: the blur, at every pass it records,
+/// and the reconstruction, each on [`Ssao::blur_pipeline_layout`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Filters {
+    pub(crate) blur: GraphicsPipelineHandle,
+    pub(crate) upsample: GraphicsPipelineHandle,
 }
 
 impl Ssao {
@@ -777,7 +825,58 @@ impl Ssao {
             blur_again_groups: vec![None; frames],
             upsample_pipeline,
             upsample_groups: vec![None; frames],
+            bentless: None,
+            frame_bent: true,
         })
+    }
+
+    /// Builds the bent-free filters where `wanted` and this chain does not hold
+    /// them yet.
+    ///
+    /// **Between frames, never inside one**, on `View::build_passes`' terms —
+    /// `View::begin_frame` calls this, and never the build, so what a renderer
+    /// makes at construction does not depend on the console. A frame that
+    /// finds the pair missing runs the filters that carry the direction, which
+    /// draw the same picture.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from a pipeline. Neither is kept unless both are built —
+    /// see [`crate::partial`].
+    pub(crate) fn prepare(
+        &mut self,
+        device: &dyn Device,
+        build_fullscreen: impl Fn(
+            &dyn Device,
+            &str,
+            &crcbl_shaders::Shader,
+            PipelineLayoutHandle,
+            &[ColorTargetState],
+        ) -> Result<GraphicsPipelineHandle, HalError>,
+        wanted: bool,
+    ) -> Result<(), HalError> {
+        if self.bentless.is_some() || !wanted {
+            return Ok(());
+        }
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        let mut made = Partial::new(device);
+        let blur = made.add(build_fullscreen(
+            device,
+            "ssao blur bentless",
+            &SSAO_BLUR_BENTLESS,
+            self.blur_pipeline_layout,
+            &targets,
+        )?);
+        let upsample = made.add(build_fullscreen(
+            device,
+            "ssao upsample bentless",
+            &SSAO_UPSAMPLE_BENTLESS,
+            self.blur_pipeline_layout,
+            &targets,
+        )?);
+        made.keep();
+        self.bentless = Some(Filters { blur, upsample });
+        Ok(())
     }
 
     /// Writes `frame`'s uniform block.
@@ -790,12 +889,13 @@ impl Ssao {
     ///
     /// If `frame` is not a slot this was built with.
     pub(crate) fn begin_frame(
-        &self,
+        &mut self,
         device: &dyn Device,
         frame: usize,
         params: ssao::SsaoParams,
     ) -> Result<(), HalError> {
         device.write_buffer(self.uniforms[frame], 0, &params.to_bytes())?;
+        self.frame_bent = params.bent_normals;
         // The comparison's other side: this frame's own matrices with
         // [`shipped`]'s scalars, so the seam separates the four knobs and
         // nothing else. Building it from `params` rather than beside it is what
@@ -836,6 +936,36 @@ impl Ssao {
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) const fn gathers(&self) -> (GraphicsPipelineHandle, GraphicsPipelineHandle) {
         (self.pipeline, self.hemisphere_pipeline)
+    }
+
+    /// The filters that carry the bent direction, and the bent-free pair if
+    /// [`Ssao::prepare`] has built it.
+    ///
+    /// Test-only, and [`Ssao::gathers`]' counterpart for the filters. See
+    /// `crate::forward`'s `lazy_passes::the_filters_skip_the_bent_direction_only_when_no_gather_wrote_one`.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) const fn filters(&self) -> (Filters, Option<Filters>) {
+        (
+            Filters {
+                blur: self.blur_pipeline,
+                upsample: self.upsample_pipeline,
+            },
+            self.bentless,
+        )
+    }
+
+    /// The filters a frame runs: the bent-free pair where it is held and no
+    /// gather of the frame wrote a direction, and the pair that carries one
+    /// otherwise — see [`writes_bent`]. `technique` is the near side's gather
+    /// and the switch is [`Ssao::frame_bent`], the one its block carries.
+    fn filters_for(&self, technique: Technique, compared: bool) -> Filters {
+        match self.bentless {
+            Some(bentless) if !writes_bent(technique, self.frame_bent, compared) => bentless,
+            _ => Filters {
+                blur: self.blur_pipeline,
+                upsample: self.upsample_pipeline,
+            },
+        }
     }
 
     /// The gather pipeline `technique` runs.
@@ -897,8 +1027,13 @@ impl Ssao {
         // borrows below split `self`. The console's on the near side and the
         // shipped one on the far, which is [`shipped`]'s rule for the four
         // scalars applied to the switch that is not one of them.
-        let pipeline = self.pipeline_for(technique());
+        let near = technique();
+        let pipeline = self.pipeline_for(near);
         let shipped_pipeline = self.pipeline_for(shipped_technique());
+        // The seam is decided here rather than beside the gathers below, because
+        // whether it is drawn decides the filters too — see [`writes_bent`].
+        let seam = split_at().and_then(|at| crate::split::halves(half, at));
+        let filters = self.filters_for(near, seam.is_some());
         let pipeline_layout = self.pipeline_layout;
         let layout = self.layout;
         let uniforms = self.uniforms[frame];
@@ -922,7 +1057,6 @@ impl Ssao {
         // and writes the same image, so what separates the two sides is the
         // block each binds, the pipeline each runs and the columns each may
         // write.
-        let seam = split_at().and_then(|at| crate::split::halves(half, at));
         let (split_uniforms, split_groups) = (self.split_uniforms[frame], &mut self.split_groups);
         let split_cached = &mut split_groups[frame];
         match seam {
@@ -976,7 +1110,7 @@ impl Ssao {
             uniforms,
             layout: self.blur_layout,
             pipeline_layout: self.blur_pipeline_layout,
-            pipeline: self.blur_pipeline,
+            pipeline: filters.blur,
         };
         blur.add_pass(graph, "ssao-blur", blur_cached, raw, depth, blurred);
         let filtered = match again {
@@ -998,7 +1132,7 @@ impl Ssao {
         // differs is the pipeline and the extent of the image it was handed, and
         // neither of those is something this function does differently.
         let upsample = Filter {
-            pipeline: self.upsample_pipeline,
+            pipeline: filters.upsample,
             ..blur
         };
         upsample.add_pass(
@@ -1025,8 +1159,12 @@ impl Ssao {
         {
             device.destroy_bind_group(cached.1);
         }
-        // Before the layout it was built against, which is the blur's — see
+        // Before the layout they were built against, which is the blur's — see
         // [`Ssao::upsample_pipeline`].
+        if let Some(bentless) = self.bentless {
+            device.destroy_graphics_pipeline(bentless.upsample);
+            device.destroy_graphics_pipeline(bentless.blur);
+        }
         device.destroy_graphics_pipeline(self.upsample_pipeline);
         device.destroy_graphics_pipeline(self.blur_pipeline);
         device.destroy_pipeline_layout(self.blur_pipeline_layout);

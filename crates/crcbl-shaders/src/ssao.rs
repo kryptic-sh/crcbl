@@ -425,6 +425,13 @@ mod tests {
     /// binds it exactly as it binds `ssao.slang`. What it does *not* declare is
     /// the bent-direction threshold, because it measures no direction — see
     /// [`BENT_NORMAL_SOURCES`], which is the list that check sweeps instead.
+    ///
+    /// **The bent-free filters are not on it**, and are not a copy nothing
+    /// holds: [`the_bentless_filters_are_their_parents_without_the_direction`]
+    /// derives each from its parent here, so every constant this list's checks
+    /// pin in a parent is pinned in its variant by that equality.
+    ///
+    /// [`the_bentless_filters_are_their_parents_without_the_direction`]: fn@the_bentless_filters_are_their_parents_without_the_direction
     const OCCLUSION_SOURCES: [(&str, &str); 4] = [
         ("ssao.slang", include_str!("../shaders/ssao.slang")),
         (
@@ -1110,6 +1117,210 @@ mod tests {
                 source.contains(": normalize(mean);"),
                 "{name}'s `encode_bent` no longer renormalises, so the direction it writes \
                  carries the filter's own disagreement as a length"
+            );
+        }
+    }
+
+    /// A shader source as its file name and its text.
+    type Source = (&'static str, &'static str);
+
+    /// Each bent-free filter and the filter it was cut from: `(parent, variant)`.
+    const BENTLESS_FILTERS: [(Source, Source); 2] = [
+        (
+            (
+                "ssao_blur.slang",
+                include_str!("../shaders/ssao_blur.slang"),
+            ),
+            (
+                "ssao_blur_bentless.slang",
+                include_str!("../shaders/ssao_blur_bentless.slang"),
+            ),
+        ),
+        (
+            (
+                "ssao_upsample.slang",
+                include_str!("../shaders/ssao_upsample.slang"),
+            ),
+            (
+                "ssao_upsample_bentless.slang",
+                include_str!("../shaders/ssao_upsample_bentless.slang"),
+            ),
+        ),
+    ];
+
+    /// `source`'s code: every line with its comment removed and its indentation
+    /// trimmed, and the lines left empty dropped.
+    fn code_lines(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or_default().trim())
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// `line` with every call to `name` — `name` ending in its open paren —
+    /// replaced by `with`, argument list and all.
+    fn replace_calls(line: &str, name: &str, with: &str) -> String {
+        let mut out = String::new();
+        let mut rest = line;
+        while let Some(at) = rest.find(name) {
+            out.push_str(&rest[..at]);
+            let mut depth = 0usize;
+            let mut end = rest.len();
+            for (offset, byte) in rest[at..].bytes().enumerate() {
+                match byte {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = at + offset + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.push_str(with);
+            rest = &rest[end..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The bent direction's locals: a statement naming one of these as a whole
+    /// identifier is cut by [`without_the_direction`].
+    const DIRECTION_LOCALS: [&str; 4] = ["bent", "bent_weight", "direction", "carried"];
+
+    /// Every statement [`without_the_direction`] may cut from a parent's
+    /// fragment, each declaring or accumulating one of [`DIRECTION_LOCALS`].
+    ///
+    /// **Pinned rather than inferred**, so the cut cannot grow: a visibility
+    /// statement that happened to name one of those locals would otherwise be
+    /// dropped from both sides and the comparison would hold of a variant
+    /// missing it.
+    const DIRECTION_STATEMENTS: [&str; 6] = [
+        "float3 bent = float3(0.0, 0.0, 0.0);",
+        "float bent_weight = 0.0;",
+        "float3 direction = decode_bent(sample);",
+        "float carried = dot(direction, direction);",
+        "bent += direction * share;",
+        "bent_weight += carried * share;",
+    ];
+
+    /// The identifiers `line` names, in order.
+    fn identifiers(line: &str) -> impl Iterator<Item = &str> {
+        line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|word| !word.is_empty())
+    }
+
+    /// The code of `parent` with the bent direction cut out, which is what its
+    /// bent-free variant must be line for line, and the statements the cut
+    /// removed.
+    ///
+    /// The cut: the functions that decode and encode a direction go, and so
+    /// does the threshold only they read; every `encode_bent(…)` the fragment
+    /// returns becomes `BENT_NONE`, declared beside the sentinel it is three
+    /// of; and every remaining statement naming one of [`DIRECTION_LOCALS`]
+    /// goes, which the caller holds to [`DIRECTION_STATEMENTS`]. **Everything
+    /// the visibility is computed from survives untouched and in order**, which
+    /// is the claim that makes the `r` channel bit-identical — a reordered sum
+    /// would fail here.
+    fn without_the_direction(parent: &str) -> (Vec<String>, Vec<String>) {
+        let mut derived = Vec::new();
+        let mut cut = Vec::new();
+        // Brace depth inside a function being cut, while one is.
+        let mut cutting: Option<usize> = None;
+        for line in code_lines(parent) {
+            if let Some(depth) = cutting.as_mut() {
+                *depth += line.matches('{').count();
+                *depth -= line.matches('}').count();
+                if *depth == 0 && line.contains('}') {
+                    cutting = None;
+                }
+                continue;
+            }
+            if line.starts_with("float3 decode_bent(") || line.starts_with("float3 encode_bent(") {
+                cutting = Some(0);
+                continue;
+            }
+            if line.starts_with("static const float BENT_NORMAL_MIN_LENGTH") {
+                continue;
+            }
+            let line = replace_calls(&line, "encode_bent(", "BENT_NONE");
+            if identifiers(&line).any(|word| DIRECTION_LOCALS.contains(&word)) {
+                cut.push(line);
+                continue;
+            }
+            let sentinel = line.starts_with("static const float BENT_NORMAL_NONE_CHANNEL");
+            derived.push(line);
+            if sentinel {
+                derived.push("static const float3 BENT_NONE =".to_owned());
+                derived.push(
+                    "float3(BENT_NORMAL_NONE_CHANNEL, BENT_NORMAL_NONE_CHANNEL, \
+                     BENT_NORMAL_NONE_CHANNEL);"
+                        .to_owned(),
+                );
+            }
+        }
+        (derived, cut)
+    }
+
+    /// **Each bent-free filter is its parent with the direction cut out, and
+    /// nothing else changed.**
+    ///
+    /// `crcbl_render::ssao::Ssao` swaps these in for the frames whose gathers
+    /// wrote no direction, and the swap is only free if it draws the same
+    /// picture: the parent's visibility bit for bit, and the sentinel the
+    /// parent writes for a channel of sentinels. A variant whose sum drifted —
+    /// a tap reordered, a tolerance retuned in one file — would move every
+    /// golden drawn at the low tier and nothing at the default, so this holds
+    /// the two files together by deriving one from the other rather than by
+    /// spot-checking expressions. See [`without_the_direction`] for the rules.
+    ///
+    /// The comparison is over code, so each file's comments are free to say
+    /// what that file is for — and they do.
+    #[test]
+    fn the_bentless_filters_are_their_parents_without_the_direction() {
+        for ((parent_name, parent), (name, variant)) in BENTLESS_FILTERS {
+            let (derived, cut) = without_the_direction(parent);
+            let mut cut_sorted = cut.clone();
+            cut_sorted.sort();
+            let mut pinned = DIRECTION_STATEMENTS.map(str::to_owned).to_vec();
+            pinned.sort();
+            assert_eq!(
+                cut_sorted, pinned,
+                "the cut removed other statements from {parent_name} than the bent direction's \
+                 own; a statement naming one of its locals is either new bent maths, which \
+                 DIRECTION_STATEMENTS has to name, or visibility maths the variant must keep"
+            );
+            // Anti-vacuity: the cut has to have removed something, or this is a
+            // file compared with a copy of itself.
+            assert!(
+                derived.len() < code_lines(parent).len()
+                    && parent.contains("decode_bent(")
+                    && parent.contains("encode_bent("),
+                "{parent_name} carries no bent direction to cut, so {name} is not a variant of it"
+            );
+            for gone in ["decode_bent", "encode_bent", "BENT_NORMAL_MIN_LENGTH"] {
+                assert!(
+                    !code_lines(variant).iter().any(|line| line.contains(gone)),
+                    "{name} still names `{gone}`, so it pays for the direction it was cut to skip"
+                );
+            }
+            let code = code_lines(variant);
+            if let Some(at) = code.iter().zip(&derived).position(|(a, b)| a != b) {
+                panic!(
+                    "{name} departs from {parent_name} with the direction cut out at code line \
+                     {at}: it has `{}` where the cut gives `{}`",
+                    code[at], derived[at]
+                );
+            }
+            assert_eq!(
+                code.len(),
+                derived.len(),
+                "{name} and {parent_name} with the direction cut out agree line for line but \
+                 one is longer"
             );
         }
     }

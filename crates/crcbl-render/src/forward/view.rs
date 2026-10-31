@@ -1618,6 +1618,21 @@ impl View {
         // only once they exist, so a failed build leaves no frame asking for a
         // pass that is not there.
         self.build_passes(device, effects, extent != frame.target_extent, &mut || {})?;
+        // The occlusion filters without the bent direction, on the first frame
+        // no gather writes one — see `Ssao::prepare`. Here and not in the build,
+        // so a renderer's construction does not depend on the console.
+        if let Some(pass) = self
+            .ssao
+            .as_mut()
+            .filter(|_| effects.contains(RenderEffects::AMBIENT_OCCLUSION))
+        {
+            let wanted = !crate::ssao::writes_bent(
+                crate::ssao::technique(),
+                crate::ssao::bent_normals(),
+                crate::ssao::split_at().is_some(),
+            );
+            pass.prepare(device, ForwardRenderer::build_fullscreen, wanted)?;
+        }
         // And the water and grass passes for the bodies and field this frame
         // draws, on the same terms — see [`View::build_content`].
         self.build_content(device, frame.water, frame.grass.is_some())?;
@@ -1904,7 +1919,7 @@ impl View {
         let inv_projection = projection.inverse();
         // Written on every frame the pass exists for, whether or not this one
         // adds it, on every other block's terms.
-        if let Some(pass) = &self.ssao {
+        if let Some(pass) = &mut self.ssao {
             pass.begin_frame(
                 device,
                 slot,

@@ -132,6 +132,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The ambient-occlusion blur and reconstruction skip the bent direction when
+  no gather wrote one.** A frame with `r_ssao_bent_normals` off (the low quality
+  tier) or with `r_ssao_technique hemisphere` now runs
+  `shaders/ssao_blur_bentless.slang` and `shaders/ssao_upsample_bentless.slang`,
+  built the first frame that can use them: the parents with the bent-normal
+  decode and re-encode cut out, writing the same visibility bit for bit and the
+  same sentinel. On an RDNA2 iGPU at `quality low`, 1920×1080, `ssao-upsample`
+  went from 0.808 ms to 0.518 ms and `ssao-blur` from 0.410 ms to 0.197 ms. A
+  frame comparing techniques at `r_ssao_split` keeps the filters that carry the
+  direction, and the filters follow the bent switch the frame was begun with.
 - **The render-scale upscale fetches nine samples instead of sixteen.**
   `shaders/upscale.slang` keeps the same Catmull-Rom kernel but merges each
   axis's two middle taps into one bilinear fetch at their balance point

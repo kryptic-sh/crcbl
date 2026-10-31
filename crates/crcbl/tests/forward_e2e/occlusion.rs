@@ -95,7 +95,8 @@ use crcbl::hal::{
 use crcbl::math::{Mat4, Vec4};
 use crcbl::render::Projection;
 use crcbl::shaders::{
-    SSAO, SSAO_BLUR, SSAO_HEMISPHERE, SSAO_UPSAMPLE, Shader, Stage, ssao::SsaoParams,
+    SSAO, SSAO_BLUR, SSAO_BLUR_BENTLESS, SSAO_HEMISPHERE, SSAO_UPSAMPLE, SSAO_UPSAMPLE_BENTLESS,
+    Shader, Stage, ssao::SsaoParams,
 };
 
 /// The frame this measures at.
@@ -958,6 +959,11 @@ struct Passes {
     /// one shape rather than two, and nothing downstream can bind a pipeline it
     /// was not handed.
     upsample_pipeline: GraphicsPipelineHandle,
+    /// `ssao_blur_bentless.slang` and `ssao_upsample_bentless.slang`, the pair
+    /// `crcbl_render::ssao::Ssao` runs on a frame whose gather wrote no
+    /// direction — see [`Knobs::bentless_filters`].
+    bentless_blur_pipeline: GraphicsPipelineHandle,
+    bentless_upsample_pipeline: GraphicsPipelineHandle,
 }
 
 /// A full-screen-triangle pipeline over `shader`, which is
@@ -1085,6 +1091,18 @@ impl Passes {
                 &SSAO_UPSAMPLE,
                 blur_pipeline_layout,
             ),
+            bentless_blur_pipeline: fullscreen_pipeline(
+                device,
+                "ssao blur bentless",
+                &SSAO_BLUR_BENTLESS,
+                blur_pipeline_layout,
+            ),
+            bentless_upsample_pipeline: fullscreen_pipeline(
+                device,
+                "ssao upsample bentless",
+                &SSAO_UPSAMPLE_BENTLESS,
+                blur_pipeline_layout,
+            ),
             layout,
             pipeline_layout,
             blur_layout,
@@ -1093,6 +1111,8 @@ impl Passes {
     }
 
     fn destroy(self, device: &dyn Device) {
+        device.destroy_graphics_pipeline(self.bentless_upsample_pipeline);
+        device.destroy_graphics_pipeline(self.bentless_blur_pipeline);
         device.destroy_graphics_pipeline(self.upsample_pipeline);
         device.destroy_graphics_pipeline(self.blur_pipeline);
         device.destroy_pipeline_layout(self.blur_pipeline_layout);
@@ -1270,6 +1290,9 @@ struct Knobs {
     bent_normals: bool,
     /// `crcbl_render::ssao::r_ssao_radius`, in world units.
     radius: f32,
+    /// Whether the blurs and the reconstruction run the bent-free pair, which
+    /// `crcbl_render::ssao::Ssao` selects when no gather wrote a direction.
+    bentless_filters: bool,
 }
 
 impl Knobs {
@@ -1292,6 +1315,7 @@ impl Knobs {
         intensity: crcbl::shaders::ssao::INTENSITY_DEFAULT,
         bent_normals: true,
         radius: RADIUS,
+        bentless_filters: false,
     };
 }
 
@@ -1391,6 +1415,7 @@ fn run_passes(
         intensity,
         bent_normals,
         radius,
+        bentless_filters,
     } = knobs;
     let device = headless.device.as_ref();
     let (width, height) = EXTENT;
@@ -1410,6 +1435,14 @@ fn run_passes(
     );
 
     let passes = Passes::new(device);
+    let (blur_pipeline, upsample_pipeline) = if bentless_filters {
+        (
+            passes.bentless_blur_pipeline,
+            passes.bentless_upsample_pipeline,
+        )
+    } else {
+        (passes.blur_pipeline, passes.upsample_pipeline)
+    };
     let (raw, raw_view) = occlusion_image(device, "ssao", OCCLUSION_EXTENT);
     let (blurred, blurred_view) = occlusion_image(device, "ssao-blurred", OCCLUSION_EXTENT);
     // The second blur's target, created only when one was asked for, on the
@@ -1742,7 +1775,7 @@ fn run_passes(
         });
         encoder.set_viewport(&viewport);
         encoder.set_scissor(&area);
-        encoder.bind_graphics_pipeline(passes.blur_pipeline);
+        encoder.bind_graphics_pipeline(blur_pipeline);
         encoder.bind_group(0, blur_groups[index], &[], passes.blur_pipeline_layout);
         encoder.draw(0..3, 0..1);
         encoder.end_render_pass();
@@ -1793,7 +1826,7 @@ fn run_passes(
         });
         encoder.set_viewport(&Viewport::from_size(width, height));
         encoder.set_scissor(&scene);
-        encoder.bind_graphics_pipeline(passes.upsample_pipeline);
+        encoder.bind_graphics_pipeline(upsample_pipeline);
         encoder.bind_group(0, group, &[], passes.blur_pipeline_layout);
         encoder.draw(0..3, 0..1);
         encoder.end_render_pass();
@@ -3504,6 +3537,93 @@ fn the_bent_direction_switch_writes_the_sentinel_and_leaves_the_scalar_alone() {
          `(x, y, on, off)` {moved:?}. The scalar is gathered by the same loop and the switch \
          must not touch it — every golden in this workspace is a picture of that channel."
     );
+
+    headless.finish();
+}
+
+/// **The bent-free filters draw what the filters that carry a direction draw,
+/// byte for byte, over a gather that wrote none.**
+///
+/// `crcbl_render::ssao::Ssao` swaps `ssao_blur_bentless.slang` and
+/// `ssao_upsample_bentless.slang` in on such a frame, and the swap is only free
+/// if nothing it draws moves: the visibility the same to the bit, and the
+/// sentinel in every bent channel. `crcbl_shaders::ssao`'s
+/// `the_bentless_filters_are_their_parents_without_the_direction` holds the
+/// sources to each other; this is the half that asks the compiled modules on a
+/// device, where a driver contracting the two sums differently would show.
+/// At one blur and at two, so the bent-free blur reading its own output is
+/// covered.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_bent_free_filters_draw_the_same_bytes() {
+    let headless = Headless::open_at_format(EXTENT, None, Features::TIMESTAMP_QUERY);
+    let (width, height) = EXTENT;
+    let size = (width as f32, height as f32);
+    let projection = Projection::Perspective {
+        fov_y: FOV_Y,
+        near: NEAR,
+    }
+    .matrix(size.0 / size.1);
+
+    let wall = depth_of(projection, -WALL_Z);
+    let plate = lifted_depth(projection, PLATE_LIFT);
+    let texels = depth_image(|x, _| {
+        if PLATE_COLUMNS.contains(&x) {
+            plate
+        } else {
+            wall
+        }
+    });
+    for blurs in 1..=2 {
+        let off = Knobs {
+            bent_normals: false,
+            blurs,
+            ..Knobs::SPARSE
+        };
+        let carrying = run_passes(&headless, projection, &texels, off, Chain::Reconstructed);
+        let bentless = run_passes(
+            &headless,
+            projection,
+            &texels,
+            Knobs {
+                bentless_filters: true,
+                ..off
+            },
+            Chain::Reconstructed,
+        );
+        // Anti-vacuity: the scene has to have occluded something, or two
+        // images of an unoccluded wall agree whatever either filter does.
+        assert!(
+            carrying
+                .image
+                .as_chunks::<TEXEL_BYTES>()
+                .0
+                .iter()
+                .any(|texel| texel[0] < UNOCCLUDED),
+            "the chain at {blurs} blur(s) occluded nothing, so the comparison below is over \
+             a blank channel"
+        );
+        let mut differ = Vec::new();
+        for (index, (a, b)) in carrying
+            .image
+            .as_chunks::<TEXEL_BYTES>()
+            .0
+            .iter()
+            .zip(bentless.image.as_chunks::<TEXEL_BYTES>().0)
+            .enumerate()
+        {
+            if a != b && differ.len() < MESSAGE_SAMPLES {
+                let index = index as u32;
+                differ.push((index % width, index / width, *a, *b));
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "at {blurs} blur(s) the bent-free filters drew other bytes than the filters that \
+             carry a direction, over the same gather, at `(x, y, carrying, bentless)` \
+             {differ:?}; selecting them would move every frame drawn without a direction"
+        );
+    }
 
     headless.finish();
 }

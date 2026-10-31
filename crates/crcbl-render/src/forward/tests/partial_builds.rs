@@ -136,6 +136,43 @@ fn the_settings_driven_passes_release_on_every_failure() {
     );
 }
 
+/// [`Ssao::prepare`] is a constructor of its own — the bent-free filters are
+/// built by the first frame that can run them, after [`Ssao::new`] — so it is
+/// failed at each of its creations too.
+#[test]
+fn the_bent_free_filters_release_on_every_failure() {
+    let (recorder, device, _) = open();
+    let device = device.as_ref();
+    let fullscreen = ForwardRenderer::build_fullscreen;
+    let alone = fails_cleanly_at_every_creation(
+        "Ssao::new",
+        &recorder,
+        device,
+        |device| Ssao::new(device, FRAMES, fullscreen),
+        Ssao::destroy,
+    );
+    let prepared = fails_cleanly_at_every_creation(
+        "Ssao::prepare",
+        &recorder,
+        device,
+        |device| {
+            let mut ssao = Ssao::new(device, FRAMES, fullscreen)?;
+            match ssao.prepare(device, fullscreen, true) {
+                Ok(()) => Ok(ssao),
+                Err(error) => {
+                    ssao.destroy(device);
+                    Err(error)
+                }
+            }
+        },
+        Ssao::destroy,
+    );
+    assert!(
+        prepared > alone,
+        "`Ssao::prepare` created nothing past `Ssao::new`, so none of its failures was checked"
+    );
+}
+
 #[test]
 fn the_content_passes_release_on_every_failure() {
     let (recorder, device, _) = open();

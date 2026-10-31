@@ -49,13 +49,14 @@ kernel): 1.876 → 1.057 ms on the iGPU. Ranked fixes left:
   shader's spelling; closing it needs a GPU check of the upscale against a CPU
   four-tap reference on a noise source. The browser gates never draw below
   render scale 1.0, so the WGSL upscale is checked only by naga.
-- **SSAO upsample and blur: skip the bent work when bent normals are off.** A
-  second upsample pipeline without the bent path, picked in `Ssao::add_passes`
-  as the hemisphere gather already is (a separate `.slang`: no `#include`, and
-  two entry points in one module are refused): −0.54 ms worst case. Fallback: a
-  uniform branch on `camera.params.w` (−0.36 / −0.06 ms). Must still write
-  `BENT_NORMAL_NONE_CHANNEL`; alcove's `golden.rs` and lantern's bent-off
-  reading guard that.
+- **The bent-free SSAO filters are byte-compared only on radv.**
+  `forward_e2e::occlusion::the_bent_free_filters_draw_the_same_bytes` compares
+  `ssao_*_bentless.slang` against the parents over one gather, and alcove's
+  bent-off frame matched byte for byte, on the RDNA2 iGPU and RX 7900 XTX
+  (2026-10-31: upsample 0.808 → 0.518 ms, blur 0.410 → 0.197 ms on the iGPU).
+  lavapipe, Metal, D3D12 and WebGPU have not run that test; CI's forward-e2e
+  legs will be its first run there. The bentless shaders' header comments are
+  copied from their parents and still carry counts.
 - **Half-res linear view-z from the gather, read with `GatherRed`** in the
   upsample and blur: upsample 1.40 → 0.49 ms worst case with the bent skip.
   Needs a transient image and a binding, `ImageGatherExtended` checked on the

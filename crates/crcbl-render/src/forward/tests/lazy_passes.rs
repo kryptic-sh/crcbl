@@ -298,3 +298,241 @@ fn a_view_made_later_builds_what_its_first_frames_switch_on() {
     assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
     recorder.assert_valid();
 }
+
+/// Every filter pipeline the frame bound since command `from`, as the pair the
+/// `ssao-blur` and `ssao-upsample` passes ran — the same question
+/// `gathers_bound` asks of the marches.
+fn filters_bound(recorder: &Recorder, from: usize) -> Vec<crate::ssao::Filters> {
+    use crcbl_hal::null::Command;
+
+    let mut inside = None;
+    let (mut blurs, mut upsamples) = (Vec::new(), Vec::new());
+    for command in &recorder.commands()[from..] {
+        if let Some((_, label)) = command.opens_pass() {
+            inside = match label {
+                Some("ssao-blur") => Some(true),
+                Some("ssao-upsample") => Some(false),
+                _ => None,
+            };
+            continue;
+        }
+        if matches!(command, Command::EndRenderPass | Command::EndComputePass) {
+            inside = None;
+            continue;
+        }
+        match (inside, command) {
+            (Some(true), Command::BindGraphicsPipeline(pipeline)) => blurs.push(*pipeline),
+            (Some(false), Command::BindGraphicsPipeline(pipeline)) => upsamples.push(*pipeline),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        blurs.len(),
+        upsamples.len(),
+        "the frame recorded a blur without a reconstruction or the other way round"
+    );
+    blurs
+        .into_iter()
+        .zip(upsamples)
+        .map(|(blur, upsample)| crate::ssao::Filters { blur, upsample })
+        .collect()
+}
+
+/// Moves `r_ssao_bent_normals` and puts it back at its default when dropped.
+///
+/// Taken only while [`ssao_technique_switch`]'s guard is held, which is the
+/// lock `crate::ssao`'s own tests move this variable under.
+struct BentSwitch;
+
+impl BentSwitch {
+    fn set(&self, on: bool) {
+        crate::ssao::r_ssao_bent_normals
+            .set(&crcbl_console::Value::Bool(on))
+            .expect("`r_ssao_bent_normals` is a writable bool");
+    }
+}
+
+impl Drop for BentSwitch {
+    fn drop(&mut self) {
+        let shipped = matches!(
+            crate::ssao::r_ssao_bent_normals.default(),
+            crcbl_console::Value::Bool(true)
+        );
+        self.set(shipped);
+    }
+}
+
+/// **The bent-free filters are built by the first frame whose gathers write no
+/// direction, and run only on such frames.**
+///
+/// Read off the pipelines the `ssao-blur` and `ssao-upsample` passes bound:
+/// the default frame measures a direction and runs the filters that carry it,
+/// a frame with `r_ssao_bent_normals` off builds the bent-free pair once and
+/// runs it, a comparing frame runs the carrying pair again because its far side
+/// gathers what ships, and the cheap tier runs the bent-free pair with the
+/// switch back on, since `ssao_hemisphere.slang` measures no direction either.
+#[test]
+fn the_filters_skip_the_bent_direction_only_when_no_gather_wrote_one() {
+    const BLUR: &str = "ssao blur bentless";
+    const UPSAMPLE: &str = "ssao upsample bentless";
+    let _blurs = ssao_blur_switch();
+    let seam = ssao_split_switch();
+    let technique = ssao_technique_switch();
+    let bent = BentSwitch;
+    bent.set(true);
+
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    let built = |recorder: &Recorder| (created(recorder, BLUR), created(recorder, UPSAMPLE));
+    let filters = |renderer: &ForwardRenderer| {
+        renderer
+            .primary
+            .ssao
+            .as_ref()
+            .expect("the default stack builds the occlusion pair")
+            .filters()
+    };
+    assert_eq!(
+        built(&recorder),
+        (0, 0),
+        "the build made the bent-free pair"
+    );
+    let (carrying, _) = filters(&renderer);
+
+    // One frame, and the filters it bound, under whatever the console now holds.
+    let bound = |renderer: &mut ForwardRenderer| {
+        let from = recorder.commands().len();
+        frame(device, renderer, queue).release(device);
+        filters_bound(&recorder, from)
+    };
+
+    assert_eq!(bound(&mut renderer), vec![carrying], "the default frame");
+    assert_eq!(
+        built(&recorder),
+        (0, 0),
+        "a frame measuring a direction built the bent-free pair"
+    );
+
+    bent.set(false);
+    let first = bound(&mut renderer);
+    let bentless = filters(&renderer)
+        .1
+        .expect("the first frame without a direction built the bent-free pair");
+    assert_ne!(bentless, carrying);
+    assert_eq!(first, vec![bentless], "a frame with the direction off");
+    assert_eq!(bound(&mut renderer), vec![bentless], "and the next one");
+    assert_eq!(
+        built(&recorder),
+        (1, 1),
+        "built once, by the first such frame"
+    );
+
+    seam.set(0.5);
+    assert_eq!(
+        bound(&mut renderer),
+        vec![carrying],
+        "a comparing frame's far side gathers what ships, which measures a direction"
+    );
+    seam.set(0.0);
+
+    bent.set(true);
+    assert_eq!(
+        bound(&mut renderer),
+        vec![carrying],
+        "the direction back on"
+    );
+    technique.set(other_technique_name());
+    assert_eq!(
+        bound(&mut renderer),
+        vec![bentless],
+        "the cheap tier measures no direction, switch or no switch"
+    );
+    assert_eq!(built(&recorder), (1, 1), "and nothing was built again");
+
+    renderer.destroy(device);
+    assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
+    recorder.assert_valid();
+}
+
+/// **The filters follow the switch the gather's block was written with, not
+/// the console at record time.**
+///
+/// `begin_frame` writes the occlusion block, and with it the switch the
+/// gather reads; `add_passes` records the filters later. A console turned off
+/// between the two, with the bent-free pair already built, must still run the
+/// filters that carry a direction — the gather was told to measure one, and the
+/// bent-free pair would overwrite it with the sentinel.
+#[test]
+fn the_filters_follow_the_switch_the_frame_was_begun_with() {
+    let _blurs = ssao_blur_switch();
+    let _seam = ssao_split_switch();
+    let _technique = ssao_technique_switch();
+    let bent = BentSwitch;
+
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    bent.set(false);
+    frame(device, &mut renderer, queue).release(device);
+    let (carrying, bentless) = renderer
+        .primary
+        .ssao
+        .as_ref()
+        .expect("the default stack builds the occlusion pair")
+        .filters();
+    let bentless = bentless.expect("a frame without a direction built the bent-free pair");
+
+    // Begun with the direction on, recorded with it off.
+    bent.set(true);
+    renderer
+        .begin_frame(
+            device,
+            &Camera::default(),
+            &DirectionalLight::default(),
+            TEST_EXTENT,
+        )
+        .expect("write");
+    bent.set(false);
+    let from = recorder.commands().len();
+    let imported = swapchain_image(device);
+    let mut graph = crate::RenderGraph::new(queue);
+    let target = graph.import_image("target", imported);
+    let mut pool = crate::TransientPool::new();
+    renderer.add_passes(&mut graph, &pool, target, TEST_EXTENT);
+    let compiled = graph.compile(&pool).expect("a legal frame");
+    let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+        label: Some("forward frame"),
+        queue,
+    });
+    compiled
+        .execute(device, &mut pool, encoder.as_mut(), None)
+        .expect("the graph executed");
+    let commands = encoder.finish().expect("recording succeeded");
+    Frame {
+        imported,
+        pool,
+        commands,
+    }
+    .release(device);
+    let switched = filters_bound(&recorder, from);
+
+    // The control: begun with it off, the same frame runs the bent-free pair.
+    let off = {
+        let from = recorder.commands().len();
+        frame(device, &mut renderer, queue).release(device);
+        filters_bound(&recorder, from)
+    };
+
+    assert_eq!(
+        switched,
+        vec![carrying],
+        "the console moved between begin_frame and add_passes and the frame ran the filters \
+         the console asked for, over a gather its block told to measure a direction"
+    );
+    assert_eq!(off, vec![bentless], "a frame begun with the direction off");
+
+    renderer.destroy(device);
+    assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
+    recorder.assert_valid();
+}
