@@ -776,6 +776,14 @@ impl InstancePool {
         core::mem::replace(&mut self.buffers[slot], replacement)
     }
 
+    /// The elements [`take_written`](Self::take_written) would hand out now,
+    /// without taking them: a test that checks a write is pending must leave it
+    /// for the frame that reads it.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(super) fn pending_written(&self) -> &[u32] {
+        &self.written_since_taken
+    }
+
     /// Releases every buffer. The device must be idle.
     pub fn destroy(self, device: &dyn Device) {
         for buffer in self.buffers {

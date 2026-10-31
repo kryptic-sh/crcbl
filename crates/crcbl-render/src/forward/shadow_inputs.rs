@@ -454,8 +454,10 @@ impl ForwardRenderer {
     ///
     /// A skinned frame is **not** in here and is not meant to be: a record that
     /// merely carried "this frame skins" would still match the last skinned
-    /// frame's and cache. [`ForwardRenderer::frame_skins`] is a separate veto on
-    /// the answer for that reason, and it is where that limit is written down.
+    /// frame's and cache. What carries a pose instead is the writes count above:
+    /// [`ForwardRenderer::point_skinned_instances`] writes every skinned object
+    /// on every skinned frame, so its box — or, without one, every group —
+    /// redraws each frame it is skinned.
     ///
     /// # What is deliberately not in it
     ///
@@ -465,7 +467,8 @@ impl ForwardRenderer {
     ///   exposes no way to upload or free a mesh afterwards. The one runtime
     ///   caller of the suballocator is
     ///   [`reserve_skinned`](Self::reserve_skinned), whose bytes are a skinned
-    ///   region's, and those are `frame_skins`' always-redraw case.
+    ///   region's, and those are written only by a skinning dispatch, which
+    ///   reaches the record through the re-point writes above.
     /// * **Whether the frame has shadows at all**, which is the atlas's *layout*
     ///   rather than any group's reading: a frame with shadows off gives every
     ///   group no views and no cull, so none of them reaches this function, and

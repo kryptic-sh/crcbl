@@ -2243,17 +2243,6 @@ pub struct ForwardRenderer {
     /// the frame in flight and wraps every [`FRAMES_IN_FLIGHT`]. A schedule
     /// keyed to that would repeat every few frames and bound nothing.
     shadow_frame: u64,
-    /// Whether this frame dispatches skinning, and so rewrites part of the
-    /// vertex pool the shadow pass draws from.
-    ///
-    /// The atlas's one **always redraw**: a skinned caster's vertices are
-    /// produced by a compute pass into the pool, so there is nothing on the
-    /// host to compare a frame's geometry against — the palette a caller hands
-    /// over is not the vertices, and the vertices are never read back. Set by
-    /// [`ForwardRenderer::begin_skinned_frame`], which is the only call that
-    /// can make it true, and cleared by [`ForwardRenderer::begin_frame`], which
-    /// dispatches none.
-    frame_skins: bool,
 
     /// Topic 03 §3.6's one permitted readback: the camera cull's statistics, on
     /// a delayed ring — see [`crate::cull_stats`], which is where the shape and
@@ -5930,7 +5919,6 @@ impl ForwardRenderer {
             shadow_cadence_request: None,
             shadow_atlas_clears: true,
             shadow_frame: 0,
-            frame_skins: false,
             // [`FRAMES_IN_FLIGHT`], the number every other ring here is sized
             // by, so a slot has been through the whole loop before it is read.
             // `culls_clusters` rather than the device's feature bits: what
@@ -6436,7 +6424,6 @@ impl ForwardRenderer {
         // The instance pool owns the ring, so its slot is the frame index the
         // uniform buffer and the bind group below are picked with.
         self.frame = self.instances.rotate();
-        self.frame_skins = false;
         self.instances.flush(device)?;
         self.begin_frame_body(device, camera, light, extent)
     }
@@ -6494,9 +6481,6 @@ impl ForwardRenderer {
         // First, on `begin_frame`'s terms.
         self.retire_uploads(device)?;
         self.frame = self.instances.rotate();
-        // An empty plan dispatches nothing — see [`Skinning::begin_frame`] — so
-        // it leaves the vertex pool where it was, and the shadow atlas with it.
-        self.frame_skins = !ranges.is_empty();
         skinning.begin_frame(device, self.frame, ranges)?;
         self.point_skinned_instances(skinning.parity());
         self.instances.flush(device)?;
@@ -7333,6 +7317,24 @@ impl ForwardRenderer {
     /// skinned object through plain [`begin_frame`](Self::begin_frame) gets, and
     /// it predates this second base — and the previous half is then no worse off
     /// than the current one.
+    ///
+    /// # What the shadow cache reads from it
+    ///
+    /// **Every re-point is an instance write**, whether or not the entry's
+    /// region was in this frame's `ranges`: the parity alternates on every
+    /// skinned frame, so each entry draws out of the other half from the frame
+    /// before, and a region left out of the plan holds an older pose there.
+    /// [`InstancePool::take_written`] names each element, and
+    /// [`note_caster_writes`](Self::note_caster_writes) turns it into a
+    /// footprint, so a skinned caster's frame redraws every shadow group its box
+    /// reaches before or after it — and every group when it has no box, whose
+    /// footprint is [`shadow_inputs::CasterFootprint::Everywhere`]. **A
+    /// conservative superset**, not the exact set: the footprint carries slack,
+    /// a point light is tested against its whole-light box rather than per face,
+    /// and the cadence can defer a group it marks to a later frame. That
+    /// write is the whole of what keeps a held map from showing a pose the
+    /// object has left, so a re-point that skipped an unchanged entry would
+    /// have to be a shadow-cache decision too.
     fn point_skinned_instances(&mut self, parity: u32) {
         let Self {
             instances,
@@ -17954,20 +17956,36 @@ mod tests {
         }
     }
 
-    /// **A frame with a skinned object in it always redraws the atlas**, and
-    /// that is a limit written down rather than a gap.
+    /// **A frame skinning an object with no box always redraws the atlas**,
+    /// and that is a limit written down rather than a gap.
     ///
     /// A skinned caster's vertices are produced by a compute dispatch into the
     /// pool, so there is nothing on the host to compare: the palette a caller
     /// hands over is not the geometry, and the geometry is never read back. The
     /// honest answer is to redraw, and the dishonest one is a map of a pose the
-    /// character has left.
+    /// character has left. Without [`SkinnedInstanceDesc::bounds`] nothing says
+    /// which maps the pose is in, so it is every one — see `shadow_reach`'s
+    /// skinned tests for an object that has a box.
     #[test]
-    fn a_frame_with_a_skinned_object_never_caches_the_atlas() {
+    fn a_frame_skinning_an_unboxed_object_never_caches_the_atlas() {
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let mut fixture = SkinnedFixture::build(device, queue);
+        // Pinned, on `shadow_cache_scene`'s terms: a console hold would make a
+        // lap cache for a reason that is not the one asked about.
+        fixture
+            .renderer
+            .set_shadow_cadence(Some(shadow::Cadence::EVERY_FRAME));
         fixture.renderer.set_lights(&[shadowable_spot(-1.0)]);
+        fixture
+            .renderer
+            .add_skinned_instance(&SkinnedInstanceDesc {
+                mesh: &fixture.skinned,
+                material: DEMO_UNTINTED,
+                transform: Mat4::IDENTITY,
+                bounds: None,
+            })
+            .expect("room for one object");
         let imported = swapchain_image_at(device, TEST_EXTENT);
         let mut pool = crate::TransientPool::new();
 
@@ -17996,6 +18014,19 @@ mod tests {
             assert!(
                 !fixture.renderer.shadow_atlas_cached(),
                 "lap {lap} held a shadow map of a pose no host-side comparison can vouch for"
+            );
+            assert!(
+                fixture.renderer.shadow_lights().base_of(0).is_some(),
+                "the spot must hold a slot for its group to be asked about"
+            );
+            assert_eq!(
+                [
+                    fixture.renderer.shadow_cascade_redrawn(0),
+                    fixture.renderer.shadow_cascade_redrawn(1),
+                    fixture.renderer.shadow_slot_redrawn(0),
+                ],
+                [true; 3],
+                "lap {lap}: an object with no box held a group its pose could be in"
             );
         }
 

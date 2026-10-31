@@ -543,9 +543,10 @@ impl ForwardRenderer {
                     self.shadow_group_id[group] = self.shadow_group_id[group].wrapping_add(1);
                 }
                 let (held_id, held_centre, held_reach) = self.shadow_group_held[group];
-                // A skinned frame's vertices are written by a compute pass into the
-                // pool, so nothing on the host can tell this group's maps from the
-                // last frame's — see [`ForwardRenderer::frame_skins`].
+                // A skinned frame needs no veto of its own here: every object it
+                // re-points is an instance write, so its footprint is already in
+                // `shadow_group_writes` — see
+                // [`ForwardRenderer::point_skinned_instances`].
                 //
                 // **No group is held while the probe updater is on**, and that is a
                 // correctness rule rather than a cost: the reflective shadow maps
@@ -561,11 +562,7 @@ impl ForwardRenderer {
                 // texels they already held, so the atlas is unchanged; what it buys
                 // is a map for the gather to read.
                 let updater_needs_it = self.probe_update_runs();
-                if !relaid
-                    && !self.frame_skins
-                    && !updater_needs_it
-                    && held_id == self.shadow_group_id[group]
-                {
+                if !relaid && !updater_needs_it && held_id == self.shadow_group_id[group] {
                     continue;
                 }
                 wanted[group] = Some(shadow::Group {

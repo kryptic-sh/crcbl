@@ -107,7 +107,11 @@ fn skinned_instance_refusal_preserves_prior_skinning_and_retries_pending_uploads
             "{result:?}"
         );
         assert_eq!(fixture.renderer.frame, slot);
-        assert!(fixture.renderer.frame_skins);
+        // The re-point happened before the refusal, so it is a write still
+        // waiting in the log the shadow cache drains — left there, for the next
+        // frame's footprint test to read.
+        let pending = fixture.renderer.instances.pending_written();
+        assert!(pending.contains(&skinned.index()), "{pending:?}");
         let parity = fixture.skinning.parity();
         assert_ne!(
             parity, old_parity,

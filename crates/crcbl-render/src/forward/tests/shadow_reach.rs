@@ -284,3 +284,282 @@ fn a_light_redraws_for_the_eye_only_while_a_dag_is_in_its_cull() {
     renderer.destroy(device);
     recorder.assert_valid();
 }
+
+/// Draws one **skinned** frame of `fixture` and answers which groups it
+/// redrew, on [`redrawn`]'s terms: the fixture's one range is skinned, so every
+/// object drawn out of its region is re-pointed.
+fn skinned_redrawn(
+    device: &dyn Device,
+    fixture: &mut SkinnedFixture,
+    queue: QueueHandle,
+) -> [bool; 4] {
+    fixture.begin(device);
+    skinned_groups_drawn(device, fixture, queue)
+}
+
+/// [`skinned_redrawn`] with an **empty** skinning plan: no region is
+/// dispatched, and the parity still alternates.
+fn unplanned_redrawn(
+    device: &dyn Device,
+    fixture: &mut SkinnedFixture,
+    queue: QueueHandle,
+) -> [bool; 4] {
+    fixture
+        .renderer
+        .begin_skinned_frame(
+            device,
+            &mut fixture.skinning,
+            &[],
+            &Camera::default(),
+            &DirectionalLight::default(),
+            TEST_EXTENT,
+        )
+        .expect("an empty plan is legal");
+    skinned_groups_drawn(device, fixture, queue)
+}
+
+/// Records and runs the frame `fixture`'s renderer has just begun, and answers
+/// which groups it redrew, on [`redrawn`]'s terms.
+fn skinned_groups_drawn(
+    device: &dyn Device,
+    fixture: &mut SkinnedFixture,
+    queue: QueueHandle,
+) -> [bool; 4] {
+    let imported = swapchain_image(device);
+    let mut graph = crate::RenderGraph::new(queue);
+    let target = graph.import_image("target", imported);
+    let mut pool = crate::TransientPool::new();
+    fixture
+        .renderer
+        .add_skinned_passes(&mut graph, &pool, target, TEST_EXTENT, &fixture.skinning);
+    let compiled = graph.compile(&pool).expect("a legal frame");
+    let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+        label: Some("skinned shadow reach"),
+        queue,
+    });
+    compiled
+        .execute(device, &mut pool, encoder.as_mut(), None)
+        .expect("the graph executed");
+    let commands = encoder.finish().expect("recording succeeded");
+    Frame {
+        imported,
+        pool,
+        commands,
+    }
+    .release(device);
+    let renderer = &fixture.renderer;
+    [
+        renderer.shadow_cascade_redrawn(0),
+        renderer.shadow_cascade_redrawn(1),
+        renderer.shadow_slot_redrawn(0),
+        renderer.shadow_slot_redrawn(1),
+    ]
+}
+
+/// A unit model-space box around `centre`, for an object whose transform
+/// is the identity.
+fn skinned_box(centre: Vec3) -> Aabb {
+    Aabb {
+        min: centre - Vec3::splat(0.5),
+        max: centre + Vec3::splat(0.5),
+    }
+}
+
+/// The skinning fixture with [`settled_scene`]'s two lights and one skinned
+/// object placed with `bounds`, drawn for a few skinned frames so the first
+/// frame's whole-atlas redraw is behind it.
+fn skinned_scene(
+    device: &dyn Device,
+    queue: QueueHandle,
+    bounds: Option<Aabb>,
+) -> (SkinnedFixture, InstanceHandle) {
+    let mut fixture = SkinnedFixture::build(device, queue);
+    // Pinned, on `shadow_cache_scene`'s terms.
+    fixture
+        .renderer
+        .set_shadow_cadence(Some(shadow::Cadence::EVERY_FRAME));
+    fixture
+        .renderer
+        .set_lights(&[shadowable_spot(SPOT), shadowable_point(POINT)]);
+    let handle = fixture
+        .renderer
+        .add_skinned_instance(&SkinnedInstanceDesc {
+            mesh: &fixture.skinned,
+            material: DEMO_UNTINTED,
+            transform: Mat4::IDENTITY,
+            bounds,
+        })
+        .expect("room for one object");
+    assert_eq!(
+        skinned_redrawn(device, &mut fixture, queue),
+        [true; 4],
+        "the first frame of all draws every group"
+    );
+    assert!(
+        fixture.renderer.shadow_lights().base_of(1).is_some(),
+        "the point light must hold a slot for its group to be asked about"
+    );
+    (fixture, handle)
+}
+
+/// **A skinned object with a box redraws the lights its box reaches on every
+/// frame it is skinned, and holds the others** — the skinned twin of
+/// `a_moved_caster_redraws_the_lights_it_was_or_is_in_and_no_other`, with the
+/// pose standing for the move: the dispatch writes new vertices every frame,
+/// so the box is a write every frame.
+#[test]
+fn a_boxed_skinned_object_redraws_only_the_lights_its_box_reaches() {
+    let _blurs = ssao_blur_switch();
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let in_spot = skinned_box(Vec3::new(SPOT, 0.0, 0.0));
+    let (mut fixture, _) = skinned_scene(device, queue, Some(in_spot));
+
+    for frame in 0..4 {
+        let drew = skinned_redrawn(device, &mut fixture, queue);
+        assert_eq!(
+            [drew[2], drew[3]],
+            [true, false],
+            "skinned frame {frame}: a pose in the spot's cone redraws the spot and holds the \
+             point light, which its box cannot reach"
+        );
+    }
+
+    fixture.destroy(device);
+    recorder.assert_valid();
+}
+
+/// **One skinned object with no box redraws every map**, whatever a boxed one
+/// beside it reaches: nothing bounds its vertices, so its footprint is
+/// everywhere.
+#[test]
+fn an_unboxed_skinned_object_redraws_every_light_beside_a_boxed_one() {
+    let _blurs = ssao_blur_switch();
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let in_spot = skinned_box(Vec3::new(SPOT, 0.0, 0.0));
+    let (mut fixture, _) = skinned_scene(device, queue, Some(in_spot));
+    for _ in 0..2 {
+        skinned_redrawn(device, &mut fixture, queue);
+    }
+    fixture
+        .renderer
+        .add_skinned_instance(&SkinnedInstanceDesc {
+            mesh: &fixture.skinned,
+            material: DEMO_UNTINTED,
+            // Far from both lights, so only the missing box can put it in them.
+            transform: Mat4::from_translation(AWAY),
+            bounds: None,
+        })
+        .expect("room for a second object");
+
+    for frame in 0..4 {
+        assert_eq!(
+            skinned_redrawn(device, &mut fixture, queue),
+            [true; 4],
+            "skinned frame {frame}: an object with no box held a map its pose could be in"
+        );
+    }
+
+    fixture.destroy(device);
+    recorder.assert_valid();
+}
+
+/// **A box that moves redraws the lights it reached before the move and the
+/// ones it reaches after**, and the frame after the move only the latter:
+/// from the spot's cone to the point light's reach, the frame of the move
+/// redraws both, because the spot's map still holds the pose that left it.
+#[test]
+fn a_moved_skinned_box_redraws_the_lights_it_left_and_entered() {
+    let _blurs = ssao_blur_switch();
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let in_spot = skinned_box(Vec3::new(SPOT, 0.0, 0.0));
+    let (mut fixture, handle) = skinned_scene(device, queue, Some(in_spot));
+    for _ in 0..2 {
+        skinned_redrawn(device, &mut fixture, queue);
+    }
+
+    let at_point = skinned_box(Vec3::new(POINT, 0.0, 0.0));
+    fixture
+        .renderer
+        .set_skinned_bounds(handle, Some(at_point))
+        .expect("a finite, ordered box");
+    let moved = skinned_redrawn(device, &mut fixture, queue);
+    assert_eq!(
+        [moved[2], moved[3]],
+        [true, true],
+        "the box moved from the spot's cone to the point light: which lights redrew"
+    );
+    let after = skinned_redrawn(device, &mut fixture, queue);
+    assert_eq!(
+        [after[2], after[3]],
+        [false, true],
+        "the frame after the move: the spot's map no longer holds the pose"
+    );
+
+    fixture.destroy(device);
+    recorder.assert_valid();
+}
+
+/// **A skinned object is redrawn on every skinned frame whether or not its
+/// region was in the plan**: the parity alternates either way, so it draws out
+/// of the other half of its region — an older pose — and the re-point that
+/// says so is the write that reaches the shadow cache. Both ways to be left
+/// out: a plan naming another region, and an empty plan.
+#[test]
+fn a_boxed_skinned_object_left_out_of_the_plan_still_redraws_its_lights() {
+    let _blurs = ssao_blur_switch();
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let in_spot = skinned_box(Vec3::new(SPOT, 0.0, 0.0));
+
+    // A plan naming the fixture's region, and the object drawn out of another
+    // one, which no range this test hands over names.
+    let (mut fixture, placed) = skinned_scene(device, queue, None);
+    fixture.renderer.remove_instance(placed);
+    let other = fixture
+        .renderer
+        .reserve_skinned(DEMO_CUBE)
+        .expect("room for a second region");
+    fixture
+        .renderer
+        .add_skinned_instance(&SkinnedInstanceDesc {
+            mesh: &other,
+            material: DEMO_UNTINTED,
+            transform: Mat4::IDENTITY,
+            bounds: Some(in_spot),
+        })
+        .expect("room for one object");
+    for _ in 0..2 {
+        skinned_redrawn(device, &mut fixture, queue);
+    }
+    for frame in 0..3 {
+        let drew = skinned_redrawn(device, &mut fixture, queue);
+        assert_eq!(
+            [drew[2], drew[3]],
+            [true, false],
+            "frame {frame} skinned another region: the object left out of the plan held the \
+             spot's map, or redrew a light its box cannot reach"
+        );
+    }
+    fixture.renderer.release_skinned(other);
+    fixture.destroy(device);
+
+    // An empty plan, with the object drawn out of the fixture's own region.
+    let (mut fixture, _) = skinned_scene(device, queue, Some(in_spot));
+    for _ in 0..2 {
+        unplanned_redrawn(device, &mut fixture, queue);
+    }
+    for frame in 0..3 {
+        let drew = unplanned_redrawn(device, &mut fixture, queue);
+        assert_eq!(
+            [drew[2], drew[3]],
+            [true, false],
+            "empty plan {frame}: the object held the spot's map, or redrew a light its box \
+             cannot reach"
+        );
+    }
+    fixture.destroy(device);
+    recorder.assert_valid();
+}

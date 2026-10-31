@@ -10082,10 +10082,11 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   - **Not measured** on D3D12, Metal, WebGPU or lavapipe, and the host cost of
     the footprint tests (one `MeshPool::table_entries` decode and an AABB test
     per written element per group, on frames with writes) is unpriced.
-  - **Deliberately kept:** `frame_skins` and the probe updater still veto every
-    hold; a light a live DAG instance can reach still redraws on every eye move;
-    growing `InstancePool::slot_count` (an insert above the high-water mark)
-    redraws every group, because the instance count is in every record.
+  - **Deliberately kept:** the probe updater still vetoes every hold; a skinned
+    object with no `SkinnedInstanceDesc::bounds` redraws every group on every
+    skinned frame; a light a live DAG instance can reach still redraws on every
+    eye move; growing `InstancePool::slot_count` (an insert above the high-water
+    mark) redraws every group, because the instance count is in every record.
   - **`depth_pass_reads` is checked against the shaders, within one scene's
     sight.** `FRAME_UNIFORMS_READERS` classifies every `FrameUniforms` field,
     and `mesh_e2e`'s
@@ -13197,23 +13198,33 @@ What the rung did leave behind:
   rung, not a refactor, because the present rule is deliberate and is argued in
   `ForwardRenderer::begin_frame_body`'s comment.
 
-- **A skinned frame never caches, by construction.**
-  `ForwardRenderer::frame_skins` vetoes the answer whenever
-  `begin_skinned_frame` was given a non-empty plan: the vertices are written by
-  a compute pass and there is nothing on the host to compare. A frame with an
-  idle character therefore pays for the whole atlas. Making it cheaper needs the
-  skinning pass to report that a palette did not change, which nothing asks it
-  for today. The performance review re-read `Skinning::begin_frame`,
-  `ForwardRenderer::begin_skinned_frame`, `point_skinned_instances`,
-  `shadow_group_record` and the group-reuse condition in `begin_frame_body`. The
-  current path validates inputs, advances output parity, repoints current and
-  previous base vertices, uploads instances, then vetoes reuse for an active
-  skinning plan. A static world transform alone is insufficient evidence that a
+- **A skinned object redraws the groups its box reaches on every skinned
+  frame.** The vertices are written by a compute pass and there is nothing on
+  the host to compare, so `point_skinned_instances`' re-point of every skinned
+  object (a `set_bases` write, whether or not its region was in the frame's
+  `ranges`, since the parity alternates either way) is what reaches the cache:
+  `note_caster_writes` turns it into a footprint like any rigid write. An object
+  with a `SkinnedInstanceDesc::bounds` box redraws only the groups that box
+  reaches before or after the frame; one without a box is
+  `CasterFootprint::Everywhere` and redraws every group. None of the workspace's
+  own callers passes a box yet (see _Cooked animated bounds_), so `apps/puppet`,
+  `apps/viewer` and `apps/editor` still redraw the whole atlas on every skinned
+  frame. An idle character with a box still pays for its own groups every frame.
+  Making that cheaper needs the skinning pass to report that a palette did not
+  change, which nothing asks it for today. The performance review re-read
+  `Skinning::begin_frame`, `ForwardRenderer::begin_skinned_frame`,
+  `point_skinned_instances`, `shadow_group_record` and the group-reuse condition
+  in `begin_frame_body`. The current path validates inputs, advances output
+  parity, repoints current and previous base vertices and uploads instances, and
+  the re-point is the write that redraws the groups the object's footprint
+  reaches. A static world transform alone is insufficient evidence that a
   caster's vertices are unchanged. Decline transform-only shadow reuse; any
   future unchanged-pose optimization must also preserve dynamic bindings,
   output-half contents, previous-pose motion vectors, empty-plan behavior and
   failed-upload recovery. Source review establishes these contracts; a priced
-  actual-renderer skinned workload and replacement images remain unverified.
+  actual-renderer skinned workload and replacement images remain unverified. The
+  per-box narrowing is checked by `shadow_reach`'s skinned tests on the null
+  backend only; what it saves on a GPU is unmeasured.
 
 - **A moved instance costs two redraws, not one.** `InstancePool`'s
   carry-forward settles a moved record's `previous_transform` on the frame

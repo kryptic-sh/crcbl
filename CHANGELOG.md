@@ -55,6 +55,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   skeleton with 8 turns per character it is about 4.5x faster than the per-call
   path. `rotate_joint` is unchanged.
 
+### Changed
+
+- **A skinned frame no longer redraws every shadow map.** The cache used to veto
+  every hold on a frame whose `begin_skinned_frame` plan was non-empty, so a
+  scene with animated characters never kept a shadow map. The veto is gone, and
+  the instance write each skinned object's per-frame re-point already made now
+  decides the redraw, as a moving rigid instance's write does: an object with a
+  `SkinnedInstanceDesc::bounds` box redraws the cascades and light slots (a
+  point light's six faces together) its box reaches before or after the frame,
+  and holds the rest. An object with no box still redraws every map on every
+  skinned frame, and so does any frame with one such object in it.
+
 ## [0.14.0] - 2026-10-31
 
 ### Breaking
