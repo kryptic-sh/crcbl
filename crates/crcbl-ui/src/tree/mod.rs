@@ -211,6 +211,8 @@ pub mod focus;
 mod font_tests;
 pub(crate) mod inline;
 mod layout;
+#[cfg(test)]
+mod measure_tests;
 mod paragraph;
 #[cfg(test)]
 mod paragraph_tests;
@@ -1173,7 +1175,6 @@ impl Ui {
         self.store.prune(self.frame);
         let store = &self.store;
         self.edits.retain(|key, _| store.find(*key).is_some());
-        self.measure.retain(&self.live_text);
 
         let space = taffy::Size {
             width: available.width.to_taffy(),
@@ -1196,6 +1197,7 @@ impl Ui {
         }
         self.lay_out_paragraphs(atlas);
         self.cut_text(atlas);
+        self.measure.end_cycle(&self.live_text);
         self.fit_text_inputs(atlas);
         self.clamp_scroll();
         self.place(origin);

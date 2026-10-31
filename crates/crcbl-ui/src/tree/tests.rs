@@ -524,7 +524,8 @@ fn adding_a_child_clears_the_parent_and_its_ancestors() {
 
 /// **Text is measured once per (text, scale, width bucket)**, a second span of
 /// the same text is answered from the cache, and a frame whose tree did not
-/// change measures nothing at all.
+/// change measures nothing at all. Text a frame no longer builds is held for
+/// a while after; `measure_tests.rs` has when it goes.
 #[test]
 fn text_is_measured_once_and_an_unchanged_frame_measures_nothing() {
     let atlas = FontAtlas::built_in();
@@ -569,8 +570,8 @@ fn text_is_measured_once_and_an_unchanged_frame_measures_nothing() {
     assert!(ui.measure.misses > first.0, "new text was not measured");
     assert_eq!(
         ui.measure.texts(),
-        1,
-        "the old text's measurements outlived its span"
+        2,
+        "the old text's measurements did not outlive its span"
     );
 }
 

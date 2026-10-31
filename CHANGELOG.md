@@ -121,6 +121,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-ui`'s text measure cache keeps a text's measurements for a while
+  after the layout that last built it**, rather than only for text that layout
+  built. A game that draws each label as a begin-frame, layout and emit cycle of
+  its own on one `Ui` no longer measures and shapes every label again every
+  frame: 180 ellipsis labels drawn that way went from about 795 µs to 270 µs a
+  frame at 400 px. Memory stays bounded for text that changes every frame, such
+  as a timer: unused text is dropped after a fixed number of layouts, the cache
+  holds a fixed maximum number of texts, and a wrapping text keeps a fixed
+  maximum number of widths.
 - **A `text-overflow: ellipsis` span in a parsed font is cut without shaping
   every prefix its search tries**: each probe is first settled from the advances
   its whole line already shaped, and only the prefixes that estimate cannot

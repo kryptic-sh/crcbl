@@ -49,13 +49,64 @@ struct MeasureKey {
     width: WidthBucket,
 }
 
+/// How many layouts a text's measurements are held for after the last one
+/// that built or measured it.
+///
+/// **Longer than any frame's layouts**: a game that draws each label as a
+/// begin-frame, layout and emit cycle of its own on one [`super::Ui`] lays out
+/// once per label, so a label drawn every frame comes back within one frame's
+/// labels, and is held across frames as long as a frame draws fewer labels
+/// than this. **Short enough that a churning label**,
+/// a timer whose text is new every layout, leaves no more dead texts behind
+/// than this and one [`SWEEP_EVERY`] between sweeps.
+pub(super) const RETENTION_CYCLES: u64 = 1024;
+
+/// How many layouts pass between sweeps for texts older than
+/// [`RETENTION_CYCLES`]. A sweep visits every text held, so a frame of one
+/// layout per label sweeps once per this many labels rather than once per
+/// label.
+pub(super) const SWEEP_EVERY: u64 = 64;
+
+/// The most texts held after a layout, whatever their age: the bound on a UI
+/// whose text churns faster than [`RETENTION_CYCLES`] can let it go, such as
+/// many timers at once.
+///
+/// Room for one churning label's whole window and the layouts between sweeps,
+/// so a single one never reaches it. Each text holds a few sizes, at most
+/// [`WIDTHS_KEPT`] definite widths, and at most one `nowrap` layout and its
+/// cut, so this bounds the cache's memory.
+pub(super) const TEXTS_KEPT: usize = 2048;
+
+/// How many texts a layout that finds more than [`TEXTS_KEPT`] keeps: the
+/// newest. Below the cap by a quarter of it, so the eviction, which visits
+/// every text, runs at most once per that many new texts — each one measured,
+/// which costs far more than its share of the eviction.
+pub(super) const TEXTS_AFTER_EVICTION: usize = TEXTS_KEPT / 4 * 3;
+
+/// The most definite widths one text's measurements are held at; a new one
+/// past it drops the one measured first. A steady layout asks a wrapping text
+/// at one or two, so this holds a box moving between a few widths, while a
+/// box dragged through every width does not grow its text's entry without
+/// bound.
+pub(super) const WIDTHS_KEPT: usize = 8;
+
+const _: () = assert!(TEXTS_KEPT as u64 > RETENTION_CYCLES + SWEEP_EVERY);
+
 /// Text measurements, keyed by (text and its font, size and line height, width
 /// bucket), on Clay's measure-cache pattern.
 ///
 /// A flex pass asks a leaf for its min-content and max-content size and again
 /// at its final width, and a text span answers all three from one
-/// measurement here. Entries for text no live span holds are dropped at
-/// layout.
+/// measurement here.
+///
+/// **A text's measurements outlive the layout that built it**, so a UI that
+/// lays out one label per cycle finds each label's measurements again next
+/// frame: they are held while some layout in the last [`RETENTION_CYCLES`]
+/// built a span of that text, or measured it, and dropped at a sweep after
+/// that. Never more than [`TEXTS_KEPT`] texts are held after a layout; past
+/// it, the ones built or measured longest ago go first. Holding a measurement
+/// longer is never wrong: it is found by content hash, and a `nowrap` layout
+/// is checked against its text, font and size before it is used.
 ///
 /// Text in a parsed font is laid out by [`TextLayout`]: its max-content size
 /// unbroken, its min-content size broken at every space, and at a definite
@@ -67,13 +118,15 @@ struct MeasureKey {
 ///
 /// **A `nowrap` span's layout is kept with its size**, so cutting it to fit
 /// ([`super::ellipsis`]) and drawing it shape nothing again: one layout per
-/// live `nowrap` span in a parsed font, held as long as its text is. **So is
+/// `nowrap` span's text in a parsed font, held as long as its sizes are. **So is
 /// the cut** an ellipsis span's text was last cut to fit with, and the width it
 /// was cut at, so a steady frame cuts none of its spans again.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MeasureCache {
-    entries: HashMap<MeasureKey, Measured>,
-    /// Measurements answered from `entries`.
+    texts: HashMap<u64, Held>,
+    /// How many layouts have ended: what [`Held::used`] is stamped with.
+    cycle: u64,
+    /// Measurements answered from `texts`.
     pub hits: u64,
     /// Measurements that went to the font.
     pub misses: u64,
@@ -183,7 +236,7 @@ impl MeasureCache {
             text: content_hash,
             width: WidthBucket::Any,
         };
-        if let Some(entry) = self.entries.get_mut(&key)
+        if let Some(entry) = self.held_mut(key)
             && entry.layout.is_some()
         {
             entry.cut = Some(cut);
@@ -206,7 +259,7 @@ impl MeasureCache {
             text: content_hash,
             width: WidthBucket::Any,
         };
-        self.entries.get(&key).filter(|entry| {
+        self.held(key).filter(|entry| {
             entry
                 .layout
                 .as_ref()
@@ -231,30 +284,141 @@ impl MeasureCache {
 
     /// The entry held under `key`, or `measure`'s, held from now on.
     fn entry(&mut self, key: MeasureKey, measure: impl FnOnce() -> Measured) -> &Measured {
-        // Counted before the entry is borrowed, which ends the borrow `get`
-        // would hold across the insert.
-        if self.entries.contains_key(&key) {
-            self.hits += 1;
-        } else {
-            self.misses += 1;
+        let held = self.texts.entry(key.text).or_default();
+        held.used = self.cycle;
+        if key.width == WidthBucket::Any {
+            if held.any.is_some() {
+                self.hits += 1;
+            } else {
+                self.misses += 1;
+            }
+            return held.any.get_or_insert_with(measure);
         }
-        self.entries.entry(key).or_insert_with(measure)
+        let measured = &mut held.widths;
+        if let Some(at) = measured.iter().position(|(width, _)| *width == key.width) {
+            self.hits += 1;
+            return &measured[at].1;
+        }
+        self.misses += 1;
+        let definite =
+            |(width, _): &(WidthBucket, Measured)| matches!(width, WidthBucket::Definite(_));
+        if matches!(key.width, WidthBucket::Definite(_))
+            && measured.iter().filter(|entry| definite(entry)).count() >= WIDTHS_KEPT
+            && let Some(first) = measured.iter().position(definite)
+        {
+            measured.remove(first);
+        }
+        measured.push((key.width, measure()));
+        &measured[measured.len() - 1].1
     }
 
-    /// Drops every entry for text not in `live`.
-    pub fn retain(&mut self, live: &HashSet<u64>) {
-        self.entries.retain(|key, _| live.contains(&key.text));
+    /// The entry held under `key`, if one is.
+    fn held(&self, key: MeasureKey) -> Option<&Measured> {
+        let held = self.texts.get(&key.text)?;
+        if key.width == WidthBucket::Any {
+            return held.any.as_ref();
+        }
+        held.widths
+            .iter()
+            .find_map(|(width, measured)| (*width == key.width).then_some(measured))
+    }
+
+    /// The entry held under `key`, if one is, to change.
+    fn held_mut(&mut self, key: MeasureKey) -> Option<&mut Measured> {
+        let held = self.texts.get_mut(&key.text)?;
+        if key.width == WidthBucket::Any {
+            return held.any.as_mut();
+        }
+        held.widths
+            .iter_mut()
+            .find_map(|(width, measured)| (*width == key.width).then_some(measured))
+    }
+
+    /// Ends a layout that built the spans and paragraphs whose content hashes
+    /// are `live`: stamps their texts as used now, every [`SWEEP_EVERY`]
+    /// layouts drops the texts unused for [`RETENTION_CYCLES`], and drops the
+    /// longest unused ones past [`TEXTS_KEPT`].
+    ///
+    /// Visits each of `live`, and every text held only at a sweep or past the
+    /// cap, so a frame of many small layouts does not visit the whole cache
+    /// each layout.
+    pub fn end_cycle(&mut self, live: &HashSet<u64>) {
+        let cycle = self.cycle;
+        for hash in live {
+            if let Some(held) = self.texts.get_mut(hash) {
+                held.used = cycle;
+            }
+        }
+        if cycle.is_multiple_of(SWEEP_EVERY) || self.texts.len() > TEXTS_KEPT {
+            self.texts
+                .retain(|_, held| cycle - held.used < RETENTION_CYCLES);
+        }
+        if self.texts.len() > TEXTS_KEPT {
+            self.evict_oldest(TEXTS_AFTER_EVICTION);
+        }
+        self.cycle += 1;
+    }
+
+    /// Drops the texts used longest ago until `keep` are held, ties between
+    /// texts used at the same layout broken in the map's order.
+    fn evict_oldest(&mut self, keep: usize) {
+        let excess = self.texts.len().saturating_sub(keep);
+        if excess == 0 {
+            return;
+        }
+        let mut used: Vec<u64> = self.texts.values().map(|held| held.used).collect();
+        // The oldest stamp a kept text may have: `excess` texts are older or
+        // as old.
+        let (_, &mut threshold, _) = used.select_nth_unstable(excess - 1);
+        let older = used.iter().filter(|&&stamp| stamp < threshold).count();
+        let mut at_threshold = excess - older;
+        self.texts.retain(|_, held| {
+            if held.used < threshold {
+                false
+            } else if held.used == threshold && at_threshold > 0 {
+                at_threshold -= 1;
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// How many different strings have measurements held.
     #[cfg(test)]
     pub fn texts(&self) -> usize {
-        self.entries
-            .keys()
-            .map(|key| key.text)
-            .collect::<HashSet<_>>()
-            .len()
+        self.texts.len()
     }
+
+    /// Whether any measurement of content `content_hash` is held.
+    #[cfg(test)]
+    pub fn holds(&self, content_hash: u64) -> bool {
+        self.texts.contains_key(&content_hash)
+    }
+
+    /// How many measurements are held, under every width of every text.
+    #[cfg(all(test, feature = "parsed-font"))]
+    pub fn measurements(&self) -> usize {
+        self.texts
+            .values()
+            .map(|held| usize::from(held.any.is_some()) + held.widths.len())
+            .sum()
+    }
+}
+
+/// One text's measurements, and when it was last used.
+#[derive(Clone, Debug, Default)]
+struct Held {
+    /// The layout that last built a span of this text or measured it: the
+    /// [`MeasureCache::cycle`] it ran in.
+    used: u64,
+    /// Its one measurement under every width, for text that measures the
+    /// same under all of them: held in place, so a `nowrap` span's layout is
+    /// one lookup away.
+    any: Option<Measured>,
+    /// Its measurement under each other width it was asked under, in the
+    /// order they were measured.
+    widths: Vec<(WidthBucket, Measured)>,
 }
 
 /// One measurement held.

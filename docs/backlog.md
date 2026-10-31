@@ -105,11 +105,10 @@ an ellipsis span draws the layout its cut measured. Left:
     em and a `calt` that fires only before "…" would pin it. Also: a wrongly
     rejected probe goes unnoticed (shorter cut), and two spans with the same
     text at different widths share one kept-cut slot and re-cut each frame.
-  - **Measurements do not survive a cycle.** `Ui::layout` calls
-    `MeasureCache::retain` against `live_text`, which `begin_frame_with` clears,
-    so one cycle per label keeps only the last label and reshapes every label
-    every frame (EW pattern at 400 px: 750 µs against ~176 µs when the cache
-    hits). Evict by age or a size cap instead of "live this cycle".
+  - **One layout with more live texts than the measure cache keeps**
+    (`TEXTS_KEPT` in `crates/crcbl-ui/src/tree/layout.rs`, evicting to
+    three-quarters of it) drops some of its own texts each cycle and measures
+    them again; bounded, and only for a very large single layout.
   - **`NodeStyle::layout_hash` runs for every node every frame** in `Ui::close`
     even when `resolve_style` reused the stored style; the stored hash is still
     valid then. 2.6–6.5% of the frame.
@@ -5689,27 +5688,6 @@ open):
   since. **A retained layout cache is still only a candidate**, to be priced
   against the emission cost that remains. It carries the state that sank the
   retained-geometry trial above, so it needs a measured win before it is built.
-- `tree::layout::MeasureCache::text` keys bitmap measurements by width even
-  though its bitmap branch never wraps. `MeasureCache::retain` removes entries
-  only when their content hash disappears from `Ui::live_text`, so previously
-  visited width buckets remain for unchanged live labels. A matched external
-  source-copy screen requested 512 distinct definite widths for one unchanged
-  label, calling the existing retention rule after each request: bitmap and sans
-  each retained 512 entries with 512 misses and no hits. Every result matched an
-  independently constructed font measurement; dropping the live content removed
-  all entries, and corrupting the expected retained-entry count failed the named
-  check. This establishes direct-cache behavior, not actual `Ui` resize
-  frequency, heap bytes or frame latency. The actual editor `Panels::frame`
-  receives the current window extent, builds docked panels and calls
-  `Ui::layout` with definite available space; `Ui::dock_node` also applies
-  changed divider positions to its layout. These are relevant callers, but their
-  actual measurement-cache growth has not been observed. Measure dock splitting,
-  viewport resizing and long-lived panels before prioritizing width-bucket
-  normalization for bitmap text or a bounded sans measurement cache. Preserve
-  font/size/line-height identity, parsed-font wrapping, min/max-content
-  semantics, measurement correctness and dead-content pruning. This memory
-  candidate stays behind the measured sans-layout production trial; no
-  production change is applied.
 - UI clipping follow-up inspected `tree::emit::Ui::{emit, emit_node}`,
   `DrawList::{clip, push_clip}` and `ClipRect::intersect`. Emission skips
   `Display::None`, but otherwise visits descendants and builds sans layouts or
