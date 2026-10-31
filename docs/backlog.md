@@ -156,6 +156,20 @@ an ellipsis span draws the layout its cut measured. Left:
 - `Shaper::plan` has no multi-threaded test; its `Sync` bound is the compiler's
   check only.
 
+## Flappy's sRGB check still races the bird's death on SwiftShader (2026-10-31)
+
+`web/tools/browser-e2e.mjs` group G puts the demo in play before sampling the
+sky (the 2026-08-20 fix), then samples for up to `BACKDROP_SAMPLES` ×
+`BACKDROP_INTERVAL_MS`. On Pages run 41173240354 (d319d532, SwiftShader at 43 ms
+a frame) the HUD showed `Playing … vy -0.4` and the sample still read
+`rgb(63,105,141)`, the death screen's uniform 0.61 dim the comment there
+describes: the bird died during the sampling window. Not a regression of
+d319d532 or 6516a6ab (neither touches flappy or UI drawing; the hardware adapter
+passes locally). Fix: sample as soon as the started line appears and stop on the
+first frame that matches, or keep pressing the flap key between samples, or make
+flappy's started state immune to dying for the read (a debug key). Local
+SwiftShader cannot read canvas pixels here, so this reproduces only on CI.
+
 ## Whole-codebase review: bugs (2026-10-30)
 
 A read-only sweep in risk order: unsafe and FFI first, then decoders of
