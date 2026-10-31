@@ -913,6 +913,13 @@ runs). Left:
   `D,F,G,H,I` 22) all ran on the EPYC 7763, which points the 2–3× spread at the
   host CPU; one run, so read a few more before acting. GitHub does not let a job
   pick a CPU model, so the lever is balance: rows sized for the slow host.
+- **After the alcove/tide/lantern split, Pages took 53 min** (run for 0bd498ba,
+  CI 24 min). Slowest rows: puppet `E` 39, shard `E,F,G,H,I` 31, breach `C` 30
+  (12 on the run for 3dbc2430), shard `C,D` 29, alcove `C,D` 26; the rest 24 or
+  less. Puppet `E` is now the whole floor, so rebalancing the other rows buys
+  nothing until its three queued-input cases are split or made cheaper. A
+  docs-only push runs no Pages (`paths-ignore: '**/*.md'`), so a waiter for
+  Pages on one never ends.
 - **Not waiting for Pages before the next push** would roughly halve the cycle;
   `pages.yml` already cancels a superseded main run. A process change, the
   owner's call.
