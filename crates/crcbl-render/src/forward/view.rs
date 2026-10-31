@@ -987,6 +987,171 @@ impl ViewPipelines {
     }
 }
 
+/// The water and grass passes one [`View::build_content`] call builds — each
+/// [`None`] where the call was not asked for it.
+///
+/// **Their pipelines are one [`pipeline_batch`]**, compiled side by side where
+/// the device allows it: on a cold driver cache each is a shader compilation,
+/// none needs another, and a frame that first has both a body and a field
+/// would otherwise pay the water passes' compiles and then the grass passes'.
+/// A backend that cannot take pipelines from several threads creates them one
+/// after another, as `crate::pipeline_batch` decides.
+pub(super) struct ContentPasses {
+    pub(super) water: Option<Water>,
+    pub(super) grass: Option<Grass>,
+}
+
+impl ContentPasses {
+    /// Builds the water passes where `water` and the grass passes where
+    /// `grass`, for `frames` frames in flight, lit through `shadow_sampler`.
+    ///
+    /// **All or nothing**: a failure part-way releases everything this call
+    /// created — the batch's other members included, since every member runs
+    /// whatever the others return — so the caller has nothing to clean up.
+    ///
+    /// `service` runs before each round of the batch, or before each pipeline
+    /// where the batch is serial — see `crate::pipeline_batch`.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any seam call.
+    pub(super) fn new(
+        device: &dyn Device,
+        frames: usize,
+        shadow_sampler: SamplerHandle,
+        water: bool,
+        grass: bool,
+        service: &mut dyn FnMut(),
+    ) -> Result<Self, HalError> {
+        let (water, grass) = Self::pipelines(device, water, grass, service)?;
+        // Each pass releases its own set on its failure; the grass set, which
+        // nothing owns yet while the water passes are built, is released here.
+        let water = match water.map(|set| Water::new(device, set, frames, shadow_sampler)) {
+            None => None,
+            Some(Ok(pass)) => Some(pass),
+            Some(Err(error)) => {
+                if let Some(set) = grass {
+                    set.destroy(device);
+                }
+                return Err(error);
+            }
+        };
+        let grass = match grass.map(|set| Grass::new(device, set, frames, shadow_sampler)) {
+            None => None,
+            Some(Ok(pass)) => Some(pass),
+            Some(Err(error)) => {
+                if let Some(pass) = water {
+                    pass.destroy(device);
+                }
+                return Err(error);
+            }
+        };
+        Ok(Self { water, grass })
+    }
+
+    /// The water and grass passes' pipeline sets, out of one batch.
+    ///
+    /// **The water surface and every grass draw lead**, so each is in the
+    /// earliest round its place allows whatever a round's size: the surface was
+    /// the water passes' costly compile when they were timed apart, and each
+    /// grass draw is a compile on the order of the forward pass's. The water
+    /// copy and the grass dispatches, never timed alone and taken to be cheap,
+    /// trail them.
+    fn pipelines(
+        device: &dyn Device,
+        water: bool,
+        grass: bool,
+        service: &mut dyn FnMut(),
+    ) -> Result<(Option<WaterPipelines>, Option<GrassPipelines>), HalError> {
+        // Every layout and, once the batch is back, every pipeline it made, held
+        // until both sets are whole.
+        let mut pending = Partial::new(device);
+        let water = if water {
+            Some(WaterLayouts::new(device, &mut pending)?)
+        } else {
+            None
+        };
+        let grass = if grass {
+            Some(GrassLayouts::new(device, &mut pending)?)
+        } else {
+            None
+        };
+        let surface = water.map(|layouts| move || layouts.surface(device).map(Pipeline::Graphics));
+        let draws = grass.map(|layouts| {
+            GrassLayouts::DRAWS
+                .map(|draw| move || layouts.draw(device, draw).map(Pipeline::Graphics))
+        });
+        let copy = water.map(|layouts| {
+            move || {
+                layouts
+                    .copy(device, ForwardRenderer::build_fullscreen_with)
+                    .map(Pipeline::Graphics)
+            }
+        });
+        let clear = grass.map(|layouts| move || layouts.clear(device).map(Pipeline::Compute));
+        let generate = grass.map(|layouts| move || layouts.generate(device).map(Pipeline::Compute));
+        // In the order the results are read back out of below.
+        let mut jobs: Vec<&pipeline_batch::Job<'_, _>> = Vec::new();
+        if let Some(job) = &surface {
+            jobs.push(job);
+        }
+        for job in draws.iter().flatten() {
+            jobs.push(job);
+        }
+        if let Some(job) = &copy {
+            jobs.push(job);
+        }
+        if let Some(job) = &clear {
+            jobs.push(job);
+        }
+        if let Some(job) = &generate {
+            jobs.push(job);
+        }
+        let made = pipeline_batch::create_listed(device, service, &jobs);
+        // Every success is held before any error propagates: the batch ran each
+        // member whatever the others returned, and dropping an unvisited result
+        // does not release its handle.
+        for pipeline in made.iter().flatten() {
+            pending.add(*pipeline);
+        }
+        let mut made = made.into_iter();
+        let mut next = || {
+            made.next()
+                .unwrap_or_else(|| unreachable!("one result per job"))
+        };
+        let surface = water.map(|_| next());
+        let draws = grass.map(|_| GrassLayouts::DRAWS.map(|_| next()));
+        let copy = water.map(|_| next());
+        let clear = grass.map(|_| next());
+        let generate = grass.map(|_| next());
+        let water = match (water, surface, copy) {
+            (Some(layouts), Some(surface), Some(copy)) => {
+                Some(layouts.finish(copy?.graphics(), surface?.graphics()))
+            }
+            _ => None,
+        };
+        let grass = match (grass, draws, clear, generate) {
+            (Some(layouts), Some(draws), Some(clear), Some(generate)) => {
+                let [raster, shell, fin, blade_near, blade_far] = draws;
+                Some(layouts.finish(
+                    clear?.compute(),
+                    generate?.compute(),
+                    [
+                        raster?.graphics(),
+                        shell?.graphics(),
+                        fin?.graphics(),
+                        blade_near?.graphics(),
+                        blade_far?.graphics(),
+                    ],
+                ))
+            }
+            _ => None,
+        };
+        pending.keep();
+        Ok((water, grass))
+    }
+}
+
 impl View {
     /// Creates one camera's resources against the scene `inputs` describes.
     ///
@@ -1593,39 +1758,45 @@ impl View {
     /// groups.
     ///
     /// The first frame with water pays the surface's pipelines, and the first
-    /// frame with grass its dispatches and the draw batch — a hitch,
-    /// cold, on the frame a body or a field first appears.
+    /// frame with grass its dispatches and the draw batch — a hitch, cold, on
+    /// the frame a body or a field first appears. A call that builds both
+    /// compiles them in one batch — see [`ContentPasses`] — and a caller that
+    /// knows its content early can pay it under a loading screen instead — see
+    /// [`ForwardRenderer::prepare_content`].
+    ///
+    /// `service` runs between the batch's rounds — see [`ContentPasses::new`].
     ///
     /// # Errors
     ///
-    /// [`HalError`] from a constructor. Whatever is already held stays held;
-    /// one that failed part-way has released what it had created — see
-    /// [`crate::partial`].
+    /// [`HalError`] from a constructor, and then this view holds what it held
+    /// before the call: [`ContentPasses::new`] releases whatever it had
+    /// created — see [`crate::partial`].
     pub(super) fn build_content(
         &mut self,
         device: &dyn Device,
         water: bool,
         grass: bool,
+        service: &mut dyn FnMut(),
     ) -> Result<(), HalError> {
-        let frames = self.uniforms.len();
-        if water && self.water.is_none() {
-            // The full-screen builder with a depth state, because the copy pass
-            // writes a colour target and a depth one at once.
-            self.water = Some(Water::new(
-                device,
-                frames,
-                self.shadow_sampler,
-                ForwardRenderer::build_fullscreen_with,
-            )?);
+        let water = water && self.water.is_none();
+        let grass = grass && self.grass.is_none();
+        if !water && !grass {
+            return Ok(());
         }
-        if grass && self.grass.is_none() {
-            // The atlas's sampler, because the cards are lit through a copy of
-            // the forward pass's cascade walk.
-            self.grass = Some(crate::grass::Grass::new(
-                device,
-                frames,
-                self.shadow_sampler,
-            )?);
+        // The atlas's comparison sampler, which both passes bind.
+        let built = ContentPasses::new(
+            device,
+            self.uniforms.len(),
+            self.shadow_sampler,
+            water,
+            grass,
+            service,
+        )?;
+        if let Some(pass) = built.water {
+            self.water = Some(pass);
+        }
+        if let Some(pass) = built.grass {
+            self.grass = Some(pass);
         }
         Ok(())
     }
@@ -1684,7 +1855,7 @@ impl View {
         }
         // And the water and grass passes for the bodies and field this frame
         // draws, on the same terms — see [`View::build_content`].
-        self.build_content(device, frame.water, frame.grass.is_some())?;
+        self.build_content(device, frame.water, frame.grass.is_some(), &mut || {})?;
         self.frame_effects = effects;
         self.frame_extent = extent;
         self.frame_target_extent = frame.target_extent;

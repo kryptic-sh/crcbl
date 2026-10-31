@@ -179,7 +179,7 @@ use crate::bloom::Bloom;
 use crate::cmaa2::Cmaa2;
 use crate::exposure::{Exposure, ExposureAdaptation, ExposureBuffers};
 use crate::fxaa::Fxaa;
-use crate::grass::{Grass, GrassFrame, GrassScene};
+use crate::grass::{Grass, GrassFrame, GrassLayouts, GrassPipelines, GrassScene};
 use crate::grid::{Grid as GroundGrid, GridStyle};
 use crate::hiz::Hiz;
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError};
@@ -207,7 +207,9 @@ use crate::volumetric::{
     FroxelBuffers, Medium, Volumetric, VolumetricImages, VolumetricLayouts, VolumetricPipelines,
     VolumetricReads,
 };
-use crate::water::{Water, WaterBodies, WaterFrame, WaterImages, WaterInputs};
+use crate::water::{
+    Water, WaterBodies, WaterFrame, WaterImages, WaterInputs, WaterLayouts, WaterPipelines,
+};
 use crcbl_shaders::atmosphere::{SKY_VIEW_BUILD_ROWS, SkyView, SkyViewBuild};
 
 mod bucket_draws;
@@ -3458,7 +3460,8 @@ impl ForwardRenderer {
     /// post-processing subsystems, before every round of the mesh-pass
     /// pipelines, and between the build's other phases. The water and grass
     /// passes are not built here: the first frame with a body or a field
-    /// builds them — see `View::build_content`.
+    /// builds them, unless the caller builds them first under the same kind of
+    /// `service` with [`prepare_content`](Self::prepare_content).
     ///
     /// **The longest gap left is about one pipeline**, and a pipeline cannot be
     /// split: on that scene, cold, it was the forward pass's colour pipeline
@@ -10233,7 +10236,8 @@ impl ForwardRenderer {
     /// slot as that slot next begins, so the call touches no device and a frame
     /// still in flight keeps the buffers it was submitted with. The first frame
     /// with a body builds each view's water passes — a hitch, cold, on that
-    /// frame.
+    /// frame, which [`prepare_content`](Self::prepare_content) moves under a
+    /// loading screen.
     ///
     /// # Off is exactly off
     ///
@@ -10270,7 +10274,8 @@ impl ForwardRenderer {
     /// leaves its resources alive until the ring has come round, so the call is
     /// safe at any point between frames. The field is drawn from the next
     /// [`begin_frame`](Self::begin_frame) on, which builds each view's grass
-    /// passes the first time it sees one — a hitch, cold, on that frame.
+    /// passes the first time it sees one — a hitch, cold, on that frame, which
+    /// [`prepare_content`](Self::prepare_content) moves under a loading screen.
     ///
     /// # Off is exactly off
     ///
@@ -10299,6 +10304,39 @@ impl ForwardRenderer {
     #[must_use]
     pub fn grass(&self) -> Option<&crate::grass::GrassField> {
         self.grass.field()
+    }
+
+    /// Builds every view's water and grass passes for the bodies and the field
+    /// set now, so the first frame that draws them does not.
+    ///
+    /// **Optional, and for a loading screen.** Without it the first frame with
+    /// a body or a field builds them — a hitch, cold, on that frame. Called
+    /// after [`set_water`](Self::set_water) and
+    /// [`set_grass`](Self::set_grass) while a game is still loading, it pays
+    /// the same compiles with `service` between them, on
+    /// [`with_scene_serviced`](Self::with_scene_serviced)'s terms. A view that
+    /// holds a pass already keeps it, and a view made after this call builds
+    /// its own on its first frame with them.
+    ///
+    /// Between frames, on [`create_view`](Self::create_view)'s terms: it
+    /// creates objects and records nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the device. The view that failed holds what it held
+    /// before; the views before it keep what this call built them, which is
+    /// what their next frame would have built.
+    pub fn prepare_content(
+        &mut self,
+        device: &dyn Device,
+        service: &mut dyn FnMut(),
+    ) -> Result<(), HalError> {
+        let water = !self.water.bodies().is_empty();
+        let grass = self.grass.field().is_some();
+        for view in std::iter::once(&mut self.primary).chain(self.views.iter_mut().flatten()) {
+            view.build_content(device, water, grass, service)?;
+        }
+        Ok(())
     }
 
     /// The two buffers the grass generation pass writes, or [`None`] for a

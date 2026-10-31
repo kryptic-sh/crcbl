@@ -15,8 +15,8 @@
 //!   [`crcbl_water::surface_mesh`], and a ring of host-visible buffers holding
 //!   the grid, the indices and one medium row per body. Every view draws the
 //!   same water.
-//! * [`Water`] is **one camera's**: the two pipelines, its uniform ring and the
-//!   bind groups naming its own transients.
+//! * [`Water`] is **one camera's**: the pipelines ([`WaterPipelines`]),
+//!   its uniform ring and the bind groups naming its own transients.
 //!
 //! # Two passes, and why the first is a draw
 //!
@@ -457,56 +457,30 @@ type SurfaceCache = (
     Option<(Vec<ImageViewHandle>, BindGroupHandle)>,
 );
 
-/// Everything one camera's water passes own.
-#[derive(Debug)]
-pub(crate) struct Water {
+/// The water passes' layouts, created ahead of their pipelines so each
+/// pipeline can be one member of somebody else's [`pipeline_batch`] — see
+/// [`WaterPipelines`].
+///
+/// Handles only, and `Copy` so a batch's jobs can each take them: nothing here
+/// owns them until [`WaterLayouts::finish`] hands them to the set.
+///
+/// [`pipeline_batch`]: crate::pipeline_batch
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WaterLayouts {
     copy_layout: BindGroupLayoutHandle,
     copy_pipeline_layout: PipelineLayoutHandle,
-    copy_pipeline: GraphicsPipelineHandle,
-    /// `[frame]`: the copy group, cached against its two source views.
-    copy_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
     surface_layout: BindGroupLayoutHandle,
     surface_pipeline_layout: PipelineLayoutHandle,
-    surface_pipeline: GraphicsPipelineHandle,
-    /// `[frame]`: `water.slang`'s own block.
-    uniforms: Vec<BufferHandle>,
-    /// `[frame]`: the surface group — see [`SurfaceCache`].
-    surface_groups: Vec<SurfaceCache>,
-    /// The atlas's comparison sampler, which the renderer owns for its life.
-    shadow_sampler: SamplerHandle,
 }
 
-impl Water {
-    /// Passes [`Water::add_passes`] adds to a frame that has water.
-    pub(crate) const PASSES: u32 = 2;
-
-    /// Full-screen draws among those passes: `water-copy`'s triangle.
-    pub(crate) const FULLSCREEN_PASSES: u64 = 1;
-
-    /// Builds both pipelines and the uniform ring.
-    ///
-    /// `build_fullscreen_with` is [`crate::forward`]'s, handed in on
-    /// [`crate::sky_pass::SkyPass::new`]'s terms; the copy pipeline is its shape
-    /// with a colour target **and** a depth target written under an
-    /// always-passing compare.
+impl WaterLayouts {
+    /// Creates the copy pass's layout and the surface's, each held in `made` —
+    /// so the caller's guard releases them if anything after fails.
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. A failure part-way through releases
-    /// everything already created — see [`crate::partial`].
-    pub(crate) fn new(
-        device: &dyn Device,
-        frames: usize,
-        shadow_sampler: SamplerHandle,
-        build_fullscreen_with: impl Fn(
-            &dyn Device,
-            &str,
-            &crcbl_shaders::Shader,
-            PipelineLayoutHandle,
-            &[ColorTargetState],
-            Option<DepthStencilState>,
-        ) -> Result<GraphicsPipelineHandle, HalError>,
-    ) -> Result<Self, HalError> {
+    /// [`HalError`] from either layout.
+    pub(crate) fn new(device: &dyn Device, made: &mut Partial<'_>) -> Result<Self, HalError> {
         let copy_entries = [
             sampled(0, ShaderStages::FRAGMENT, SampleType::Float),
             sampled(1, ShaderStages::FRAGMENT, SampleType::Depth),
@@ -516,7 +490,6 @@ impl Water {
             entries: &copy_entries,
         };
         check_portable_storage_buffers(Some("water copy"), &[&copy_desc])?;
-        let mut made = Partial::new(device);
         let copy_layout = made.add(device.create_bind_group_layout(&copy_desc)?);
         let copy_pipeline_layout =
             made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
@@ -524,20 +497,6 @@ impl Water {
                 bind_group_layouts: &[copy_layout],
                 push_constants: None,
             })?);
-        let copy_pipeline = made.add(build_fullscreen_with(
-            device,
-            "water copy",
-            &WATER_COPY,
-            copy_pipeline_layout,
-            &[ColorTargetState::opaque(Format::Rgba16Float)],
-            Some(DepthStencilState {
-                format: Format::D32Float,
-                depth_write: true,
-                depth_compare: CompareOp::Always,
-                stencil: None,
-                bias: DepthBias::default(),
-            }),
-        )?);
 
         // **Every binding is visible to both stages**, though the vertex stage
         // reads only the frame block and the vertices and the fragment stage
@@ -616,8 +575,155 @@ impl Water {
                 bind_group_layouts: &[surface_layout],
                 push_constants: None,
             })?);
-        let surface_pipeline = made.add(build_surface(device, surface_pipeline_layout)?);
+        Ok(Self {
+            copy_layout,
+            copy_pipeline_layout,
+            surface_layout,
+            surface_pipeline_layout,
+        })
+    }
 
+    /// The copy pass's pipeline.
+    ///
+    /// `build_fullscreen_with` is [`crate::forward`]'s, handed in on
+    /// [`crate::sky_pass::SkyPass::new`]'s terms; the copy pipeline is its shape
+    /// with a colour target **and** a depth target written under an
+    /// always-passing compare.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from `build_fullscreen_with`.
+    pub(crate) fn copy(
+        self,
+        device: &dyn Device,
+        build_fullscreen_with: impl Fn(
+            &dyn Device,
+            &str,
+            &crcbl_shaders::Shader,
+            PipelineLayoutHandle,
+            &[ColorTargetState],
+            Option<DepthStencilState>,
+        ) -> Result<GraphicsPipelineHandle, HalError>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        build_fullscreen_with(
+            device,
+            "water copy",
+            &WATER_COPY,
+            self.copy_pipeline_layout,
+            &[ColorTargetState::opaque(Format::Rgba16Float)],
+            Some(DepthStencilState {
+                format: Format::D32Float,
+                depth_write: true,
+                depth_compare: CompareOp::Always,
+                stencil: None,
+                bias: DepthBias::default(),
+            }),
+        )
+    }
+
+    /// The surface's pipeline — see [`build_surface`].
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the manifest lookup, the module or the pipeline.
+    pub(crate) fn surface(self, device: &dyn Device) -> Result<GraphicsPipelineHandle, HalError> {
+        build_surface(device, self.surface_pipeline_layout)
+    }
+
+    /// The whole set, out of these layouts and the pipelines made against
+    /// them, which it owns from here.
+    pub(crate) fn finish(
+        self,
+        copy: GraphicsPipelineHandle,
+        surface: GraphicsPipelineHandle,
+    ) -> WaterPipelines {
+        WaterPipelines {
+            layouts: self,
+            copy,
+            surface,
+        }
+    }
+}
+
+/// The water passes' layouts and pipelines: everything [`Water`] owns that
+/// names none of its buffers.
+///
+/// **Built apart from [`Water::new`]** so its compiles can overlap each
+/// other and the grass passes': `View::build_content` compiles these as
+/// members of one [`pipeline_batch`] with a field's, out of [`WaterLayouts`],
+/// and hands the set to the view's water passes.
+///
+/// [`pipeline_batch`]: crate::pipeline_batch
+#[derive(Debug)]
+pub(crate) struct WaterPipelines {
+    layouts: WaterLayouts,
+    copy: GraphicsPipelineHandle,
+    surface: GraphicsPipelineHandle,
+}
+
+impl WaterPipelines {
+    /// Holds every handle in `made`, layouts first, so a constructor that
+    /// takes the set releases it with whatever else it was building — after
+    /// what it made later, since a guard releases in reverse.
+    fn hold(&self, made: &mut Partial<'_>) {
+        let layouts = self.layouts;
+        made.add(layouts.copy_layout);
+        made.add(layouts.copy_pipeline_layout);
+        made.add(layouts.surface_layout);
+        made.add(layouts.surface_pipeline_layout);
+        made.add(self.copy);
+        made.add(self.surface);
+    }
+
+    /// Releases everything, in dependency order. The device must be idle.
+    pub(crate) fn destroy(self, device: &dyn Device) {
+        device.destroy_graphics_pipeline(self.surface);
+        device.destroy_pipeline_layout(self.layouts.surface_pipeline_layout);
+        device.destroy_bind_group_layout(self.layouts.surface_layout);
+        device.destroy_graphics_pipeline(self.copy);
+        device.destroy_pipeline_layout(self.layouts.copy_pipeline_layout);
+        device.destroy_bind_group_layout(self.layouts.copy_layout);
+    }
+}
+
+/// Everything one camera's water passes own.
+#[derive(Debug)]
+pub(crate) struct Water {
+    /// The layouts and the pipelines, compiled ahead of the ring — see
+    /// [`WaterPipelines`].
+    pipelines: WaterPipelines,
+    /// `[frame]`: the copy group, cached against its two source views.
+    copy_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
+    /// `[frame]`: `water.slang`'s own block.
+    uniforms: Vec<BufferHandle>,
+    /// `[frame]`: the surface group — see [`SurfaceCache`].
+    surface_groups: Vec<SurfaceCache>,
+    /// The atlas's comparison sampler, which the renderer owns for its life.
+    shadow_sampler: SamplerHandle,
+}
+
+impl Water {
+    /// Passes [`Water::add_passes`] adds to a frame that has water.
+    pub(crate) const PASSES: u32 = 2;
+
+    /// Full-screen draws among those passes: `water-copy`'s triangle.
+    pub(crate) const FULLSCREEN_PASSES: u64 = 1;
+
+    /// Builds the uniform ring against `pipelines`, which it owns from here.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created and `pipelines` with it, so the caller has
+    /// nothing left to clean up — see [`crate::partial`].
+    pub(crate) fn new(
+        device: &dyn Device,
+        pipelines: WaterPipelines,
+        frames: usize,
+        shadow_sampler: SamplerHandle,
+    ) -> Result<Self, HalError> {
+        let mut made = Partial::new(device);
+        pipelines.hold(&mut made);
         let mut uniforms = Vec::with_capacity(frames);
         for _ in 0..frames {
             uniforms.push(made.add(device.create_buffer(&BufferDesc {
@@ -630,13 +736,8 @@ impl Water {
 
         made.keep();
         Ok(Self {
-            copy_layout,
-            copy_pipeline_layout,
-            copy_pipeline,
+            pipelines,
             copy_groups: vec![None; frames],
-            surface_layout,
-            surface_pipeline_layout,
-            surface_pipeline,
             uniforms,
             surface_groups: (0..frames).map(|_| (None, None)).collect(),
             shadow_sampler,
@@ -681,9 +782,9 @@ impl Water {
             shadow_atlas,
         } = images;
 
-        let copy_pipeline = self.copy_pipeline;
-        let copy_pipeline_layout = self.copy_pipeline_layout;
-        let copy_layout = self.copy_layout;
+        let copy_pipeline = self.pipelines.copy;
+        let copy_pipeline_layout = self.pipelines.layouts.copy_pipeline_layout;
+        let copy_layout = self.pipelines.layouts.copy_layout;
         let copy_cached = &mut self.copy_groups[frame];
         graph
             .add_render_pass("water-copy")
@@ -768,9 +869,9 @@ impl Water {
             )
         });
 
-        let surface_pipeline = self.surface_pipeline;
-        let surface_pipeline_layout = self.surface_pipeline_layout;
-        let surface_layout = self.surface_layout;
+        let surface_pipeline = self.pipelines.surface;
+        let surface_pipeline_layout = self.pipelines.layouts.surface_pipeline_layout;
+        let surface_layout = self.pipelines.layouts.surface_layout;
         let params = self.uniforms[frame];
         let shadow_sampler = self.shadow_sampler;
         let (cached_buffers, surface_cached) = &mut self.surface_groups[frame];
@@ -872,12 +973,7 @@ impl Water {
         ) {
             device.destroy_bind_group(group);
         }
-        device.destroy_graphics_pipeline(self.surface_pipeline);
-        device.destroy_pipeline_layout(self.surface_pipeline_layout);
-        device.destroy_bind_group_layout(self.surface_layout);
-        device.destroy_graphics_pipeline(self.copy_pipeline);
-        device.destroy_pipeline_layout(self.copy_pipeline_layout);
-        device.destroy_bind_group_layout(self.copy_layout);
+        self.pipelines.destroy(device);
         for buffer in self.uniforms {
             device.destroy_buffer(buffer);
         }

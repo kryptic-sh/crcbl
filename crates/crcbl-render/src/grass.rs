@@ -107,7 +107,6 @@ use crcbl_shaders::{GRASS, GRASS_GEN, Stage};
 use crate::draw_gen::compute_pipeline_entry;
 use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
 use crate::partial::Partial;
-use crate::pipeline_batch;
 use crate::ssao::cached_group;
 use crate::texture::{
     PendingUpload, UploadBatch, UploadedTexture, upload_texture, upload_texture_mip_layers,
@@ -982,64 +981,67 @@ type RasterCache = (
     Option<(Vec<ImageViewHandle>, BindGroupHandle)>,
 );
 
-/// Everything one camera's grass passes own.
-#[derive(Debug)]
-pub(crate) struct Grass {
-    gen_layout: BindGroupLayoutHandle,
-    gen_pipeline_layout: PipelineLayoutHandle,
-    clear_pipeline: ComputePipelineHandle,
-    generate_pipeline: ComputePipelineHandle,
-    raster_layout: BindGroupLayoutHandle,
-    raster_pipeline_layout: PipelineLayoutHandle,
-    /// The cards, then the shells and the fins, then the near and far mesh
-    /// blades — one pipeline each over one layout.
-    raster_pipeline: GraphicsPipelineHandle,
-    shell_pipeline: GraphicsPipelineHandle,
-    fin_pipeline: GraphicsPipelineHandle,
-    blade_near_pipeline: GraphicsPipelineHandle,
-    blade_far_pipeline: GraphicsPipelineHandle,
-    /// `[frame]`: `grass_gen.slang`'s own block.
-    gen_params: Vec<BufferHandle>,
-    /// `[frame]`: the wind's block, `crcbl_shaders::wind::WindParams`.
-    wind_params: Vec<BufferHandle>,
-    /// `[frame]`: `grass.slang`'s own block. A ring rather than one buffer
-    /// beside the field, because its screen scale is **this view's** and a
-    /// second view of the same field draws at another extent.
-    raster_params: Vec<BufferHandle>,
-    /// `[frame]`: the clearing dispatch's group — see [`Grass::add_passes`] for
-    /// why there are two of one set.
-    clear_groups: Vec<RasterCache>,
-    /// `[frame]`: the generation dispatch's group.
-    gen_groups: Vec<RasterCache>,
-    /// `[frame]`: the raster group — see [`RasterCache`].
-    raster_groups: Vec<RasterCache>,
-    card_sampler: SamplerHandle,
-    wind_sampler: SamplerHandle,
-    shadow_sampler: SamplerHandle,
+/// One draw pipeline of the `grass` pass: its vertex and fragment entry
+/// points in `grass.slang`, and how its vertices assemble.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Draw {
+    entries: (&'static str, &'static str),
+    topology: PrimitiveTopology,
 }
 
-impl Grass {
-    /// Passes [`Grass::add_passes`] adds to a frame that has a field.
-    pub(crate) const PASSES: u32 = 3;
+impl Draw {
+    const fn list(vertex: &'static str, fragment: &'static str) -> Self {
+        Self {
+            entries: (vertex, fragment),
+            topology: PrimitiveTopology::TriangleList,
+        }
+    }
 
-    /// Builds the pipelines — the dispatches and a card, a shell, a fin and the
-    /// mesh blade draws — the two samplers and the three uniform rings.
-    ///
-    /// The draw pipelines are one [`pipeline_batch`], compiled side by side
-    /// where the device allows it: on a cold driver cache each is a compile on
-    /// the order of the forward pass's, and this runs on the frame that first
-    /// draws a field — see `View::build_content` in [`crate::forward`].
+    const fn strip(vertex: &'static str, fragment: &'static str) -> Self {
+        Self {
+            entries: (vertex, fragment),
+            topology: PrimitiveTopology::TriangleStrip,
+        }
+    }
+}
+
+/// The grass passes' layouts, created ahead of their pipelines so each
+/// pipeline can be one member of somebody else's [`pipeline_batch`] — see
+/// [`GrassPipelines`].
+///
+/// Handles only, and `Copy` so a batch's jobs can each take them: nothing here
+/// owns them until [`GrassLayouts::finish`] hands them to the set.
+///
+/// [`pipeline_batch`]: crate::pipeline_batch
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GrassLayouts {
+    gen_layout: BindGroupLayoutHandle,
+    gen_pipeline_layout: PipelineLayoutHandle,
+    raster_layout: BindGroupLayoutHandle,
+    raster_pipeline_layout: PipelineLayoutHandle,
+}
+
+impl GrassLayouts {
+    /// The draw pipelines, in the order [`finish`](Self::finish) takes them:
+    /// the cards, then the shells and the fins, then the near and far mesh
+    /// blades. **Strips** for a blade: it is a pair of vertices at each height
+    /// and one at the tip, which is decision 3's fifteen and seven only as a
+    /// strip.
+    pub(crate) const DRAWS: [Draw; 5] = [
+        Draw::list("vertexMain", "fragmentMain"),
+        Draw::list("shellVertexMain", "shellFragmentMain"),
+        Draw::list("finVertexMain", "shellFragmentMain"),
+        Draw::strip("bladeNearVertexMain", "bladeFragmentMain"),
+        Draw::strip("bladeFarVertexMain", "bladeFragmentMain"),
+    ];
+
+    /// Creates the generation layout and the raster one, each held in `made`
+    /// — so the caller's guard releases them if anything after fails.
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. A failure part-way through releases
-    /// everything already created — see [`crate::partial`] — the draw batch's
-    /// other members included, since the batch runs them all regardless.
-    pub(crate) fn new(
-        device: &dyn Device,
-        frames: usize,
-        shadow_sampler: SamplerHandle,
-    ) -> Result<Self, HalError> {
+    /// [`HalError`] from either layout.
+    pub(crate) fn new(device: &dyn Device, made: &mut Partial<'_>) -> Result<Self, HalError> {
         let compute = ShaderStages::COMPUTE;
         let gen_entries = [
             uniform(gen_binding::WIND, compute, false),
@@ -1077,29 +1079,12 @@ impl Grass {
             entries: &gen_entries,
         };
         check_portable_storage_buffers(Some("grass generate"), &[&gen_desc])?;
-        let mut made = Partial::new(device);
         let gen_layout = made.add(device.create_bind_group_layout(&gen_desc)?);
         let gen_pipeline_layout = made.add(device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("grass generate"),
             bind_group_layouts: &[gen_layout],
             push_constants: None,
         })?);
-        let clear_pipeline = made.add(compute_pipeline_entry(
-            device,
-            "grass clear",
-            &GRASS_GEN,
-            "clearMain",
-            gen_pipeline_layout,
-            WORKGROUP_SIZE,
-        )?);
-        let generate_pipeline = made.add(compute_pipeline_entry(
-            device,
-            "grass generate",
-            &GRASS_GEN,
-            "generateMain",
-            gen_pipeline_layout,
-            WORKGROUP_SIZE,
-        )?);
 
         // **Every binding is visible to both stages**, on `crate::water`'s
         // terms: Slang's Metal backend materialises every global into every
@@ -1171,44 +1156,195 @@ impl Grass {
                 bind_group_layouts: &[raster_layout],
                 push_constants: None,
             })?);
-        let list = PrimitiveTopology::TriangleList;
-        // **Strips**: a blade is a pair of vertices at each height and one at
-        // the tip, which is decision 3's fifteen and seven only as a strip.
-        let strip = PrimitiveTopology::TriangleStrip;
-        let raster =
-            |entries, topology| build_raster(device, raster_pipeline_layout, entries, topology);
-        // One [`pipeline_batch`]: each draw pipeline is a compile on the order
-        // of the forward pass's on a cold driver cache, and none needs another.
-        let results = pipeline_batch::create(
-            device,
-            &mut || {},
-            [
-                &|| raster(("vertexMain", "fragmentMain"), list),
-                &|| raster(("shellVertexMain", "shellFragmentMain"), list),
-                &|| raster(("finVertexMain", "shellFragmentMain"), list),
-                &|| raster(("bladeNearVertexMain", "bladeFragmentMain"), strip),
-                &|| raster(("bladeFarVertexMain", "bladeFragmentMain"), strip),
-            ],
-        );
-        // Every member ran whatever the others returned, so a refusal leaves
-        // the rest of the batch live: each success is held before the `?`s
-        // below, so the first of them releases the others too.
-        for pipeline in results.iter().flatten() {
-            made.add(*pipeline);
-        }
-        let [
-            raster_pipeline,
-            shell_pipeline,
-            fin_pipeline,
-            blade_near_pipeline,
-            blade_far_pipeline,
-        ] = results;
-        let raster_pipeline = raster_pipeline?;
-        let shell_pipeline = shell_pipeline?;
-        let fin_pipeline = fin_pipeline?;
-        let blade_near_pipeline = blade_near_pipeline?;
-        let blade_far_pipeline = blade_far_pipeline?;
+        Ok(Self {
+            gen_layout,
+            gen_pipeline_layout,
+            raster_layout,
+            raster_pipeline_layout,
+        })
+    }
 
+    /// The dispatch that zeroes each slot's draw arguments.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the module or the pipeline.
+    pub(crate) fn clear(self, device: &dyn Device) -> Result<ComputePipelineHandle, HalError> {
+        compute_pipeline_entry(
+            device,
+            "grass clear",
+            &GRASS_GEN,
+            "clearMain",
+            self.gen_pipeline_layout,
+            WORKGROUP_SIZE,
+        )
+    }
+
+    /// The dispatch that places each tile's instances.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the module or the pipeline.
+    pub(crate) fn generate(self, device: &dyn Device) -> Result<ComputePipelineHandle, HalError> {
+        compute_pipeline_entry(
+            device,
+            "grass generate",
+            &GRASS_GEN,
+            "generateMain",
+            self.gen_pipeline_layout,
+            WORKGROUP_SIZE,
+        )
+    }
+
+    /// One of [`DRAWS`](Self::DRAWS)' pipelines — each a compile on the order
+    /// of the forward pass's on a cold driver cache, and none needs another.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the manifest lookup, the module or the pipeline.
+    pub(crate) fn draw(
+        self,
+        device: &dyn Device,
+        draw: Draw,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        build_raster(
+            device,
+            self.raster_pipeline_layout,
+            draw.entries,
+            draw.topology,
+        )
+    }
+
+    /// The whole set, out of these layouts, the dispatches and the draws
+    /// in [`DRAWS`](Self::DRAWS)' order, which it owns from here.
+    pub(crate) fn finish(
+        self,
+        clear: ComputePipelineHandle,
+        generate: ComputePipelineHandle,
+        draws: [GraphicsPipelineHandle; Self::DRAWS.len()],
+    ) -> GrassPipelines {
+        let [raster, shell, fin, blade_near, blade_far] = draws;
+        GrassPipelines {
+            layouts: self,
+            clear,
+            generate,
+            raster,
+            shell,
+            fin,
+            blade_near,
+            blade_far,
+        }
+    }
+}
+
+/// The grass passes' layouts and pipelines: everything [`Grass`] owns that
+/// names none of its samplers or buffers.
+///
+/// **Built apart from [`Grass::new`]** so its compiles can overlap each other
+/// and the water passes': `View::build_content` compiles these as members of
+/// one [`pipeline_batch`] with a body's, out of [`GrassLayouts`], and hands
+/// the set to the view's grass passes.
+///
+/// [`pipeline_batch`]: crate::pipeline_batch
+#[derive(Debug)]
+pub(crate) struct GrassPipelines {
+    layouts: GrassLayouts,
+    clear: ComputePipelineHandle,
+    generate: ComputePipelineHandle,
+    /// The cards, then the shells and the fins, then the near and far mesh
+    /// blades — one pipeline each over one layout.
+    raster: GraphicsPipelineHandle,
+    shell: GraphicsPipelineHandle,
+    fin: GraphicsPipelineHandle,
+    blade_near: GraphicsPipelineHandle,
+    blade_far: GraphicsPipelineHandle,
+}
+
+impl GrassPipelines {
+    /// Holds every handle in `made`, layouts first, so a constructor that
+    /// takes the set releases it with whatever else it was building — after
+    /// what it made later, since a guard releases in reverse.
+    fn hold(&self, made: &mut Partial<'_>) {
+        let layouts = self.layouts;
+        made.add(layouts.gen_layout);
+        made.add(layouts.gen_pipeline_layout);
+        made.add(self.clear);
+        made.add(self.generate);
+        made.add(layouts.raster_layout);
+        made.add(layouts.raster_pipeline_layout);
+        for pipeline in [
+            self.raster,
+            self.shell,
+            self.fin,
+            self.blade_near,
+            self.blade_far,
+        ] {
+            made.add(pipeline);
+        }
+    }
+
+    /// Releases everything, in dependency order. The device must be idle.
+    pub(crate) fn destroy(self, device: &dyn Device) {
+        device.destroy_graphics_pipeline(self.blade_far);
+        device.destroy_graphics_pipeline(self.blade_near);
+        device.destroy_graphics_pipeline(self.fin);
+        device.destroy_graphics_pipeline(self.shell);
+        device.destroy_graphics_pipeline(self.raster);
+        device.destroy_pipeline_layout(self.layouts.raster_pipeline_layout);
+        device.destroy_bind_group_layout(self.layouts.raster_layout);
+        device.destroy_compute_pipeline(self.generate);
+        device.destroy_compute_pipeline(self.clear);
+        device.destroy_pipeline_layout(self.layouts.gen_pipeline_layout);
+        device.destroy_bind_group_layout(self.layouts.gen_layout);
+    }
+}
+
+/// Everything one camera's grass passes own.
+#[derive(Debug)]
+pub(crate) struct Grass {
+    /// The layouts and the pipelines, compiled ahead of the rings — see
+    /// [`GrassPipelines`].
+    pipelines: GrassPipelines,
+    /// `[frame]`: `grass_gen.slang`'s own block.
+    gen_params: Vec<BufferHandle>,
+    /// `[frame]`: the wind's block, `crcbl_shaders::wind::WindParams`.
+    wind_params: Vec<BufferHandle>,
+    /// `[frame]`: `grass.slang`'s own block. A ring rather than one buffer
+    /// beside the field, because its screen scale is **this view's** and a
+    /// second view of the same field draws at another extent.
+    raster_params: Vec<BufferHandle>,
+    /// `[frame]`: the clearing dispatch's group — see [`Grass::add_passes`] for
+    /// why there are two of one set.
+    clear_groups: Vec<RasterCache>,
+    /// `[frame]`: the generation dispatch's group.
+    gen_groups: Vec<RasterCache>,
+    /// `[frame]`: the raster group — see [`RasterCache`].
+    raster_groups: Vec<RasterCache>,
+    card_sampler: SamplerHandle,
+    wind_sampler: SamplerHandle,
+    shadow_sampler: SamplerHandle,
+}
+
+impl Grass {
+    /// Passes [`Grass::add_passes`] adds to a frame that has a field.
+    pub(crate) const PASSES: u32 = 3;
+
+    /// Builds the two samplers and the three uniform rings against
+    /// `pipelines`, which it owns from here.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any seam call. A failure part-way through releases
+    /// everything already created and `pipelines` with it, so the caller has
+    /// nothing left to clean up — see [`crate::partial`].
+    pub(crate) fn new(
+        device: &dyn Device,
+        pipelines: GrassPipelines,
+        frames: usize,
+        shadow_sampler: SamplerHandle,
+    ) -> Result<Self, HalError> {
+        let mut made = Partial::new(device);
+        pipelines.hold(&mut made);
         let card_sampler = made.add(device.create_sampler(&SamplerDesc {
             label: Some("grass card"),
             // **Linear within a level, and the level is the shader's.**
@@ -1261,17 +1397,7 @@ impl Grass {
 
         made.keep();
         Ok(Self {
-            gen_layout,
-            gen_pipeline_layout,
-            clear_pipeline,
-            generate_pipeline,
-            raster_layout,
-            raster_pipeline_layout,
-            raster_pipeline,
-            shell_pipeline,
-            fin_pipeline,
-            blade_near_pipeline,
-            blade_far_pipeline,
+            pipelines,
             gen_params,
             wind_params,
             raster_params,
@@ -1349,10 +1475,10 @@ impl Grass {
         let args_id = imported("grass-draw-args", field.args);
 
         let slots = field.slots;
-        let gen_layout = self.gen_layout;
-        let gen_pipeline_layout = self.gen_pipeline_layout;
-        let clear_pipeline = self.clear_pipeline;
-        let generate_pipeline = self.generate_pipeline;
+        let gen_layout = self.pipelines.layouts.gen_layout;
+        let gen_pipeline_layout = self.pipelines.layouts.gen_pipeline_layout;
+        let clear_pipeline = self.pipelines.clear;
+        let generate_pipeline = self.pipelines.generate;
         let gen_params = self.gen_params[frame];
         let wind_params = self.wind_params[frame];
         let wind_sampler = self.wind_sampler;
@@ -1407,13 +1533,13 @@ impl Grass {
                 }
             });
 
-        let raster_pipeline = self.raster_pipeline;
-        let shell_pipeline = self.shell_pipeline;
-        let fin_pipeline = self.fin_pipeline;
-        let blade_near_pipeline = self.blade_near_pipeline;
-        let blade_far_pipeline = self.blade_far_pipeline;
-        let raster_pipeline_layout = self.raster_pipeline_layout;
-        let raster_layout = self.raster_layout;
+        let raster_pipeline = self.pipelines.raster;
+        let shell_pipeline = self.pipelines.shell;
+        let fin_pipeline = self.pipelines.fin;
+        let blade_near_pipeline = self.pipelines.blade_near;
+        let blade_far_pipeline = self.pipelines.blade_far;
+        let raster_pipeline_layout = self.pipelines.layouts.raster_pipeline_layout;
+        let raster_layout = self.pipelines.layouts.raster_layout;
         let card_sampler = self.card_sampler;
         let shadow_sampler = self.shadow_sampler;
         let raster_params = self.raster_params[frame];
@@ -1578,17 +1704,7 @@ impl Grass {
         {
             device.destroy_bind_group(group);
         }
-        device.destroy_graphics_pipeline(self.blade_far_pipeline);
-        device.destroy_graphics_pipeline(self.blade_near_pipeline);
-        device.destroy_graphics_pipeline(self.fin_pipeline);
-        device.destroy_graphics_pipeline(self.shell_pipeline);
-        device.destroy_graphics_pipeline(self.raster_pipeline);
-        device.destroy_pipeline_layout(self.raster_pipeline_layout);
-        device.destroy_bind_group_layout(self.raster_layout);
-        device.destroy_compute_pipeline(self.generate_pipeline);
-        device.destroy_compute_pipeline(self.clear_pipeline);
-        device.destroy_pipeline_layout(self.gen_pipeline_layout);
-        device.destroy_bind_group_layout(self.gen_layout);
+        self.pipelines.destroy(device);
         device.destroy_sampler(self.wind_sampler);
         device.destroy_sampler(self.card_sampler);
         for buffer in self

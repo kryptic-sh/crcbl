@@ -264,19 +264,27 @@ Left:
   are cheap (never timed alone). Measured 2026-11-01 (RX 7900 XTX, radv, cold
   with `MESA_SHADER_CACHE_DISABLE`, quiet window, load 1.7–1.8, five interleaved
   pairs): a cold `ForwardRenderer::new` went from 261.8–267.0 ms to 191.5–204.4
-  ms. Still one after the other: the mesh batch, `DrawGenPipelines::new`'s two
-  batches and, on the first grassy frame, the grass batch. A view made by
-  `create_view` compiles its volume's and march's pipelines serially
-  (`ViewPipelines::new`); a batch of its own would need the five members listed
-  a second time.
-- Still serial: `Water::new` (`water`, about 52 ms cold), now on the first frame
-  with a body (`View::build_content`) rather than in the build. Its pipelines
-  compile one after another inside its constructor; overlapping them means
-  pulling their descriptions out as `VolumetricPipelines` did, into a batch of
-  the frame's own.
+  ms. Still one after the other: the mesh batch and `DrawGenPipelines::new`'s
+  two batches. A view made by `create_view` compiles its volume's and march's
+  pipelines serially (`ViewPipelines::new`); a batch of its own would need the
+  five members listed a second time.
+- Water's and grass's pipelines compile in one batch per view on the first frame
+  with a body or a field (`ContentPasses` in `View::build_content`, 2026-11-01):
+  the water surface and every grass draw lead it, and the water copy and the
+  grass dispatches trail them, on the guess that those are cheap (never timed
+  alone). Its rounds are capped at `MAX_JOBS_PER_ROUND` like every batch's. Each
+  view compiles its own set, so a frame that first has content on several views
+  pays one batch per view, one after the other.
 - The null backend's `destroy_*` on a dead handle is a silent no-op, so no
   null-backend test can catch a double destroy; `DrawGenPipelines`' exactly-once
-  release rests on `Arc::into_inner` and on vk validation in the e2e runs.
+  release rests on `Arc::into_inner` and on vk validation in the e2e runs. The
+  same holds for every pass `partial_builds.rs`'s
+  `fails_cleanly_at_every_creation` sweeps: it proves nothing leaks, not that
+  each handle is released once. `Recorder` records `Event::Destroyed` only for a
+  live handle and its events carry no handle, so closing the gap means the null
+  backend reporting a dead-handle destroy (a `ValidationError`, which may red
+  tests that destroy leniently today) or a counting `Device` wrapper in the
+  tests.
 - `ForwardRenderer::build` builds `GrassScene` before its final struct literal
   so a grass failure is rolled back; no null-backend switch can fail its
   one-texel calm-wind upload alone, so that ordering has no test.
@@ -328,11 +336,16 @@ have to build them first.
   remaining cost is mostly the mesh pipelines, the sided twins, water and grass.
 - Water and grass are built by the first frame with a body or a field
   (`View::build_content`, 2026-10-31). The cost moved to that frame: cold, about
-  57 ms for water and about 116 ms for grass on an RX 7900 XTX (load ~16). A
-  game that sets them while loading could pre-warm with a hidden frame, or a
-  `ForwardRenderer::prepare_content` could build them under the loading screen's
-  `service`; neither exists. `GrassScene::new` (two 1×1 calm wind textures, no
-  pipeline) stays in the build on purpose.
+  57 ms for water and about 116 ms for grass on an RX 7900 XTX (load ~16), and
+  both now compile in one batch (see the parallel-build entry). Measured
+  2026-11-01 (same GPU, cold with `MESA_SHADER_CACHE_DISABLE`, quiet window,
+  load 3.2–3.3, five interleaved pairs): a first frame with a pond and a lawn
+  went from 162.5–167.5 ms to 109.5–115.0 ms. `ForwardRenderer::prepare_content`
+  (2026-11-01) builds them under a loading screen's `service` instead, but
+  nothing in the tree calls it yet: `apps/tide` and `crcbl`'s screenshot scenes
+  set water or grass and still pay the build on their first frame.
+  `GrassScene::new` (two 1×1 calm wind textures, no pipeline) stays in the build
+  on purpose.
 
 ### A failed lazy build is not tested through a frame
 

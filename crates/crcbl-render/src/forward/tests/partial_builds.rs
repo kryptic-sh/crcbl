@@ -16,8 +16,13 @@ const FRAMES: usize = FRAMES_IN_FLIGHT;
 /// Fails `build`'s first creation, then its second, and so on until it
 /// finishes before reaching the failure, asserting after each failed attempt
 /// that it propagated the injected error and left nothing alive. The finished
-/// build is destroyed and checked for leaks too, so a constructor that
-/// over-releases on success would show up as well.
+/// build is destroyed and checked for leaks too, so a `destroy` that releases
+/// something the build did not create — the caller's sampler, say — shows up.
+///
+/// **What this cannot see is a handle released twice.** The null backend's
+/// `destroy_*` on a dead handle does nothing and records nothing, so a double
+/// destroy, on a failure path or the success path, leaves the count where a
+/// single one would — see `docs/backlog.md`.
 ///
 /// Returns how many creations were failed, which is how many `build` makes.
 fn fails_cleanly_at_every_creation<T>(
@@ -182,34 +187,64 @@ fn the_bent_free_filters_release_on_every_failure() {
     );
 }
 
+/// Releases whatever a [`view::ContentPasses`] holds.
+fn destroy_content(passes: view::ContentPasses, device: &dyn Device) {
+    if let Some(pass) = passes.grass {
+        pass.destroy(device);
+    }
+    if let Some(pass) = passes.water {
+        pass.destroy(device);
+    }
+}
+
+/// **A first-use content build releases everything on every failure** —
+/// the water passes alone, the grass passes alone, and both out of one
+/// batch, where a refusal in either set leaves the other's pipelines live
+/// and a failure past the batch leaves the other pass's whole set to release.
 #[test]
 fn the_content_passes_release_on_every_failure() {
     let (recorder, device, _) = open();
     let device = device.as_ref();
     let shadow_sampler = sampler(device);
-    fails_cleanly_at_every_creation(
-        "Water::new",
+    let build = |water, grass| {
+        move |device: &dyn Device| {
+            view::ContentPasses::new(device, FRAMES, shadow_sampler, water, grass, &mut || {})
+        }
+    };
+    let water = fails_cleanly_at_every_creation(
+        "ContentPasses::new (water)",
         &recorder,
         device,
-        |device| {
-            Water::new(
-                device,
-                FRAMES,
-                shadow_sampler,
-                ForwardRenderer::build_fullscreen_with,
-            )
-        },
-        Water::destroy,
+        build(true, false),
+        destroy_content,
     );
     // The draw batch's members are created side by side, so this also covers a
     // refusal that leaves batch siblings live.
-    fails_cleanly_at_every_creation(
-        "Grass::new",
+    let grass = fails_cleanly_at_every_creation(
+        "ContentPasses::new (grass)",
         &recorder,
         device,
-        |device| Grass::new(device, FRAMES, shadow_sampler),
-        Grass::destroy,
+        build(false, true),
+        destroy_content,
     );
+    let both = fails_cleanly_at_every_creation(
+        "ContentPasses::new (water and grass)",
+        &recorder,
+        device,
+        build(true, true),
+        destroy_content,
+    );
+    assert_eq!(
+        both,
+        water + grass,
+        "the build of both made other than each build's creations together, so some \
+         failure of one set beside the other was not checked"
+    );
+    // Neither asked for builds nothing, and fails nowhere.
+    let before = recorder.total_live_objects();
+    let nothing = build(false, false)(device).expect("nothing to create");
+    assert!(nothing.water.is_none() && nothing.grass.is_none());
+    assert_eq!(recorder.total_live_objects(), before);
     device.destroy_sampler(shadow_sampler);
     assert_eq!(recorder.total_live_objects(), 0);
 }

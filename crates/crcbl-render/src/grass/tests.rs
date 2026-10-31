@@ -432,12 +432,22 @@ fn a_misshapen_wind_layer_is_refused() {
     scene.destroy(device);
 }
 
-/// **The three pipelines build on the null backend**, which is what says the
-/// layouts, the pipeline layouts and the two modules agree about their bindings
-/// before any real device is asked.
+/// **Every pipeline builds on the null backend, and the pass releases all of
+/// it**: the null backend checks that the layouts, the pipeline layouts and
+/// the modules agree about their bindings before any real device is asked, and
+/// counts what is left alive once the pass is destroyed.
 #[test]
 fn the_pipelines_build_and_release() {
-    let (device, queue) = null();
+    use crcbl_hal::{
+        DeviceDesc, Instance,
+        null::{NullInstance, Recorder},
+    };
+    let recorder = Recorder::new();
+    let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+    let adapter = instance.adapters().remove(0);
+    let device = instance
+        .create_device(&DeviceDesc::for_adapter(adapter.id))
+        .expect("the null backend opens a device");
     let device = device.as_ref();
     let sampler = device
         .create_sampler(&crcbl_hal::SamplerDesc {
@@ -446,8 +456,27 @@ fn the_pipelines_build_and_release() {
             ..crcbl_hal::SamplerDesc::default()
         })
         .expect("a comparison sampler");
-    let grass = Grass::new(device, 2, sampler).expect("the pipelines build");
+    let before = recorder.total_live_objects();
+    let mut made = Partial::new(device);
+    let layouts = GrassLayouts::new(device, &mut made).expect("the layouts build");
+    made.keep();
+    let pipelines = layouts.finish(
+        layouts.clear(device).expect("the clear builds"),
+        layouts.generate(device).expect("the generation builds"),
+        GrassLayouts::DRAWS.map(|draw| layouts.draw(device, draw).expect("each draw builds")),
+    );
+    let grass = Grass::new(device, pipelines, 2, sampler).expect("the rings build");
+    assert!(
+        recorder.total_live_objects() > before,
+        "the pass created nothing, so its release checks nothing"
+    );
     grass.destroy(device);
+    assert_eq!(
+        recorder.total_live_objects(),
+        before,
+        "destroying the pass left some of it alive"
+    );
     device.destroy_sampler(sampler);
-    let _ = queue;
+    assert_eq!(recorder.total_live_objects(), 0);
+    recorder.assert_valid();
 }

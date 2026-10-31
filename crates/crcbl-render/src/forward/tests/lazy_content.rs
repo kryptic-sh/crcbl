@@ -24,6 +24,17 @@ const GRASS: [&str; 6] = [
     "bladeFarVertexMain",
 ];
 
+/// Every grass draw pipeline's label, the cards' included — which
+/// [`GRASS`] leaves out, since another pass shares that entry point's name.
+/// Read only where the recorder has seen nothing else.
+const GRASS_DRAWS: [&str; 5] = [
+    "vertexMain",
+    "shellVertexMain",
+    "finVertexMain",
+    "bladeNearVertexMain",
+    "bladeFarVertexMain",
+];
+
 /// How many pipelines labelled `label` `recorder` has seen created.
 fn created(recorder: &Recorder, label: &str) -> usize {
     recorder
@@ -275,6 +286,187 @@ fn water_and_grass_are_built_by_the_first_frame_that_has_them() {
 
     // Released with the renderer, every one of them.
     renderer.destroy_view(device, view);
+    renderer.destroy(device);
+    assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
+    recorder.assert_valid();
+}
+
+/// The labels of the pipelines `recorder` has seen created, in order.
+fn pipelines(recorder: &Recorder) -> Vec<String> {
+    recorder
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Created {
+                kind: ObjectKind::GraphicsPipeline | ObjectKind::ComputePipeline,
+                label: Some(label),
+            } => Some(label),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A frame that first has both a body and a field builds both out of one
+/// batch, and the frames after it build nothing.**
+///
+/// One batch is observed in the order the null backend, which takes the serial
+/// path, saw the pipelines: every grass draw comes after the water surface and
+/// before the water copy. Two batches, in either order, keep each pass's
+/// pipelines together and cannot interleave them like that.
+#[test]
+fn a_first_frame_with_water_and_grass_builds_both_in_one_batch() {
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    place_cube(&mut renderer, Mat4::IDENTITY);
+    renderer.set_water(&[pond()]).expect("a square meshes");
+    renderer
+        .set_grass(device, queue, Some(&lawn()))
+        .expect("the null backend uploads every map");
+    recorder.clear();
+
+    for lap in 0..2 {
+        let both = drawn(device, queue, &mut renderer, None, |_| {});
+        assert_eq!(passes(&both, "water"), 1, "frame {lap}: {both:?}");
+        assert_eq!(passes(&both, "grass"), 1, "frame {lap}: {both:?}");
+        assert_eq!(counts(&recorder, WATER), [1; 2], "after frame {lap}");
+        assert_eq!(counts(&recorder, GRASS), [1; 6], "after frame {lap}");
+    }
+    let made = pipelines(&recorder);
+    let at = |label: &str| {
+        made.iter()
+            .position(|made| made == label)
+            .unwrap_or_else(|| panic!("no `{label}` among {made:?}"))
+    };
+    let (surface, copy) = (at("water"), at("water copy"));
+    for draw in GRASS_DRAWS {
+        assert!(
+            (surface..copy).contains(&at(draw)),
+            "`{draw}` was not made between the water surface and the water copy, so the water \
+             and grass passes were not one batch: {made:?}"
+        );
+    }
+
+    renderer.destroy(device);
+    assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
+    recorder.assert_valid();
+}
+
+/// **`ForwardRenderer::prepare_content` builds what the first frame with the
+/// content would have, on every view, with `service` between the compiles —
+/// and that frame then builds nothing.**
+#[test]
+fn prepared_content_leaves_the_first_frame_nothing_to_build() {
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    place_cube(&mut renderer, Mat4::IDENTITY);
+    let view = renderer
+        .create_view(device, queue, &ViewDesc::default())
+        .expect("a second view fits");
+
+    // Nothing set: nothing to build.
+    recorder.clear();
+    let mut services = 0;
+    renderer
+        .prepare_content(device, &mut || services += 1)
+        .expect("nothing to create");
+    assert!(
+        pipelines(&recorder).is_empty(),
+        "{:?}",
+        pipelines(&recorder)
+    );
+    assert_eq!(services, 0);
+
+    renderer.set_water(&[pond()]).expect("a square meshes");
+    renderer
+        .set_grass(device, queue, Some(&lawn()))
+        .expect("the null backend uploads every map");
+    recorder.clear();
+    renderer
+        .prepare_content(device, &mut || services += 1)
+        .expect("the null backend accepts every descriptor");
+    assert_eq!(counts(&recorder, WATER), [2; 2], "one set per camera");
+    assert_eq!(counts(&recorder, GRASS), [2; 6], "one set per camera");
+    // The null backend's batch is serial, so `service` runs before each
+    // pipeline it makes.
+    assert_eq!(
+        services,
+        pipelines(&recorder).len(),
+        "`service` did not run before each pipeline"
+    );
+
+    for lap in 0..2 {
+        let both = drawn(device, queue, &mut renderer, Some(view), |_| {});
+        assert_eq!(passes(&both, "water"), 2, "frame {lap}: {both:?}");
+        assert_eq!(passes(&both, "grass"), 2, "frame {lap}: {both:?}");
+        assert_eq!(counts(&recorder, WATER), [2; 2], "frame {lap} built water");
+        assert_eq!(counts(&recorder, GRASS), [2; 6], "frame {lap} built grass");
+    }
+    // A second call finds every pass built.
+    renderer
+        .prepare_content(device, &mut || {})
+        .expect("nothing to create");
+    assert_eq!(counts(&recorder, WATER), [2; 2]);
+    assert_eq!(counts(&recorder, GRASS), [2; 6]);
+
+    renderer.destroy_view(device, view);
+    renderer.destroy(device);
+    assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
+    recorder.assert_valid();
+}
+
+/// **Water removed and set again draws with the passes it was first built
+/// with**: no frame between rebuilds them, the frames without water record no
+/// water pass, and nothing is left alive at the end.
+#[test]
+fn water_removed_and_set_again_keeps_its_passes() {
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    place_cube(&mut renderer, Mat4::IDENTITY);
+    recorder.clear();
+    renderer.set_water(&[pond()]).expect("a square meshes");
+    // A whole ring of wet frames, so every slot holds its mesh buffers and
+    // cached groups: the steady state the frames after the re-set return to.
+    for lap in 0..=FRAMES_IN_FLIGHT {
+        let wet = drawn(device, queue, &mut renderer, None, |_| {});
+        assert_eq!(passes(&wet, "water"), 1, "frame {lap}: {wet:?}");
+    }
+    assert_eq!(counts(&recorder, WATER), [1; 2]);
+    let live = recorder.total_live_objects();
+
+    renderer.set_water(&[]).expect("an empty set is a set");
+    // Enough frames for every slot of the ring to have come round without
+    // water, so no slot still draws the bodies set before.
+    for lap in 0..=FRAMES_IN_FLIGHT {
+        let dry = drawn(device, queue, &mut renderer, None, |_| {});
+        if lap == FRAMES_IN_FLIGHT {
+            assert_eq!(passes(&dry, "water"), 0, "{dry:?}");
+        }
+    }
+    assert_eq!(
+        counts(&recorder, WATER),
+        [1; 2],
+        "a dry frame rebuilt water"
+    );
+
+    renderer.set_water(&[pond()]).expect("a square meshes");
+    for lap in 0..=FRAMES_IN_FLIGHT {
+        let again = drawn(device, queue, &mut renderer, None, |_| {});
+        assert_eq!(passes(&again, "water"), 1, "frame {lap}: {again:?}");
+    }
+    assert_eq!(
+        counts(&recorder, WATER),
+        [1; 2],
+        "water set again rebuilt its passes"
+    );
+    assert_eq!(
+        recorder.total_live_objects(),
+        live,
+        "the frames without water and after it left objects behind"
+    );
+
     renderer.destroy(device);
     assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
     recorder.assert_valid();

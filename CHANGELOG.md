@@ -43,6 +43,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the new `InstancePoolError::InvalidBounds`, and `set_skinned_instance` panics
   naming it, as it does for an out-of-range material.
 
+- **`ForwardRenderer::prepare_content(device, service)`** builds every view's
+  water and grass passes for the bodies and field set now, with `service` called
+  between compiles as `with_scene_serviced` calls it. Call it after `set_water`
+  and `set_grass` while a loading screen is up, and the first frame that draws
+  them has nothing left to build. It is optional: without it, that first frame
+  builds them as before.
+
 - **`crcbl_anim::rotate_joints` — several model-space joint turns for one
   palette update.**
   `rotate_joints(skeleton, model, pose, palette, &[(joint, model_rotation)])`
@@ -75,6 +82,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   during `ForwardRenderer::new` for the primary view under the default effect
   stack, by `create_view` or the first frame that reflects for any other view,
   and never for a view that keeps them off.
+- **The first frame with water or grass compiles their pipelines side by side.**
+  The water surface and copy pipelines used to compile one after the other, and
+  a frame that first had both a body and a field compiled the water passes' and
+  then the grass passes'. Each view now compiles every pipeline the frame needs
+  in one shared parallel batch on Vulkan, D3D12 and Metal, in rounds capped by
+  `pipeline_batch`'s `MAX_JOBS_PER_ROUND`, and one after another where the batch
+  falls back to serial (WebGPU, the null backend, a runtime without threads). A
+  cold first frame with water and grass on an RX 7900 XTX under radv went from
+  about 166 ms to about 112 ms (medians). A view still builds water and grass on
+  its first frame with a body or a field, and never builds them otherwise.
 
 ## [0.14.0] - 2026-10-31
 
