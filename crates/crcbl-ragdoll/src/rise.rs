@@ -20,14 +20,15 @@
 //! same solve is tried at points on rings around them, nearest ring first,
 //! out to the cap, and the first that stands is the answer. A point counts
 //! only if the hips can reach it: a ray at the hips' height from the hips to
-//! the standing capsule that meets nothing, so a corpse beside a thin wall
-//! never rises on its far side. Each ring is a capsule radius out from the
-//! last and spaces its points a radius apart, so the work grows with the
-//! square of `max_shift` over the character's radius; a cap of a few radii
-//! costs a few dozen solves, once per rise.
+//! the standing capsule that meets nothing but the hips' own body, which it
+//! starts inside, so a corpse beside a thin wall never rises on its far side.
+//! Each ring is a capsule radius out from the last and spaces its points a
+//! radius apart, so the work grows with the square of `max_shift` over the
+//! character's radius; a cap of a few radii costs a few dozen solves, once per
+//! rise.
 
 use crcbl_phys::{
-    CharacterConfig, CharacterController, PhysicsSystem, QueryFilter, QueryScratch, Ray,
+    CharacterConfig, CharacterController, ColliderId, PhysicsSystem, QueryFilter, QueryScratch, Ray,
 };
 use glam::DVec3;
 
@@ -113,8 +114,9 @@ impl Ragdoll {
             .transform(self.entities[root])
             .ok_or(RiseError::BodyGone)?
             .position;
+        let hips_body = physics.collider_of(self.entities[root]);
         let mut scratch = QueryScratch::new();
-        let refusal = match stand_from(physics, query, &mut scratch, hips, hips) {
+        let refusal = match stand_from(physics, query, &mut scratch, (hips, hips_body), hips) {
             Ok(centre) => return Ok(centre),
             Err(refusal) => refusal,
         };
@@ -126,7 +128,8 @@ impl Ragdoll {
             for point in 0..points {
                 let angle = core::f64::consts::TAU * f64::from(point) / f64::from(points);
                 let at = hips + DVec3::new(angle.cos(), 0.0, angle.sin()) * distance;
-                if let Ok(centre) = stand_from(physics, query, &mut scratch, hips, at) {
+                if let Ok(centre) = stand_from(physics, query, &mut scratch, (hips, hips_body), at)
+                {
                     return Ok(centre);
                 }
             }
@@ -136,13 +139,19 @@ impl Ragdoll {
 }
 
 /// Stand the query's character up over `at` (at the hips' height) and check
-/// what it lands on against the hips: within the cap, clear of everything,
-/// and reachable from them.
+/// what it lands on against the hips — where they are, and their body's
+/// collider: within the cap, clear of everything, and reachable from them.
+///
+/// The reach ray starts at the hips' centre, inside their own body, and a ray
+/// fired from inside a shape strikes its far wall, so under a mask that sees
+/// the corpse every point past the hips' radius read as unreachable and a
+/// character could never stand on its own corpse: the ray leaves the hips'
+/// body out.
 fn stand_from(
     physics: &mut PhysicsSystem,
     query: &RiseQuery,
     scratch: &mut QueryScratch,
-    hips: DVec3,
+    (hips, hips_body): (DVec3, Option<ColliderId>),
     at: DVec3,
 ) -> Result<DVec3, RiseError> {
     let config = query.character;
@@ -171,7 +180,11 @@ fn stand_from(
         return Err(RiseError::Blocked);
     }
     let path = Ray::new(hips, across).with_bounds(0.0, 1.0);
-    if queries.cast_ray_filtered(&path, filter, scratch).is_some() {
+    let reach = QueryFilter {
+        exclude: hips_body,
+        ..filter
+    };
+    if queries.cast_ray_filtered(&path, reach, scratch).is_some() {
         return Err(RiseError::Unreachable);
     }
     Ok(centre)

@@ -44,6 +44,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reads skinned vertices back, and `ForwardRenderer::skinned_regions_skipped()`
   reports how many regions the last frame skipped.
 
+### Fixed
+
+- **A generated ragdoll lying on a plane now falls asleep.** A body held still
+  between a joint and a contact was turned each substep by half the joint's
+  warm-started impulse: the solver carried a joint's change to a body's angular
+  velocity into its step whole and a contact's at half, so under a steady load
+  the two impulses cancelled in the velocity but not in the turn. The ragdoll
+  kept a turn its springs pulled back, reported a spin it was not making, and
+  never stayed still long enough to sleep. The part of a joint's change that the
+  body's contacts cancel is now taken at the midpoint too. On a 56-body
+  generated humanoid at the default sixteen substeps, none of five runs slept
+  within 40 s before; after, four sleep, in 2.2 to 9.1 s, and the fifth is held
+  awake by its light spine chattering, a separate open cause. A jointed body
+  with no contact in its solver pass steps exactly as before. **Every scene with
+  a joint and a contact on the same body now steps to different bits**, and so
+  do the unjointed bodies it touches: pinned state hashes (tumble's moved and is
+  re-pinned), lockstep peers on builds either side of this change, and recorded
+  replays of such scenes will diverge. A scene with no joint steps exactly as
+  before.
+
+- **`Ragdoll::rise_point` can stand a character on its own corpse.** Under a
+  query mask that sees the corpse, the check that the hips can reach the
+  standing point fired its ray from the hips' centre, inside their own body, and
+  a ray fired from inside a shape strikes its far wall, so every point farther
+  than the hips' radius came back `RiseError::Unreachable`. The ray now leaves
+  the hips' own body out; a mask that leaves the corpse out, the usual one,
+  answers as before.
+
 ## [0.15.0] - 2026-11-01
 
 ### Breaking

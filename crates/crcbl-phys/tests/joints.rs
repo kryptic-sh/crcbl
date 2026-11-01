@@ -949,22 +949,24 @@ fn bridge(
     (entities, joints)
 }
 
-/// How far a loaded bridge's middle plank sags below its anchors after
-/// three seconds, against the hanging chain's, with its planks asking for
-/// `substeps`, and the worst joint error.
-fn bridge_sag(substeps: u32) -> (f64, f64, f64) {
-    const PLANKS: u32 = 21;
-    const SPAN: f64 = 9.5;
-    const HEIGHT: f64 = 4.0;
-    const LOAD: f64 = 40.0;
+/// The loaded bridge's planks: twenty-one across 9.5 m, their anchors 4 m up.
+const LOADED_PLANKS: u32 = 21;
+const LOADED_SPAN: f64 = 9.5;
+const LOADED_HEIGHT: f64 = 4.0;
+/// The crate on its middle plank, in kilograms.
+const LOAD: f64 = 40.0;
+
+/// The loaded bridge, its planks asking for `substeps`: the system, the
+/// planks and the crate resting on the middle one.
+fn loaded_bridge(substeps: u32) -> (PhysicsSystem, Vec<Entity>, Entity) {
     let mut phys = system();
-    let (planks, _) = bridge(&mut phys, PLANKS, SPAN, HEIGHT);
+    let (planks, _) = bridge(&mut phys, LOADED_PLANKS, LOADED_SPAN, LOADED_HEIGHT);
     for &plank in &planks {
         phys.set_substeps(plank, substeps);
     }
     let middle = planks[planks.len() / 2];
     let deck = position(&phys, middle) + DVec3::new(0.0, 0.05 + 0.2, 0.0);
-    box_(
+    let load = box_(
         &mut phys,
         200,
         deck,
@@ -972,6 +974,18 @@ fn bridge_sag(substeps: u32) -> (f64, f64, f64) {
         DVec3::splat(0.2),
         LOAD,
     );
+    (phys, planks, load)
+}
+
+/// How far a loaded bridge's middle plank sags below its anchors after
+/// three seconds, against the hanging chain's, with its planks asking for
+/// `substeps`, and the worst joint error.
+fn bridge_sag(substeps: u32) -> (f64, f64, f64) {
+    const PLANKS: u32 = LOADED_PLANKS;
+    const SPAN: f64 = LOADED_SPAN;
+    const HEIGHT: f64 = LOADED_HEIGHT;
+    let (mut phys, planks, _) = loaded_bridge(substeps);
+    let middle = planks[planks.len() / 2];
     let mut worst: f64 = 0.0;
     for _ in 0..180 {
         phys.step(DT);
@@ -990,9 +1004,10 @@ fn bridge_sag(substeps: u32) -> (f64, f64, f64) {
 /// seconds the middle plank hangs within the bound of the depth a chain of
 /// rigid links would, which is algebra.
 ///
-/// Measured on 2026-09-23: 2.188 m against 2.100 — the joints stretched
-/// 5.1 mm at worst, and twenty-two of them lengthen the chain — at the
-/// defaults. The chain is right: with no load it hangs 1.953 m deep, where a
+/// Measured on 2026-09-23, and again on 2026-11-01 once a jointed body's
+/// contacts began cancelling part of its joints' change in the step: 2.188 m
+/// against 2.100 — the joints stretched 5.1 mm at worst, and twenty-two of
+/// them lengthen the chain — at the defaults. The chain is right: with no load it hangs 1.953 m deep, where a
 /// catenary of the same length and span hangs 1.96 m.
 #[test]
 fn a_loaded_bridge_sags_as_a_hanging_chain_says() {
@@ -1002,6 +1017,46 @@ fn a_loaded_bridge_sags_as_a_hanging_chain_says() {
         "sags {sag} m, not {expected} m"
     );
     assert!(worst < 1.0e-2, "a joint drifted {worst} m");
+}
+
+/// **A loaded bridge never gains energy.** The loaded bridge above, awake:
+/// its planks' and the crate's kinetic energy plus their weight's potential,
+/// tick by tick over five seconds, never rises above where it started and
+/// ends lower. A joint correction the step takes only half of, put back by
+/// the joint's spring, adds energy — measured on 2026-09-23, the unloaded
+/// bridge gained 3.4 kJ in three seconds that way — and the crate is the
+/// contact that shares the middle plank's load with its joints.
+///
+/// Measured on 2026-11-01: it never came within 0.56 J of its start and ended
+/// 94.5 J lower. With every joint's change taken at the midpoint instead, it
+/// rose 5.6 kJ over its start.
+#[test]
+fn a_loaded_bridge_never_gains_energy() {
+    let (mut phys, planks, load) = loaded_bridge(0);
+    let bodies: Vec<Entity> = planks.iter().copied().chain([load]).collect();
+    let energy = |phys: &PhysicsSystem| -> f64 {
+        bodies
+            .iter()
+            .map(|&e| {
+                let b = body(phys, e);
+                let t = phys.transform(e).expect("a body");
+                b.kinetic_energy(t.rotation) + G * t.position.y / b.inverse_mass
+            })
+            .sum()
+    };
+    let start = energy(&phys);
+    let mut highest = f64::NEG_INFINITY;
+    for _ in 0..300 {
+        phys.step(DT);
+        highest = highest.max(energy(&phys));
+    }
+    let end = energy(&phys);
+    assert!(
+        highest <= start,
+        "it rose {} J over its start",
+        highest - start
+    );
+    assert!(end < start, "it ended {} J over its start", end - start);
 }
 
 /// **More substeps for the bridge's group hold it closer to the chain.**
@@ -1348,4 +1403,67 @@ fn a_group_with_more_substeps_stands_a_tall_column() {
         eight < 5.0e-3,
         "the column at eight substeps leaned {eight} m"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A joint and a contact holding one body
+// ---------------------------------------------------------------------------
+
+/// **A bar hung from a ball joint with its free end on the floor reports the
+/// spin it makes, and sleeps.** A 5 cm, 100 g bar — a fingertip's size —
+/// leans 0.3 rad, its upper end jointed to a fixed anchor and a corner of its
+/// lower end on the floor, so the joint and the floor share its weight and
+/// their impulses cancel about its centre.
+///
+/// While the solver turned a body by its joints' change to its spin whole and
+/// its contacts' at half, they cancelled in the velocity and not in the turn:
+/// the bar turned by half the joint's warm-started impulse each substep, its
+/// spring pulled it back, and it reported a spin it was not making. Measured
+/// on 2026-11-01 at the default four substeps: from tick 15 to tick 60 it read
+/// 0.089 rising to 0.1006 rad/s while turning at 0.029 down to 0.004 —
+/// hovering at [`ContactSettings::sleep_angular_speed`], over it from tick 29
+/// — and slept at tick 424. Since the part of the joints' change a contact
+/// opposes is taken at the midpoint too, the two agree to 2e-4 rad/s from
+/// tick 15, and it sleeps at tick 31.
+#[test]
+fn a_bar_held_by_a_joint_and_the_floor_reports_its_spin_and_sleeps() {
+    const LENGTH: f64 = 0.05;
+    let mut phys = system_with(ContactSettings::DEFAULT);
+    phys.add_plane(DVec3::Y, 0.0, CRATE);
+    let half = DVec3::new(0.5 * LENGTH, 0.05 * LENGTH, 0.05 * LENGTH);
+    let tilt = about_z(-0.3);
+    let corner = tilt * DVec3::new(half.x, -half.y, 0.0);
+    let centre = DVec3::new(0.0, 0.001 - corner.y, 0.0);
+    let bar = box_(&mut phys, 1, centre, tilt, half, 0.1);
+    let pivot = centre + tilt * DVec3::new(-half.x, 0.0, 0.0);
+    let hook = anchor(&mut phys, 0, pivot);
+    let joint = joint_at(
+        &phys,
+        hook,
+        bar,
+        Transform::from_position(pivot),
+        JointKind::Spherical(SphericalJoint::ball()),
+    );
+    phys.add_joint(joint).expect("a valid ball joint");
+
+    let mut asleep_at = None;
+    for tick in 1..=60 {
+        let before = rotation(&phys, bar);
+        phys.step(DT);
+        if phys.is_sleeping(bar) {
+            asleep_at = Some(tick);
+            break;
+        }
+        // Past the landing, what it reports is what it turns.
+        let reported = body(&phys, bar).angular_velocity.length();
+        // Twice the turn's half-angle sine: its angle to third order, which
+        // at the few milliradians a tick turns here is far inside the bound.
+        let turn = rotation(&phys, bar) * before.inverse();
+        let turning = 2.0 * DVec3::new(turn.x, turn.y, turn.z).length() / DT;
+        assert!(
+            tick < 15 || (reported - turning).abs() < 0.01,
+            "tick {tick}: it reports {reported} rad/s while turning at {turning}"
+        );
+    }
+    assert!(asleep_at.is_some(), "still awake after a second");
 }

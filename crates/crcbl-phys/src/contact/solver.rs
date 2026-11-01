@@ -140,8 +140,16 @@ pub(crate) struct Scratch {
     /// The points the restitution pass bounced, as (constraint, point).
     bounced: Vec<(usize, usize)>,
     /// Each awake body's angular velocity change from joints this substep,
-    /// which its step carries whole: see `run_pass`.
+    /// which its step carries whole, less what its contacts cancel of it:
+    /// see `run_pass`.
     carried: Vec<DVec3>,
+    /// Each awake body's angular velocity before this substep's
+    /// constraints, kept while the pass has joints: what its contacts'
+    /// change is read from.
+    free_spin: Vec<DVec3>,
+    /// Whether each awake body is a side of one of the pass's contacts,
+    /// kept while the pass has joints.
+    touching: Vec<bool>,
 }
 
 /// What the solver keeps for one awake body over a tick.
@@ -742,6 +750,21 @@ impl ContactPipeline {
 /// then its contacts, integrating the positions, and relaxing joints and
 /// contacts in the same order — Box2D v3's `b2SolverStage` sequence, with
 /// the joints first as its overflow solve has them.
+///
+/// **A joint's change to a body's spin is carried whole, less what the
+/// body's contacts cancel of it** — see
+/// [`SemiImplicitEuler::integrate_position_carrying`] for why joints carry
+/// whole and contacts half. Where a joint and a contact hold a body still
+/// between them, their impulses cancel in the velocity; carried whole
+/// against the contact's half, they did not cancel in the turn, and the body
+/// turned by half the joint's warm-started impulse every substep. Measured
+/// on 2026-11-01, that kept a generated ragdoll lying on a plane from ever
+/// sleeping (`crates/crcbl-ragdoll/tests/creep.rs`). So the part of the
+/// joints' change its contacts oppose is taken at the midpoint, as theirs
+/// is, and only the rest whole. A jointed body with no contact in the pass —
+/// a hanging chain's link, a plank with nothing on it — skips this and steps
+/// exactly as before, to the bit, and so does a body no joint touches; one
+/// whose contacts do not oppose its joints steps the same up to rounding.
 fn run_pass(
     pass: &Pass,
     settings: &ContactSettings,
@@ -755,6 +778,19 @@ fn run_pass(
     let max_angular_speed = settings.max_rotation / h;
     let contacts = pass.contacts.clone();
     scratch.carried.clear();
+    scratch.free_spin.clear();
+    scratch.touching.clear();
+    if !joints.is_empty() {
+        scratch.free_spin.resize(bodies.len(), DVec3::ZERO);
+        scratch.touching.resize(bodies.len(), false);
+        for c in &scratch.constraints[contacts.clone()] {
+            for index in [c.a, c.b] {
+                if index != NONE {
+                    scratch.touching[index] = true;
+                }
+            }
+        }
+    }
     for k in 0..pass.substeps {
         for &index in &pass.bodies {
             let body = &mut bodies[index];
@@ -768,6 +804,9 @@ fn run_pass(
                 body.angular_velocity *= max_angular_speed / turn_squared.sqrt();
             }
             scratch.bodies[index].spin = spin;
+            if let Some(free) = scratch.free_spin.get_mut(index) {
+                *free = body.angular_velocity;
+            }
         }
         coast(scratch, bodies, &pass.outside, f64::from(k) * h);
         if !joints.is_empty() {
@@ -800,7 +839,14 @@ fn run_pass(
             let body = &mut bodies[index];
             let transform = &mut transforms[index];
             let s = &mut scratch.bodies[index];
-            let carried = scratch.carried.get(index).copied().unwrap_or(DVec3::ZERO);
+            let carried = match scratch.carried.get(index) {
+                Some(&joint) if scratch.touching[index] => {
+                    let contact = body.angular_velocity - scratch.free_spin[index] - joint;
+                    uncancelled(joint, contact)
+                }
+                Some(&joint) => joint,
+                None => DVec3::ZERO,
+            };
             SemiImplicitEuler::integrate_position_carrying(body, transform, s.spin, carried, h);
             s.moved(transform, body.angular_velocity, h);
         }
@@ -823,6 +869,19 @@ fn run_pass(
     for &index in &pass.outside {
         scratch.bodies[index].rewind();
     }
+}
+
+/// The part of `joint`, a body's angular velocity change from its joints,
+/// that `contact`, the change from its contacts, does not cancel: `joint`
+/// scaled down by the fraction of it `contact` points against, from none of
+/// it to all.
+fn uncancelled(joint: DVec3, contact: DVec3) -> DVec3 {
+    let length_squared = joint.length_squared();
+    if length_squared == 0.0 {
+        return DVec3::ZERO;
+    }
+    let cancelled = (-contact.dot(joint) / length_squared).clamp(0.0, 1.0);
+    joint * (1.0 - cancelled)
 }
 
 /// Puts each of `outside` — bodies another pass integrates — where it is `t`
@@ -946,6 +1005,43 @@ fn motion_since_start(solver: &[SolverBody], index: usize) -> (DVec3, DVec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A contact takes off as much of a joint's change as it points against
+    /// it, and nothing for pointing along it or across it.
+    #[test]
+    fn a_contact_cancels_the_part_of_a_joints_change_it_opposes() {
+        let joint = DVec3::new(0.0, 2.0, 0.0);
+        assert_eq!(uncancelled(joint, -joint), DVec3::ZERO);
+        assert_eq!(uncancelled(joint, -3.0 * joint), DVec3::ZERO);
+        assert_eq!(uncancelled(joint, -0.25 * joint), 0.75 * joint);
+        assert_eq!(uncancelled(joint, joint), joint);
+        assert_eq!(uncancelled(joint, DVec3::X), joint);
+        assert_eq!(uncancelled(joint, DVec3::new(5.0, -1.0, 0.0)), 0.5 * joint);
+        assert_eq!(uncancelled(DVec3::ZERO, DVec3::X), DVec3::ZERO);
+        // Off every axis: the projection, not a per-axis clamp, which would
+        // leave (0, 1, 0) here.
+        assert_eq!(
+            uncancelled(DVec3::new(1.0, 1.0, 0.0), DVec3::new(-1.0, 0.0, 0.0)),
+            DVec3::new(0.5, 0.5, 0.0)
+        );
+    }
+
+    /// Turning a joint's and a contact's change together turns what is left
+    /// of the joint's with them.
+    #[test]
+    fn what_a_contact_cancels_does_not_depend_on_the_axes() {
+        let joint = DVec3::new(0.3, -1.2, 0.7);
+        let contact = DVec3::new(-0.9, 0.4, 0.2);
+        let left = uncancelled(joint, contact);
+        assert!(left.length() > 0.0 && left.length() < joint.length());
+        let turn = rotation_from_scaled_axis(DVec3::new(0.4, -1.1, 2.3));
+        let turned = uncancelled(turn * joint, turn * contact);
+        assert!(
+            turned.distance(turn * left) < 1e-12,
+            "{turned} against {}",
+            turn * left
+        );
+    }
 
     /// With no stiffness the spring is off: full mass, no carried impulse,
     /// and no bias.

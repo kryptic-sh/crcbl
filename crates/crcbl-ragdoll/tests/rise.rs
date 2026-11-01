@@ -7,7 +7,7 @@ use crcbl_anim::Pose;
 use crcbl_ecs::Entity;
 use crcbl_phys::{CharacterConfig, ColliderComponent, PhysicsSystem, Transform};
 use crcbl_ragdoll::{GenerateSettings, Handoff, Ragdoll, RagdollRig, RiseError, RiseQuery};
-use glam::DVec3;
+use glam::{DVec3, Mat4, Vec3};
 
 const DT: f64 = 1.0 / 60.0;
 
@@ -45,8 +45,15 @@ fn block(physics: &mut PhysicsSystem, index: u32, centre: DVec3, half_extents: D
     );
 }
 
-/// A humanoid dropped and settled on the solver's floor, on the corpse
-/// layer; with `ground`, a static floor box queries see as well.
+/// A humanoid laid on its back a centimetre over the solver's floor and
+/// settled there, on the corpse layer; with `ground`, a static floor box
+/// queries see as well.
+///
+/// Laid, not dropped: a T-pose dropped upright lands wherever the fall
+/// happens to break its symmetry. Measured on 2026-11-01, this fixture
+/// dropped from 0.3 m landed in a different pose when only the solver's
+/// rounding changed, and of eight tilts of the drop from −0.12 to 0.1 rad,
+/// three passed the stand-on-its-own-body check below and five did not.
 fn corpse(ground: bool) -> (PhysicsSystem, Ragdoll) {
     let mut physics = world();
     if ground {
@@ -63,7 +70,7 @@ fn corpse(ground: bool) -> (PhysicsSystem, Ragdoll) {
     let pose = Pose::new(&skeleton);
     let handoff = Handoff {
         pose: &pose,
-        model: model(0.3),
+        model: on_its_back(),
         previous: None,
     };
     let ragdoll = Ragdoll::spawn(
@@ -84,6 +91,20 @@ fn corpse(ground: bool) -> (PhysicsSystem, Ragdoll) {
     ragdoll.set_query_layers(&mut physics, CORPSE);
     (physics, ragdoll)
 }
+
+/// The fixture's model transform turned a quarter about `z`, its head to
+/// `-x` and its face up, its bones' axes [`LYING_HEIGHT`] up.
+fn on_its_back() -> Mat4 {
+    Mat4::from_translation(Vec3::new(2.0, LYING_HEIGHT, -1.0))
+        * Mat4::from_rotation_z(core::f32::consts::FRAC_PI_2)
+        * Mat4::from_rotation_y(core::f32::consts::FRAC_PI_2)
+        * Mat4::from_scale(Vec3::splat(common::SCALE))
+}
+
+/// How high [`on_its_back`] lays the bones' axes, in metres: a centimetre
+/// over the radius of the fattest body the rig fits to the fixture, its
+/// thighs' and calves' 9 cm.
+const LYING_HEIGHT: f32 = 0.1;
 
 /// The hips: the body nearest the skeleton root, which the generated rig
 /// lists first.

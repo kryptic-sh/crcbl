@@ -17691,27 +17691,108 @@ run in ordinary CI; do not make EW's asset checkout or adoption an engine test
 prerequisite. Continue the remaining authored-runtime and delivery items in
 `docs/plan/35-ragdolls.md`; the synthetic pose/body bridge is already present.
 
-### A generated ragdoll on a plane creeps and rarely sleeps (EW, 2026-11-01)
+### A generated ragdoll above 24 substeps, and what else keeps one awake (EW, 2026-11-01)
 
-EW's rig is `RagdollRig::generate` with `GenerateSettings::DEFAULT` over a
-55-joint skeleton (IK joints removed): 40 bodies, 80 kg, under
-`ContactSettings::DEFAULT` and `GravityForce::EARTH`, on a plane with friction
-0.8, stepped at 1/60 s. Of five runs (no launch, plus strikes along ±x and ±z),
-none slept within 40 s. EW's variations, sleeping runs out of five:
+EW's report — a `RagdollRig::generate` rig on a 0.8-friction plane creeping at
+0.1–0.3 rad/s and almost never sleeping — was measured on a comparable rig in
+`crates/crcbl-ragdoll/tests/creep.rs`: a 66-joint mannequin, 56 bodies, 10 g
+fingertips and 12.5 kg thighs, and the same five runs (no launch, strikes of 30
+N·s at the head along ±x and ±z). Its main cause was a solver defect and is
+fixed (see the changelog): a body held still between a joint and a contact
+turned by half the joint's warm-started impulse every substep. Measured then, a
+fingertip reported 0.34 rad/s while turning at 0.016 rad/s. EW's guess, bias
+velocity left by the relax pass, was not tested directly — no constraint's bias
+was logged — but changing only how the step turns a body, with the relax
+untouched, made four of the five runs sleep at sixteen substeps, and the fifth
+is kept awake by a separate cause (below).
 
-- Fingers, thumbs and toes collapsed: 3.
-- Substeps 24, 32 or 48: 0 (worse, not better).
-- `joint_friction` 0.01: 2.
-- Cone/twist limits 0.7/0.1 or 1.2/1.0: 3.
-- Floor friction 0.3 or 1.5: 2 and 3.
-- Self-collision ignored: no change.
+The fix takes the part of a body's joint change that its contacts cancel at the
+midpoint, as the contacts' own change is taken, where it had been taken whole. A
+jointed body with no contact in its solver pass skips that and steps to the bit
+as before (an unloaded 21-plank bridge hashed the same before and after; without
+the skip it did not). A first form instead took every jointed body's contact
+change whole, which is Box2D's form. It cured the creep but made a column of
+cubes tethered corner to corner by weak springs sway 55.1 mm, against 13.9 mm on
+the final rule and 14.9 mm before either (`stacking.rs`'s
+`a_column_tethered_by_weak_springs_sways_as_one_without_them`). Declined for
+that. With the tethers pulling under tension from the start, the column leaned
+39.5 cm before the fix and 15.6 cm after
+(`a_column_tethered_under_tension_leans_only_as_far_as_its_contacts_give`): the
+creep, on cubes. A two-capsule ball-jointed limb lying on an unjointed
+three-cube stack drifted 5.94 mm in 10 s before the fix and after it, and the
+stack's top 2.57 mm both times; not pinned. The loaded bridge sags as before
+(2.188 m, 5.1 mm joint error) and never gains energy (`joints.rs`'s
+`a_loaded_bridge_never_gains_energy`, new).
 
-In a stuck run `spine_01` (a 0.96 kg capsule between a 2.6 kg pelvis sphere and
-`spine_02`) holds an angular velocity of about 0.17 rad/s, above
-`sleep_angular_speed` (0.1), while its orientation barely changes. EW's
-question: is this bias velocity left by a ball joint at its cone/twist limit
-(perhaps together with the floor contact) after the relax pass, and why do more
-substeps make it worse? Unmeasured by us; EW's settle timeout covers it.
+Measured on that rig in release on 2026-11-01, as runs out of five asleep within
+40 s:
+
+| Group substeps | Before the fix | After |
+| -------------- | -------------- | ----- |
+| 4              | 0              | 4     |
+| 8              | 0              | 3     |
+| 16 (default)   | 0              | 4     |
+| 24             | 0              | 4     |
+| 32             | 0              | 0     |
+| 48             | 0              | —     |
+
+48 was not measured on the final form of the fix. The run that stays awake at 16
+and 24 is the +z strike; see the spine chatter below.
+
+**At 24 substeps and above the rig blows up, and it did before the fix too.**
+The peak angular speed of any body over a 40 s run on the floor was 11.7–16.0
+krad/s at 24 substeps before the fix and 38.9–904 krad/s at 32. After the fix,
+in the form measured before it skipped bodies with no contact (rounding apart,
+the same rule), it was 2.1–10.8 krad/s at 24 and 38.5–63.3 krad/s at 32. In the
+air at 500 m nothing spins up. So the blow-up predates the fix and is a separate
+cause. Before the fix it matches EW's "more substeps is worse" in kind: EW saw 0
+of 5 at 24, 32 and 48, and so do we, but nothing slept at 16 either, so the
+counts alone cannot tell the two causes apart.
+
+The fix is not ruled out as a contributor at 32. It changes the spin of exactly
+these 10 g bodies on the floor, where the blow-up happens. The first form, which
+carried their contact impulses whole, blew up at 32 as well.
+
+It follows the group rule in `crates/crcbl-phys/src/contact/group.rs` that
+raises a group's joint stiffness in proportion to its substeps
+(`Prepared::soften`'s `scale`). That rule pins every ragdoll joint at the
+quarter-substep-rate cap: 240 Hz at 16 substeps, 360 Hz at 24, 480 Hz at 32. On
+the fix before its no-contact skip, at 32 substeps, capping the joints'
+effective stiffness at 240 Hz let 4 of 5 runs sleep, and at 360 Hz 2 of 5 (after
+31.9 and 38.0 s). At 24 substeps the same 360 Hz slept 5 of 5 then. So the
+stiffness alone is not what breaks. Per substep a joint at the cap is equally
+stiff at any count; the guess is the manifold, built once a tick while a stiff
+joint rings several times inside it. Unverified. **Decision for the user:**
+
+- Cap a group's joint stiffness at 240 Hz whatever its substeps. The bridge test
+  `more_substeps_for_the_bridge_hold_it_closer` asks for 12 substeps (180 Hz)
+  and is under the cap.
+- Or document that a ragdoll should not ask for more than 24 substeps, and leave
+  the rule.
+- Not the fix: dropping the joint scaling outright reds that bridge test (2.184
+  m sag against 2.100, measured with the first form of the fix).
+
+**At eight substeps the light fingers still keep two of five awake.** That is
+what `GenerateSettings::DEFAULT`'s sixteen was measured for. Not looked into
+further.
+
+**The +z run does not sleep: its light spine chatters.** On the final rule at
+sixteen substeps it was still awake after 300 s, `spine_02` to `spine_04` and
+`neck_01` turning at 7–22 rad/s at 40 s; those links (0.29–0.78 kg, between a
+3.1 kg pelvis and the whole upper body) are thinner than the pelvis and spine
+spheres around them, so they likely touch nothing and the fix does not reach
+them — likely, not checked. In the unfixed solver the same run chattered the
+same way for its first ten seconds, and under the first form of the fix for all
+40 s, its joints 0.05–0.1 rad past their limits, turning back and forth with
+almost no net turn. The form of the fix just before the no-contact skip slept
+this run after 18.1 s: a rounding-level difference in bodies with no contact
+moved it from 18 s to never, so it sits on an edge, and `creep.rs` leaves it
+out. `max_mass_ratio` bounds only a jointed pair, never a light link carrying a
+heavy subtree; a generator rule on subtree mass is the candidate. Open.
+
+Not reproduced exactly: EW's own rig (40 bodies, 0.96 kg `spine_01`, 2.6 kg
+pelvis) was not available. The fixture is comparable, not the same, so EW should
+confirm on theirs.
 
 ### Player kit — `30-player-kit.md` (2026-08-27, re-verified 2026-09-24)
 

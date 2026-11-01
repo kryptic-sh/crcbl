@@ -9,8 +9,8 @@
 
 use crcbl_ecs::{Entity, SystemTrait as _};
 use crcbl_phys::{
-    ColliderComponent, ContactSettings, GravityForce, MassProperties, PhysicsSystem, RigidBody,
-    SurfaceMaterial, Transform,
+    ColliderComponent, ContactSettings, DistanceJoint, GravityForce, Joint, JointKind,
+    MassProperties, PhysicsSystem, RigidBody, SurfaceMaterial, Transform,
 };
 use glam::{DQuat, DVec3};
 
@@ -597,4 +597,102 @@ fn pyramid_hash(ticks: u32) -> u64 {
 fn a_pyramid_hashes_the_same_on_two_runs() {
     assert_eq!(pyramid_hash(120), pyramid_hash(120));
     assert_ne!(pyramid_hash(120), pyramid_hash(121));
+}
+
+// ---------------------------------------------------------------------------
+// Jointed bodies carrying load through contacts
+// ---------------------------------------------------------------------------
+
+/// [`column_trace`]'s column awake, each cube tethered to the one below it
+/// by a 1 Hz spring of rest length `rest` between the two cubes' top
+/// corners at `+x`, `+z`, the pair still colliding: a load carried through
+/// contacts by bodies whose joints torque them. A spring of rest length one
+/// cube pulls only once the column sways; a shorter one pulls the upper
+/// corner down from the start, which the contacts under that corner hold.
+fn tethered_column_trace(count: u32, rest: f64, ticks: u32) -> Vec<ColumnSample> {
+    let mut phys = system_with(AWAKE, CRATE);
+    let boxes = column(&mut phys, count, 0.5);
+    let corner = Transform::from_position(DVec3::new(0.5, 0.5, 0.5));
+    for pair in boxes.windows(2) {
+        phys.add_joint(
+            Joint::new(
+                pair[0],
+                pair[1],
+                corner,
+                corner,
+                JointKind::Distance(DistanceJoint::spring(rest, 1.0, 0.7)),
+            )
+            .colliding(true),
+        )
+        .expect("a valid spring");
+    }
+    let top = *boxes.last().expect("a column has a top");
+    let start = position(&phys, top);
+    (0..ticks)
+        .map(|_| {
+            phys.step(DT);
+            let drift = position(&phys, top) - start;
+            let tipped = boxes
+                .iter()
+                .map(|&e| {
+                    let up = phys.transform(e).expect("a box").rotation * DVec3::Y;
+                    (up.x * up.x + up.z * up.z).sqrt()
+                })
+                .fold(0.0, f64::max);
+            ColumnSample {
+                sunk: -drift.y,
+                sideways: DVec3::new(drift.x, 0.0, drift.z).length(),
+                tipped,
+                asleep: boxes.iter().all(|&e| phys.is_sleeping(e)),
+            }
+        })
+        .collect()
+}
+
+/// The most the top cube of `trace` moved sideways, and where it was at the
+/// end, in metres.
+fn sway(trace: &[ColumnSample]) -> (f64, f64) {
+    let most = trace.iter().map(|s| s.sideways).fold(0.0, f64::max);
+    (most, trace.last().expect("a sample").sideways)
+}
+
+/// **A column whose cubes are tethered by weak springs sways as one without
+/// them**: [`a_column_under_greenhills_height_damps_its_sway`]'s fourteen
+/// cubes, each joined to the one below by a spring at its rest length
+/// between their corners, which pulls only as the column sways — so every
+/// cube has a joint that torques it, and the load still goes through the
+/// contacts.
+///
+/// The solver turns a body by its joints' change to its spin whole and its
+/// contacts' at the midpoint — the halving the stacks were measured with.
+/// Measured on 2026-11-01 over 600 ticks, the top cube's worst swing and
+/// where it ended: 13.9 mm and 2.0 mm, against the untethered column's 13.7
+/// and 1.8. Before a jointed body's contacts cancelled part of its joints'
+/// change in the step, 14.9 and 3.9; taking every jointed body's contacts
+/// whole as well, as a first fix for the ragdoll creep in
+/// `crates/crcbl-ragdoll/tests/creep.rs` did, 55.1 and 16.0.
+#[test]
+fn a_column_tethered_by_weak_springs_sways_as_one_without_them() {
+    let (most, last) = sway(&tethered_column_trace(14, 1.0, 600));
+    assert!(most < 0.02, "the top cube swung {most} m sideways");
+    assert!(last < 5e-3, "the top cube was {last} m out at tick 600");
+}
+
+/// **A column whose tethers pull a corner of every cube down leans no
+/// further than the contacts give.** The column above, its springs half a
+/// cube long, so each pulls from the start and the contacts under the corner
+/// hold it: a joint torque a contact cancels, as a ragdoll's limb on the
+/// floor is held.
+///
+/// Stiff contacts would hold that column upright; soft ones let it lean as
+/// the corners' contacts squeeze. Measured on 2026-11-01 over 600 ticks: the
+/// top cube leaned 15.6 cm at worst and was 8.4 cm out at the end. Before a
+/// jointed body's contacts cancelled part of its joints' change in the step,
+/// the cancelled part turned the cubes every substep, and the column leaned
+/// 39.5 cm and was 26.8 cm out.
+#[test]
+fn a_column_tethered_under_tension_leans_only_as_far_as_its_contacts_give() {
+    let (most, last) = sway(&tethered_column_trace(14, 0.5, 600));
+    assert!(most < 0.25, "the top cube leaned {most} m");
+    assert!(last < 0.15, "the top cube was {last} m out at tick 600");
 }

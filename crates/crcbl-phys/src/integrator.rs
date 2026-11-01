@@ -224,6 +224,11 @@ impl SemiImplicitEuler {
     /// column in `stacking.rs` lean 4.9 cm in ten seconds where it holds to
     /// 1.8 mm, the midpoint's halving acting as a damping on rocking that the
     /// stacks were measured with.
+    ///
+    /// **The contact solver passes less than a joint's whole change** where a
+    /// contact on the same body opposes it: that part goes at the midpoint,
+    /// as the contact's does, so the two still cancel in the turn — see
+    /// `run_pass` in `crates/crcbl-phys/src/contact/solver.rs`.
     pub fn integrate_position_carrying(
         body: &mut RigidBody,
         transform: &mut Transform,
