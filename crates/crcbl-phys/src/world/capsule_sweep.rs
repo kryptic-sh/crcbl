@@ -85,8 +85,7 @@ impl OverlapQueries<'_> {
             head.min(feet).min(head + motion).min(feet + motion) - reach,
             head.max(feet).max(head + motion).max(feet + motion) + reach,
         );
-        self.bvh
-            .traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
+        filter.candidates(self.bvh, &bounds, scratch);
         let at = |t: f64| ContactShape::Capsule {
             a: head + motion * t,
             b: feet + motion * t,

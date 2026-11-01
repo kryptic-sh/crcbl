@@ -299,6 +299,25 @@ impl ResolvedFilter {
         }
     }
 
+    /// The tree's elements whose bounds meet `bounds`, into
+    /// `scratch.candidates`, leaving out subtrees on none of the mask's
+    /// layers.
+    ///
+    /// Both layer tests ask `layers & mask != 0` before anything else, so a
+    /// collider in a pruned subtree is one [`admits`](Self::admits) would
+    /// refuse, and the survivors come in the order the unpruned walk gives
+    /// them: every query's answer is what it was without the pruning. The
+    /// exclusion, the trigger flag and [`LayerMatch::Within`]'s second half
+    /// are not masks over the tree and stay in `admits`.
+    fn candidates(&self, bvh: &Bvh, bounds: &Aabb, scratch: &mut QueryScratch) {
+        bvh.traverse_aabb_masked_into(
+            bounds,
+            self.mask,
+            &mut scratch.stack,
+            &mut scratch.candidates,
+        );
+    }
+
     /// Whether the collider at storage slot `idx` may be reported.
     fn admits(&self, idx: usize, slot: &ColliderSlot) -> bool {
         Some(idx) != self.skip
@@ -810,8 +829,7 @@ impl OverlapQueries<'_> {
         out: &mut Vec<DVec3>,
     ) {
         let filter = ResolvedFilter::solid(self.colliders, self.generations, filter);
-        self.bvh
-            .traverse_aabb_into(&capsule.aabb(), &mut scratch.stack, &mut scratch.candidates);
+        filter.candidates(self.bvh, &capsule.aabb(), scratch);
         for &element in scratch.candidates.iter() {
             let idx = element as usize;
             let Some(Some(slot)) = self.colliders.get(idx) else {
@@ -919,7 +937,7 @@ fn overlap_sphere_core(
     let filter = ResolvedFilter::overlap(colliders, generations, filter);
     let query_aabb = Aabb::from_centre_half(query_sphere.centre, DVec3::splat(query_sphere.radius));
 
-    bvh.traverse_aabb_into(&query_aabb, &mut scratch.stack, &mut scratch.candidates);
+    filter.candidates(bvh, &query_aabb, scratch);
 
     for &element in scratch.candidates.iter() {
         let idx = element as usize;
@@ -970,7 +988,7 @@ fn overlap_aabb_core(
     out: &mut Vec<ColliderId>,
 ) {
     let filter = ResolvedFilter::overlap(colliders, generations, filter);
-    bvh.traverse_aabb_into(aabb, &mut scratch.stack, &mut scratch.candidates);
+    filter.candidates(bvh, aabb, scratch);
     out.clear();
     for &slot in &scratch.candidates {
         let admitted = colliders
@@ -1006,9 +1024,9 @@ fn cast_ray_core(
 ) -> Option<(ColliderId, ShapeHit)> {
     // Out of the scratch and back into it, because the descent borrows the
     // stack at the same time and the two are fields of one struct.
-    let mut hits = core::mem::take(&mut scratch.ray_hits);
-    bvh.traverse_ray_into(ray, &mut scratch.stack, &mut hits);
     let filter = ResolvedFilter::solid(colliders, generations, filter);
+    let mut hits = core::mem::take(&mut scratch.ray_hits);
+    bvh.traverse_ray_masked_into(ray, filter.mask, &mut scratch.stack, &mut hits);
     let best = closest_hit_core(
         colliders,
         generations,
@@ -1042,8 +1060,7 @@ fn sweep_sphere_hits(
 ) {
     let filter = ResolvedFilter::solid(view.colliders, view.generations, filter);
     let bounds = swept_bounds(segment, DVec3::splat(radius));
-    view.bvh
-        .traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
+    filter.candidates(view.bvh, &bounds, scratch);
     swept_hits_core(
         view.colliders,
         view.generations,
@@ -1093,8 +1110,7 @@ fn sweep_capsule_hits(
     let segment = &Segment::new(capsule.centre, end);
     let filter = ResolvedFilter::solid(view.colliders, view.generations, filter);
     let bounds = swept_bounds(segment, DVec3::new(radius, radius + half_height, radius));
-    view.bvh
-        .traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
+    filter.candidates(view.bvh, &bounds, scratch);
     swept_hits_core(
         view.colliders,
         view.generations,
@@ -1146,7 +1162,7 @@ fn capsule_penetrations_core(
 ) {
     out.clear();
     let filter = ResolvedFilter::solid(colliders, generations, filter);
-    bvh.traverse_aabb_into(&capsule.aabb(), &mut scratch.stack, &mut scratch.candidates);
+    filter.candidates(bvh, &capsule.aabb(), scratch);
 
     for &element in scratch.candidates.iter() {
         let idx = element as usize;
@@ -1198,7 +1214,7 @@ fn lying_capsule_blocker_core(
     scratch: &mut QueryScratch,
 ) -> Option<ColliderId> {
     let filter = ResolvedFilter::solid(colliders, generations, filter);
-    bvh.traverse_aabb_into(&capsule.aabb(), &mut scratch.stack, &mut scratch.candidates);
+    filter.candidates(bvh, &capsule.aabb(), scratch);
 
     let (head, feet) = (capsule.head, capsule.feet());
     let lying = ContactShape::Capsule {
@@ -1670,12 +1686,28 @@ impl PhysicsWorld {
     /// Layers filter **queries** only — the ones on this world and the
     /// character controller's. They do not touch the contact solver, which
     /// never reads this world.
+    ///
+    /// A built tree takes the new bits in place ([`Bvh::set_layers`]): every
+    /// node holds the union of its subtree's layers so a query can skip
+    /// subtrees on none of its mask's, and a union left holding the old bits
+    /// would hide this collider from a query for its new ones.
     pub fn set_layers(&mut self, id: ColliderId, bits: u32) -> bool {
         let Some(slot) = self.slot_of(id) else {
             return false;
         };
         if let Some(slot_data) = self.colliders[slot].as_mut() {
             slot_data.layers = bits;
+        }
+        if let Some(bvh) = self.bvh.as_mut() {
+            let updated = match self.bvh_slot_to_elem.get(slot).copied() {
+                Some(elem) if elem != NO_ELEMENT => bvh.set_layers(elem as usize, bits),
+                _ => false,
+            };
+            // A live collider with no element in a built tree: the tree no
+            // longer describes the collider set, as in `remove`.
+            if !updated {
+                self.invalidate_bvh();
+            }
         }
         true
     }
@@ -1730,16 +1762,19 @@ impl PhysicsWorld {
             .colliders
             .iter()
             .enumerate()
-            .filter_map(|(idx, slot)| slot.as_ref().map(|s| (s.entry.aabb(), idx as u32)))
+            .filter_map(|(idx, slot)| {
+                slot.as_ref()
+                    .map(|s| (s.entry.aabb(), idx as u32, s.layers))
+            })
             .collect();
         // Build slot→elem reverse mapping.  `elem_idx` is the element's
         // position in the array handed to `Bvh::build` — its *build order* —
         // which is exactly what `Bvh::update_aabb` is indexed by.
         self.bvh_slot_to_elem = vec![NO_ELEMENT; self.colliders.len()];
-        for (elem_idx, (_, slot)) in elements.iter().enumerate() {
+        for (elem_idx, (_, slot, _)) in elements.iter().enumerate() {
             self.bvh_slot_to_elem[*slot as usize] = elem_idx as u32;
         }
-        let bvh = Bvh::build(elements);
+        let bvh = Bvh::build_layered(elements);
         self.bvh_quality_baseline = Some(bvh.normalized_surface_area_cost());
         self.refits_since_quality_check = 0;
         self.bvh = Some(bvh);
@@ -2284,7 +2319,7 @@ impl PhysicsWorld {
         // absent, so a batch of adds before the first query still costs one
         // bulk build rather than n insertions.
         if let Some(bvh) = self.bvh.as_mut() {
-            let elem = bvh.insert(aabb, index);
+            let elem = bvh.insert_layered(aabb, index, ALL_LAYERS);
             if self.bvh_slot_to_elem.len() <= index as usize {
                 self.bvh_slot_to_elem.resize(index as usize + 1, NO_ELEMENT);
             }
@@ -3915,3 +3950,7 @@ mod arc_selection_tests;
 #[cfg(test)]
 #[path = "world/arc_sweep_tests.rs"]
 mod arc_sweep_tests;
+
+#[cfg(test)]
+#[path = "world/layer_prune_tests.rs"]
+mod layer_prune_tests;

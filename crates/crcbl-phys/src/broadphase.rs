@@ -30,6 +30,19 @@
 //! region, because then every candidate site costs the same. [`Bvh::depth`] is
 //! the observable, and `crates/crcbl-phys/tests/broadphase_churn.rs` bounds it across
 //! thousands of operations including that degenerate input.
+//!
+//! # Layers
+//!
+//! Every element carries a `u32` of layer bits ([`Bvh::insert_layered`],
+//! [`Bvh::build_layered`], [`Bvh::set_layers`]; the unlayered forms put it on
+//! every bit), and every internal node the union of its subtree's. The masked
+//! traversals ([`Bvh::traverse_aabb_masked_into`],
+//! [`Bvh::traverse_ray_masked_into`]) skip any subtree whose union shares no
+//! bit with the query's mask, which is what lets a query that looks at a few
+//! static colliders walk past a crowd of characters on other layers without
+//! descending to each of them. A leaf is reported only if an unmasked
+//! traversal would report it *and* its own bits meet the mask, in the same
+//! order, because every ancestor of such a leaf carries its bits too.
 
 use crate::collider::Aabb;
 use glam::DVec3;
@@ -129,6 +142,20 @@ pub struct BvhHit {
 /// Sentinel for "no node" — an absent parent, or an empty tree's root.
 const NIL: u32 = u32::MAX;
 
+/// The layer bits an element gets from the unlayered [`Bvh::build`] and
+/// [`Bvh::insert`]: every one.
+const ALL_BITS: u32 = u32::MAX;
+
+/// One element on its way into [`Bvh::build_layered`]: its position in the
+/// input travels with it so the centroid sort cannot lose it.
+#[derive(Debug, Clone, Copy)]
+struct BuildItem {
+    aabb: Aabb,
+    element_id: u32,
+    build_index: u32,
+    layers: u32,
+}
+
 /// A flat node in the BVH tree.
 ///
 /// Nodes are stored in a flat array.  Bulk construction lays them out in
@@ -160,6 +187,11 @@ struct Node {
     /// parent `1`. Maintained by every structural change so
     /// [`Bvh::balance`] can compare two subtrees in `O(1)`.
     height: u32,
+    /// Leaf: its element's layer bits. Internal: the union of its two
+    /// children's, so a subtree with no bit in a query's mask holds no leaf
+    /// that has one. Maintained by every structural change and by
+    /// [`Bvh::set_layers`]; [`Bvh::update_aabb`] moves no node and leaves it.
+    layers: u32,
 }
 
 /// A dynamic bounding volume hierarchy for spatial queries.
@@ -209,13 +241,29 @@ impl Bvh {
     /// An empty iterator produces an empty BVH (no root node).
     #[must_use]
     pub fn build(elements: impl IntoIterator<Item = (Aabb, u32)>) -> Self {
-        // Each item carries its position in the input array as a third field so
-        // the centroid sort below cannot detach `element_node` from the build
-        // order that `update_aabb` is indexed by.
-        let mut items: Vec<(Aabb, u32, u32)> = elements
+        Self::build_layered(
+            elements
+                .into_iter()
+                .map(|(aabb, element_id)| (aabb, element_id, ALL_BITS)),
+        )
+    }
+
+    /// [`Bvh::build`] from (AABB, element_id, layers) triples, each element on
+    /// the layer bits given rather than on every one.
+    #[must_use]
+    pub fn build_layered(elements: impl IntoIterator<Item = (Aabb, u32, u32)>) -> Self {
+        // Each item carries its position in the input array so the centroid
+        // sort below cannot detach `element_node` from the build order that
+        // `update_aabb` is indexed by.
+        let mut items: Vec<BuildItem> = elements
             .into_iter()
             .enumerate()
-            .map(|(build_index, (aabb, element_id))| (aabb, element_id, build_index as u32))
+            .map(|(build_index, (aabb, element_id, layers))| BuildItem {
+                aabb,
+                element_id,
+                build_index: build_index as u32,
+                layers,
+            })
             .collect();
         if items.is_empty() {
             return Self {
@@ -257,12 +305,12 @@ impl Bvh {
 
     /// Recursive build using spatial median split on the longest axis.
     ///
-    /// `items` are `(aabb, element_id, build_index)`; leaves record their node
-    /// and their element id against `build_index`, never against the leaf's
-    /// own position, so that a leaf's `child_left` is the same element index
-    /// that [`Bvh::update_aabb`] and [`Bvh::remove`] take.
+    /// Leaves record their node and their element id against
+    /// [`BuildItem::build_index`], never against the leaf's own position, so
+    /// that a leaf's `child_left` is the same element index that
+    /// [`Bvh::update_aabb`] and [`Bvh::remove`] take.
     fn build_rec(
-        items: &mut [(Aabb, u32, u32)],
+        items: &mut [BuildItem],
         nodes: &mut Vec<Node>,
         element_indices: &mut [u32],
         element_node: &mut [u32],
@@ -275,14 +323,15 @@ impl Bvh {
         // Compute union AABB of this range.
         let mut aabb = Aabb::EMPTY;
         for item in &items[range_start..range_end] {
-            aabb = aabb.union(item.0);
+            aabb = aabb.union(item.aabb);
         }
 
         if count == 1 {
             // Leaf node: the element index *is* the build index, so one number
             // addresses the leaf, `element_indices` and `element_node` alike.
-            let elem_idx = items[range_start].2;
-            element_indices[elem_idx as usize] = items[range_start].1;
+            let item = items[range_start];
+            let elem_idx = item.build_index;
+            element_indices[elem_idx as usize] = item.element_id;
             let node_idx = nodes.len() as u32;
             element_node[elem_idx as usize] = node_idx;
             nodes.push(Node {
@@ -292,6 +341,7 @@ impl Bvh {
                 parent,
                 leaf_count: 1,
                 height: 0,
+                layers: item.layers,
             });
             return node_idx;
         }
@@ -316,8 +366,8 @@ impl Bvh {
         // rather than to nothing. `crcbl_render::shadow` and
         // `crcbl_scene::simplify` already choose it for the same reason.
         items[range_start..range_end].sort_by(|a, b| {
-            let ka = a.0.centre().to_array()[axis];
-            let kb = b.0.centre().to_array()[axis];
+            let ka = a.aabb.centre().to_array()[axis];
+            let kb = b.aabb.centre().to_array()[axis];
             ka.total_cmp(&kb)
         });
 
@@ -331,6 +381,7 @@ impl Bvh {
             parent,
             leaf_count: 0,
             height: 0,
+            layers: 0,
         });
 
         let left = Self::build_rec(
@@ -357,6 +408,8 @@ impl Bvh {
         nodes[node_idx as usize].height = 1 + nodes[left as usize]
             .height
             .max(nodes[right as usize].height);
+        nodes[node_idx as usize].layers =
+            nodes[left as usize].layers | nodes[right as usize].layers;
         node_idx
     }
 
@@ -381,6 +434,37 @@ impl Bvh {
     /// call, which at a crowd sample's ten thousand agents is 1.2 million
     /// allocations a second doing nothing.
     pub fn traverse_aabb_into(&self, query: &Aabb, stack: &mut Vec<u32>, out: &mut Vec<u32>) {
+        self.aabb_walk::<false>(query, ALL_BITS, stack, out);
+    }
+
+    /// [`traverse_aabb_into`](Self::traverse_aabb_into) reporting only the
+    /// elements whose layer bits share at least one bit with `mask`, and never
+    /// descending into a subtree that holds none.
+    ///
+    /// `out` is exactly what the unmasked form writes with every element whose
+    /// layers miss `mask` taken out, in the same order — the pruning only ever
+    /// skips subtrees whose leaves would all have been taken out. A mask of `0`
+    /// reports nothing.
+    pub fn traverse_aabb_masked_into(
+        &self,
+        query: &Aabb,
+        mask: u32,
+        stack: &mut Vec<u32>,
+        out: &mut Vec<u32>,
+    ) {
+        self.aabb_walk::<true>(query, mask, stack, out);
+    }
+
+    /// The one AABB descent, pruning on `mask` when `MASKED`. A const
+    /// parameter rather than a mask of every bit for the unmasked form,
+    /// because an element on no layer at all is still reported by that one.
+    fn aabb_walk<const MASKED: bool>(
+        &self,
+        query: &Aabb,
+        mask: u32,
+        stack: &mut Vec<u32>,
+        out: &mut Vec<u32>,
+    ) {
         out.clear();
         stack.clear();
         if self.root == NIL {
@@ -390,7 +474,7 @@ impl Bvh {
 
         while let Some(node_idx) = stack.pop() {
             let node = &self.nodes[node_idx as usize];
-            if !node.aabb.intersects(query) {
+            if (MASKED && node.layers & mask == 0) || !node.aabb.intersects(query) {
                 continue;
             }
             if node.leaf_count > 0 {
@@ -426,6 +510,34 @@ impl Bvh {
     /// Both `out` and the descent `stack` are **cleared** and then filled, so
     /// what they held before never reaches an answer.
     pub fn traverse_ray_into(&self, ray: &Ray, stack: &mut Vec<u32>, out: &mut Vec<BvhHit>) {
+        self.ray_walk::<false>(ray, ALL_BITS, stack, out);
+    }
+
+    /// [`traverse_ray_into`](Self::traverse_ray_into) reporting only the
+    /// elements whose layer bits share at least one bit with `mask`, and never
+    /// descending into a subtree that holds none — the ray counterpart of
+    /// [`traverse_aabb_masked_into`](Self::traverse_aabb_masked_into), with the
+    /// same guarantee: the unmasked answer with the other elements taken out,
+    /// in the same order, at the same `t`.
+    pub fn traverse_ray_masked_into(
+        &self,
+        ray: &Ray,
+        mask: u32,
+        stack: &mut Vec<u32>,
+        out: &mut Vec<BvhHit>,
+    ) {
+        self.ray_walk::<true>(ray, mask, stack, out);
+    }
+
+    /// The one ray descent, pruning on `mask` when `MASKED`, as
+    /// [`aabb_walk`](Self::aabb_walk) does.
+    fn ray_walk<const MASKED: bool>(
+        &self,
+        ray: &Ray,
+        mask: u32,
+        stack: &mut Vec<u32>,
+        out: &mut Vec<BvhHit>,
+    ) {
         out.clear();
         stack.clear();
         if self.root == NIL {
@@ -441,9 +553,10 @@ impl Bvh {
 
         while let Some(node_idx) = stack.pop() {
             let node = &self.nodes[node_idx as usize];
-            if !node
-                .aabb
-                .intersect_ray(ray.origin, inv_dir, dir_is_neg, t_min, t_max)
+            if (MASKED && node.layers & mask == 0)
+                || !node
+                    .aabb
+                    .intersect_ray(ray.origin, inv_dir, dir_is_neg, t_min, t_max)
             {
                 continue;
             }
@@ -520,12 +633,47 @@ impl Bvh {
         true
     }
 
+    /// Put one element on the layer bits `layers`, replacing what it was on,
+    /// and bring every ancestor's union up to date. Returns `false` if the
+    /// index names no element, as [`Bvh::update_aabb`] does.
+    ///
+    /// O(depth) at most, and it stops at the first ancestor whose union comes
+    /// out unchanged, since every one above that is unchanged too.
+    pub fn set_layers(&mut self, element_index: usize, layers: u32) -> bool {
+        let Some(leaf_node) = self.leaf_of(element_index) else {
+            return false;
+        };
+        self.nodes[leaf_node as usize].layers = layers;
+        let mut current = self.nodes[leaf_node as usize].parent;
+        while current != NIL {
+            let node = self.nodes[current as usize];
+            let union = self.nodes[node.child_left as usize].layers
+                | self.nodes[node.child_right as usize].layers;
+            if union == node.layers {
+                break;
+            }
+            self.nodes[current as usize].layers = union;
+            current = node.parent;
+        }
+        true
+    }
+
+    /// Put every node on every layer bit, so the masked walks prune nothing:
+    /// the unpruned reference the query world's layer tests compare against.
+    #[cfg(test)]
+    pub(crate) fn saturate_layers(&mut self) {
+        for node in &mut self.nodes {
+            node.layers = ALL_BITS;
+        }
+    }
+
     // ── Churn: insert / remove ─────────────────────────────────────────
 
     /// Insert one element, returning the element index that names it.
     ///
-    /// The returned index is the handle for [`Bvh::update_aabb`] and
-    /// [`Bvh::remove`], and it is in the same space as the build-order indices
+    /// The returned index is the handle for [`Bvh::update_aabb`],
+    /// [`Bvh::set_layers`] and [`Bvh::remove`], and it is in the same space as
+    /// the build-order indices
     /// [`Bvh::build`] hands out. Indices of removed elements are recycled, so
     /// an index is only meaningful until the element it names is removed.
     ///
@@ -535,6 +683,13 @@ impl Bvh {
     /// root is refit and rebalanced. Cost is one root-to-leaf descent plus one
     /// walk back up.
     pub fn insert(&mut self, aabb: Aabb, element_id: u32) -> usize {
+        self.insert_layered(aabb, element_id, ALL_BITS)
+    }
+
+    /// [`Bvh::insert`] with the element on the layer bits `layers` rather than
+    /// on every one. The returned index is the same handle, for
+    /// [`Bvh::update_aabb`], [`Bvh::set_layers`] and [`Bvh::remove`].
+    pub fn insert_layered(&mut self, aabb: Aabb, element_id: u32, layers: u32) -> usize {
         let element_index = self.alloc_element(element_id);
         let leaf = self.alloc_node(Node {
             aabb,
@@ -543,6 +698,7 @@ impl Bvh {
             parent: NIL,
             leaf_count: 1,
             height: 0,
+            layers,
         });
         self.element_node[element_index as usize] = leaf;
         self.live_elements += 1;
@@ -562,6 +718,7 @@ impl Bvh {
             parent: old_parent,
             leaf_count: 0,
             height: 1 + self.nodes[sibling as usize].height,
+            layers: layers | self.nodes[sibling as usize].layers,
         });
         self.nodes[sibling as usize].parent = new_parent;
         self.nodes[leaf as usize].parent = new_parent;
@@ -808,6 +965,7 @@ impl Bvh {
             let right = self.nodes[node.child_right as usize];
             self.nodes[current as usize].aabb = left.aabb.union(right.aabb);
             self.nodes[current as usize].height = 1 + left.height.max(right.height);
+            self.nodes[current as usize].layers = left.layers | right.layers;
             current = self.nodes[current as usize].parent;
         }
     }
@@ -896,13 +1054,15 @@ impl Bvh {
         node.child_right = right;
     }
 
-    /// Recompute one internal node's bounds and height from its children.
+    /// Recompute one internal node's bounds, height and layers from its
+    /// children.
     fn recompute(&mut self, index: u32) {
         let node = self.nodes[index as usize];
         let left = self.nodes[node.child_left as usize];
         let right = self.nodes[node.child_right as usize];
         self.nodes[index as usize].aabb = left.aabb.union(right.aabb);
         self.nodes[index as usize].height = 1 + left.height.max(right.height);
+        self.nodes[index as usize].layers = left.layers | right.layers;
     }
 
     /// Pick the node a new leaf with bounds `aabb` should become a sibling of.
@@ -960,6 +1120,7 @@ impl Bvh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl_core::rand::hash_unit;
 
     fn unit_box_at(centre: DVec3) -> (Aabb, u32) {
         (Aabb::from_centre_half(centre, DVec3::splat(0.5)), 0)
@@ -1330,6 +1491,11 @@ mod tests {
                     .union(bvh.nodes[right as usize].aabb),
                 "node {index} has stale bounds"
             );
+            assert_eq!(
+                node.layers,
+                bvh.nodes[left as usize].layers | bvh.nodes[right as usize].layers,
+                "node {index} has a stale layer union"
+            );
 
             stack.push(left);
             stack.push(right);
@@ -1475,6 +1641,151 @@ mod tests {
         );
         assert_eq!(bvh.element_indices.len(), 32, "element slots leaked");
         assert_invariants(&bvh);
+    }
+
+    /// The layers, in the 4 bits the masked tests deal them from: few enough
+    /// that subtrees with no bit of a mask are common, so pruning happens.
+    fn dealt_layers(seed: u64, index: u64) -> u32 {
+        (hash_unit(seed, index) * 16.0) as u32
+    }
+
+    fn dealt_box(seed: u64, index: u64) -> Aabb {
+        let at = |axis: u64| hash_unit(seed, 4 * index + axis) * 40.0;
+        Aabb::from_centre_half(
+            DVec3::new(at(0), at(1), at(2)),
+            DVec3::splat(0.25 + hash_unit(seed, 4 * index + 3)),
+        )
+    }
+
+    /// The masked walks against the unmasked ones filtered by hand, for every
+    /// mask of the dealt bits, and the number of answers the masked walk kept,
+    /// so a caller can tell the comparison was not over empty lists.
+    fn assert_masked_walks_filter_the_unmasked(bvh: &Bvh, layers_of: &[u32], probe: u64) -> usize {
+        let mut stack = Vec::new();
+        let (mut all, mut masked) = (Vec::new(), Vec::new());
+        let (mut all_hits, mut masked_hits) = (Vec::new(), Vec::new());
+        let query = dealt_box(probe, 0).inflated(6.0);
+        let centre = query.centre();
+        let ray = Ray::new(
+            centre - DVec3::new(30.0, 7.0, 3.0),
+            DVec3::new(30.0, 7.0, 3.0),
+        );
+        let mut kept = 0;
+        for mask in 0..16u32 {
+            bvh.traverse_aabb_into(&query, &mut stack, &mut all);
+            bvh.traverse_aabb_masked_into(&query, mask, &mut stack, &mut masked);
+            all.retain(|&id| layers_of[id as usize] & mask != 0);
+            assert_eq!(masked, all, "aabb walk under mask {mask:#b}");
+            kept += masked.len();
+
+            bvh.traverse_ray_into(&ray, &mut stack, &mut all_hits);
+            bvh.traverse_ray_masked_into(&ray, mask, &mut stack, &mut masked_hits);
+            all_hits.retain(|hit| layers_of[hit.element_id as usize] & mask != 0);
+            assert_eq!(masked_hits, all_hits, "ray walk under mask {mask:#b}");
+            kept += masked_hits.len();
+        }
+        kept
+    }
+
+    /// Pruning on the layer unions changes no answer, through a bulk build
+    /// and then through every kind of churn: inserts, removals, refits and
+    /// layer changes, with the invariants — the unions among them — checked
+    /// after each.
+    #[test]
+    fn masked_walks_are_the_unmasked_walks_filtered_through_churn() {
+        const SEED: u64 = 0x001a_7e25;
+        const START: u64 = 64;
+        const STEPS: u64 = 400;
+        // `layers_of[element_id]`, element ids being the order they were made.
+        let mut layers_of: Vec<u32> = (0..START).map(|i| dealt_layers(SEED, i)).collect();
+        let mut bvh = Bvh::build_layered(
+            (0..START).map(|i| (dealt_box(SEED, i), i as u32, layers_of[i as usize])),
+        );
+        // (element index, element id) of each live element.
+        let mut live: Vec<(usize, u32)> = (0..START as usize).map(|i| (i, i as u32)).collect();
+        assert_invariants(&bvh);
+        let mut kept = assert_masked_walks_filter_the_unmasked(&bvh, &layers_of, SEED);
+
+        for step in 0..STEPS {
+            let roll = hash_unit(SEED ^ 0xc0de, step);
+            let pick = (hash_unit(SEED ^ 0xfeed, step) * live.len() as f64) as usize;
+            if roll < 0.3 || live.is_empty() {
+                let id = layers_of.len() as u32;
+                layers_of.push(dealt_layers(SEED ^ 0xabc, step));
+                let index =
+                    bvh.insert_layered(dealt_box(SEED ^ 0xabc, step), id, layers_of[id as usize]);
+                live.push((index, id));
+            } else if roll < 0.5 {
+                let (index, _) = live.swap_remove(pick);
+                assert!(bvh.remove(index));
+            } else if roll < 0.75 {
+                let (index, _) = live[pick];
+                assert!(bvh.update_aabb(index, dealt_box(SEED ^ 0x5e7, step)));
+            } else {
+                let (index, id) = live[pick];
+                layers_of[id as usize] = dealt_layers(SEED ^ 0x1a7, step);
+                assert!(bvh.set_layers(index, layers_of[id as usize]));
+            }
+            assert_invariants(&bvh);
+            kept += assert_masked_walks_filter_the_unmasked(&bvh, &layers_of, SEED ^ step);
+        }
+        assert!(kept > 1000, "the walks compared almost nothing: {kept}");
+    }
+
+    /// A subtree whose union holds no bit of the mask is skipped, and one
+    /// element moved onto that bit after the build is found again: the
+    /// union it lives under picked the bit up.
+    #[test]
+    fn set_layers_brings_the_unions_above_it_up_to_date() {
+        let mut bvh = Bvh::build_layered((0..16).map(|i| {
+            (
+                unit_box_at(DVec3::new(f64::from(i) * 2.0, 0.0, 0.0)).0,
+                i,
+                0b01,
+            )
+        }));
+        let everything = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(100.0));
+        let (mut stack, mut out) = (Vec::new(), Vec::new());
+        bvh.traverse_aabb_masked_into(&everything, 0b10, &mut stack, &mut out);
+        assert!(out.is_empty(), "nothing is on the second bit yet: {out:?}");
+
+        assert!(bvh.set_layers(11, 0b10));
+        assert_invariants(&bvh);
+        bvh.traverse_aabb_masked_into(&everything, 0b10, &mut stack, &mut out);
+        assert_eq!(out, [11]);
+
+        // And off it again: the bit leaves every union it was the only
+        // reason for.
+        assert!(bvh.set_layers(11, 0b01));
+        assert_invariants(&bvh);
+        assert_eq!(bvh.nodes[bvh.root as usize].layers, 0b01);
+        assert!(!bvh.set_layers(99, 0b10), "no such element");
+    }
+
+    /// The node as it was before it carried a layer union.
+    #[allow(dead_code, reason = "only its layout is measured")]
+    struct NodeWithoutLayers {
+        aabb: Aabb,
+        child_left: u32,
+        child_right: u32,
+        parent: u32,
+        leaf_count: u32,
+        height: u32,
+    }
+
+    /// Where `f64` is 8-aligned — 64-bit targets and wasm32 — the layer union
+    /// rides in what was the node's padding, and the node is the size it was
+    /// before. Where `f64` is 4-aligned (i686) there was no padding, and the
+    /// node grows by the one `u32`.
+    #[test]
+    fn the_layer_union_costs_no_node_memory_where_f64_is_8_aligned() {
+        let before = std::mem::size_of::<NodeWithoutLayers>();
+        let after = std::mem::size_of::<Node>();
+        if std::mem::align_of::<f64>() == 8 {
+            assert_eq!(after, before);
+        } else {
+            assert_eq!(after, before + std::mem::size_of::<u32>());
+        }
     }
 
     #[test]

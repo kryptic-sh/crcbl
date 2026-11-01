@@ -100,6 +100,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   cold first frame with water and grass on an RX 7900 XTX under radv went from
   about 166 ms to about 112 ms (medians). A view still builds water and grass on
   its first frame with a body or a field, and never builds them otherwise.
+- **Filtered `PhysicsWorld` queries skip broadphase subtrees on no wanted
+  layer.** Rays, sphere/capsule/arc/lying sweeps, sphere/AABB overlaps, capsule
+  penetrations, lying-capsule blockers, and their `OverlapQueries` forms now
+  skip subtrees with no collider on the query mask's layers. Each `Bvh` node
+  keeps the union of its subtree's layer bits, maintained through build, insert,
+  remove, rotation and `set_layers`, so answers and their order are unchanged.
+  The union takes no extra node memory where `f64` is 8-aligned (64-bit targets
+  and wasm32); on i686 a node grows by 4 bytes. Unfiltered queries take the same
+  masked walk with every layer and answer as before. On a volley of level-only
+  rays through a crowd on other layers this nearly halves the cost per ray
+  (about 47% fewer instructions under callgrind). `Bvh` gains `build_layered`,
+  `insert_layered`, `set_layers`, `traverse_aabb_masked_into` and
+  `traverse_ray_masked_into`.
 
 ### Fixed
 

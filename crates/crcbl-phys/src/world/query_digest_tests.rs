@@ -93,12 +93,12 @@ impl Digest {
 }
 
 /// A value in `[low, high)` from draw `index` of `seed`.
-fn draw(seed: u64, index: &mut u64, low: f64, high: f64) -> f64 {
+pub(super) fn draw(seed: u64, index: &mut u64, low: f64, high: f64) -> f64 {
     *index += 1;
     low + (high - low) * hash_unit(seed, *index)
 }
 
-fn point(seed: u64, index: &mut u64, reach: f64) -> DVec3 {
+pub(super) fn point(seed: u64, index: &mut u64, reach: f64) -> DVec3 {
     DVec3::new(
         draw(seed, index, -reach, reach),
         draw(seed, index, -reach, reach),
@@ -107,7 +107,7 @@ fn point(seed: u64, index: &mut u64, reach: f64) -> DVec3 {
 }
 
 /// A tilted quad, two triangles.
-fn ramp() -> TriangleMesh {
+pub(super) fn ramp() -> TriangleMesh {
     TriangleMesh::new(
         &[
             DVec3::new(-1.0, 0.0, -1.0),

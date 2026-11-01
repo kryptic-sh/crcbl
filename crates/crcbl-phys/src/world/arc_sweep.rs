@@ -159,10 +159,10 @@ impl OverlapQueries<'_> {
         // path, its turning points included, and not only round its ends.
         let reach = DVec3::new(radius, radius + half_height, radius);
         let bounds = path.bounds();
-        self.bvh.traverse_aabb_into(
+        filter.candidates(
+            self.bvh,
             &Aabb::new(bounds.min - reach, bounds.max + reach),
-            &mut scratch.stack,
-            &mut scratch.candidates,
+            scratch,
         );
         let mut closest = None;
         swept_hits_core(

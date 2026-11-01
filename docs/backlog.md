@@ -16048,6 +16048,29 @@ What it left unbuilt is below; the contact solver's own remainder is under
 _Contact solver L2/L3: rungs 0 to 5 built, and what they left_, and orbit's
 acceptance flight under _orbit_.
 
+### Broadphase pruning: what the layer union left (2026-11-01)
+
+- **Contact broadphase:** `contact::broadphase::Broadphase::query_path`
+  (continuous sweep) and `find_new_pairs` still descend into every overlapping
+  leaf. Their filter is `bodies_may_touch`, a two-sided
+  `CollisionFilter::collides_with` plus joints and ignored pairs. Per-node
+  unions of categories and of masks would let a subtree be pruned when
+  `union_category & self.mask == 0 || union_mask & self.category == 0`.
+  `set_collision_filter` would have to refresh them. Not measured, and there's
+  no evidence yet that this path is hot.
+- **Trigger-only subtrees:** rays, sweeps and penetrations skip triggers in
+  `ResolvedFilter::admits`, after the BVH has handed them over. A "has a
+  non-trigger" bit per node would let solid queries prune all-trigger subtrees,
+  and `set_trigger` would need to walk up as `Bvh::set_layers` does. On 64-bit
+  targets the node has no padding left, so the bit would grow it or take a bit
+  from `height`. Not measured.
+- **Statics mixed into crowd subtrees:** with pruning,
+  `crates/crcbl-phys/examples/filtered_ray_volley.rs` still spends 2,621 Ir per
+  ray in `Bvh::traverse_ray_masked_into`, because the spatial-median
+  `Bvh::build_rec` mixes the `LEVEL` walls into crowd subtrees near the edges. A
+  separate static tree and moving tree (as the contact broadphase has) or one
+  tree per layer group would address it. Measured with callgrind on 2026-11-01.
+
 ### Bubbles, sleeping and sector streaming hooks (2026-08-27)
 
 **Bubbles and sectors not built; sleeping is (re-checked 2026-09-24).** Sleep
