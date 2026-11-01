@@ -443,6 +443,7 @@ mod tests {
     /// pruned and its marker gone with it.
     #[test]
     fn a_live_autosave_is_not_listed_removed_or_pruned() {
+        let _quiet = crate::spawn_guard::no_spawns();
         let base = tempfile::tempdir().expect("a temporary directory");
         let now = 100 * DAY_MS;
         let live = copy_at(base.path(), &format!("{}-live", now - 30 * DAY_MS));
@@ -481,6 +482,7 @@ mod tests {
     /// of the listing, and Delete removes it with its copy.
     #[test]
     fn a_crashed_sessions_marker_makes_an_ordinary_copy() {
+        let _quiet = crate::spawn_guard::no_spawns();
         let base = tempfile::tempdir().expect("a temporary directory");
         let copy = copy_at(base.path(), "1-greybox");
         std::fs::write(

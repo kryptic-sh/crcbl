@@ -12456,12 +12456,13 @@ mod tests {
             return;
         }
 
-        let output = crcbl_spawn::command(
-            std::env::current_exe().expect("a test binary knows its own path"),
+        let output = crate::spawn_guard::output(
+            crcbl_spawn::command(
+                std::env::current_exe().expect("a test binary knows its own path"),
+            )
+            .args(["--exact", name])
+            .env(crcbl_core::trace::ENV_VAR, "1"),
         )
-        .args(["--exact", name])
-        .env(crcbl_core::trace::ENV_VAR, "1")
-        .output()
         .expect("re-running this test binary");
         let report = String::from_utf8_lossy(&output.stdout);
         assert!(

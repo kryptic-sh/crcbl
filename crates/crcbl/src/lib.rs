@@ -452,6 +452,9 @@ pub mod ui_nav;
 
 pub mod ui_scale;
 
+#[cfg(test)]
+mod spawn_guard;
+
 /// Everything this crate exposes to the debug console.
 ///
 /// One list per crate, gathered by the engine at one seam — debug-console

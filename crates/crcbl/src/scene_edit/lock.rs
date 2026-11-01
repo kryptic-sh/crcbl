@@ -325,6 +325,7 @@ mod tests {
     /// a locked file.
     #[test]
     fn a_held_lock_refuses_another_until_it_is_dropped() {
+        let _quiet = crate::spawn_guard::no_spawns();
         let dir = scene_dir();
         let held = lock_scene(dir.path()).expect("nobody holds it");
         assert_eq!(held.dir(), dir.path());

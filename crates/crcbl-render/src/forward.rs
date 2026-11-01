@@ -12346,6 +12346,7 @@ mod tests {
     fn a_draw_index_puts_the_geometry_passes_on_a_call_per_range() {
         use crcbl_hal::null::Command;
 
+        let _seam = ssao_split_switch();
         for path in [GeometryPath::IndirectCount, GeometryPath::IndirectPerBatch] {
             for ranged in [false, true] {
                 let optional = if ranged {
@@ -12514,6 +12515,7 @@ mod tests {
     fn the_mesh_tail_records_a_flat_call_per_partition_behind_a_task_stage() {
         use crcbl_hal::null::Command;
 
+        let _seam = ssao_split_switch();
         // `None` is the demo scene; `Some(n)` is `n` copies of its cube, one
         // bucket each, in one material mode — so one run of `n` buckets.
         for cubes in [None, Some(4), Some(33)] {
@@ -15664,6 +15666,14 @@ mod tests {
     /// makes the occlusion chain record its second march, so a test about the
     /// widest frame a renderer can produce has to hold this as well as the blur
     /// count — see `crate::ssao`'s `r_ssao_split`.
+    ///
+    /// **Every test comparing [`ForwardRenderer::counters`]' draws with
+    /// [`recorded_draws`] takes this too**, because that march is a draw the
+    /// counters leave out (`Ssao::passes` says why): a frame built while
+    /// another test holds a seam records one draw more than it counts. Found
+    /// on 2026-11-01 by the mesh-tail test reading 13 against 14 under a
+    /// threaded `cargo test`, and confirmed by a seam on by default reddening
+    /// every such test that did not hold this.
     pub(super) fn ssao_split_switch() -> SsaoSplitSwitch {
         let guard = SSAO_SPLIT_SWITCH
             .lock()
@@ -15696,6 +15706,10 @@ mod tests {
     }
 
     /// [`ssao_split_switch`]'s lock.
+    ///
+    /// **Third in the lock order**: after [`DEBUG_DRAW_SWITCH`] and
+    /// [`SSAO_BLUR_SWITCH`], and before [`SSAO_SLICE_SWITCH`],
+    /// `crate::ssao::TECHNIQUE_SWITCH` and `crate::shadow::FILTER_SWITCH`.
     static SSAO_SPLIT_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Takes `r_shadow_filter` and `r_shadow_split` for this thread and puts
@@ -15945,6 +15959,7 @@ mod tests {
     #[test]
     fn the_forward_counters_are_the_recorded_draws_and_admit_what_they_cannot_know() {
         let _blurs = ssao_blur_switch();
+        let _seam = ssao_split_switch();
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
@@ -16081,6 +16096,7 @@ mod tests {
     /// frame and not the second.
     #[test]
     fn a_light_that_takes_a_shadow_tile_moves_the_draw_count() {
+        let _seam = ssao_split_switch();
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
@@ -20849,6 +20865,7 @@ mod tests {
     fn the_debug_draw_layers_call_is_counted_in_the_frames_draws() {
         let switch = debug_draw_switch();
         let _blurs = ssao_blur_switch();
+        let _seam = ssao_split_switch();
 
         let (recorder, device, queue) = open();
         let device = device.as_ref();
@@ -21993,6 +22010,7 @@ mod tests {
     #[test]
     fn a_switched_off_effect_is_work_the_frame_did_not_record() {
         let _blurs = ssao_blur_switch();
+        let _seam = ssao_split_switch();
         let (control, instances, atlas_draws) = frame_switching_off(RenderEffects::empty());
         assert!(
             atlas_draws > 0,

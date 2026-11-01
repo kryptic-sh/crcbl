@@ -12,7 +12,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::{PoisonError, RwLock};
 
 use crcbl::reflect::Value;
 use crcbl::scene::edit::EditCommand;
@@ -124,12 +125,43 @@ fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
     }
 }
 
+/// Read across every child this binary starts, and written while a scene
+/// lock taken in this process is let go — see [`release`].
+static SPAWNING: RwLock<()> = RwLock::new(());
+
+/// Starts `command`'s child while no lock of this process is being let go —
+/// see [`release`]. Every child in this binary starts here. Returns once
+/// the child has exec'd, as std's spawn does on Linux and macOS (by
+/// `posix_spawn`, or by forking and waiting for the exec), so the lock files
+/// it was handed are closed in it by then. On Windows std opens files with
+/// handles no child inherits, so there the guard costs only the wait.
+fn spawn(command: &mut Command) -> Child {
+    let _spawning = SPAWNING.read().unwrap_or_else(PoisonError::into_inner);
+    command.spawn().expect("the crcbl binary runs")
+}
+
+/// Drops `held`, a scene lock or a document holding one, while no other
+/// test's child is mid-spawn. A child starts with a copy of every descriptor
+/// this process has open, and the lock file is closed in it only when it
+/// execs; the lock belongs to the open file, so a lock dropped while a child
+/// sits between the two is still held, by that child, and the next take of it
+/// here is refused. Waiting for every [`spawn`] in flight to return closes
+/// that window without retrying a take that is refused.
+fn release<T>(held: T) {
+    let _quiet = SPAWNING.write().unwrap_or_else(PoisonError::into_inner);
+    drop(held);
+}
+
 /// Runs the binary.
 fn crcbl(args: &[&str]) -> Output {
-    crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl"))
-        .args(args)
-        .output()
-        .expect("the crcbl binary runs")
+    let child = spawn(
+        crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl"))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    child.wait_with_output().expect("the crcbl binary ends")
 }
 
 /// `crcbl scene <verb> <dir> <rest…>`.
@@ -561,7 +593,7 @@ fn an_edit_while_the_editor_holds_the_scene_is_refused_until_it_closes() {
     assert_eq!(every_file(&dir), before, "a refused run changed the scene");
     ok(&scene("list", &dir, &[]));
 
-    drop(editor);
+    release(editor);
     ok(&scene("move", &dir, &["4", "3", "0", "1"]));
     assert_ne!(
         scene_files(&dir),
@@ -614,7 +646,7 @@ fn the_editor_cannot_open_a_scene_another_holder_has() {
         Err(EditError::Locked { dir: held, .. }) => assert_eq!(held, dir),
         other => panic!("the editor opened a held scene: {other:?}"),
     }
-    drop(run);
+    release(run);
     editor_holding(&dir);
 }
 
@@ -628,7 +660,6 @@ fn the_editor_cannot_open_a_scene_another_holder_has() {
 fn a_served_scene_is_fetched_from_another_process_and_locked_until_quit() {
     use std::io::{BufRead as _, BufReader, Read as _, Write as _};
     use std::net::SocketAddr;
-    use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     use crcbl::scene_edit::SceneFollower;
@@ -641,13 +672,13 @@ fn a_served_scene_is_fetched_from_another_process_and_locked_until_quit() {
     let dir = field_copy(&temp, "field.scn");
     let before = scene_files(&dir);
     let dir_text = dir.to_str().expect("a temporary path is text");
-    let mut server = crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl"))
-        .args(["edit", dir_text, "--serve"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the crcbl binary runs");
+    let mut server = spawn(
+        crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl"))
+            .args(["edit", dir_text, "--serve"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    );
     let mut said = BufReader::new(server.stdout.take().expect("piped"));
     let mut serving = String::new();
     said.read_line(&mut serving).expect("a line");

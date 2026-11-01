@@ -18187,41 +18187,30 @@ path; `Editor::overwrite_as`'s branch for a save-as that moved the asset source
 cannot be reached (onto the scene's own directory `Document::save_as` moves
 nothing) and has no test.
 
-### The scene-lock test races under threaded `cargo test` (2026-11-01)
+### A frame drawing the occlusion seam undercounts its draws (2026-11-01)
 
-`the_editor_cannot_open_a_scene_another_holder_has` in
-`crates/crcbl-cli/tests/scene.rs` fails under plain
-`cargo test -p crcbl-cli --test scene`: `editor_holding`'s `lock_scene` gets
-`Locked` after `drop(run)`, with the holder being the test's own process.
-Measured on mxaddict-pc on 2026-11-01: 2 of 3 runs failed at low load; an agent
-saw 4 of 6 threaded failures, 6 of 6 passes run alone and 3 of 3 with
-`--test-threads=1`. CI never sees it, because nextest runs each test in its own
-process.
+On a frame that draws the occlusion comparison seam, `ForwardRenderer::counters`
+leaves out the seam's second march (the `ssao-shipped` pass in
+`Ssao::add_passes`). That frame has ambient occlusion resolved on, and
+`crate::split::halves` grants a seam at `r_ssao_split` over the half-resolution
+occlusion extent. Because `recorded_fullscreen` lacks that triangle,
+`direct_draws` does too, and all three counters that add it come up one short:
+`draws`, `instances` and `drawn`. Measured on the mesh-path demo on 2026-11-01:
+`draws` 13 against 14 recorded. `Ssao::passes` documents leaving the march out,
+and nothing ships with the seam on, so this is a decision rather than a bug:
+either count it (add the seam term to `recorded_fullscreen` wherever
+`Ssao::add_passes` records the second march), or keep the counters to the frame
+nobody typed at and say so on `FrameCounters`. Until then every test in
+`forward.rs` comparing the counters with `recorded_draws` holds
+`ssao_split_switch`, which is what fixed the threaded `cargo test` flake that
+found it.
 
-The suspected mechanism is unconfirmed. `lock_scene` takes a `flock`, which
-belongs to the open file description. Other tests in the binary spawn `crcbl`
-children, and a child created while the lock file is open holds a copy of that
-description until it execs (`O_CLOEXEC` closes it only at exec). So the lock can
-outlive `drop(run)`. To confirm: run the test alone with the spawning tests
-filtered out and see whether it fails. To fix: make the release wait-free for
-the test, for example by spawning nothing while a lock is open in-process, or by
-retrying the re-open until a deadline. Then decide whether a real editor that
-spawns processes while holding the lock has the same window.
-
-### The mesh-tail draw-count test races under threaded `cargo test` (2026-11-01)
-
-`forward::tests::the_mesh_tail_records_a_flat_call_per_partition_behind_a_task_stage`
-in `crates/crcbl-render/src/forward.rs` failed twice in about seven threaded
-workspace runs on mxaddict-pc, both times at its last check
-(`renderer.counters().draws` against `recorded_draws`, case
-`None cubes, Features(TASK_SHADER), ranged false`: 13 against 14), and passed
-every other run. It holds no console-switch guard while its frame's pass list
-depends on process-wide switches that other tests flip under theirs, so a switch
-changing mid-frame can add a pass the counter did not count. nextest's process
-per test keeps CI out of it. Unconfirmed. The fix is to take the switch guards
-its frame reads (`ssao_blur_switch` and its siblings), or to count the draws
-from the same snapshot of the switches the frame used; twelve threaded runs is
-the experiment that would show it gone.
+The scene-lock flake that was filed beside this one (a `flock` inherited by a
+child mid-spawn) is fixed in the tests that had it. Whether a real editor has
+the same window is moot: the editor spawns no processes while holding a scene
+lock. Checked on 2026-11-01: `apps/editor` neither spawns nor depends on
+`crcbl-spawn`, and the only spawn outside test code under `crates/*/src` is
+`crcbl-cli`'s cargo runner.
 
 ### Scene edits over the transport: the server slice and what it leaves (2026-10-04)
 
@@ -28045,7 +28034,17 @@ and it is spent only on the path that would otherwise have failed. **Whether
 that is enough is not yet known** — the next occurrence is the measurement, and
 it will say a longer time rather than the same one.
 
-### The viewer's suite has segfaulted three times on lavapipe (2026-08-19, 08-28, 09-05)
+### The viewer's suite has segfaulted four times on lavapipe (2026-08-19, 08-28, 09-05, 11-01)
+
+**2026-11-01**, run 41280519963 on `189b122a`: the same step, the same
+`signal: 11, SIGSEGV` from `crcbl_viewer-… --quiet`, right after the suite
+opened a vk device on llvmpipe (Mesa 25.2.8, LLVM 20.1.2), with every other step
+and job green. The push carried the skinning cull (`crcbl-render`, which the
+viewer links) and `crcbl-nav`'s planner, so unlike the earlier three it did
+touch code the suite runs. The failed job's re-run was green, and so were 20
+consecutive local runs of the step's command on this machine's lavapipe with its
+env (validation, sync validation and the fatal gate on, `taskset -c 0-3`), so it
+still reads as the older llvmpipe rather than this tree.
 
 **2026-09-05**, run 33932759011 on `31dec1f`: the same step, the same
 `signal: 11, SIGSEGV` from `crcbl_viewer-… --quiet`, every other step green, on

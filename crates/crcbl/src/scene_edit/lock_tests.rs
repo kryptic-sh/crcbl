@@ -91,6 +91,7 @@ fn a_change_after_an_open_and_a_removed_file_are_refused() {
 /// and `lock_origin` takes the new one; a new scene lets that go too.
 #[test]
 fn the_lock_follows_the_documents_directory() {
+    let _quiet = crate::spawn_guard::no_spawns();
     let base = tempfile::tempdir().expect("a temporary directory");
     let (dir, _) = saved(&base);
     let mut document =
@@ -118,6 +119,7 @@ fn the_lock_follows_the_documents_directory() {
 /// else is: a document on another directory keeps none.
 #[test]
 fn a_scene_read_again_takes_the_lock_over() {
+    let _quiet = crate::spawn_guard::no_spawns();
     let base = tempfile::tempdir().expect("a temporary directory");
     let (dir, _) = saved(&base);
     let (other_dir, _) = {
