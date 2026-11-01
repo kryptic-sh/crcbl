@@ -224,23 +224,27 @@ fn strike(run: &mut Run, impulse: DVec3) {
         .expect("struck");
 }
 
-/// Four of EW's five runs: no launch, and a strike along each of `±x` and
-/// `-z`. The fifth, along `+z`, is left out: there the light spine chatters
-/// and keeps the ragdoll awake, a separate cause the backlog's entry on
-/// generated ragdolls above 24 substeps records.
-const STRIKES: [DVec3; 4] = [
+/// Three of EW's five runs: no launch, and a strike along each of `±x`.
+///
+/// The two along `±z` are left out because whether they sleep is chaotic,
+/// not because they fail: the light spine chatters in them, a separate cause
+/// the backlog's entry on generated ragdolls above 24 substeps records.
+/// Measured on 2026-11-01, eight runs of each strike scaled by `1 + k·1e-9`
+/// for `k` in `0..8`: the three here slept after 2.9–3.5, 2.4–3.9 and
+/// 2.3–4.1 s every time; along `+z`, four of eight slept, after 2.9 to 34.0
+/// s; along `-z`, two of eight. A last-bit difference is enough to move a
+/// `±z` run from one side to the other — the first Windows CI run of this
+/// test did that to `-z`.
+const STRIKES: [DVec3; 3] = [
     DVec3::ZERO,
     DVec3::new(30.0, 0.0, 0.0),
     DVec3::new(-30.0, 0.0, 0.0),
-    DVec3::new(0.0, 0.0, -30.0),
 ];
 
-/// How long each of [`STRIKES`] may take to sleep, in seconds.
-///
-/// Measured on 2026-11-01 at the default sixteen substeps: they slept after
-/// 3.3, 4.1, 2.2 and 9.1 s. Before the solver stopped turning a body by the
-/// whole of the part of its joints' change its contacts cancel, none of them
-/// slept in 40 s.
+/// How long each of [`STRIKES`] may take to sleep, in seconds: over three
+/// times the slowest of the perturbed runs above. Before the solver stopped
+/// turning a body by the whole of the part of its joints' change its
+/// contacts cancel, none of the five slept in 40 s.
 const SLEEP_WITHIN: f64 = 15.0;
 
 /// Spawns the ragdoll, strikes it with `impulse`, and says whether it fell
@@ -277,4 +281,55 @@ fn a_generated_ragdoll_on_a_plane_falls_asleep() {
             "struck with {impulse}, still awake after {SLEEP_WITHIN} s"
         );
     }
+}
+
+/// FNV-1a over the bytes a hash is fed: a fixed algorithm, so a pinned value
+/// means the same on every target and toolchain.
+struct Fnv(u64);
+
+impl std::hash::Hasher for Fnv {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+/// The physics state's hash.
+fn state_hash(physics: &PhysicsSystem) -> u64 {
+    use crcbl_ecs::SystemTrait as _;
+    let mut hasher = Fnv(0xcbf2_9ce4_8422_2325);
+    physics.hash_state(&mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
+/// The state, freshly spawned and two seconds into the no-launch run, taken
+/// on x86-64 Linux on 2026-11-01. The first is the generator's and the
+/// spawn's work, the second the solver's.
+const PINNED_AT_SPAWN: u64 = 0xb1c5_9aa9_6601_9c6b;
+const PINNED_AT_TWO_SECONDS: u64 = 0xe50e_968a_d457_1813;
+
+/// **The ragdoll is the same to the bit on every target**, spawned and
+/// after two seconds of falling and settling: the runs above are chaotic
+/// enough that a last-bit difference changes which of them sleep, so a target
+/// that disagrees here says so by name rather than as a ragdoll that did not
+/// sleep. A mismatch at spawn is the generator's; one only at two seconds is
+/// the solver's.
+#[test]
+fn the_ragdoll_steps_to_the_same_bits_on_every_target() {
+    let mut run = spawn();
+    let at_spawn = state_hash(&run.physics);
+    for _ in 0..120 {
+        run.physics.step(DT);
+    }
+    let at_two_seconds = state_hash(&run.physics);
+    assert_eq!(
+        (at_spawn, at_two_seconds),
+        (PINNED_AT_SPAWN, PINNED_AT_TWO_SECONDS),
+        "spawned {at_spawn:#018x}, after two seconds {at_two_seconds:#018x}"
+    );
 }

@@ -67,11 +67,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   never stayed still long enough to sleep. The part of a joint's change that the
   body's contacts cancel is now taken at the midpoint too. On a 56-body
   generated humanoid at the default sixteen substeps, none of five runs slept
-  within 40 s before; after, four sleep, in 2.2 to 9.1 s, and the fifth is held
-  awake by its light spine chattering, a separate open cause. A jointed body
-  with no contact in its solver pass steps exactly as before. **Every scene with
-  a joint and a contact on the same body now steps to different bits**, and so
-  do the unjointed bodies it touches: pinned state hashes (tumble's moved and is
+  within 40 s before; after, the run with no launch and the two struck along ±x
+  sleep, in 2.3 to 4.1 s, and whether the two struck along ±z sleep turns on
+  last-bit differences, a separate open cause. A jointed body with no contact in
+  its solver pass steps exactly as before. **Every scene with a joint and a
+  contact on the same body now steps to different bits**, and so do the
+  unjointed bodies it touches: pinned state hashes (tumble's moved and is
   re-pinned), lockstep peers on builds either side of this change, and recorded
   replays of such scenes will diverge. A scene with no joint steps exactly as
   before.
@@ -83,6 +84,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   than the hips' radius came back `RiseError::Unreachable`. The ray now leaves
   the hips' own body out; a mask that leaves the corpse out, the usual one,
   answers as before.
+
+- **A generated ragdoll's rig is the same on every target.** Fitting a body to a
+  bone pointing straight down — every leg of a T-pose — turned it with `glam`'s
+  `DQuat::from_rotation_arc`, whose half turn uses the platform's sine and
+  cosine, so `RagdollRig::generate` and an authored rig's capsules could differ
+  by a last bit between targets. The half turn is now built exactly. A generated
+  or authored rig with such a bone starts, and so steps, to different bits than
+  before.
 
 ## [0.15.0] - 2026-11-01
 

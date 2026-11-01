@@ -17808,19 +17808,41 @@ joint rings several times inside it. Unverified. **Decision for the user:**
 what `GenerateSettings::DEFAULT`'s sixteen was measured for. Not looked into
 further.
 
-**The +z run does not sleep: its light spine chatters.** On the final rule at
-sixteen substeps it was still awake after 300 s, `spine_02` to `spine_04` and
-`neck_01` turning at 7–22 rad/s at 40 s; those links (0.29–0.78 kg, between a
-3.1 kg pelvis and the whole upper body) are thinner than the pelvis and spine
-spheres around them, so they likely touch nothing and the fix does not reach
-them — likely, not checked. In the unfixed solver the same run chattered the
-same way for its first ten seconds, and under the first form of the fix for all
-40 s, its joints 0.05–0.1 rad past their limits, turning back and forth with
-almost no net turn. The form of the fix just before the no-contact skip slept
-this run after 18.1 s: a rounding-level difference in bodies with no contact
-moved it from 18 s to never, so it sits on an edge, and `creep.rs` leaves it
-out. `max_mass_ratio` bounds only a jointed pair, never a light link carrying a
-heavy subtree; a generator rule on subtree mass is the candidate. Open.
+**The ±z runs sleep or not by chance: the light spine chatters.** On the final
+rule at sixteen substeps the +z run was once still awake after 300 s, `spine_02`
+to `spine_04` and `neck_01` turning at 7–22 rad/s at 40 s; those links
+(0.29–0.78 kg, between a 3.1 kg pelvis and the whole upper body) are thinner
+than the pelvis and spine spheres around them, so they likely touch nothing and
+the fix does not reach them — likely, not checked. In the unfixed solver the
+same run chattered the same way for its first ten seconds, and under the first
+form of the fix for all 40 s, its joints 0.05–0.1 rad past their limits, turning
+back and forth with almost no net turn. Measured on 2026-11-01 with the
+generator's half turns exact, eight runs of each strike scaled by `1 + k·1e-9`:
+along +z four of eight slept within 40 s (2.9 to 34.0 s), along -z two of eight,
+while no launch and ±x slept every time within 2.3–4.1 s. So a last-bit
+difference decides a ±z run; the first Windows CI run of `creep.rs` failed on
+-z, most likely that way, and the test now holds only the other three.
+`max_mass_ratio` bounds only a jointed pair, never a light link carrying a heavy
+subtree; a generator rule on subtree mass is the candidate. Open.
+
+**A `Tether` holds a client within the chest's width of the server in most
+landings, not all.** `ragdoll.rs`'s
+`a_tethered_client_holds_within_a_body_width_of_the_server` asserted it of one
+blow, and the generator's exact half turn moved that blow's end gap from under 1
+cm to 1.9 cm. Over 32 blows scaled by `1 + k·1e-9`: the tethered peak was
+0.144–0.178 m against a 0.172 m chest (over it twice), and 8 runs ended 1.7–4.1
+cm apart where the rest ended within 2.1 mm. The test now holds the median peak
+and a quarter of eight ends. Whether the 2–4 cm ends are a tether that slept
+before it converged was not looked into.
+
+**Whether Windows steps the generated ragdoll to the same bits is unconfirmed.**
+`creep.rs`'s `the_ragdoll_steps_to_the_same_bits_on_every_target` pins its state
+at spawn and after two seconds, taken on x86-64 Linux, and the next CI run
+answers it. One platform dependence on that path is fixed: `rotation_onto` in
+`crates/crcbl-ragdoll/src/rig.rs` built a half turn with the platform's cosine.
+Nothing lints `crcbl-ragdoll` for platform transcendentals as
+`crates/crcbl-phys/clippy.toml` lints the solver; `rise.rs` and `debug.rs` still
+call `f64::cos` and `f64::sin` (queries and drawing, not simulation).
 
 Not reproduced exactly: EW's own rig (40 bodies, 0.96 kg `spine_01`, 2.6 kg
 pelvis) was not available. The fixture is comparable, not the same, so EW should

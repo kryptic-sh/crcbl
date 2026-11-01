@@ -381,9 +381,42 @@ pub(crate) fn inverse(transform: &Transform) -> Transform {
     Transform::new(-(rotation * transform.position), rotation)
 }
 
-/// The shortest rotation taking `from` onto the unit direction of `to`, or
-/// `None` if `to` has no direction.
+/// The shortest rotation taking the unit vector `from` onto the unit
+/// direction of `to`, or `None` if `to` has no direction.
+///
+/// `glam`'s `DQuat::from_rotation_arc`, except for a half turn: glam builds
+/// that with the platform's sine and cosine of a quarter turn, a cosine that
+/// is not exactly zero and is rounded as each C runtime rounds it, so a body
+/// fitted to a bone pointing straight down — every leg of a T-pose — could
+/// stand turned by different bits on different targets. The half turn about
+/// an axis is exactly that axis with a zero real part.
 pub(crate) fn rotation_onto(from: DVec3, to: DVec3) -> Option<DQuat> {
     let to = to.try_normalize()?;
+    // glam's own threshold for the half turn, so every other pair takes its
+    // arithmetic unchanged.
+    const ONE_MINUS_EPS: f64 = 1.0 - 2.0 * f64::EPSILON;
+    if from.dot(to) < -ONE_MINUS_EPS {
+        let axis = from.any_orthonormal_vector();
+        return Some(DQuat::from_xyzw(axis.x, axis.y, axis.z, 0.0));
+    }
     Some(DQuat::from_rotation_arc(from, to))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A half turn is built without the platform's trigonometry: its real
+    /// part is exactly zero, and it still takes `from` onto `to`.
+    #[test]
+    fn a_half_turn_onto_a_bone_is_exact() {
+        let turn = rotation_onto(DVec3::Y, DVec3::new(0.0, -0.42, 0.0)).expect("a direction");
+        assert_eq!(turn.w, 0.0);
+        assert!((turn * DVec3::Y - DVec3::NEG_Y).length() < 1e-15);
+        let arc = rotation_onto(DVec3::Y, DVec3::new(0.3, 0.4, 0.0)).expect("a direction");
+        assert_eq!(
+            arc,
+            DQuat::from_rotation_arc(DVec3::Y, DVec3::new(0.6, 0.8, 0.0))
+        );
+    }
 }
