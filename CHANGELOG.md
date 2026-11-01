@@ -15,6 +15,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`Clip::sample_into` searches for the keyframe segment once per timeline.**
+  `Clip::new` now groups channels whose keyframe times are equal bit for bit,
+  and leaves out any channel a later one overwrites, so a sample runs one search
+  per distinct timeline instead of one per channel. Results are bit-identical.
+  On a 55-joint humanoid locomotion clip under callgrind, a sample fell from
+  14.7k to 9.5k instructions; building a clip costs about 175k instructions more
+  for 60 channels.
+
 - **`Palette::compute` recomposes only what changed.** It keeps the local
   transforms it last composed and recomposes a joint only when its local differs
   in any bit, or its parent was recomposed in the same call; the result is still

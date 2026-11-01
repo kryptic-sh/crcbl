@@ -138,8 +138,16 @@ recomposes only changed joints and their descendants, bit for bit; measured on
 - **A scratch palette shared across skeletons recomposes everything** each time
   it switches skeleton (ids differ even for identical joints); correct, but
   loses the saving. Not checked whether EW's rig does this.
-- **Clip sampling is next**: EW's same profile put `Clip::sample_into` at 14.8%
-  inclusive, `sample::locate` 6.0% self.
+- **Clip sampling: what grouping by timeline left (2026-11-01).** `sample_into`
+  now searches once per timeline (14.7k → 9.5k instructions a sample on the
+  example). A keyframe cursor for sequential sampling was declined: the search
+  is now about 2% of a sample, and a cursor needs caller-held state since `Clip`
+  is shared and `Sync`. `blend_into` and linear rotation sampling are dominated
+  by glam's `Quat::slerp` (about 120 instructions a joint) and cannot be cut
+  bit-identically, since `slerp(q, q, t)` takes glam's lerp-and-normalize
+  fallback; any further win means accepting different bits, the user's call.
+  `Clip::translation_of` still searches per channel; it reads one channel, so
+  grouping would not help it.
 
 ## Skinning's per-frame CPU after the binding compare (2026-10-31)
 
