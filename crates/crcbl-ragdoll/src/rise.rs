@@ -28,7 +28,8 @@
 //! rise.
 
 use crcbl_phys::{
-    CharacterConfig, CharacterController, ColliderId, PhysicsSystem, QueryFilter, QueryScratch, Ray,
+    CharacterConfig, CharacterController, ColliderId, PhysicsSystem, QueryFilter, QueryScratch,
+    Ray, rotation_from_scaled_axis,
 };
 use glam::DVec3;
 
@@ -127,7 +128,10 @@ impl Ragdoll {
             let points = (core::f64::consts::TAU * distance / spacing).ceil() as u32;
             for point in 0..points {
                 let angle = core::f64::consts::TAU * f64::from(point) / f64::from(points);
-                let at = hips + DVec3::new(angle.cos(), 0.0, angle.sin()) * distance;
+                // Turned with the engine's own trigonometry, not the
+                // platform's: where a corpse rises is game state.
+                let at =
+                    hips + rotation_from_scaled_axis(DVec3::NEG_Y * angle) * DVec3::X * distance;
                 if let Ok(centre) = stand_from(physics, query, &mut scratch, (hips, hips_body), at)
                 {
                     return Ok(centre);

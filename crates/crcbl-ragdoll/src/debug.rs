@@ -107,8 +107,9 @@ impl Ragdoll {
                     twist_lower,
                     twist_upper,
                 } => {
-                    let rim = origin + axis * (JOINT_AXIS_LENGTH * cone.cos());
-                    let radius = JOINT_AXIS_LENGTH * cone.sin();
+                    let (sin, cos) = sin_cos(cone);
+                    let rim = origin + axis * (JOINT_AXIS_LENGTH * cos);
+                    let radius = JOINT_AXIS_LENGTH * sin;
                     arc(rim, (u, v), radius, (0.0, TAU), &mut limit);
                     arc(
                         origin,
@@ -200,6 +201,17 @@ fn outline(world: &Transform, shape: BodyShape, line: &mut impl FnMut(DVec3, DVe
     }
 }
 
+/// `angle`'s sine and cosine, from the platform: these draw lines, and no
+/// simulation state reads them, so the bits they round to may differ by
+/// target.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "drawing only: no simulation state depends on these bits"
+)]
+fn sin_cos(angle: f64) -> (f64, f64) {
+    angle.sin_cos()
+}
+
 /// The arc of radius `radius` about `centre` in the plane of `u` and `v`,
 /// from angle `from` to `to` measured from `u` towards `v`, as segments of
 /// at most a [`CIRCLE_SEGMENTS`]th of a turn — at least one.
@@ -210,7 +222,10 @@ fn arc(
     (from, to): (f64, f64),
     line: &mut impl FnMut(DVec3, DVec3),
 ) {
-    let point = |angle: f64| centre + (u * angle.cos() + v * angle.sin()) * radius;
+    let point = |angle: f64| {
+        let (sin, cos) = sin_cos(angle);
+        centre + (u * cos + v * sin) * radius
+    };
     let segments = (((to - from).abs() / TAU) * CIRCLE_SEGMENTS as f64)
         .ceil()
         .max(1.0) as usize;

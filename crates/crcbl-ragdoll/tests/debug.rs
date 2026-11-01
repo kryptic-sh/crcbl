@@ -129,12 +129,20 @@ fn the_debug_view_draws_bodies_joints_and_limits() {
                     let axis = (tip - origin).normalize();
                     let reach = point - origin;
                     let at_length = (reach.length() - JOINT_AXIS_LENGTH).abs() < NEAR;
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "measuring a drawn line, not simulating"
+                    )]
                     let angle = axis.angle_between(reach);
                     let square = (angle - core::f64::consts::FRAC_PI_2).abs() < NEAR;
                     // Measured from the parent's `x`, as the revolute and the
                     // twist angle are.
                     let zero =
                         worlds[joint.parent].rotation * joint.frame_parent.rotation * DVec3::X;
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "measuring a drawn line, not simulating"
+                    )]
                     let turned = zero.cross(reach).dot(axis).atan2(zero.dot(reach));
                     match joint.kind {
                         RigJointKind::Ball { cone, .. }

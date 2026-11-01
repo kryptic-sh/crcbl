@@ -17843,14 +17843,29 @@ cm apart where the rest ended within 2.1 mm. The test now holds the median peak
 and a quarter of eight ends. Whether the 2–4 cm ends are a tether that slept
 before it converged was not looked into.
 
-**Whether Windows steps the generated ragdoll to the same bits is unconfirmed.**
-`creep.rs`'s `the_ragdoll_steps_to_the_same_bits_on_every_target` pins its state
-at spawn and after two seconds, taken on x86-64 Linux, and the next CI run
-answers it. One platform dependence on that path is fixed: `rotation_onto` in
-`crates/crcbl-ragdoll/src/rig.rs` built a half turn with the platform's cosine.
-Nothing lints `crcbl-ragdoll` for platform transcendentals as
-`crates/crcbl-phys/clippy.toml` lints the solver; `rise.rs` and `debug.rs` still
-call `f64::cos` and `f64::sin` (queries and drawing, not simulation).
+**Windows spawned the generated ragdoll to different bits; fixed, awaiting CI.**
+CI run 41298473165 on `007a68f8` failed `creep.rs`'s
+`the_ragdoll_steps_to_the_same_bits_on_every_target` on windows-latest only, at
+spawn (`0xb88e0d131d214ae1` against `0xb1c5_9aa9_6601_9c6b`); macOS and Linux
+matched. The cause, read from the emitted assembly: `f64::powi` compiles to a
+call to the C runtime's `pow` on `x86_64-pc-windows-msvc` (in a debug build, and
+for any exponent not known at compile time) and to `__powidf2` on Linux, and
+`BodyShape::volume` took `radius.powi(3)`. It is multiplied out now, which left
+the Linux pins unchanged. `crates/crcbl-ragdoll/clippy.toml` now refuses the
+same transcendentals as `crcbl-phys`'s. On `x86_64-pc-windows-msvc`, the only C
+runtime math calls left in `crcbl-ragdoll`, `crcbl-anim` and `crcbl-phys` are
+`debug.rs`'s drawing (`#[expect]`ed), `crcbl-phys`'s orbit, atmosphere and
+sphere-of-influence code (each `#[expect]`ed, off the rigid-body path), and one
+open item below.
+
+**`crcbl-anim`'s `motion_from_previous_pose` reads the platform's `atan2`.** It
+turns two poses into a body's angular velocity with `DQuat::to_scaled_axis`, and
+`Ragdoll::spawn` uses it whenever a handoff carries the previous pose, so such a
+spawn starts at different bits by target. Not fixed: `crcbl-core` has no
+deterministic `atan2` (`crcbl-phys`'s Box3D transcription is private to the
+joint solver), and `crcbl-anim` has no transcendental lint. The fix is an
+`atan2` in `crcbl_core::trig` from a named reference with known-value tests,
+then the lint on `crcbl-anim`.
 
 Not reproduced exactly: EW's own rig (40 bodies, 0.96 kg `spine_01`, 2.6 kg
 pelvis) was not available. The fixture is comparable, not the same, so EW should

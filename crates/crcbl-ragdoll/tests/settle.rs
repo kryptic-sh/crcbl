@@ -5,7 +5,7 @@ mod common;
 
 use common::{entities, model, skeleton, world};
 use crcbl_anim::Pose;
-use crcbl_phys::{PhysicsSystem, QueryFilter, Transform};
+use crcbl_phys::{PhysicsSystem, QueryFilter, Transform, rotation_from_scaled_axis};
 use crcbl_ragdoll::{
     GenerateSettings, Handoff, Ragdoll, RagdollRig, SettleBudget, SettleError, SettledPose,
 };
@@ -42,7 +42,10 @@ fn spawn(physics: &mut PhysicsSystem, rig: &RagdollRig, x: f32, first: u32) -> R
 #[test]
 fn a_settled_pose_round_trips_and_refuses_bad_bytes() {
     let pose = SettledPose::new(vec![
-        Transform::new(DVec3::new(1.25, 0.1, -3.0), DQuat::from_rotation_y(0.7)),
+        Transform::new(
+            DVec3::new(1.25, 0.1, -3.0),
+            rotation_from_scaled_axis(DVec3::Y * 0.7),
+        ),
         Transform::new(DVec3::new(10_000.0, 2.0, 0.0), DQuat::IDENTITY),
     ]);
     let mut bytes = Vec::new();
@@ -57,12 +60,14 @@ fn a_settled_pose_round_trips_and_refuses_bad_bytes() {
             .distance(pose.bodies()[0].position)
             <= quantum
     );
-    assert!(
-        read.bodies()[0]
-            .rotation
-            .angle_between(pose.bodies()[0].rotation)
-            < 1e-4
-    );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "measuring the round trip, not simulating"
+    )]
+    let turned = read.bodies()[0]
+        .rotation
+        .angle_between(pose.bodies()[0].rotation);
+    assert!(turned < 1e-4);
     assert_eq!(
         read.bodies()[1],
         pose.bodies()[1],

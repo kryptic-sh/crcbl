@@ -93,13 +93,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the hips' own body out; a mask that leaves the corpse out, the usual one,
   answers as before.
 
-- **A generated ragdoll's rig is the same on every target.** Fitting a body to a
-  bone pointing straight down — every leg of a T-pose — turned it with `glam`'s
-  `DQuat::from_rotation_arc`, whose half turn uses the platform's sine and
-  cosine, so `RagdollRig::generate` and an authored rig's capsules could differ
-  by a last bit between targets. The half turn is now built exactly. A generated
-  or authored rig with such a bone starts, and so steps, to different bits than
-  before.
+- **A generated ragdoll's rig is the same on every target.** A sphere's volume,
+  which shares out a generated rig's mass, took `f64::powi(3)`, and on
+  `x86_64-pc-windows-msvc` that calls the C runtime's `pow`: a generated ragdoll
+  spawned to different bits on Windows than on Linux and macOS. The volume is
+  now multiplied out. Fitting a body to a bone pointing straight down — every
+  leg of a T-pose — turned it with `glam`'s `DQuat::from_rotation_arc`, whose
+  half turn uses the platform's sine and cosine; that half turn is now built
+  exactly. `crcbl-ragdoll` now refuses platform transcendentals at lint time, as
+  `crcbl-phys` does, and `Ragdoll::rise_point` places its search ring with the
+  engine's own trigonometry. A generated or authored rig with a bone pointing
+  straight down starts, and so steps, to different bits than before.
 
 ## [0.15.0] - 2026-11-01
 

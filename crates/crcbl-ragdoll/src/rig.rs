@@ -72,7 +72,10 @@ impl BodyShape {
                 radius,
                 half_height,
             } => PI * radius * radius * (2.0 * half_height + 4.0 / 3.0 * radius),
-            Self::Sphere { radius } => 4.0 / 3.0 * PI * radius.powi(3),
+            // Multiplied out rather than `powi(3)`, whose precision is the
+            // target's to choose: the volume shares out a generated rig's
+            // mass, so it must be the same bits everywhere.
+            Self::Sphere { radius } => 4.0 / 3.0 * PI * (radius * radius * radius),
             Self::Box { half_extents } => 8.0 * half_extents.x * half_extents.y * half_extents.z,
         }
     }
