@@ -30,6 +30,7 @@ use crcbl_phys::Transform;
 use glam::{DVec3, Mat4};
 
 use crate::frames::{body_worlds, overlapping_pairs, rigid_frames};
+use crate::limits::SwingTwist;
 use crate::rig::{
     BodyShape, RagdollRig, RigBody, RigError, RigJoint, RigJointKind, compose, inverse,
     rotation_onto,
@@ -195,9 +196,13 @@ impl RagdollRig {
                 frame_parent: compose(&inverse(&fitted[parent].world), &frame),
                 frame_child: compose(&inverse(&body.world), &frame),
                 kind: RigJointKind::Ball {
-                    cone: settings.cone,
+                    swing_x: settings.cone,
+                    swing_y: settings.cone,
                     twist_lower: -settings.twist,
                     twist_upper: settings.twist,
+                    neutral: SwingTwist::REST,
+                    soft_swing: None,
+                    soft_twist: None,
                 },
                 friction: 0.0,
             });

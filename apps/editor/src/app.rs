@@ -2055,6 +2055,12 @@ const RAGDOLL_COLOR: [f32; 4] = [0.6, 0.45, 0.95, 1.0];
 /// a joint sits on its child bone's origin, where the bones meet.
 const JOINT_COLOR: [f32; 4] = BONE_COLOR;
 
+/// The colour a ragdoll joint's soft bounds are drawn in, where it starts to
+/// meet resistance: a coral, apart from the joints' magenta and the primary
+/// selection's amber, so the free range reads inside the hard limits drawn
+/// around it.
+const SOFT_LIMIT_COLOR: [f32; 4] = [1.0, 0.45, 0.3, 1.0];
+
 /// The colour a falling ragdoll's sleeping bodies are drawn in: a grey, so a
 /// body still moving reads in [`RAGDOLL_COLOR`] against the settled ones.
 const SLEEPING_COLOR: [f32; 4] = [0.55, 0.55, 0.62, 1.0];
@@ -2287,6 +2293,7 @@ fn drop_lines(
             DebugLine::Body { sleeping: false } => RAGDOLL_COLOR,
             DebugLine::Body { sleeping: true } => SLEEPING_COLOR,
             DebugLine::JointAxis | DebugLine::Limit | DebugLine::Divergence { .. } => JOINT_COLOR,
+            DebugLine::SoftLimit => SOFT_LIMIT_COLOR,
         };
         lines.push((from.as_vec3(), to.as_vec3(), color));
     });

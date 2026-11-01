@@ -126,11 +126,29 @@ description) and 3 (anatomical profile) are next. Left from layer 1:
   to the swing-twist split (Box3D's and Jolt's): the twist row pushes along its
   gradient, which is not frame B's own axis. Measured 2.04 rad of swing drift
   under a 6 N·m axial torque at a 0.8 rad swing. Not a bug.
-- **The ragdoll debug view draws a circular cone** (`crcbl-ragdoll`'s
-  `debug.rs`, from `RigJointKind::Ball { cone }`); layer 2 draws the ellipse and
-  the soft bounds once its description carries them.
 - **Not measured:** the cost of the per-solve Eberly bisection on an elliptical
   joint, and soft-zone hertz above the rigid rows' 60 Hz.
+
+## Joint limits layer 2: what the ragdoll description left (2026-11-01)
+
+- **`generate` cannot fold yet.** In `RagdollRig::generate` a folded bone should
+  also be left out of fitting; today an `eyes` or `ik_*` child turns its parent
+  into a "several children" sphere. Layer 3, with the profile.
+- **The editor has no rows for soft zones, `swing_x_axis` or `fold`.**
+  `apps/editor/src/panel/rig.rs` keeps them as the file has them while other
+  rows change; Reflect reads no `Option` or list, so this needs an on/off row
+  per zone, or a list section like the ignored pairs.
+- **`to_desc` writes no fold list**: a `RagdollRig` keeps no record of which
+  bones were folded; harmless today, since a bone with no body behaves the same
+  either way.
+- **New files need this build**: older builds reject the new fields. Writing
+  `cone` for circular rigs was considered and declined (2026-11-01).
+- **The plan's "Where it stands today" paragraph** in `docs/plan/35-ragdolls.md`
+  still describes the circular cone from before layer 1; correct it when the
+  feature closes.
+- **Not verified**: the editor's rest-pose warning has no UI test
+  (`RigJointKind::rest_is_within_limits` is tested), and soft swing from the
+  description is tested only for equality with layer 1's builder.
 
 ## Palette and IK cost after the incremental compute (2026-11-01)
 

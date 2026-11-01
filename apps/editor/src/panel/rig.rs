@@ -4,9 +4,13 @@
 //! The rig's rows are whether bodies overlapping at rest stop colliding and
 //! the solver substeps it asks for; a body's are its shape and size, its mass,
 //! and where it sits and which way it points in its bone's frame; a joint's,
-//! its kind and limits, its friction, and its axis and offset from its child
-//! bone. An axis is three numbers, which the rig resolves to a direction (a
-//! zero one is refused); the viewport has no handle for it.
+//! its kind, limits and neutral, its friction, and its axis and offset from
+//! its child bone. A joint's soft zones have no rows yet: they are kept as the
+//! file has them while the other rows move. An axis is three numbers, which
+//! the rig resolves to a direction (a zero one is refused); the viewport has
+//! no handle for it. A joint whose rest pose lies outside its limits as
+//! measured from its neutral — one a ragdoll spawned near rest snaps out of —
+//! carries a warning under its rows; it is not refused.
 //!
 //! **The bone pairs the file names as never colliding have a section of their
 //! own** rather than rows: a list is not a thing [`crcbl::reflect`] reads.
@@ -37,12 +41,13 @@
 //! field of the new variant at zero, which no body may have, so a capsule
 //! turned into a sphere keeps its radius and a box is made to wrap the capsule
 //! the body was. **A joint's kind switched keeps its swing** ([`kind_desc`]):
-//! a ball's cone becomes a hinge's range either side of rest, and a hinge's
-//! farther limit a ball's cone, with no twist. Every other switch — to or from
-//! fixed — starts at zero limits, which every kind allows: a joint locked
-//! until it is opened.
+//! a ball's wider swing half-angle becomes a hinge's range either side of
+//! rest, and a hinge's farther limit a ball's circular swing, with no twist.
+//! A switch drops the neutral and the soft zones, which mean something else
+//! in the other kind. Every other switch — to or from fixed — starts at zero
+//! limits, which every kind allows: a joint locked until it is opened.
 
-use crcbl::ragdoll::{JointKindDesc, RagdollDesc, ShapeDesc};
+use crcbl::ragdoll::{JointKindDesc, RagdollDesc, RigJointKind, ShapeDesc, SwingTwist};
 use crcbl::reflect::Reflect;
 use crcbl::ui::tree::{InspectorOptions, NodeKey, Ui};
 
@@ -113,18 +118,28 @@ struct JointRows {
 #[reflect(crate = "crcbl::reflect")]
 enum Kind {
     Ball {
-        #[reflect(name = "Cone (°)", min = 0.0, max = 180.0, step = 0.5)]
-        cone: f64,
+        #[reflect(name = "Swing about x (°)", min = 0.0, max = 180.0, step = 0.5)]
+        swing_x: f64,
+        #[reflect(name = "Swing about y (°)", min = 0.0, max = 180.0, step = 0.5)]
+        swing_y: f64,
         #[reflect(name = "Least twist (°)", min = -180.0, max = 180.0, step = 0.5)]
         twist_lower: f64,
         #[reflect(name = "Most twist (°)", min = -180.0, max = 180.0, step = 0.5)]
         twist_upper: f64,
+        #[reflect(name = "Neutral swing about x (°)", min = -180.0, max = 180.0, step = 0.5)]
+        neutral_swing_x: f64,
+        #[reflect(name = "Neutral swing about y (°)", min = -180.0, max = 180.0, step = 0.5)]
+        neutral_swing_y: f64,
+        #[reflect(name = "Neutral twist (°)", min = -180.0, max = 180.0, step = 0.5)]
+        neutral_twist: f64,
     },
     Hinge {
         #[reflect(name = "Least angle (°)", min = -180.0, max = 180.0, step = 0.5)]
         lower: f64,
         #[reflect(name = "Most angle (°)", min = -180.0, max = 180.0, step = 0.5)]
         upper: f64,
+        #[reflect(name = "Neutral (°)", min = -180.0, max = 180.0, step = 0.5)]
+        neutral: f64,
     },
     Fixed,
 }
@@ -276,10 +291,18 @@ pub(super) fn build(ui: &mut Ui, edit: RigEdit<'_>, options: &InspectorOptions<'
                 joint.kind = kind_desc(joint.kind, before.kind, rows.kind);
                 built.edited = true;
             }
+            if !RigJointKind::from(joint.kind).rest_is_within_limits() {
+                ui.span(".rig-warning", REST_OUTSIDE, &[]);
+            }
         });
     }
     built
 }
+
+/// The warning under a joint whose rest pose lies outside its limits as
+/// measured from its neutral.
+const REST_OUTSIDE: &str =
+    "Rest lies outside these limits about the neutral: a ragdoll spawned near rest snaps inside.";
 
 /// The option a pair drop-down shows while nothing is picked.
 const ADD_PAIR: &str = "Add a pair...";
@@ -451,25 +474,39 @@ fn reshaped(old: ShapeDesc, to: Shape) -> ShapeDesc {
 fn kind_rows(kind: JointKindDesc) -> Kind {
     match kind {
         JointKindDesc::Ball {
-            cone,
+            swing_x,
+            swing_y,
             twist_lower,
             twist_upper,
+            neutral,
+            ..
         } => Kind::Ball {
-            cone: cone.to_degrees(),
+            swing_x: swing_x.to_degrees(),
+            swing_y: swing_y.to_degrees(),
             twist_lower: twist_lower.to_degrees(),
             twist_upper: twist_upper.to_degrees(),
+            neutral_swing_x: neutral.swing_x.to_degrees(),
+            neutral_swing_y: neutral.swing_y.to_degrees(),
+            neutral_twist: neutral.twist.to_degrees(),
         },
-        JointKindDesc::Hinge { lower, upper } => Kind::Hinge {
+        JointKindDesc::Hinge {
+            lower,
+            upper,
+            neutral,
+            ..
+        } => Kind::Hinge {
             lower: lower.to_degrees(),
             upper: upper.to_degrees(),
+            neutral: neutral.to_degrees(),
         },
         JointKindDesc::Fixed => Kind::Fixed,
     }
 }
 
 /// `old`, drawn as `before`, after its rows moved to `after`: each angle that
-/// moved in radians, and each that did not exactly as it was. A switch keeps
-/// the swing — see the [module docs](self).
+/// moved in radians, each that did not exactly as it was, and the soft zones,
+/// which have no rows, kept. A switch keeps the swing — see the
+/// [module docs](self).
 fn kind_desc(old: JointKindDesc, before: Kind, after: Kind) -> JointKindDesc {
     let angle = |old: f64, before: f64, after: f64| {
         if after == before {
@@ -481,66 +518,135 @@ fn kind_desc(old: JointKindDesc, before: Kind, after: Kind) -> JointKindDesc {
     match (old, before, after) {
         (
             JointKindDesc::Ball {
-                cone,
+                swing_x,
+                swing_y,
                 twist_lower,
                 twist_upper,
+                neutral,
+                soft_swing,
+                soft_twist,
             },
             Kind::Ball {
-                cone: cone_before,
+                swing_x: x_before,
+                swing_y: y_before,
                 twist_lower: lower_before,
                 twist_upper: upper_before,
+                neutral_swing_x: neutral_x_before,
+                neutral_swing_y: neutral_y_before,
+                neutral_twist: neutral_twist_before,
             },
             Kind::Ball {
-                cone: cone_after,
+                swing_x: x_after,
+                swing_y: y_after,
                 twist_lower: lower_after,
                 twist_upper: upper_after,
+                neutral_swing_x: neutral_x_after,
+                neutral_swing_y: neutral_y_after,
+                neutral_twist: neutral_twist_after,
             },
         ) => JointKindDesc::Ball {
-            cone: angle(cone, cone_before, cone_after),
+            swing_x: angle(swing_x, x_before, x_after),
+            swing_y: angle(swing_y, y_before, y_after),
             twist_lower: angle(twist_lower, lower_before, lower_after),
             twist_upper: angle(twist_upper, upper_before, upper_after),
+            neutral: SwingTwist {
+                swing_x: angle(neutral.swing_x, neutral_x_before, neutral_x_after),
+                swing_y: angle(neutral.swing_y, neutral_y_before, neutral_y_after),
+                twist: angle(neutral.twist, neutral_twist_before, neutral_twist_after),
+            },
+            soft_swing,
+            soft_twist,
         },
         (
-            JointKindDesc::Hinge { lower, upper },
+            JointKindDesc::Hinge {
+                lower,
+                upper,
+                neutral,
+                soft,
+            },
             Kind::Hinge {
                 lower: lower_before,
                 upper: upper_before,
+                neutral: neutral_before,
             },
             Kind::Hinge {
                 lower: lower_after,
                 upper: upper_after,
+                neutral: neutral_after,
             },
         ) => JointKindDesc::Hinge {
             lower: angle(lower, lower_before, lower_after),
             upper: angle(upper, upper_before, upper_after),
+            neutral: angle(neutral, neutral_before, neutral_after),
+            soft,
         },
         // A switch between the two that swing: the swing, in radians.
-        (JointKindDesc::Ball { cone, .. }, _, Kind::Hinge { .. }) => JointKindDesc::Hinge {
-            lower: -cone,
-            upper: cone,
-        },
-        (JointKindDesc::Hinge { lower, upper }, _, Kind::Ball { .. }) => JointKindDesc::Ball {
-            cone: lower.abs().max(upper.abs()),
-            twist_lower: 0.0,
-            twist_upper: 0.0,
-        },
+        (
+            JointKindDesc::Ball {
+                swing_x, swing_y, ..
+            },
+            _,
+            Kind::Hinge { .. },
+        ) => {
+            let swing = swing_x.max(swing_y);
+            JointKindDesc::Hinge {
+                lower: -swing,
+                upper: swing,
+                neutral: 0.0,
+                soft: None,
+            }
+        }
+        (JointKindDesc::Hinge { lower, upper, .. }, _, Kind::Ball { .. }) => {
+            let swing = lower.abs().max(upper.abs());
+            JointKindDesc::Ball {
+                swing_x: swing,
+                swing_y: swing,
+                twist_lower: 0.0,
+                twist_upper: 0.0,
+                neutral: SwingTwist::REST,
+                soft_swing: None,
+                soft_twist: None,
+            }
+        }
         // Any other switch: the new kind, from its rows.
         (
             _,
             _,
             Kind::Ball {
-                cone,
+                swing_x,
+                swing_y,
                 twist_lower,
                 twist_upper,
+                neutral_swing_x,
+                neutral_swing_y,
+                neutral_twist,
             },
         ) => JointKindDesc::Ball {
-            cone: cone.to_radians(),
+            swing_x: swing_x.to_radians(),
+            swing_y: swing_y.to_radians(),
             twist_lower: twist_lower.to_radians(),
             twist_upper: twist_upper.to_radians(),
+            neutral: SwingTwist {
+                swing_x: neutral_swing_x.to_radians(),
+                swing_y: neutral_swing_y.to_radians(),
+                twist: neutral_twist.to_radians(),
+            },
+            soft_swing: None,
+            soft_twist: None,
         },
-        (_, _, Kind::Hinge { lower, upper }) => JointKindDesc::Hinge {
+        (
+            _,
+            _,
+            Kind::Hinge {
+                lower,
+                upper,
+                neutral,
+            },
+        ) => JointKindDesc::Hinge {
             lower: lower.to_radians(),
             upper: upper.to_radians(),
+            neutral: neutral.to_radians(),
+            soft: None,
         },
         (_, _, Kind::Fixed) => JointKindDesc::Fixed,
     }
@@ -568,6 +674,7 @@ mod tests {
             joints: Vec::new(),
             ignore: vec![pair("head", "hips")],
             ignore_rest_overlaps: true,
+            fold: Vec::new(),
             substeps: 0,
         };
         let touching = [pair("head", "chest"), pair("hips", "hand")];
@@ -614,88 +721,132 @@ mod tests {
         );
     }
 
-    /// **A switched kind keeps its swing**: a ball's cone is a hinge's range
-    /// either side of rest, and back again a ball with that cone and no twist;
-    /// a fixed joint switched to a ball starts locked.
+    /// A ball of `swing` about both axes and the given twist, with no
+    /// neutral or soft zones.
+    fn ball(swing: f64, twist_lower: f64, twist_upper: f64) -> JointKindDesc {
+        JointKindDesc::Ball {
+            swing_x: swing,
+            swing_y: swing,
+            twist_lower,
+            twist_upper,
+            neutral: SwingTwist::REST,
+            soft_swing: None,
+            soft_twist: None,
+        }
+    }
+
+    /// A hinge between `lower` and `upper`, with no neutral or soft zone.
+    fn hinge(lower: f64, upper: f64) -> JointKindDesc {
+        JointKindDesc::Hinge {
+            lower,
+            upper,
+            neutral: 0.0,
+            soft: None,
+        }
+    }
+
+    /// **A switched kind keeps its swing**: a ball's wider half-angle is a
+    /// hinge's range either side of rest, and back again a ball with that
+    /// swing and no twist; a fixed joint switched to a ball starts locked.
     #[test]
     fn a_switched_kind_keeps_its_swing() {
-        let ball = JointKindDesc::Ball {
-            cone: 0.7,
+        let elliptical = JointKindDesc::Ball {
+            swing_x: 0.5,
+            swing_y: 0.7,
             twist_lower: -0.3,
             twist_upper: 0.2,
+            neutral: SwingTwist {
+                swing_x: 0.1,
+                ..SwingTwist::REST
+            },
+            soft_swing: None,
+            soft_twist: None,
         };
         let zero_hinge = Kind::Hinge {
             lower: 0.0,
             upper: 0.0,
+            neutral: 0.0,
         };
-        let hinge = kind_desc(ball, kind_rows(ball), zero_hinge);
         assert_eq!(
-            hinge,
-            JointKindDesc::Hinge {
-                lower: -0.7,
-                upper: 0.7,
-            }
+            kind_desc(elliptical, kind_rows(elliptical), zero_hinge),
+            hinge(-0.7, 0.7)
         );
-        let lopsided = JointKindDesc::Hinge {
-            lower: -2.4,
-            upper: 0.1,
-        };
+        let lopsided = hinge(-2.4, 0.1);
         let zero_ball = Kind::Ball {
-            cone: 0.0,
+            swing_x: 0.0,
+            swing_y: 0.0,
             twist_lower: 0.0,
             twist_upper: 0.0,
+            neutral_swing_x: 0.0,
+            neutral_swing_y: 0.0,
+            neutral_twist: 0.0,
         };
         assert_eq!(
             kind_desc(lopsided, kind_rows(lopsided), zero_ball),
-            JointKindDesc::Ball {
-                cone: 2.4,
-                twist_lower: 0.0,
-                twist_upper: 0.0,
-            }
+            ball(2.4, 0.0, 0.0)
         );
         let fixed = JointKindDesc::Fixed;
         assert_eq!(
             kind_desc(fixed, kind_rows(fixed), zero_ball),
-            JointKindDesc::Ball {
-                cone: 0.0,
-                twist_lower: 0.0,
-                twist_upper: 0.0,
-            }
+            ball(0.0, 0.0, 0.0)
         );
     }
 
     /// **An angle nobody moved is written back exactly as it was**, though
-    /// its row showed it in degrees; the one that moved is in radians.
+    /// its row showed it in degrees; the one that moved is in radians, and
+    /// the soft zones, which have no rows, are kept.
     #[test]
     fn only_the_moved_angle_is_rewritten() {
+        let soft = crcbl::ragdoll::SoftRange {
+            lower: -0.3,
+            upper: 0.1,
+            hertz: 4.0,
+            damping_ratio: 0.7,
+        };
         let old = JointKindDesc::Ball {
-            cone: 0.1,
+            swing_x: 0.1,
+            swing_y: 0.1,
             twist_lower: -0.4,
             twist_upper: 0.2,
+            neutral: SwingTwist::REST,
+            soft_swing: None,
+            soft_twist: Some(soft),
         };
         // Both change on a trip through degrees, so a rewrite would show.
         assert_ne!(0.2_f64.to_degrees().to_radians(), 0.2);
         assert_ne!((-0.4_f64).to_degrees().to_radians(), -0.4);
         let before = kind_rows(old);
         let Kind::Ball {
+            swing_y,
             twist_lower,
             twist_upper,
+            neutral_swing_x,
+            neutral_swing_y,
+            neutral_twist,
             ..
         } = before
         else {
             panic!("a ball reads as a ball");
         };
         let after = Kind::Ball {
-            cone: 90.0,
+            swing_x: 90.0,
+            swing_y,
             twist_lower,
             twist_upper,
+            neutral_swing_x,
+            neutral_swing_y,
+            neutral_twist,
         };
         assert_eq!(
             kind_desc(old, before, after),
             JointKindDesc::Ball {
-                cone: core::f64::consts::FRAC_PI_2,
+                swing_x: core::f64::consts::FRAC_PI_2,
+                swing_y: 0.1,
                 twist_lower: -0.4,
                 twist_upper: 0.2,
+                neutral: SwingTwist::REST,
+                soft_swing: None,
+                soft_twist: Some(soft),
             }
         );
     }

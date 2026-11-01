@@ -8,14 +8,21 @@
 //! for the caller to colour; `crcbl_render::debug_draw::DebugDraw::line`
 //! takes them as they come.
 //!
-//! A ball joint's limit is drawn as the rim of its cone about the parent's
-//! axis, and a hinge's as the arc its child's `x` sweeps between the limits,
-//! from the parent's `x`, as `crcbl_phys`'s revolute angle is measured. A
-//! ball joint's twist is drawn the same way, a smaller arc
-//! ([`TWIST_RADIUS`]) between its twist limits. The twist is the child's turn
-//! about its own axis, but the arc stays in the parent's plane, so it is
-//! exact only while the child stands on the parent's axis. A weld has nothing
-//! drawn beyond the axis.
+//! Every limit is drawn about the joint's neutral, where the physics joint's
+//! zero sits. A ball joint's swing limit is drawn as the rim of its
+//! elliptical cone about the parent's axis — the directions its child's axis
+//! reaches at the limit, as `crcbl_phys` bounds the swing — and a hinge's as
+//! the arc its child's `x` sweeps between the limits, from the parent's `x`,
+//! as `crcbl_phys`'s revolute angle is measured. A ball joint's twist is
+//! drawn the same way, a smaller arc ([`TWIST_RADIUS`]) between its twist
+//! limits. The twist is the child's turn about its own axis, but the arc
+//! stays in the parent's plane, so it is exact only while the child stands
+//! on the parent's axis. A weld has nothing drawn beyond the axis.
+//!
+//! **Soft bounds are [`DebugLine::SoftLimit`]s**, apart from the hard
+//! [`DebugLine::Limit`]s: a soft swing's own, smaller rim, and for a hinge or
+//! a twist a spoke from the joint's origin out to its arc's radius at each
+//! soft bound, so the free range is the stretch of arc between the spokes.
 
 use core::f64::consts::TAU;
 
@@ -23,6 +30,7 @@ use crcbl_phys::{PhysicsSystem, Transform};
 use glam::DVec3;
 
 use crate::instance::Ragdoll;
+use crate::limits::SoftRange;
 use crate::rig::{BodyShape, RagdollRig, RigJointKind, compose};
 
 /// What a segment from [`Ragdoll::debug_lines`] or [`divergence_lines`]
@@ -36,8 +44,11 @@ pub enum DebugLine {
     },
     /// A joint's axis, from its origin.
     JointAxis,
-    /// The edge of what a joint lets through.
+    /// The edge of what a joint lets through: its hard limit.
     Limit,
+    /// Where a joint's soft zone begins, inside its hard limit: past it the
+    /// joint meets resistance.
+    SoftLimit,
     /// From a client's joint to the server's same joint, and whether the two
     /// stand closer than the width the caller allows.
     Divergence {
@@ -61,9 +72,10 @@ impl Ragdoll {
     /// Hands `line` every segment of this ragdoll's debug view, as `physics`
     /// holds its bodies now, each tagged with the [`DebugLine`] it is: each
     /// body's outline, marked asleep or awake, and each of `rig`'s joints'
-    /// axis and limit — a ball joint's cone rim about the parent's axis and
+    /// axis and limits — a ball joint's swing rim about the parent's axis and
     /// its twist arc, a hinge's arc from the parent's `x` between its angles,
-    /// and nothing more for a weld. `rig` is the one the ragdoll was spawned
+    /// each soft bound as a [`DebugLine::SoftLimit`], and nothing more for a
+    /// weld. `rig` is the one the ragdoll was spawned
     /// from; a body gone from `physics` is left out, with its joints.
     pub fn debug_lines(
         &self,
@@ -91,7 +103,7 @@ impl Ragdoll {
             else {
                 continue;
             };
-            let frame = compose(parent, &joint.frame_parent);
+            let frame = compose(parent, &joint.physics_frames().0);
             let origin = frame.position;
             let axis = frame.rotation * DVec3::Z;
             line(
@@ -103,14 +115,15 @@ impl Ragdoll {
             let (u, v) = (frame.rotation * DVec3::X, frame.rotation * DVec3::Y);
             match joint.kind {
                 RigJointKind::Ball {
-                    cone,
+                    swing_x,
+                    swing_y,
                     twist_lower,
                     twist_upper,
+                    soft_swing,
+                    soft_twist,
+                    ..
                 } => {
-                    let (sin, cos) = sin_cos(cone);
-                    let rim = origin + axis * (JOINT_AXIS_LENGTH * cos);
-                    let radius = JOINT_AXIS_LENGTH * sin;
-                    arc(rim, (u, v), radius, (0.0, TAU), &mut limit);
+                    rim(&frame, (swing_x, swing_y), &mut limit);
                     arc(
                         origin,
                         (u, v),
@@ -118,8 +131,17 @@ impl Ragdoll {
                         (twist_lower, twist_upper),
                         &mut limit,
                     );
+                    let mut soft = |from, to| line(from, to, DebugLine::SoftLimit);
+                    if let Some(swing) = soft_swing {
+                        rim(&frame, (swing.x, swing.y), &mut soft);
+                    }
+                    if let Some(twist) = soft_twist {
+                        spokes(origin, (u, v), TWIST_RADIUS, &twist, &mut soft);
+                    }
                 }
-                RigJointKind::Hinge { lower, upper } => {
+                RigJointKind::Hinge {
+                    lower, upper, soft, ..
+                } => {
                     arc(
                         origin,
                         (u, v),
@@ -127,6 +149,11 @@ impl Ragdoll {
                         (lower, upper),
                         &mut limit,
                     );
+                    if let Some(soft) = soft {
+                        spokes(origin, (u, v), JOINT_AXIS_LENGTH, &soft, &mut |from, to| {
+                            line(from, to, DebugLine::SoftLimit)
+                        });
+                    }
                 }
                 RigJointKind::Fixed => {}
             }
@@ -198,6 +225,41 @@ fn outline(world: &Transform, shape: BodyShape, line: &mut impl FnMut(DVec3, DVe
                 }
             }
         }
+    }
+}
+
+/// The rim of the swing limit of half-angles `x` and `y` about `frame`'s
+/// x- and y-axes, [`JOINT_AXIS_LENGTH`] out from its origin, as
+/// [`CIRCLE_SEGMENTS`] segments: the directions frame `z` reaches at the
+/// limit. `crcbl_phys` bounds the swing quaternion's x and y parts by the
+/// ellipse whose radii are the sines of the half-angles' halves, so the rim
+/// is that ellipse, each point the swing it stands for applied to `z`.
+fn rim(frame: &Transform, (x, y): (f64, f64), line: &mut impl FnMut(DVec3, DVec3)) {
+    let (a, b) = (sin_cos(0.5 * x).0, sin_cos(0.5 * y).0);
+    let point = |step: usize| {
+        let (sin, cos) = sin_cos(TAU * step as f64 / CIRCLE_SEGMENTS as f64);
+        let (qx, qy) = (a * cos, b * sin);
+        let w = (1.0 - qx * qx - qy * qy).max(0.0).sqrt();
+        let tipped = DVec3::new(2.0 * w * qy, -2.0 * w * qx, 1.0 - 2.0 * (qx * qx + qy * qy));
+        frame.position + frame.rotation * tipped * JOINT_AXIS_LENGTH
+    };
+    for step in 0..CIRCLE_SEGMENTS {
+        line(point(step), point(step + 1));
+    }
+}
+
+/// A spoke from `centre` out to `radius` at each of `soft`'s bounds, in the
+/// plane of `u` and `v`, measured from `u` towards `v` as [`arc`] measures.
+fn spokes(
+    centre: DVec3,
+    (u, v): (DVec3, DVec3),
+    radius: f64,
+    soft: &SoftRange,
+    line: &mut impl FnMut(DVec3, DVec3),
+) {
+    for bound in [soft.lower, soft.upper] {
+        let (sin, cos) = sin_cos(bound);
+        line(centre, centre + (u * cos + v * sin) * radius);
     }
 }
 

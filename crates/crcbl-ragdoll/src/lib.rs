@@ -31,6 +31,7 @@ mod desc;
 mod frames;
 mod generate;
 mod instance;
+mod limits;
 mod rig;
 mod rise;
 mod settle;
@@ -41,6 +42,7 @@ pub use desc::{BodyDesc, DescError, JointDesc, JointKindDesc, RagdollDesc, Shape
 pub use frames::REST_CLEARANCE;
 pub use generate::{GenerateError, GenerateSettings};
 pub use instance::{Handoff, PreviousPose, Ragdoll, SpawnError, StrikeError};
+pub use limits::{SoftRange, SoftSwing, SwingTwist};
 pub use rig::{BodyShape, RagdollRig, RigBody, RigError, RigJoint, RigJointKind};
 pub use rise::{RiseError, RiseQuery};
 pub use settle::{SettleBudget, SettleError, SettledPose};

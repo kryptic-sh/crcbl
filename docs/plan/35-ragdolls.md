@@ -114,7 +114,17 @@ Three layers, built in this order:
 2. **Ragdoll description (`crcbl-ragdoll`).** `JointKindDesc::Hinge` and `Ball`
    gain the soft bounds, spring settings and a neutral angle or orientation;
    `Ball` gains the two swing half-angles in place of one cone (the old `cone`
-   reads as both). Authored rigs set everything per joint.
+   reads as both). Authored rigs set everything per joint. **Built 2026-11-01:**
+   `JointKindDesc` and `RigJointKind` carry `swing_x`/`swing_y`, a `neutral` (a
+   hinge's angle, a ball's `SwingTwist`) and optional soft zones (`SoftRange`,
+   `SoftSwing`). `RigJoint::physics_frames` turns the parent's frame by a ball's
+   neutral swing and the child's back by its neutral twist, so the swing ellipse
+   stays on the parent's axes; `JointDesc::swing_x_axis` names the frame's roll
+   about the axis, and `to_desc` writes it where the roll is not the default.
+   `RagdollDesc::fold` names bones with no body that move rigidly with a bodied
+   ancestor; the debug view draws the ellipse and the soft bounds; the editor
+   warns of a rest pose outside the limits about the neutral. Folding in
+   `generate` is layer 3's, with the profile.
 3. **Anatomical defaults in `RagdollRig::generate`.** An opt-in profile on
    `GenerateSettings` that infers the joint type and ranges from humanoid bone
    names (Mixamo and Unreal naming, plus EW's skeleton) and the hierarchy: knees

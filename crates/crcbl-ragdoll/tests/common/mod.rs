@@ -78,6 +78,47 @@ pub const LEG: &str = r#"(
     substeps: 6,
 )"#;
 
+/// A hip and a knee using every limit setting beyond a hard range, each away
+/// from its default — an elliptical swing, neutrals, soft zones — and the
+/// foot folded into the calf.
+pub const EVERYTHING: &str = r#"(
+    bodies: [
+        (bone: "hips", shape: Sphere(radius: 0.12), mass: 12.0),
+        (bone: "thigh_l", shape: Capsule(radius: 0.06, half_height: 0.15), mass: 8.0,
+            centre: (0.0, -0.225, 0.0)),
+        (bone: "calf_l", shape: Capsule(radius: 0.05, half_height: 0.15), mass: 4.0,
+            centre: (0.0, -0.225, 0.0)),
+    ],
+    joints: [
+        (
+            parent: "hips",
+            child: "thigh_l",
+            kind: Ball(
+                swing_x: 1.0,
+                swing_y: 0.5,
+                twist_lower: -0.4,
+                twist_upper: 0.4,
+                neutral: (swing_x: 0.3, swing_y: -0.1, twist: 0.05),
+                soft_swing: (x: 0.6, y: 0.3, hertz: 4.0, damping_ratio: 0.7),
+                soft_twist: (lower: -0.2, upper: 0.1, hertz: 3.0, damping_ratio: 0.5),
+            ),
+            axis: (0.0, -1.0, 0.0),
+        ),
+        (
+            parent: "thigh_l",
+            child: "calf_l",
+            kind: Hinge(
+                lower: -1.0,
+                upper: 0.5,
+                neutral: 0.4,
+                soft: (lower: -0.5, upper: 0.2, hertz: 6.0, damping_ratio: 1.0),
+            ),
+            axis: (1.0, 0.0, 0.0),
+        ),
+    ],
+    fold: ["foot_l"],
+)"#;
+
 pub fn names() -> Vec<&'static str> {
     BONES.iter().map(|(name, _, _)| *name).collect()
 }

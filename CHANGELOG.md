@@ -28,6 +28,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the out-of-range swing refusal reads "swing lies in [0, π]" where it read
   "cone lies".
 
+- **The ragdoll file's ball joint takes two swing half-angles.**
+  `JointKindDesc::Ball` and `RigJointKind::Ball` replace `cone` with `swing_x`
+  and `swing_y`; a file's `cone: c` still reads as both and spawns the same
+  physics joint, so existing assets load unchanged, but files are now written
+  with `swing_x`/`swing_y` and builds before this one cannot read them. `Ball`
+  gains `neutral`, `soft_swing` and `soft_twist`, and `Hinge` gains `neutral`
+  and `soft`; `JointDesc` gains `swing_x_axis`, `RagdollDesc` gains `fold`,
+  `DescError` gains `FoldedBody` and `FoldedWithoutParent`, and `DebugLine`
+  gains `SoftLimit`.
+
 ### Added
 
 - **Elliptical swing limits:** `SphericalJoint::with_swing(x, y)` gives the
@@ -41,6 +51,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   hard limit, which stays rigid. This models muscle resisting a joint as it
   nears the end of its range. Off by default, and joints without it hash as
   before.
+- **Neutral poses for ragdoll joints:** a joint's limits are measured from a
+  neutral instead of the rest pose. A hinge takes an angle; a ball takes a
+  `SwingTwist`. A ball's neutral swing tips the parent's frame and its neutral
+  twist turns the child's, so the swing ellipse stays on the parent's axes.
+  `RigJoint::physics_frames` gives the frames a joint spawns with, and
+  `RigJointKind::rest_is_within_limits` says whether the rest pose lies inside
+  the limits measured from the neutral (a pose outside them snaps inside on the
+  first steps).
+- **Elliptical swing, its orientation and soft zones in the ragdoll file:**
+  `swing_x`/`swing_y` set the swing half-angles; `JointDesc::swing_x_axis` fixes
+  the joint frame's roll about its axis, and `RagdollRig::to_desc` writes it
+  wherever the roll is not the default, so a round trip keeps an ellipse's
+  orientation; optional `soft`, `soft_swing` and `soft_twist` zones
+  (`SoftRange`, `SoftSwing`) carry the soft bounds and the strength at the hard
+  limit and map onto `crcbl-phys`'s soft zones.
+- **Folded bones:** `RagdollDesc::fold` names bones that carry no body and move
+  rigidly with the nearest ancestor that has one; a folded bone that has a body,
+  or has no bodied ancestor, is refused.
+- **The ragdoll debug view draws the elliptical swing limit and the soft
+  bounds** (`DebugLine::SoftLimit`), which the editor draws in their own colour;
+  the editor's rig panel edits both swing half-angles and the neutral, and warns
+  of a rest pose outside the limits measured from the neutral.
 
 ## [0.16.0] - 2026-11-01
 

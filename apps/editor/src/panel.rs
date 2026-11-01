@@ -282,6 +282,8 @@ const EDITOR_CSS: &str = "
 
 .editor-note { padding: 4px; color: #7a8190; }
 
+.rig-warning { padding: 4px; color: #e0b050; }
+
 #outline { flex-grow: 1; min-width: 0; min-height: 0; border-width: 0; }
 
 .outliner-rename { flex-grow: 1; min-width: 0; }

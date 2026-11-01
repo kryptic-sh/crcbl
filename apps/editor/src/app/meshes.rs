@@ -152,10 +152,10 @@ impl Rig {
     }
 
     /// Each joint of the ragdoll rig, in rig order: its frame at rest — where
-    /// it sits, its `z` the cone or hinge axis — and how its child bone's
-    /// rigid frame is turned, which its `at` is measured in, in the world of
-    /// an entity whose mesh puts the asset's origin at `origin`. Empty without
-    /// a rig or a place to hang it.
+    /// it sits, its `z` the swing's or the hinge's axis — and how its child
+    /// bone's rigid frame is turned, which its `at` is measured in, in the
+    /// world of an entity whose mesh puts the asset's origin at `origin`.
+    /// Empty without a rig or a place to hang it.
     pub(super) fn ragdoll_joints(
         &self,
         origin: Mat4,

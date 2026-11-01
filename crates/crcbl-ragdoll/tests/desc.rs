@@ -24,7 +24,9 @@ fn a_leg_resolves_and_spawns_its_joints() {
         rig.joints()[1].kind,
         RigJointKind::Hinge {
             lower: -2.4,
-            upper: 0.0
+            upper: 0.0,
+            neutral: 0.0,
+            soft: None,
         }
     ));
     assert_eq!(rig.joints()[0].friction, 0.5);
@@ -176,7 +178,7 @@ fn bad_files_are_refused_by_name() {
 /// **A rig written as a file and read back is the rig it was**: every body on
 /// the same joint, shape and mass, centred and pointed the same; every joint
 /// between the same bodies with the same kind and friction, standing at the
-/// same point with the same axis; the same ignored pairs, whether listed or
+/// same point with the same axis and roll; the same ignored pairs, whether listed or
 /// left to the rule for rest overlaps.
 #[test]
 fn a_rig_round_trips_through_its_file() {
@@ -218,6 +220,7 @@ fn a_rig_round_trips_through_its_file() {
         (
             offset.position + offset.rotation * frame.position,
             offset.rotation * frame.rotation * glam::DVec3::Z,
+            offset.rotation * frame.rotation * glam::DVec3::X,
         )
     };
     for (a, b) in back.joints().iter().zip(fitted.joints()) {
@@ -235,6 +238,10 @@ fn a_rig_round_trips_through_its_file() {
         ] {
             assert!(close(side_a.0, side_b.0), "{side_a:?} vs {side_b:?}");
             assert!(close(side_a.1, side_b.1), "{side_a:?} vs {side_b:?}");
+            assert!(
+                close(side_a.2, side_b.2),
+                "a roll lost: {side_a:?} vs {side_b:?}"
+            );
         }
     }
     let pairs = |rig: &crcbl_ragdoll::RagdollRig| {

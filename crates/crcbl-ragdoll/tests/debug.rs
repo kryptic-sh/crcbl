@@ -145,8 +145,9 @@ fn the_debug_view_draws_bodies_joints_and_limits() {
                     )]
                     let turned = zero.cross(reach).dot(axis).atan2(zero.dot(reach));
                     match joint.kind {
-                        RigJointKind::Ball { cone, .. }
-                            if at_length && (angle - cone).abs() < NEAR =>
+                        // The leg's swing is circular, so its rim is a cone.
+                        RigJointKind::Ball { swing_x, .. }
+                            if at_length && (angle - swing_x).abs() < NEAR =>
                         {
                             on_cone = true;
                             true
@@ -168,7 +169,7 @@ fn the_debug_view_draws_bodies_joints_and_limits() {
         }
     }
     assert!(on_cone, "no cone drawn");
-    let Some(RigJointKind::Hinge { lower, upper }) = rig
+    let Some(RigJointKind::Hinge { lower, upper, .. }) = rig
         .joints()
         .iter()
         .map(|joint| joint.kind)
@@ -254,5 +255,138 @@ fn the_divergence_view_joins_shared_joints() {
                 DebugLine::Divergence { within: false }
             ),
         ]
+    );
+}
+
+/// **An elliptical swing is drawn as its ellipse, soft bounds apart from
+/// hard ones, and every limit about the joint's neutral**: each point of the
+/// ball's hard rim, and of its smaller soft one, stands where `crcbl_phys`'s
+/// swing ellipse of those half-angles puts the child's axis; the twist and
+/// the hinge arcs sweep their limits, and soft spokes stand at the soft
+/// bounds — the hinge's measured from its rest frame, turned by its neutral.
+#[test]
+fn the_debug_view_draws_ellipses_soft_bounds_and_the_neutral() {
+    let rig = RagdollDesc::from_ron(common::EVERYTHING)
+        .expect("parses")
+        .resolve(&skeleton(), &names(), model(0.0))
+        .expect("a rig");
+    let skeleton = skeleton();
+    let pose = Pose::new(&skeleton);
+    let mut physics = world();
+    let handoff = Handoff {
+        pose: &pose,
+        model: model(1.0),
+        previous: None,
+    };
+    let ragdoll = Ragdoll::spawn(
+        &mut physics,
+        &rig,
+        &skeleton,
+        &handoff,
+        &entities(1, rig.bodies().len()),
+    )
+    .expect("spawned");
+    let drawn = lines(&ragdoll, &physics, &rig);
+    let worlds = ragdoll.body_transforms(&physics).expect("every body");
+    // Each joint's frame in the world, as the physics joint holds it, and as
+    // it stood at rest.
+    let place = |joint: usize, frame: &Transform| {
+        let parent = worlds[rig.joints()[joint].parent];
+        Transform::new(
+            parent.position + parent.rotation * frame.position,
+            parent.rotation * frame.rotation,
+        )
+    };
+    let hip = place(0, &rig.joints()[0].physics_frames().0);
+    let knee = place(1, &rig.joints()[1].physics_frames().0);
+    let knee_rest = place(1, &rig.joints()[1].frame_parent);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "measuring a drawn line, not simulating"
+    )]
+    let (sin, atan2) = (f64::sin, f64::atan2);
+    // How far a point at the axis length from the hip lies from the swing
+    // ellipse of half-angles `x` and `y`, in its own function: zero on it.
+    let off_ellipse = |point: DVec3, (x, y): (f64, f64)| {
+        let reach = hip.rotation.inverse() * (point - hip.position) / JOINT_AXIS_LENGTH;
+        let swing = glam::DQuat::from_rotation_arc(DVec3::Z, reach.normalize());
+        let (u, v) = (swing.x / sin(0.5 * x), swing.y / sin(0.5 * y));
+        (u * u + v * v - 1.0).abs()
+    };
+    let turned = |frame: &Transform, point: DVec3| {
+        let (zero, axis) = (frame.rotation * DVec3::X, frame.rotation * DVec3::Z);
+        let reach = point - frame.position;
+        atan2(zero.cross(reach).dot(axis), zero.dot(reach))
+    };
+    let widen = |(lo, hi): (f64, f64), value: f64| (lo.min(value), hi.max(value));
+    let empty = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut hard_rim, mut soft_rim) = (0, 0);
+    let (mut twisted, mut swept) = (empty, empty);
+    let (mut twist_spokes, mut hinge_spokes) = (Vec::new(), Vec::new());
+    for &(from, to, kind) in &drawn {
+        let at = |frame: &Transform, point: DVec3, radius: f64| {
+            (point.distance(frame.position) - radius).abs() < NEAR
+        };
+        match kind {
+            DebugLine::Limit => {
+                for point in [from, to] {
+                    if at(&hip, point, JOINT_AXIS_LENGTH) {
+                        assert!(off_ellipse(point, (1.0, 0.5)) < NEAR, "{point} off the rim");
+                        hard_rim += 1;
+                    } else if at(&hip, point, TWIST_RADIUS) {
+                        twisted = widen(twisted, turned(&hip, point));
+                    } else if at(&knee, point, JOINT_AXIS_LENGTH) {
+                        swept = widen(swept, turned(&knee_rest, point));
+                    } else {
+                        panic!("{point} marks no hard limit");
+                    }
+                }
+            }
+            DebugLine::SoftLimit if at(&hip, from, 0.0) && at(&hip, to, TWIST_RADIUS) => {
+                twist_spokes.push(turned(&hip, to));
+            }
+            DebugLine::SoftLimit if at(&knee, from, 0.0) && at(&knee, to, JOINT_AXIS_LENGTH) => {
+                hinge_spokes.push(turned(&knee_rest, to));
+            }
+            DebugLine::SoftLimit => {
+                for point in [from, to] {
+                    assert!(
+                        at(&hip, point, JOINT_AXIS_LENGTH) && off_ellipse(point, (0.6, 0.3)) < NEAR,
+                        "{point} is on no soft bound"
+                    );
+                    soft_rim += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        hard_rim > 0 && soft_rim > 0,
+        "rims {hard_rim} hard, {soft_rim} soft"
+    );
+    let near = |(lo, hi): (f64, f64), (want_lo, want_hi): (f64, f64)| {
+        (lo - want_lo).abs() < NEAR && (hi - want_hi).abs() < NEAR
+    };
+    assert!(
+        near(twisted, (-0.4, 0.4)),
+        "the twist arc swept {twisted:?}"
+    );
+    // The knee's limits, −1.0 to 0.5 about a neutral of 0.4, from rest.
+    assert!(near(swept, (-0.6, 0.9)), "the hinge arc swept {swept:?}");
+    let sorted = |mut spokes: Vec<f64>| {
+        spokes.sort_by(f64::total_cmp);
+        spokes
+    };
+    let spokes = |spokes: Vec<f64>, want: [f64; 2]| {
+        let spokes = sorted(spokes);
+        spokes.len() == 2 && spokes.iter().zip(want).all(|(a, b)| (a - b).abs() < NEAR)
+    };
+    assert!(
+        spokes(twist_spokes.clone(), [-0.2, 0.1]),
+        "twist spokes {twist_spokes:?}"
+    );
+    assert!(
+        spokes(hinge_spokes.clone(), [-0.1, 0.6]),
+        "hinge spokes {hinge_spokes:?}"
     );
 }

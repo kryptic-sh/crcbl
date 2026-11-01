@@ -121,6 +121,7 @@ mod tests {
             joints: Vec::new(),
             ignore: Vec::new(),
             ignore_rest_overlaps: true,
+            fold: Vec::new(),
             substeps,
         }
     }

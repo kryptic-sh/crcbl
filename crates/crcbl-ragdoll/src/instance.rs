@@ -196,11 +196,12 @@ impl Ragdoll {
         }
         let mut joints = Vec::with_capacity(rig.joints().len());
         for joint in rig.joints() {
+            let (frame_parent, frame_child) = joint.physics_frames();
             let added = physics.add_joint(Joint::new(
                 entities[joint.parent],
                 entities[joint.child],
-                joint.frame_parent,
-                joint.frame_child,
+                frame_parent,
+                frame_child,
                 joint.kind.joint_kind(joint.friction),
             ));
             match added {

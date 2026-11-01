@@ -17,11 +17,19 @@
 //!         (
 //!             parent: "pelvis",
 //!             child: "thigh_l",
-//!             kind: Ball(cone: 1.2, twist_lower: -0.4, twist_upper: 0.4),
+//!             kind: Ball(
+//!                 swing_x: 1.2,
+//!                 swing_y: 0.8,
+//!                 twist_lower: -0.4,
+//!                 twist_upper: 0.4,
+//!                 neutral: (swing_x: 0.6),
+//!                 soft_swing: (x: 0.9, y: 0.5, hertz: 4.0, damping_ratio: 0.7),
+//!             ),
 //!             axis: (0.0, -1.0, 0.0),
 //!         ),
 //!     ],
 //!     ignore: [],
+//!     fold: ["ik_foot_l"],
 //!     substeps: 8,
 //! )
 //! ```
@@ -29,10 +37,20 @@
 //! A body's `centre` and `axis` are in its bone's rigid frame, in metres:
 //! the capsule's or box's `y` lies along `axis`. A joint sits at its child
 //! bone's origin, moved by `at` in that bone's frame, and its `axis` — the
-//! cone's or the hinge's — is in the same frame. Limits are measured from
-//! the rest pose. `ignore` names bone pairs whose bodies never collide;
-//! pairs overlapping at rest are added unless `ignore_rest_overlaps` is
-//! `false`.
+//! swing's or the hinge's, its frame's `z` — is in the same frame.
+//!
+//! **A joint frame's `x`**, which a ball's `swing_x` is about and its `y` its
+//! `swing_y`, is `swing_x_axis` made square to `axis` when the file gives
+//! one. Without it the frame is the shortest turn taking the bone's `z` onto
+//! `axis`, so `x` is the bone's `x` tipped along with it: the bone's `x`
+//! itself for an `axis` of `z`, and `(0, 0, -1)` for an `axis` of `x`. An
+//! `axis` of exactly `-z` has no shortest turn, and takes the half turn
+//! about the bone's `y`, so `x` is `-x`. Limits
+//! are measured from the joint's `neutral`, the rest pose if it names none
+//! ([`JointKindDesc`]). `ignore` names bone pairs whose bodies never
+//! collide; pairs overlapping at rest are added unless
+//! `ignore_rest_overlaps` is `false`. `fold` names bones that carry no body
+//! and move rigidly with their parents.
 
 use std::collections::HashMap;
 
@@ -42,9 +60,10 @@ use glam::{DVec3, Mat4};
 use serde::{Deserialize, Serialize};
 
 use crate::frames::{body_worlds, overlapping_pairs, rigid_frames};
+use crate::limits::{SoftRange, SoftSwing, SwingTwist};
 use crate::rig::{
-    BodyShape, RagdollRig, RigBody, RigError, RigJoint, RigJointKind, compose, inverse,
-    rotation_onto,
+    BodyShape, RagdollRig, RigBody, RigError, RigJoint, RigJointKind, compose, has_default_roll,
+    inverse, joint_rotation, rotation_onto,
 };
 
 /// A body's shape in the file.
@@ -90,28 +109,167 @@ pub struct BodyDesc {
     pub axis: (f64, f64, f64),
 }
 
-/// What a joint in the file lets through, measured from rest.
+/// What a joint in the file lets through, in radians, measured from the
+/// joint's neutral — rest unless it names another.
+///
+/// Older files gave a ball one `cone` half-angle; one still reads, as both
+/// `swing_x` and `swing_y`, and a file is written with the two. The optional
+/// fields are written bare, `soft: (lower: -0.2, ...)`, and left out when
+/// absent.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "JointKindFile")]
 pub enum JointKindDesc {
-    /// A ball and socket with a cone and a twist range, in radians.
+    /// A ball and socket with an elliptical swing and a twist range.
     Ball {
-        /// The cone's half-angle.
-        cone: f64,
+        /// The swing's half-angle about the joint frame's x-axis.
+        swing_x: f64,
+        /// The swing's half-angle about its y-axis.
+        swing_y: f64,
         /// The least twist.
         twist_lower: f64,
         /// The greatest twist.
         twist_upper: f64,
+        /// The child's neutral turn from rest. Rest if left out.
+        #[serde(skip_serializing_if = "is_default")]
+        neutral: SwingTwist,
+        /// Resistance past a softer swing ellipse. None if left out.
+        #[serde(skip_serializing_if = "Option::is_none", with = "bare")]
+        soft_swing: Option<SoftSwing>,
+        /// Resistance past soft twist bounds. None if left out.
+        #[serde(skip_serializing_if = "Option::is_none", with = "bare")]
+        soft_twist: Option<SoftRange>,
     },
-    /// A hinge bending between two angles, in radians.
+    /// A hinge bending between two angles.
     Hinge {
         /// The least angle.
         lower: f64,
         /// The greatest angle.
         upper: f64,
+        /// The child's neutral bend from rest about the axis. Rest if left
+        /// out.
+        #[serde(skip_serializing_if = "is_default")]
+        neutral: f64,
+        /// Resistance past soft bounds. None if left out.
+        #[serde(skip_serializing_if = "Option::is_none", with = "bare")]
+        soft: Option<SoftRange>,
     },
     /// Welded.
     Fixed,
+}
+
+/// [`JointKindDesc`] as the file may spell it: a ball's swing as one `cone`
+/// or as its two half-angles.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+enum JointKindFile {
+    Ball {
+        #[serde(default, with = "bare")]
+        cone: Option<f64>,
+        #[serde(default, with = "bare")]
+        swing_x: Option<f64>,
+        #[serde(default, with = "bare")]
+        swing_y: Option<f64>,
+        twist_lower: f64,
+        twist_upper: f64,
+        #[serde(default)]
+        neutral: SwingTwist,
+        #[serde(default, with = "bare")]
+        soft_swing: Option<SoftSwing>,
+        #[serde(default, with = "bare")]
+        soft_twist: Option<SoftRange>,
+    },
+    Hinge {
+        lower: f64,
+        upper: f64,
+        #[serde(default)]
+        neutral: f64,
+        #[serde(default, with = "bare")]
+        soft: Option<SoftRange>,
+    },
+    Fixed,
+}
+
+impl TryFrom<JointKindFile> for JointKindDesc {
+    type Error = &'static str;
+
+    fn try_from(file: JointKindFile) -> Result<Self, Self::Error> {
+        Ok(match file {
+            JointKindFile::Ball {
+                cone,
+                swing_x,
+                swing_y,
+                twist_lower,
+                twist_upper,
+                neutral,
+                soft_swing,
+                soft_twist,
+            } => {
+                let (swing_x, swing_y) = match (cone, swing_x, swing_y) {
+                    (Some(cone), None, None) => (cone, cone),
+                    (None, Some(x), Some(y)) => (x, y),
+                    (Some(_), _, _) => {
+                        return Err(
+                            "a ball's swing is a `cone` or `swing_x` and `swing_y`, not both",
+                        );
+                    }
+                    (None, _, _) => {
+                        return Err(
+                            "a ball's swing needs both `swing_x` and `swing_y`, or a `cone`",
+                        );
+                    }
+                };
+                Self::Ball {
+                    swing_x,
+                    swing_y,
+                    twist_lower,
+                    twist_upper,
+                    neutral,
+                    soft_swing,
+                    soft_twist,
+                }
+            }
+            JointKindFile::Hinge {
+                lower,
+                upper,
+                neutral,
+                soft,
+            } => Self::Hinge {
+                lower,
+                upper,
+                neutral,
+                soft,
+            },
+            JointKindFile::Fixed => Self::Fixed,
+        })
+    }
+}
+
+/// An optional field written bare — `soft: (lower: ...)` rather than RON's
+/// `Some(...)` — and left out for `None`, which `skip_serializing_if` and
+/// `default` on the field see to.
+mod bare {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer, T: Serialize>(
+        value: &Option<T>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(value) => value.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<Option<T>, D::Error> {
+        T::deserialize(deserializer).map(Some)
+    }
+}
+
+/// Whether a field holds its default, which the file leaves out.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 /// One joint in the file.
@@ -124,8 +282,16 @@ pub struct JointDesc {
     pub child: String,
     /// What it lets through.
     pub kind: JointKindDesc,
-    /// The cone or hinge axis in the child bone's rigid frame.
+    /// The swing's or the hinge's axis in the child bone's rigid frame: the
+    /// joint frame's `z`.
     pub axis: (f64, f64, f64),
+    /// The direction of the joint frame's `x` in the child bone's rigid
+    /// frame — the axis a ball's `swing_x` half-angle and neutral `swing_x`
+    /// are about — made square to `axis` by removing its part along it. Its
+    /// turn about the axis otherwise follows from `axis` alone, as the module
+    /// docs say. Left out when it would add nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "bare")]
+    pub swing_x_axis: Option<(f64, f64, f64)>,
     /// Where it sits in the child bone's frame, in metres. The bone's origin
     /// if left out.
     #[serde(default)]
@@ -151,6 +317,12 @@ pub struct RagdollDesc {
     /// Whether pairs overlapping at rest are ignored as well. On if left out.
     #[serde(default = "yes")]
     pub ignore_rest_overlaps: bool,
+    /// Bones folded into their parents: each carries no body and moves
+    /// rigidly with its parent bone, keeping the turn it had from it at the
+    /// handoff — an IK helper, an eye, or a finger not worth simulating. A
+    /// folded bone may not carry a body. None if left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fold: Vec<String>,
     /// The solver substeps the bodies ask for; zero, or left out, for the
     /// system's.
     #[serde(default)]
@@ -195,7 +367,15 @@ pub enum DescError {
     /// A joint or pair names a bone with no body.
     #[error("bone {0:?} carries no body")]
     NoBody(String),
-    /// An axis has no direction.
+    /// A bone the file folds into its parent also carries a body.
+    #[error("bone {0:?} is folded into its parent and carries a body")]
+    FoldedBody(String),
+    /// A bone the file folds has no ancestor carrying a body to follow: a
+    /// root, or a bone under bodiless ones only.
+    #[error("bone {0:?} is folded, and no bone above it carries a body to follow")]
+    FoldedWithoutParent(String),
+    /// An axis has no direction, or a joint's `swing_x_axis` none across
+    /// its axis.
     #[error("an axis for bone {0:?} has no direction")]
     ZeroAxis(String),
     /// The skeleton's rest pose leaves a joint with no usable frame.
@@ -279,8 +459,9 @@ impl RagdollDesc {
         let mut joints = Vec::with_capacity(self.joints.len());
         for desc in &self.joints {
             let (parent, child) = (body_of(&desc.parent)?, body_of(&desc.child)?);
-            let rotation = rotation_onto(DVec3::Z, DVec3::from(desc.axis))
-                .ok_or_else(|| DescError::ZeroAxis(desc.child.clone()))?;
+            let rotation =
+                joint_rotation(DVec3::from(desc.axis), desc.swing_x_axis.map(DVec3::from))
+                    .ok_or_else(|| DescError::ZeroAxis(desc.child.clone()))?;
             let local = Transform::new(DVec3::from(desc.at), rotation);
             let frame = compose(&frames[bodies[child].joint], &local);
             joints.push(RigJoint {
@@ -295,6 +476,22 @@ impl RagdollDesc {
         let mut ignored = Vec::with_capacity(self.ignore.len());
         for (a, b) in &self.ignore {
             ignored.push((body_of(a)?, body_of(b)?));
+        }
+        let bodied = |joint: usize| bodies.iter().any(|body| body.joint == joint);
+        for name in &self.fold {
+            let joint = bone(name)?;
+            if bodied(joint) {
+                return Err(DescError::FoldedBody(name.clone()));
+            }
+            // A bone follows its nearest ancestor with a body; with none, the
+            // read-back would hold it where the handoff left it.
+            let mut ancestor = skeleton.joints()[joint].parent;
+            while let Some(above) = ancestor.filter(|&above| !bodied(above)) {
+                ancestor = skeleton.joints()[above].parent;
+            }
+            if ancestor.is_none() {
+                return Err(DescError::FoldedWithoutParent(name.clone()));
+            }
         }
         // Validated before the overlap test, which places the shapes.
         let rig = RagdollRig::new(skeleton.len(), bodies, joints, ignored, self.substeps)?;
@@ -326,10 +523,12 @@ impl RagdollRig {
     /// point of an authored rig.
     ///
     /// Every pair the rig ignores is listed and `ignore_rest_overlaps` is off,
-    /// so the file resolves to the same pairs. **One thing does not survive**:
+    /// so the file resolves to the same pairs. **Two things do not survive**:
     /// the file gives a body an axis and not a whole rotation, so a box turned
-    /// about its own axis comes back unturned; capsules and spheres, which a
-    /// turn about the axis does not change, come back as they were.
+    /// about its own axis comes back unturned — capsules and spheres, which a
+    /// turn about the axis does not change, come back as they were — and the
+    /// file lists no folded bones, which a rig keeps no record of: a bone
+    /// with no body moves with its parent whether it was folded or not.
     ///
     /// # Errors
     ///
@@ -372,11 +571,14 @@ impl RagdollRig {
                 // The joint in its child bone's frame: the child body's offset
                 // from that frame, then the joint's frame on the body.
                 let local = compose(&child.offset, &joint.frame_child);
+                let axis = local.rotation * DVec3::Z;
+                let x = local.rotation * DVec3::X;
                 Ok(JointDesc {
                     parent: name_of(self.bodies()[joint.parent].joint)?,
                     child: name_of(child.joint)?,
                     kind: JointKindDesc::of(joint.kind),
-                    axis: triple(local.rotation * DVec3::Z),
+                    axis: triple(axis),
+                    swing_x_axis: (!has_default_roll(axis, x)).then(|| triple(x)),
                     at: triple(local.position),
                     friction: joint.friction,
                 })
@@ -397,6 +599,7 @@ impl RagdollRig {
             joints,
             ignore,
             ignore_rest_overlaps: false,
+            fold: Vec::new(),
             substeps: self.substeps(),
         })
     }
@@ -453,19 +656,44 @@ impl ShapeDesc {
     }
 }
 
+impl From<JointKindDesc> for RigJointKind {
+    /// The kind a file's joint resolves to: every field as the file has it.
+    fn from(desc: JointKindDesc) -> Self {
+        desc.kind()
+    }
+}
+
 impl JointKindDesc {
     const fn of(kind: RigJointKind) -> Self {
         match kind {
             RigJointKind::Ball {
-                cone,
+                swing_x,
+                swing_y,
                 twist_lower,
                 twist_upper,
+                neutral,
+                soft_swing,
+                soft_twist,
             } => Self::Ball {
-                cone,
+                swing_x,
+                swing_y,
                 twist_lower,
                 twist_upper,
+                neutral,
+                soft_swing,
+                soft_twist,
             },
-            RigJointKind::Hinge { lower, upper } => Self::Hinge { lower, upper },
+            RigJointKind::Hinge {
+                lower,
+                upper,
+                neutral,
+                soft,
+            } => Self::Hinge {
+                lower,
+                upper,
+                neutral,
+                soft,
+            },
             RigJointKind::Fixed => Self::Fixed,
         }
     }
@@ -473,15 +701,33 @@ impl JointKindDesc {
     const fn kind(self) -> RigJointKind {
         match self {
             Self::Ball {
-                cone,
+                swing_x,
+                swing_y,
                 twist_lower,
                 twist_upper,
+                neutral,
+                soft_swing,
+                soft_twist,
             } => RigJointKind::Ball {
-                cone,
+                swing_x,
+                swing_y,
                 twist_lower,
                 twist_upper,
+                neutral,
+                soft_swing,
+                soft_twist,
             },
-            Self::Hinge { lower, upper } => RigJointKind::Hinge { lower, upper },
+            Self::Hinge {
+                lower,
+                upper,
+                neutral,
+                soft,
+            } => RigJointKind::Hinge {
+                lower,
+                upper,
+                neutral,
+                soft,
+            },
             Self::Fixed => RigJointKind::Fixed,
         }
     }
