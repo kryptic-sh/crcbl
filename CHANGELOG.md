@@ -13,6 +13,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Changed
+
+- **A skinned object nothing in the frame can draw is no longer skinned.**
+  `add_skinned_passes` (and every other entry point handed a `Skinning`) now
+  drops the dispatch of a planned region when every object drawn out of it has a
+  `SkinnedInstanceDesc::bounds` box outside the camera of every view the frame
+  records and outside every shadow map it redraws, cascades and spot and point
+  lights alike (a map the shadow cadence holds that frame draws nothing), and
+  outside the culls the probe updater draws through with shadows off. An object
+  with no box is skinned as before, and so is a region no object is drawn out
+  of. An object coming back into view reports no deformation motion on its first
+  frame back, as a newly placed one does, since its region holds poses from
+  before the skip; a change of its transform still produces motion vectors. A
+  shadow map the object left is still redrawn. Callers change nothing.
+  `ForwardRenderer::set_skinning_culls(false)` turns it off for a caller that
+  reads skinned vertices back, and `ForwardRenderer::skinned_regions_skipped()`
+  reports how many regions the last frame skipped.
+
 ## [0.15.0] - 2026-11-01
 
 ### Breaking

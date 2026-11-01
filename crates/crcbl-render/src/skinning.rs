@@ -38,7 +38,10 @@
 //! longer describe the vertices that the skinning pass writes. Instance culling
 //! keeps the whole instance too, unless its record carries a box of its own —
 //! [`SkinnedInstanceDesc::bounds`](crate::SkinnedInstanceDesc::bounds) — which
-//! the culls then test in place of the source mesh's.
+//! the culls then test in place of the source mesh's. The renderer drops this
+//! pass's dispatch for a region whose every object such a box puts out of
+//! everything the frame draws — see
+//! [`ForwardRenderer::set_skinning_culls`](crate::ForwardRenderer::set_skinning_culls).
 //!
 //! # The region is double-buffered, and the motion-vector pass reads the other half
 //!
@@ -205,6 +208,14 @@ impl SkinnedRegion {
     #[must_use]
     pub const fn previous_base(&self, parity: u32) -> u32 {
         self.bases[((parity ^ 1) & 1) as usize]
+    }
+
+    /// Both halves' first vertices, in parity order: what tells two live
+    /// regions apart, since the pool hands a run out again only once the
+    /// region holding it has been released.
+    #[must_use]
+    pub(crate) const fn halves(&self) -> [u32; 2] {
+        self.bases
     }
 }
 
@@ -497,9 +508,9 @@ pub struct Skinning {
     params: Vec<Vec<BufferHandle>>,
     /// `[frame][range]`, in the same order.
     groups: Vec<Vec<BindGroupHandle>>,
-    /// `[frame]` — the group count of each range [`Skinning::begin_frame`] was
-    /// last handed for that slot, in range order.
-    active: Vec<Vec<u32>>,
+    /// `[frame]` — each range [`Skinning::begin_frame`] was last handed for
+    /// that slot, in range order: its group count and the region it writes.
+    active: Vec<Vec<Planned>>,
     layout: BindGroupLayoutHandle,
     pipeline_layout: PipelineLayoutHandle,
     pipeline: ComputePipelineHandle,
@@ -521,6 +532,15 @@ pub struct Skinning {
     /// `[frame]` — the [`Bindings::generation`] that slot's binding buffer
     /// holds, or [`None`] for one it is not known to hold.
     uploaded: Vec<Option<u64>>,
+}
+
+/// One range of a slot's plan: what [`Skinning::add_pass`] dispatches for it.
+#[derive(Clone, Copy, Debug)]
+struct Planned {
+    /// Workgroups the dispatch covers.
+    groups: u32,
+    /// The region it writes, as [`SkinnedRegion::halves`] names it.
+    region: [u32; 2],
 }
 
 /// The skin bindings a [`Skinning`] last accepted, kept so a frame handing over
@@ -862,7 +882,10 @@ impl Skinning {
             write_palette(&mut palette_bytes, range.palette);
             // `check` held the total to the binding capacity, which is a `u32`.
             binding_base += vertex_count;
-            plan.push(vertex_count.div_ceil(WORKGROUP_SIZE));
+            plan.push(Planned {
+                groups: vertex_count.div_ceil(WORKGROUP_SIZE),
+                region: range.region.halves(),
+            });
         }
 
         if !palette_bytes.is_empty() {
@@ -965,10 +988,44 @@ impl Skinning {
     ///
     /// If `frame` is not a slot this was built with.
     pub fn add_pass(&self, graph: &mut RenderGraph<'_>, frame: usize) -> Option<BufferId> {
+        self.add_pass_where(graph, frame, |_| true)
+    }
+
+    /// The regions slot `frame`'s plan writes, in range order, each as
+    /// [`SkinnedRegion::halves`] names it.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    pub(crate) fn planned_regions(&self, frame: usize) -> impl Iterator<Item = [u32; 2]> + '_ {
+        self.active[frame].iter().map(|planned| planned.region)
+    }
+
+    /// [`add_pass`](Self::add_pass) dispatching only the ranges whose region
+    /// `keep` answers `true` for — the renderer's skinning cull, see
+    /// `ForwardRenderer::cull_skinned_regions`. A plan `keep` empties adds no
+    /// pass and returns [`None`], on `add_pass`'s terms.
+    ///
+    /// **The plan is left as it is**: the palettes and blocks were uploaded by
+    /// [`begin_frame`](Self::begin_frame), the parity has moved, and a range
+    /// dropped here leaves both halves of its region holding what they held.
+    /// What a draw out of such a region then reads is the caller's to make
+    /// impossible.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    pub(crate) fn add_pass_where(
+        &self,
+        graph: &mut RenderGraph<'_>,
+        frame: usize,
+        keep: impl Fn([u32; 2]) -> bool,
+    ) -> Option<BufferId> {
         let dispatches: Vec<(BindGroupHandle, u32)> = self.active[frame]
             .iter()
             .enumerate()
-            .map(|(slot, &groups)| (self.groups[frame][slot], groups))
+            .filter(|(_, planned)| keep(planned.region))
+            .map(|(slot, planned)| (self.groups[frame][slot], planned.groups))
             .collect();
         if dispatches.is_empty() {
             return None;

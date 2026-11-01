@@ -12,8 +12,8 @@ use super::*;
 
 /// Where the spot of [`shadow_cache_scene`] stands along `x`, and the point
 /// light beside it.
-const SPOT: f32 = -1.0;
-const POINT: f32 = 12.0;
+pub(super) const SPOT: f32 = -1.0;
+pub(super) const POINT: f32 = 12.0;
 
 /// Somewhere no light of these scenes reaches: far along `+x`, past both
 /// lights' radii.
@@ -358,7 +358,7 @@ fn skinned_groups_drawn(
 
 /// A unit model-space box around `centre`, for an object whose transform
 /// is the identity.
-fn skinned_box(centre: Vec3) -> Aabb {
+pub(super) fn skinned_box(centre: Vec3) -> Aabb {
     Aabb {
         min: centre - Vec3::splat(0.5),
         max: centre + Vec3::splat(0.5),
@@ -368,7 +368,7 @@ fn skinned_box(centre: Vec3) -> Aabb {
 /// The skinning fixture with [`settled_scene`]'s two lights and one skinned
 /// object placed with `bounds`, drawn for a few skinned frames so the first
 /// frame's whole-atlas redraw is behind it.
-fn skinned_scene(
+pub(super) fn skinned_scene(
     device: &dyn Device,
     queue: QueueHandle,
     bounds: Option<Aabb>,

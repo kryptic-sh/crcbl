@@ -21,6 +21,9 @@ impl ForwardRenderer {
         let mut culls = std::mem::take(&mut self.shadow_prepare_culls);
         views.clear();
         culls.clear();
+        // Emptied first, so a frame refused part-way leaves no other frame's
+        // culls for the skinning cull to read.
+        self.skin_shadow_reach.clear();
         let result = (|| {
             // This slot's groups first, so everything below binds groups naming
             // the pages and the sampler in force — see `adopt_pages`.
@@ -587,6 +590,16 @@ impl ForwardRenderer {
             };
             let redraw = cadence.schedule(self.shadow_frame, &wanted);
             self.shadow_group_redrawn.copy_from_slice(&redraw);
+            // **The redrawn groups' culls only**, for the skinning cull: a held
+            // group draws no vertex this frame, so a pose only it could reach is
+            // read by nothing. A group the cadence defers is redrawn by a later
+            // frame, from the pose that frame skins.
+            self.skin_shadow_reach.extend(
+                culls
+                    .iter()
+                    .filter(|(group, _)| redraw[*group])
+                    .map(|(_, frustum)| *frustum),
+            );
             self.shadow_faces_redrawn = wanted
                 .iter()
                 .enumerate()
@@ -686,6 +699,10 @@ impl ForwardRenderer {
             if updater_drives_cascade_zero {
                 let view_proj = scene.cascades.view_proj[0];
                 let centre = camera.eye + direction * scene.cascades.far[0];
+                // Cascade 0's draws feed the reflective shadow map, so the
+                // skinning cull has to count it too — and each light below.
+                let cascade_zero = Frustum::from_view_projection(view_proj);
+                self.skin_shadow_reach.push(cascade_zero);
                 device.write_buffer(
                     // **Cascade 0's view is view 0.** `shadow_view` numbers a light
                     // slot's faces, which start past `shadow::CASCADES` — a cascade
@@ -697,7 +714,7 @@ impl ForwardRenderer {
                 self.shadow_draws[0].begin_frame(
                     device,
                     self.frame,
-                    &Frustum::from_view_projection(view_proj),
+                    &cascade_zero,
                     instance_count,
                     eye,
                     self.shadow_lod_params,
@@ -716,6 +733,7 @@ impl ForwardRenderer {
                         continue;
                     };
                     let (faces, frustum) = slot_matrices(held, light);
+                    self.skin_shadow_reach.push(frustum);
                     let face_planes = self.point_face_planes(light, &faces);
                     for (face, view_proj) in faces.into_iter().enumerate() {
                         device.write_buffer(

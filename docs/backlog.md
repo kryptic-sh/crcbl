@@ -13290,7 +13290,9 @@ What the rung did leave behind:
   failed-upload recovery. Source review establishes these contracts; a priced
   actual-renderer skinned workload and replacement images remain unverified. The
   per-box narrowing is checked by `shadow_reach`'s skinned tests on the null
-  backend only; what it saves on a GPU is unmeasured.
+  backend only; what it saves on a GPU is unmeasured. The skinning cull
+  (`ForwardRenderer::cull_skinned_regions`) leaves this alone on purpose: a
+  region it skips is still re-pointed, so the write still reaches the cache.
 
 - **A moved instance costs two redraws, not one.** `InstancePool`'s
   carry-forward settles a moved record's `previous_transform` on the frame
@@ -16797,12 +16799,26 @@ Remaining work:
 - **Cooked animated bounds.** A skinned instance is culled by a box the caller
   hands over (`SkinnedInstanceDesc::bounds`, `set_skinned_bounds`); none of the
   workspace's own callers (`apps/puppet`, `apps/viewer`, `apps/editor`) passes
-  one yet, so each still draws its skinned instances everywhere. A per-clip
-  bound from the cook (_No cook, no cooked clip format_) is what they would use.
-  Note that `apps/puppet`'s `Character::place_at` replaces each limb every frame
-  through `set_skinned_instance`, which rebuilds the record from its
-  description, so a limb's box belongs in that description; a
+  one yet, so each still draws its skinned instances everywhere and still
+  dispatches skinning for every one of them: the skinning cull
+  (`ForwardRenderer::set_skinning_culls`) skips a region only when every object
+  drawn out of it has a box outside every view and shadow cull. A per-clip bound
+  from the cook (_No cook, no cooked clip format_) is what they would use. What
+  the cull saves on a GPU is unmeasured. EW measured about 0.17 ms of skinning
+  for the 16 off-screen enemies of its raid demo, on the Raphael iGPU at the low
+  tier (2026-11-01); that is the case to price it on, on both settings of
+  `set_skinning_culls`. Note that `apps/puppet`'s `Character::place_at` replaces
+  each limb every frame through `set_skinned_instance`, which rebuilds the
+  record from its description, so a limb's box belongs in that description; a
   `set_skinned_bounds` made before it is overwritten.
+- **A skinned frame whose graph is refused still counts its dispatch as run.**
+  `point_skinned_instances` points an object's previous base at the other half
+  on every skinned frame after its first, unless the skinning cull skipped its
+  region the frame before, and never asks whether that frame's commands were
+  submitted. A frame refused after `begin_skinned_frame` leaves the next one
+  subtracting against a half nothing filled. Older than the skinning cull, which
+  clears the flag only for the regions it skipped. `shadow_pass_ran`'s atomic is
+  the shape a fix would take. Not observed.
 - **Bad joint indices are contained, not diagnosed.** `Skinning::begin_frame`
   refuses them by name and the shader clamps, but `crcbl-scene` cannot do better
   at import because a glTF primitive does not know its skin.

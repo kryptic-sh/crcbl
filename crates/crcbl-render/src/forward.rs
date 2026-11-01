@@ -216,6 +216,7 @@ mod bucket_draws;
 mod frame_prepare;
 mod pages;
 mod shadow_inputs;
+mod skin_cull;
 mod view;
 
 use pages::{PageBindings, RetiredPage, upload_page};
@@ -1790,6 +1791,21 @@ pub struct ForwardRenderer {
     /// The occlusion and small-feature culls a caller asked for — see
     /// [`set_occlusion_culling`](ForwardRenderer::set_occlusion_culling).
     occlusion_culling: OcclusionCulling,
+    /// Whether the skinning dispatch skips a region no view and no shadow
+    /// cull can draw this frame — see
+    /// [`set_skinning_culls`](ForwardRenderer::set_skinning_culls).
+    skinning_culls: bool,
+    /// Every shadow cull this frame redraws, and the probe updater's on a
+    /// frame with shadows off: the shadow half of what
+    /// [`ForwardRenderer::cull_skinned_regions`] tests a skinned object's
+    /// footprint against. Written by `begin_frame_body`.
+    skin_shadow_reach: Vec<Frustum>,
+    /// The skinning cull's storage and its last answer — see
+    /// [`ForwardRenderer::cull_skinned_regions`].
+    skin_cull: skin_cull::SkinCull,
+    /// Regions the last recorded skinned frame planned and did not dispatch —
+    /// see [`skinned_regions_skipped`](ForwardRenderer::skinned_regions_skipped).
+    skinned_skipped: u32,
     /// Whether a point light's six faces cull separately — see
     /// [`set_point_face_culls`](ForwardRenderer::set_point_face_culls).
     point_face_culls: bool,
@@ -3289,6 +3305,11 @@ struct SkinnedInstance {
     /// is the rule [`InstancePool::insert`](crate::instance_pool::InstancePool::insert)
     /// applies to `previous_transform` for the same reason: a spawn did not
     /// travel from anywhere.
+    ///
+    /// **Cleared again by a frame whose skinning cull skipped its region**,
+    /// whose halves then hold poses from before the skip — see
+    /// [`ForwardRenderer::cull_skinned_regions`]. So an object coming back
+    /// into view is at rest for one frame, exactly as a fresh one is.
     pointed: bool,
 }
 
@@ -3331,7 +3352,7 @@ fn bounds_fields_or_panic(bounds: Option<Aabb>) -> (u32, [f32; 3], [f32; 3]) {
 /// The two base vertices an object drawn out of `mesh` alternates between, in
 /// [`SkinnedInstance::bases`]' indexing.
 fn skinned_bases(mesh: &SkinnedMesh) -> [u32; 2] {
-    [mesh.region().base(0), mesh.region().base(1)]
+    mesh.region().halves()
 }
 
 /// One shadow cull's per-frame buffers, read out of its [`DrawGen`] before that
@@ -5925,6 +5946,10 @@ impl ForwardRenderer {
             wireframe_on: false,
             occlusion_culling: OcclusionCulling::OFF,
             point_face_culls: true,
+            skinning_culls: true,
+            skin_shadow_reach: Vec::new(),
+            skin_cull: skin_cull::SkinCull::default(),
+            skinned_skipped: 0,
             shadow_view_tamper: None,
             // Off, on the line above's terms: the normals view is opt-in, so a
             // caller that never asks for one draws the frame it drew before
@@ -7861,7 +7886,9 @@ impl ForwardRenderer {
     ///
     /// A frame whose [`begin_skinned_frame`](Self::begin_skinned_frame) was
     /// handed no ranges adds no dispatch and no declarations, and is the frame
-    /// [`add_passes`](Self::add_passes) would have built.
+    /// [`add_passes`](Self::add_passes) would have built. So is one whose every
+    /// range was dropped because nothing the frame draws can read it — see
+    /// [`set_skinning_culls`](Self::set_skinning_culls).
     ///
     /// # It records one pass more than [`MAX_PASSES`](Self::MAX_PASSES)
     ///
@@ -8048,7 +8075,15 @@ impl ForwardRenderer {
         // two declarations into the barrier between the compute write and the
         // draws. `None` is a frame with nothing to skin, which adds no pass and
         // declares nothing — see `Skinning::add_pass`.
-        let skinned = skinning.and_then(|skinning| skinning.add_pass(graph, frame));
+        //
+        // **Less the regions nothing this frame draws**, decided here rather
+        // than at `begin_skinned_frame` because only now has every view the
+        // frame records been begun — see `cull_skinned_regions`.
+        let skinned = skinning.and_then(|skinning| {
+            self.cull_skinned_regions(skinning.planned_regions(frame), views);
+            let cull = &self.skin_cull;
+            skinning.add_pass_where(graph, frame, |region| !cull.skips(region))
+        });
 
         // The camera's cull dispatch and the draw-argument dispatch, and the
         // light clustering after them — before anything draws, and before the
@@ -9914,6 +9949,42 @@ impl ForwardRenderer {
     /// alone, because a wireframe shows the edges a depth test would hide.
     pub fn set_occlusion_culling(&mut self, culling: OcclusionCulling) {
         self.occlusion_culling = culling;
+    }
+
+    /// Whether a skinned frame skips the dispatch of a region nothing this
+    /// frame can draw — **on** by default.
+    ///
+    /// A region is skipped only when every object drawn out of it carries a
+    /// [`SkinnedInstanceDesc::bounds`] box, and that box is outside the camera
+    /// of every view the frame records and outside every shadow cull it
+    /// redraws — a map the cadence holds draws nothing this frame — and every
+    /// cull the probe updater draws through with shadows off.
+    /// An object with no box keeps its region dispatched, and so does a region
+    /// no object is drawn out of. The host asks the device cull's question with
+    /// slack in the safe direction, so a skipped object is one no cull draws.
+    ///
+    /// **An object that comes back into view is at rest for one frame**: its
+    /// region's halves hold the poses of the last frame that skinned it, so the
+    /// frame it returns on writes its current half into both base lanes, as an
+    /// object's first frame out of a region does. Its own travel is still
+    /// reported. [`skinned_regions_skipped`](Self::skinned_regions_skipped)
+    /// says how many regions a frame skipped.
+    ///
+    /// **Off is the opt-out for a caller that reads a region back**: a skipped
+    /// region's halves keep an older pose, which nothing in this renderer reads,
+    /// and which a readback of [`vertex_buffer`](Self::vertex_buffer) would. It
+    /// is also the other half of a price. Both settings draw the same colour;
+    /// the motion target differs on the frame a skipped object returns, which
+    /// reads no deformation motion with the cull on and the motion its pose
+    /// made since the frame before with it off.
+    ///
+    /// Read by the next call that records a frame's passes —
+    /// [`add_skinned_passes`](Self::add_skinned_passes),
+    /// [`add_skinned_passes_with_overlay`](Self::add_skinned_passes_with_overlay)
+    /// or [`add_passes_with_views`](Self::add_passes_with_views) — and moot for
+    /// one handed no [`Skinning`].
+    pub fn set_skinning_culls(&mut self, on: bool) {
+        self.skinning_culls = on;
     }
 
     /// Whether a point light's shadow cull tags each caster with the faces of
@@ -12156,6 +12227,7 @@ mod tests {
     mod page_reload;
     mod partial_builds;
     mod shadow_reach;
+    mod skin_cull;
     mod upload_waits;
 
     use super::*;
@@ -22159,8 +22231,19 @@ mod tests {
 
     impl SkinnedFixture {
         fn build(device: &dyn Device, queue: QueueHandle) -> Self {
-            let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb)
-                .expect("the null backend accepts every descriptor");
+            Self::build_with_scene(device, queue, &scene::demo())
+        }
+
+        /// [`SkinnedFixture::build`] over `scene` in place of
+        /// [`scene::demo`], which must hold [`DEMO_CUBE`].
+        fn build_with_scene(
+            device: &dyn Device,
+            queue: QueueHandle,
+            scene: &SceneDesc<'_>,
+        ) -> Self {
+            let mut renderer =
+                ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, scene)
+                    .expect("the null backend accepts every descriptor");
             let skinned = renderer
                 .reserve_skinned(DEMO_CUBE)
                 .expect("a default pool has room for two halves of a cube");

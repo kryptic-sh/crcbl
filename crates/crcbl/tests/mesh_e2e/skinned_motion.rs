@@ -54,7 +54,7 @@ use crcbl::hal::{
 };
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
-    Camera, DirectionalLight, ForwardRenderer, ImportedImage, InitialClaim, InstanceHandle,
+    Aabb, Camera, DirectionalLight, ForwardRenderer, ImportedImage, InitialClaim, InstanceHandle,
     RenderGraph, SkinnedInstanceDesc, SkinnedMesh, Skinning, SkinningDesc, TransientPool,
     forward::FRAMES_IN_FLIGHT,
 };
@@ -166,6 +166,14 @@ impl SkinnedMotionScene {
                 bounds: None,
             },
         );
+    }
+
+    /// Gives the skinned cube a model-space box of its own, which the culls —
+    /// and the skinning cull — test in place of "everywhere".
+    fn set_bounds(&mut self, bounds: Aabb) {
+        self.renderer
+            .set_skinned_bounds(self.cube, Some(bounds))
+            .expect("a finite, ordered box");
     }
 
     /// Draws one skinned frame at `palette` and answers with the scene target
@@ -528,4 +536,105 @@ fn a_skinned_cube_whose_transform_moved_reads_that_motion() {
     );
 
     assert_at_rest(&settled, "the frame after the cube stopped");
+}
+
+/// **A skinned cube that comes back into view after its skinning was skipped
+/// reads rest on the frame it returns**, and the frame after it reads the
+/// motion its palette makes.
+///
+/// While its box is out of every cull the frame fits, the renderer skips the
+/// cube's dispatch — `ForwardRenderer::skinned_regions_skipped` says so, which
+/// is what keeps this from passing on a frame that skinned it anyway. The
+/// palette moves by [`MOVE_BY`] while it is away, so both halves of its region
+/// still hold the rest pose when it returns: a renderer that subtracted
+/// against the other half there would read the whole [`MOVE_BY`] as motion
+/// the cube never made between those two frames. The frame after the return
+/// moves the palette back to rest, and owes that displacement the other way —
+/// the claim that the history picks up again rather than staying at rest.
+///
+/// Measured on radv (RX 7900 XTX), 2026-11-01: every covered texel of the
+/// returning frame reads rest, and all 3553 of the frame after it read
+/// between 0.0333 and 0.0456 the other way in `u` — 0.895 to 1.225 times the
+/// centre's 0.0372, the band
+/// [`a_deformed_cube_reads_the_motion_its_palette_moved_it_by`] measured
+/// going out.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_skinned_cube_back_in_view_after_a_skip_reads_rest() {
+    let camera = motion_camera();
+    let mut scene = SkinnedMotionScene::open();
+    // Around every pose this test puts the cube in: the unit cube at rest and
+    // carried by `MOVE_BY`, with room to spare.
+    let seen = Aabb {
+        min: Vec3::splat(-2.0),
+        max: Vec3::splat(2.0) + MOVE_BY,
+    };
+    // The same box a long way below the floor, out of the camera's frustum and
+    // the sun's cascades.
+    let away = Vec3::new(0.0, -1.0e4, 0.0);
+    let unseen = Aabb {
+        min: seen.min + away,
+        max: seen.max + away,
+    };
+    scene.set_bounds(seen);
+    let _ = scene.frame(&camera, &rest_palette());
+    let _ = scene.frame(&camera, &rest_palette());
+    assert_eq!(
+        scene.renderer.skinned_regions_skipped(),
+        0,
+        "the cube in view is skinned"
+    );
+
+    scene.set_bounds(unseen);
+    for frame in 0..2 {
+        let _ = scene.frame(&camera, &moved_palette());
+        assert_eq!(
+            scene.renderer.skinned_regions_skipped(),
+            1,
+            "frame {frame} away: the cube out of every cull was skinned, so nothing below is \
+             about a skipped region"
+        );
+    }
+
+    scene.set_bounds(seen);
+    let back = scene.frame(&camera, &moved_palette());
+    assert_eq!(
+        scene.renderer.skinned_regions_skipped(),
+        0,
+        "the returning cube is skinned"
+    );
+    let next = scene.frame(&camera, &rest_palette());
+    scene.finish();
+
+    assert_at_rest(&back, "the frame the cube came back on");
+
+    let before = project(&camera, MOVING_AT + MOVE_BY);
+    let after = project(&camera, MOVING_AT);
+    let predicted = (after[0] - before[0]) / MESH_EXTENT.0 as f32;
+    assert!(
+        predicted < -CAMERA_MOTION_FLOOR,
+        "this camera moves the deformed centre by {predicted} in u, so the negative sign and \
+         the band below are not what its motion works out to"
+    );
+    let field = covered(&next);
+    let mut drawn = 0usize;
+    for (index, texel) in field.iter().enumerate() {
+        let Some(encoded) = texel else {
+            continue;
+        };
+        drawn += 1;
+        let motion = decode(*encoded);
+        assert!(
+            motion[0] < predicted * MOTION_BAND.0 && motion[0] > predicted * MOTION_BAND.1,
+            "texel {:?} belongs to a cube whose palette carried it {predicted} across the \
+             frame after its return and reads {motion:?} in u — a value at rest is a history \
+             that never picked up again",
+            texel_at(index)
+        );
+    }
+    assert!(
+        drawn > COVERED_FLOOR,
+        "the returned cube covered only {drawn} texel(s), so the loop above checked almost \
+         nothing"
+    );
 }
