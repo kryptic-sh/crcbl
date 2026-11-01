@@ -5082,12 +5082,24 @@ migrates every caller and deletes its own copy in the same change.
   move: configs, agents and non-finite floors are refused with `SpanGridError`,
   columns are capped at `MAX_SPAN_COLUMN_COUNT` and the erosion reach at
   `MAX_EROSION_REACH_CELLS`, queries return `GroundGrid`'s shapes and
-  `GroundRouteError`, and search state is in ordered maps. Left: tiles (one
-  build covers one region; EW measured about 1M spans, a 1,090 × 774 grid at
-  0.25 m, in 0.84 s release), headroom between columns on a link, and dynamic
-  obstacles. A probe that casts rays at cell centres over geometry on the same
-  lattice must nudge them, since a ray on an edge two boxes share can report the
-  side face; a voxelizer rasterizing triangles would not have that trap.
+  `GroundRouteError`, and a plan's search state is a per-thread slot per span,
+  stamped by generation (2026-11-01). Left: tiles (one build covers one region;
+  EW measured about 1M spans, a 1,090 × 774 grid at 0.25 m, in 0.84 s release),
+  headroom between columns on a link, and dynamic obstacles. A probe that casts
+  rays at cell centres over geometry on the same lattice must nudge them, since
+  a ray on an edge two boxes share can report the side face; a voxelizer
+  rasterizing triangles would not have that trap.
+- **An octile estimate for `SpanGrid::plan` needs EW's decision (2026-11-01).**
+  `plan` uses straight-line 3D distance as its A\* estimate (`SpanGrid::route`),
+  but links are 8-connected, so an octile estimate (plus the height term) would
+  be tighter and expand fewer spans on open ground. It is still admissible, so
+  route lengths stay optimal, but it changes which of several equal-cost routes
+  comes back and the order spans expand in. EW asked for identical results in
+  the 2026-11-01 perf slice, so it was not done. Options: keep the Euclidean
+  estimate (identical routes); switch to octile (fewer expansions, different
+  equal-cost routes, re-pin any route-exact test); or make it a per-grid choice.
+  Measure expansions and instructions with
+  `crates/crcbl-nav/examples/patrol_routes.rs` first; not measured.
 - **Fixed-rate staggered sampling: accepted, into `crcbl-core`**, as
   `FixedRateSchedule`. EW's `PerceptionSchedule` is generic, so the name drops
   "perception". Shipped 2026-09-28 as
@@ -18195,6 +18207,21 @@ filtered out and see whether it fails. To fix: make the release wait-free for
 the test, for example by spawning nothing while a lock is open in-process, or by
 retrying the re-open until a deadline. Then decide whether a real editor that
 spawns processes while holding the lock has the same window.
+
+### The mesh-tail draw-count test races under threaded `cargo test` (2026-11-01)
+
+`forward::tests::the_mesh_tail_records_a_flat_call_per_partition_behind_a_task_stage`
+in `crates/crcbl-render/src/forward.rs` failed twice in about seven threaded
+workspace runs on mxaddict-pc, both times at its last check
+(`renderer.counters().draws` against `recorded_draws`, case
+`None cubes, Features(TASK_SHADER), ranged false`: 13 against 14), and passed
+every other run. It holds no console-switch guard while its frame's pass list
+depends on process-wide switches that other tests flip under theirs, so a switch
+changing mid-frame can add a pass the counter did not count. nextest's process
+per test keeps CI out of it. Unconfirmed. The fix is to take the switch guards
+its frame reads (`ssao_blur_switch` and its siblings), or to count the draws
+from the same snapshot of the switches the frame used; twelve threaded runs is
+the experiment that would show it gone.
 
 ### Scene edits over the transport: the server slice and what it leaves (2026-10-04)
 

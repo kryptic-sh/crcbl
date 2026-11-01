@@ -55,9 +55,9 @@
 //! Routes are A\* over link lengths with the straight-line distance as the
 //! estimate. The open set is ordered by estimate and then by span index, which
 //! runs row by row along +X from the origin and lowest floor first within a
-//! column, and
-//! the search state lives in ordered maps; so the same grid asked the same
-//! question returns the same route on every machine.
+//! column, and the search state is indexed by span, never iterated in an order
+//! of its own; so the same grid asked the same question returns the same route
+//! on every machine.
 //! [`reachable_within`](SpanGrid::reachable_within) is breadth-first over the
 //! links in the order +Z, +X, -Z, -X, then the diagonals.
 //!
@@ -65,9 +65,17 @@
 //!
 //! [`SpanGrid::build`] probes each column once and checks each floor against
 //! the columns within the agent's radius, which [`MAX_EROSION_REACH_CELLS`]
-//! bounds. Queries keep state only for the spans they touch, so a query near
-//! its start stays cheap on a grid of a million spans.
+//! bounds. [`SpanGrid::plan`] does work in proportion to the spans it
+//! touches: its search state is a slot per span held by the calling thread
+//! between plans, stamped with the plan that wrote it, so a plan begins by
+//! bumping a generation rather than clearing the slots. Two setups clear: the
+//! first plan on a thread, or on a grid with more spans than any before it on
+//! that thread, grows the slots to the grid; and once the generation wraps
+//! round its `u32`, every slot is cleared once. The slots are kept until the
+//! thread ends, so memory follows the largest grid each thread has planned
+//! on. The other queries keep state only for the spans they touch.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 
@@ -82,7 +90,11 @@ use crate::grid::{GroundRoute, GroundRouteError};
 /// [`SpanGridError::TooManyColumns`] rather than clamped, because a clamped
 /// grid would describe a different region. It is far above
 /// [`MAX_GRID_CELL_COUNT`](crate::grid::MAX_GRID_CELL_COUNT) because a span
-/// grid's queries do not allocate per column the way a ground grid's do.
+/// grid's queries do not allocate per column on every call the way a ground
+/// grid's do. What [`SpanGrid::plan`] keeps instead is per span: a stamp, a
+/// cost and a link for every span of the largest grid planned on a thread,
+/// held by that thread between plans. That grows with the grid's own floors,
+/// a few times what the grid keeps per floor, so the grid's size bounds it.
 pub const MAX_SPAN_COLUMN_COUNT: usize = 1 << 22;
 
 /// The farthest the erosion looks, in cells, from a floor's column.
@@ -409,39 +421,97 @@ impl SpanGrid {
         let (Some(from), Some(to)) = (from, to) else {
             return Err(GroundRouteError::NoRoute);
         };
+        self.route(from, to, |_, _, _| {})
+            .ok_or(GroundRouteError::NoRoute)
+    }
+
+    /// [`plan`](Self::plan)'s search from span `from` to span `to`, or `None`
+    /// if no walk joins them, calling `popped` with each span popped short of
+    /// the goal, the cost its entry was pushed at, and its cost so far. A span
+    /// is expanded when its entry's cost is not above its cost so far, and
+    /// passed over otherwise.
+    ///
+    /// The search state is the calling thread's [`Scratch`], so a plan's work
+    /// is in proportion to the spans it touches, not to the grid.
+    ///
+    /// No closed set is kept, so a span whose cost improves after it was
+    /// pushed has an earlier, costlier entry left in the open set, which is
+    /// passed over. Nothing is lost by that: the latest entry holds the
+    /// span's lowest cost, so its estimate is no higher than an older one's.
+    /// It pops first, or at an equal estimate in a run of this span's entries
+    /// that no other span's can break into, the order breaking ties by span;
+    /// and an older entry popping first in that run is passed over, leaving
+    /// the latest to expand the span at its current cost, at the same point
+    /// in the order. Once a span is expanded at a cost, each neighbour holds
+    /// a cost no higher than that cost plus the link, so expanding it again at
+    /// the same cost would change nothing.
+    fn route(
+        &self,
+        from: SpanId,
+        to: SpanId,
+        mut popped: impl FnMut(SpanId, f64, f64),
+    ) -> Option<GroundRoute> {
+        SCRATCH.with(|scratch| match scratch.try_borrow_mut() {
+            Ok(mut scratch) => self.route_in(&mut scratch, from, to, &mut popped),
+            // Only a `popped` that plans again gets here.
+            Err(_) => self.route_in(&mut Scratch::default(), from, to, &mut popped),
+        })
+    }
+
+    /// [`route`](Self::route) with its search state in `scratch`.
+    fn route_in(
+        &self,
+        scratch: &mut Scratch,
+        from: SpanId,
+        to: SpanId,
+        popped: &mut impl FnMut(SpanId, f64, f64),
+    ) -> Option<GroundRoute> {
         let target = self.feet_of(to);
-        // Each span reached: its cost so far and the span before it.
-        let mut reached: BTreeMap<SpanId, (f64, SpanId)> = BTreeMap::from([(from, (0.0, from))]);
+        scratch.begin(self.floors.len());
+        scratch.reach(from, 0.0, from);
+        let from_column = self.column_of(from);
         let mut open = BinaryHeap::from([Open {
-            estimate: self.feet_of(from).distance(target),
+            estimate: self.feet_at(from, from_column).distance(target),
             span: from,
+            column: from_column,
+            cost: 0.0,
         }]);
-        while let Some(Open { span, .. }) = open.pop() {
+        while let Some(Open {
+            span, column, cost, ..
+        }) = open.pop()
+        {
             if span == to {
                 let mut waypoints = Vec::new();
                 let mut at = to;
                 while at != from {
                     waypoints.push(self.feet_of(at));
-                    at = reached[&at].1;
+                    at = scratch.slots[at].before;
                 }
                 waypoints.reverse();
-                return Ok(GroundRoute { waypoints });
+                return Some(GroundRoute { waypoints });
             }
-            let here = self.feet_of(span);
-            let so_far = reached[&span].0;
-            for next in self.neighbours(span) {
-                let there = self.feet_of(next);
+            let so_far = scratch.slots[span].cost;
+            popped(span, cost, so_far);
+            // Stale: the span was pushed again since, at a lower cost.
+            if cost > so_far {
+                continue;
+            }
+            let here = self.feet_at(span, column);
+            self.each_neighbour(span, column, |next, next_column| {
+                let there = self.feet_at(next, next_column);
                 let through = so_far + here.distance(there);
-                if reached.get(&next).is_none_or(|&(cost, _)| through < cost) {
-                    reached.insert(next, (through, span));
+                if scratch.cost_of(next).is_none_or(|cost| through < cost) {
+                    scratch.reach(next, through, span);
                     open.push(Open {
                         estimate: through + there.distance(target),
                         span: next,
+                        column: next_column,
+                        cost: through,
                     });
                 }
-            }
+            });
         }
-        Err(GroundRouteError::NoRoute)
+        None
     }
 
     /// Every span within `max_steps` links of the floor under
@@ -464,20 +534,20 @@ impl SpanGrid {
             .span_at(start_world_position)?
             .ok_or(GroundRouteError::NoRoute)?;
         let mut steps = BTreeMap::from([(from, 0)]);
-        let mut frontier = VecDeque::from([from]);
+        let mut frontier = VecDeque::from([(from, self.column_of(from))]);
         let mut reached = Vec::new();
-        while let Some(span) = frontier.pop_front() {
+        while let Some((span, column)) = frontier.pop_front() {
             let here = steps[&span];
-            reached.push((self.feet_of(span), here));
+            reached.push((self.feet_at(span, column), here));
             if here == max_steps {
                 continue;
             }
-            for next in self.neighbours(span) {
+            self.each_neighbour(span, column, |next, next_column| {
                 steps.entry(next).or_insert_with(|| {
-                    frontier.push_back(next);
+                    frontier.push_back((next, next_column));
                     here + 1
                 });
-            }
+            });
         }
         Ok(reached)
     }
@@ -678,49 +748,132 @@ impl SpanGrid {
 
     /// The feet position on `span`: its cell's centre at its floor's height.
     fn feet_of(&self, span: SpanId) -> DVec3 {
-        let column = self.column_of(span);
+        self.feet_at(span, self.column_of(span))
+    }
+
+    /// [`feet_of`](Self::feet_of) for a `span` whose `column` is known.
+    fn feet_at(&self, span: SpanId, column: usize) -> DVec3 {
         let at = self
             .config
             .cell_center(column % self.config.width, column / self.config.width);
         DVec3::new(at.x, self.floors[span], at.y)
     }
 
-    /// The spans a body steps to from `span`, in the link order the module
-    /// docs name.
-    fn neighbours(&self, span: SpanId) -> Vec<SpanId> {
-        let column = self.column_of(span);
-        let (x, z) = (column % self.config.width, column / self.config.width);
+    /// Calls `visit` with each span a body steps to from `span`, in `column`,
+    /// and that span's column, in the link order the module docs name.
+    fn each_neighbour(&self, span: SpanId, column: usize, mut visit: impl FnMut(SpanId, usize)) {
+        let (width, height) = (self.config.width, self.config.height);
+        let (x, z) = (column % width, column / width);
         let y = self.floors[span];
-        let step = |dx: isize, dz: isize| -> Vec<SpanId> {
-            let (Some(nx), Some(nz)) = (
-                x.checked_add_signed(dx).filter(|&v| v < self.config.width),
-                z.checked_add_signed(dz).filter(|&v| v < self.config.height),
-            ) else {
-                return Vec::new();
-            };
-            self.spans_of(nz * self.config.width + nx)
-                .filter(|&other| (self.floors[other] - y).abs() <= self.agent.max_climb_m)
-                .collect()
+        let toward = |dx: isize, dz: isize| -> Option<usize> {
+            let nx = x.checked_add_signed(dx).filter(|&v| v < width)?;
+            let nz = z.checked_add_signed(dz).filter(|&v| v < height)?;
+            Some(nz * width + nx)
         };
-        let mut out = Vec::new();
-        for (dx, dz) in [(0, 1), (1, 0), (0, -1), (-1, 0)] {
-            out.extend(step(dx, dz));
-        }
-        for (dx, dz) in [(1, 1), (1, -1), (-1, -1), (-1, 1)] {
-            if !step(dx, 0).is_empty() && !step(0, dz).is_empty() {
-                out.extend(step(dx, dz));
+        // Visits the floors within a climb in the column `dx`, `dz` over, and
+        // says whether there were any.
+        let mut step = |dx: isize, dz: isize| -> bool {
+            let Some(next_column) = toward(dx, dz) else {
+                return false;
+            };
+            let mut any = false;
+            for other in self.spans_of(next_column) {
+                if (self.floors[other] - y).abs() <= self.agent.max_climb_m {
+                    any = true;
+                    visit(other, next_column);
+                }
+            }
+            any
+        };
+        // +Z, +X, -Z, -X: what a diagonal cuts past.
+        let linked = [step(0, 1), step(1, 0), step(0, -1), step(-1, 0)];
+        let (plus_z, plus_x, minus_z, minus_x) = (linked[0], linked[1], linked[2], linked[3]);
+        for (dx, dz, past_x, past_z) in [
+            (1, 1, plus_x, plus_z),
+            (1, -1, plus_x, minus_z),
+            (-1, -1, minus_x, minus_z),
+            (-1, 1, minus_x, plus_z),
+        ] {
+            if past_x && past_z {
+                step(dx, dz);
             }
         }
-        out
+    }
+}
+
+thread_local! {
+    /// The search state of each thread's plans, kept between them.
+    static SCRATCH: RefCell<Scratch> = RefCell::default();
+}
+
+/// A plan's search state: a slot per span, valid only while its stamp is the
+/// current plan's generation, so a plan starts by bumping the generation
+/// rather than by clearing every slot.
+#[derive(Default)]
+struct Scratch {
+    /// The current plan's stamp; never zero once a plan has begun.
+    generation: u32,
+    slots: Vec<Slot>,
+}
+
+/// One span's search state.
+#[derive(Clone, Copy, Default)]
+struct Slot {
+    /// The generation that wrote the slot; zero for never.
+    stamp: u32,
+    /// The span's cost so far.
+    cost: f64,
+    /// The span before it on its cheapest walk so far.
+    before: SpanId,
+}
+
+impl Scratch {
+    /// Starts a plan over `spans` spans, with none of them reached.
+    fn begin(&mut self, spans: usize) {
+        if self.slots.len() < spans {
+            self.slots.resize(spans, Slot::default());
+        }
+        if self.generation == u32::MAX {
+            // Every stamp could be mistaken for a generation to come.
+            for slot in &mut self.slots {
+                slot.stamp = 0;
+            }
+            self.generation = 0;
+        }
+        self.generation += 1;
+    }
+
+    /// `span`'s cost so far, if this plan has reached it.
+    fn cost_of(&self, span: SpanId) -> Option<f64> {
+        let slot = self.slots[span];
+        (slot.stamp == self.generation).then_some(slot.cost)
+    }
+
+    /// Records that this plan reached `span` at `cost` from `before`.
+    fn reach(&mut self, span: SpanId, cost: f64, before: SpanId) {
+        self.slots[span] = Slot {
+            stamp: self.generation,
+            cost,
+            before,
+        };
     }
 }
 
 /// An open span ordered for a min-heap by estimate, ties by span, so a plan
-/// is the same every time.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// is the same every time. Its column and the cost it was pushed at ride
+/// along and play no part in the order.
+#[derive(Clone, Copy, Debug)]
 struct Open {
     estimate: f64,
     span: SpanId,
+    column: usize,
+    cost: f64,
+}
+
+impl PartialEq for Open {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
 }
 
 impl Eq for Open {}
@@ -743,3 +896,7 @@ impl PartialOrd for Open {
 #[cfg(test)]
 #[path = "spans/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "spans/route_equivalence_tests.rs"]
+mod route_equivalence_tests;

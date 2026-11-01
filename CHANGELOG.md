@@ -15,6 +15,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`SpanGrid::plan` is about 8× cheaper on long routes and returns the same
+  routes.** On the `patrol_routes` example grid (640×640 quarter-metre cells), a
+  cross-map route fell from 862 M to 109 M instructions under callgrind, and a
+  hop of a few cells from 48 k to 16 k. The search state is now a per-thread
+  slot per span, stamped with a generation instead of cleared, so a plan's work
+  follows the spans it touches; a thread keeps those slots for the largest grid
+  it has planned on, and its first plan on a grid that size pays one pass to
+  grow them. The neighbour step builds no `Vec` and reuses its straight-step
+  results for the diagonal check, each span's column travels with it instead of
+  being found by binary search, and open-set entries left behind by a cost
+  improvement are skipped instead of re-expanded (over half of all expansions on
+  the example grid). `SpanGrid::reachable_within` shares the cheaper neighbour
+  step.
 - **A skinned object nothing in the frame can draw is no longer skinned.**
   `add_skinned_passes` (and every other entry point handed a `Skinning`) now
   drops the dispatch of a planned region when every object drawn out of it has a
