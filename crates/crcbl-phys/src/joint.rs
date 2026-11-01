@@ -12,7 +12,33 @@
 //! | [`RevoluteJoint`] (hinge)   | the anchors together, the frames' z-axes | the angle about z, a motor, a spring          |
 //! | [`PrismaticJoint`] (slider) | the orientation, and B on A's x-axis     | the travel along x, a motor, a spring         |
 //! | [`WeldJoint`] (fixed)       | everything, softly if asked              | —                                             |
-//! | [`SphericalJoint`] (ball)   | the anchors together                     | a cone about A's z-axis, twist, a motor       |
+//! | [`SphericalJoint`] (ball)   | the anchors together                     | an elliptical swing, twist, a motor           |
+//!
+//! # Soft zones
+//!
+//! A hinge's angle and a ball's swing and twist can each have a **soft zone**
+//! inside their hard limit: from a soft bound to the hard one the joint meets
+//! resistance that grows with depth, and the hard limit stays rigid. Inside the
+//! soft bounds it is free, so a limb at or near its neutral pose — the frames'
+//! zero, which every bound is measured from — feels nothing.
+//!
+//! A zone's strength is a [`Spring`] read as Box2D v3's soft step at a
+//! stiffness that ramps with depth. Past its soft bound a row is a one-sided
+//! spring pushing back towards the bound, its frequency `hertz × √x` at depth
+//! fraction `x` — the depth past the soft bound over the soft bound's
+//! distance to the hard one, capped at 1. Its stiffness, which goes as the
+//! frequency squared, rises in proportion to depth from zero at the soft bound
+//! to `hertz` at the hard bound, so the restoring torque rises with the depth
+//! squared: smooth where the zone begins and steepest at the stop. The force
+//! is the gradient of a potential; each substep the soft step takes the
+//! secant stiffness at the depth where the joint stands and treats that
+//! implicitly, damped at `damping_ratio` of its frequency there. It is not
+//! an implicit solve of the curve itself, so stability and energy are
+//! measured, not proved: the tests in `crates/crcbl-phys/tests/joints.rs`
+//! find no energy gain undamped, in a zone alone or ending at the stop. Zero
+//! hertz is no resistance at all. This is PhysX's D6 soft limit — a limit
+//! with a stiffness and a damping — with the stiffness ramped so the zone
+//! has no edge to strike.
 //!
 //! These are Box3D's joints (github.com/erincatto/box3d, commit `9e5a4cde`),
 //! the three-dimensional sibling of Box2D v3's, whose solvers the contact
@@ -220,7 +246,7 @@ pub enum JointKind {
     Prismatic(PrismaticJoint),
     /// Welds the frames together.
     Weld(WeldJoint),
-    /// A ball and socket, with a cone and twist limit for ragdoll shoulders
+    /// A ball and socket, with a swing and twist limit for ragdoll shoulders
     /// and hips.
     Spherical(SphericalJoint),
 }
@@ -229,6 +255,7 @@ impl JointKind {
     fn invalid(&self) -> Option<&'static str> {
         let finite = |values: &[f64]| values.iter().all(|v| v.is_finite());
         let spring = |s: &Spring| s.hertz >= 0.0 && s.damping_ratio >= 0.0;
+        let soft_zone = |s: &Spring| finite(&[s.hertz, s.damping_ratio]) && spring(s);
         match self {
             Self::Distance(d) => {
                 if !finite(&[d.length, d.min_length, d.motor_speed]) || d.max_length.is_nan() {
@@ -241,7 +268,14 @@ impl JointKind {
                     .then_some("a distance joint's spring and motor are not negative")
             }
             Self::Revolute(r) => {
-                if !finite(&[r.lower_angle, r.upper_angle, r.target_angle, r.motor_speed]) {
+                if !finite(&[
+                    r.lower_angle,
+                    r.upper_angle,
+                    r.target_angle,
+                    r.motor_speed,
+                    r.soft_lower_angle,
+                    r.soft_upper_angle,
+                ]) {
                     return Some("a revolute joint's angles are finite");
                 }
                 if r.lower_angle > r.upper_angle
@@ -249,6 +283,22 @@ impl JointKind {
                     || r.upper_angle > core::f64::consts::PI
                 {
                     return Some("a revolute joint's limits lie in [-π, π], lower first");
+                }
+                if r.enable_soft_limit {
+                    if !r.enable_limit {
+                        return Some("a revolute joint's soft limits need its hard limits on");
+                    }
+                    if r.soft_lower_angle < r.lower_angle
+                        || r.soft_upper_angle > r.upper_angle
+                        || r.soft_lower_angle > r.soft_upper_angle
+                    {
+                        return Some(
+                            "a revolute joint's soft limits lie inside its hard limits, lower first",
+                        );
+                    }
+                }
+                if !soft_zone(&r.soft_limit) {
+                    return Some("a revolute joint's soft zone is finite and not negative");
                 }
                 (!spring(&r.spring) || r.max_motor_torque < 0.0)
                     .then_some("a revolute joint's spring and motor are not negative")
@@ -271,20 +321,62 @@ impl JointKind {
             Self::Weld(w) => (!spring(&w.linear) || !spring(&w.angular))
                 .then_some("a weld joint's springs are not negative"),
             Self::Spherical(s) => {
-                if !finite(&[s.cone_angle, s.lower_twist_angle, s.upper_twist_angle])
-                    || !s.motor_velocity.is_finite()
+                if !finite(&[
+                    s.swing_x_angle,
+                    s.swing_y_angle,
+                    s.lower_twist_angle,
+                    s.upper_twist_angle,
+                    s.soft_swing_x_angle,
+                    s.soft_swing_y_angle,
+                    s.soft_lower_twist_angle,
+                    s.soft_upper_twist_angle,
+                ]) || !s.motor_velocity.is_finite()
                 {
                     return Some("a spherical joint's angles are finite");
                 }
-                if s.cone_angle < 0.0
-                    || s.cone_angle > core::f64::consts::PI
+                let half_turn = |angle: f64| (0.0..=core::f64::consts::PI).contains(&angle);
+                if !half_turn(s.swing_x_angle)
+                    || !half_turn(s.swing_y_angle)
                     || s.lower_twist_angle > s.upper_twist_angle
                     || s.lower_twist_angle < -core::f64::consts::PI
                     || s.upper_twist_angle > core::f64::consts::PI
                 {
                     return Some(
-                        "a spherical joint's cone lies in [0, π] and its twist in [-π, π], lower first",
+                        "a spherical joint's swing lies in [0, π] and its twist in [-π, π], lower first",
                     );
+                }
+                // One zero half-angle makes the ellipse a segment, whose
+                // pushing side flips as the swing crosses it; a hinge, or a
+                // small half-angle, is the joint for that.
+                let one_zero = |x: f64, y: f64| (x == 0.0) != (y == 0.0);
+                if one_zero(s.swing_x_angle, s.swing_y_angle)
+                    || one_zero(s.soft_swing_x_angle, s.soft_swing_y_angle)
+                {
+                    return Some(
+                        "a spherical joint's swing half-angles are both zero or neither, soft or hard",
+                    );
+                }
+                if s.enable_soft_swing
+                    && (!s.enable_swing_limit
+                        || !(0.0..=s.swing_x_angle).contains(&s.soft_swing_x_angle)
+                        || !(0.0..=s.swing_y_angle).contains(&s.soft_swing_y_angle))
+                {
+                    return Some(
+                        "a spherical joint's soft swing needs its swing limit on, and lies inside it",
+                    );
+                }
+                if s.enable_soft_twist
+                    && (!s.enable_twist_limit
+                        || s.soft_lower_twist_angle < s.lower_twist_angle
+                        || s.soft_upper_twist_angle > s.upper_twist_angle
+                        || s.soft_lower_twist_angle > s.soft_upper_twist_angle)
+                {
+                    return Some(
+                        "a spherical joint's soft twist needs its twist limit on, and lies inside it, lower first",
+                    );
+                }
+                if !soft_zone(&s.soft_swing) || !soft_zone(&s.soft_twist) {
+                    return Some("a spherical joint's soft zones are finite and not negative");
                 }
                 (s.max_motor_torque < 0.0).then_some("a spherical joint's motor is not negative")
             }
@@ -415,6 +507,16 @@ pub struct RevoluteJoint {
     pub max_motor_torque: f64,
     /// The speed it drives at, in rad/s.
     pub motor_speed: f64,
+    /// Whether the angle meets a soft zone's resistance past the soft
+    /// limits, on the way to the hard ones: see the module's soft zones. It
+    /// needs `enable_limit`.
+    pub enable_soft_limit: bool,
+    /// Where the soft zone below begins, in radians, at least `lower_angle`.
+    pub soft_lower_angle: f64,
+    /// Where the soft zone above begins, in radians, at most `upper_angle`.
+    pub soft_upper_angle: f64,
+    /// The soft zones' strength.
+    pub soft_limit: Spring,
 }
 
 impl RevoluteJoint {
@@ -434,6 +536,13 @@ impl RevoluteJoint {
             enable_motor: false,
             max_motor_torque: 0.0,
             motor_speed: 0.0,
+            enable_soft_limit: false,
+            soft_lower_angle: 0.0,
+            soft_upper_angle: 0.0,
+            soft_limit: Spring {
+                hertz: 0.0,
+                damping_ratio: 0.0,
+            },
         }
     }
 
@@ -466,6 +575,20 @@ impl RevoluteJoint {
             enable_spring: true,
             spring,
             target_angle: target,
+            ..self
+        }
+    }
+
+    /// This hinge, resisted by `zone` below `lower` and above `upper`
+    /// radians, on the way to its hard limits — which it needs, from
+    /// [`with_limits`](Self::with_limits).
+    #[must_use]
+    pub const fn with_soft_limits(self, lower: f64, upper: f64, zone: Spring) -> Self {
+        Self {
+            enable_soft_limit: true,
+            soft_lower_angle: lower,
+            soft_upper_angle: upper,
+            soft_limit: zone,
             ..self
         }
     }
@@ -580,17 +703,29 @@ impl WeldJoint {
 }
 
 /// A spherical joint, a ball and socket: Box3D's `b3SphericalJointDef`
-/// without its spring.
+/// without its spring, its cone made an ellipse as Jolt's
+/// `SwingTwistConstraint` makes it.
 ///
-/// The **cone** bounds how far frame B's z-axis tips from frame A's; the
-/// **twist** bounds frame B's turn about its own z-axis. Together they are
-/// a ragdoll's shoulder or hip.
+/// Frame B's turn from frame A is split into a **swing**, which tips frame
+/// B's z-axis away from frame A's, and a **twist**, frame B's turn about its
+/// own z-axis. The swing limit is an elliptical cone: a swing about frame
+/// A's x-axis alone goes as far as `swing_x_angle`, one about its y-axis as
+/// far as `swing_y_angle`, and one between them as far as the ellipse
+/// through both allows. Equal half-angles make it the circular cone of
+/// [`with_cone`](Self::with_cone). Any asymmetry beyond that — a shoulder
+/// that swings further forward than back — is carried by the frames: the
+/// cone is centred on frame A's z-axis. Together they are a ragdoll's
+/// shoulder or hip.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SphericalJoint {
-    /// Whether the cone limit is on.
-    pub enable_cone_limit: bool,
-    /// The cone's half-angle, in radians, in `[0, π]`.
-    pub cone_angle: f64,
+    /// Whether the swing limit is on.
+    pub enable_swing_limit: bool,
+    /// The swing's half-angle about frame A's x-axis, in radians, in
+    /// `[0, π]`; zero only with `swing_y_angle` zero too.
+    pub swing_x_angle: f64,
+    /// The swing's half-angle about frame A's y-axis, in radians, in
+    /// `[0, π]`; zero only with `swing_x_angle` zero too.
+    pub swing_y_angle: f64,
     /// Whether the twist limit is on.
     pub enable_twist_limit: bool,
     /// The least twist, in radians.
@@ -604,30 +739,73 @@ pub struct SphericalJoint {
     /// The relative angular velocity it drives towards, in rad/s, in the
     /// world.
     pub motor_velocity: DVec3,
+    /// Whether the swing meets a soft zone's resistance past a softer
+    /// ellipse inside the hard one: see the module's soft zones. It needs
+    /// `enable_swing_limit`.
+    pub enable_soft_swing: bool,
+    /// The soft ellipse's half-angle about frame A's x-axis, at most
+    /// `swing_x_angle`.
+    pub soft_swing_x_angle: f64,
+    /// The soft ellipse's half-angle about frame A's y-axis, at most
+    /// `swing_y_angle`.
+    pub soft_swing_y_angle: f64,
+    /// The soft swing's strength.
+    pub soft_swing: Spring,
+    /// Whether the twist meets a soft zone's resistance past the soft twist
+    /// bounds. It needs `enable_twist_limit`.
+    pub enable_soft_twist: bool,
+    /// Where the soft zone below begins, at least `lower_twist_angle`.
+    pub soft_lower_twist_angle: f64,
+    /// Where the soft zone above begins, at most `upper_twist_angle`.
+    pub soft_upper_twist_angle: f64,
+    /// The soft twist's strength.
+    pub soft_twist: Spring,
 }
 
 impl SphericalJoint {
     /// A free ball and socket.
     #[must_use]
     pub const fn ball() -> Self {
+        let none = Spring {
+            hertz: 0.0,
+            damping_ratio: 0.0,
+        };
         Self {
-            enable_cone_limit: false,
-            cone_angle: 0.0,
+            enable_swing_limit: false,
+            swing_x_angle: 0.0,
+            swing_y_angle: 0.0,
             enable_twist_limit: false,
             lower_twist_angle: 0.0,
             upper_twist_angle: 0.0,
             enable_motor: false,
             max_motor_torque: 0.0,
             motor_velocity: DVec3::ZERO,
+            enable_soft_swing: false,
+            soft_swing_x_angle: 0.0,
+            soft_swing_y_angle: 0.0,
+            soft_swing: none,
+            enable_soft_twist: false,
+            soft_lower_twist_angle: 0.0,
+            soft_upper_twist_angle: 0.0,
+            soft_twist: none,
         }
     }
 
-    /// This joint, its frame B's z-axis kept within `angle` of frame A's.
+    /// This joint, its frame B's z-axis kept within `angle` of frame A's:
+    /// [`with_swing`](Self::with_swing) at `angle` about both axes.
     #[must_use]
     pub const fn with_cone(self, angle: f64) -> Self {
+        self.with_swing(angle, angle)
+    }
+
+    /// This joint, its swing kept inside the ellipse of half-angles `x`
+    /// about frame A's x-axis and `y` about its y-axis.
+    #[must_use]
+    pub const fn with_swing(self, x: f64, y: f64) -> Self {
         Self {
-            enable_cone_limit: true,
-            cone_angle: angle,
+            enable_swing_limit: true,
+            swing_x_angle: x,
+            swing_y_angle: y,
             ..self
         }
     }
@@ -639,6 +817,34 @@ impl SphericalJoint {
             enable_twist_limit: true,
             lower_twist_angle: lower,
             upper_twist_angle: upper,
+            ..self
+        }
+    }
+
+    /// This joint, its swing resisted by `zone` past the ellipse of
+    /// half-angles `x` and `y`, on the way to its hard swing limit — which
+    /// it needs, from [`with_swing`](Self::with_swing).
+    #[must_use]
+    pub const fn with_soft_swing(self, x: f64, y: f64, zone: Spring) -> Self {
+        Self {
+            enable_soft_swing: true,
+            soft_swing_x_angle: x,
+            soft_swing_y_angle: y,
+            soft_swing: zone,
+            ..self
+        }
+    }
+
+    /// This joint, its twist resisted by `zone` below `lower` and above
+    /// `upper` radians, on the way to its hard twist limit — which it needs,
+    /// from [`with_twist`](Self::with_twist).
+    #[must_use]
+    pub const fn with_soft_twist(self, lower: f64, upper: f64, zone: Spring) -> Self {
+        Self {
+            enable_soft_twist: true,
+            soft_lower_twist_angle: lower,
+            soft_upper_twist_angle: upper,
+            soft_twist: zone,
             ..self
         }
     }

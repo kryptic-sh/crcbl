@@ -81,6 +81,142 @@ pub(crate) fn swing_angle(q: DQuat) -> f64 {
     2.0 * atan2(y, x)
 }
 
+/// The swing part of `q` — `q = swing twist`, the twist about z — as its x
+/// and y parts and its w, which is never negative: Jolt's
+/// `Quat::GetSwingTwist` (github.com/jrouwe/JoltPhysics,
+/// `Jolt/Math/Quat.inl`) with its twist axis moved from x to z. Its z part
+/// is zero. The same for `q` and `−q`; a swing of π, which leaves the twist
+/// undefined, is `q` itself.
+pub(crate) fn swing_part(q: DQuat) -> (f64, f64, f64) {
+    let s = (q.z * q.z + q.w * q.w).sqrt();
+    if s > 0.0 {
+        ((q.w * q.x - q.z * q.y) / s, (q.w * q.y + q.z * q.x) / s, s)
+    } else {
+        (q.x, q.y, 0.0)
+    }
+}
+
+/// The z-axis turned by the swing whose x, y and w parts these are: frame
+/// B's z-axis in frame A's.
+pub(super) fn swung_z(x: f64, y: f64, w: f64) -> DVec3 {
+    DVec3::new(2.0 * w * y, -2.0 * w * x, 1.0 - 2.0 * (x * x + y * y))
+}
+
+/// The most halvings [`closest_on_ellipse`] takes: more than enough to reach
+/// adjacent `f64`s on its bracket, where it stops first.
+const ELLIPSE_BISECTIONS: u32 = 200;
+
+/// The point of the ellipse `(x/a)² + (y/b)² = 1` closest to `(x, y)`, and
+/// whether `(x, y)` is inside it or on it: David Eberly's robust bisection,
+/// "Distance from a Point to an Ellipse, an Ellipsoid, or a
+/// Hyperellipsoid" (Geometric Tools, 2013), `DistancePointEllipse` and its
+/// `GetRoot`. Both radii are above zero: a spherical joint whose swing has
+/// one zero half-angle is refused (see `JointKind::invalid`).
+pub(super) fn closest_on_ellipse(a: f64, b: f64, x: f64, y: f64) -> ((f64, f64), bool) {
+    // Eberly's form: the first quadrant, the longer axis first.
+    let swap = a < b;
+    let (e0, e1, y0, y1) = if swap {
+        (b, a, y.abs(), x.abs())
+    } else {
+        (a, b, x.abs(), y.abs())
+    };
+    let z0 = y0 / e0;
+    let z1 = y1 / e1;
+    let g = z0 * z0 + z1 * z1 - 1.0;
+    let (x0, x1) = if y1 > 0.0 {
+        if y0 > 0.0 {
+            if g == 0.0 {
+                (y0, y1)
+            } else {
+                let r0 = (e0 / e1) * (e0 / e1);
+                let s = ellipse_root(r0, z0, z1, g);
+                (r0 * y0 / (s + r0), y1 / (s + 1.0))
+            }
+        } else {
+            (0.0, e1)
+        }
+    } else {
+        let numer0 = e0 * y0;
+        let denom0 = e0 * e0 - e1 * e1;
+        if numer0 < denom0 {
+            let xde0 = numer0 / denom0;
+            (e0 * xde0, e1 * (1.0 - xde0 * xde0).sqrt())
+        } else {
+            (e0, 0.0)
+        }
+    };
+    let (x0, x1) = if swap { (x1, x0) } else { (x0, x1) };
+    ((x0.copysign(x), x1.copysign(y)), g <= 0.0)
+}
+
+/// Eberly's `GetRoot`: the root `s` of `(r0 z0 / (s + r0))² + (z1 / (s +
+/// 1))² = 1` by bisection, `g` its left side less one at `s = 0`.
+fn ellipse_root(r0: f64, z0: f64, z1: f64, g: f64) -> f64 {
+    let n0 = r0 * z0;
+    let mut s0 = z1 - 1.0;
+    let mut s1 = if g < 0.0 {
+        0.0
+    } else {
+        (n0 * n0 + z1 * z1).sqrt() - 1.0
+    };
+    let mut s = 0.0;
+    for _ in 0..ELLIPSE_BISECTIONS {
+        s = 0.5 * (s0 + s1);
+        if s == s0 || s == s1 {
+            break;
+        }
+        let ratio0 = n0 / (s + r0);
+        let ratio1 = z1 / (s + 1.0);
+        let g = ratio0 * ratio0 + ratio1 * ratio1 - 1.0;
+        if g > 0.0 {
+            s0 = s;
+        } else if g < 0.0 {
+            s1 = s;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// How far the swing of `q` is inside an elliptical limit of radii `a` and
+/// `b` — the sines of its half-angles' halves, both above zero — as an angle,
+/// negative past it; and the axis in frame A, unit or zero, about which
+/// frame B turning takes that gap away.
+///
+/// Jolt's `SwingTwistConstraintPart` (`ESwingType::Cone`) bounds the swing's
+/// x and y parts by this ellipse and, past it, pushes back from the closest
+/// point on it. Here the gap is the angle between frame B's z-axis and the
+/// closest point's, inside the ellipse too — where Jolt does nothing — so the
+/// limit is speculative as every other one in the solver is, and never
+/// reads more room than the nearest boundary leaves. The axis is the one
+/// about which a turn grows the ellipse's function fastest, taken through
+/// frame B's z-axis, so it is square to that axis — a turn about it does not
+/// tip B — and counts the slide round an ellipse that a turn about frame A's
+/// z-axis makes, which a circle does not have; on a circle it is the
+/// swing's own axis, as Box3D's cone takes it. At zero swing there is no
+/// direction and no axis, as Box3D's cone has none.
+pub(super) fn ellipse_gap(a: f64, b: f64, q: DQuat) -> (f64, DVec3) {
+    let (x, y, w) = swing_part(q);
+    let ((cx, cy), inside) = closest_on_ellipse(a, b, x, y);
+    let cw = (1.0 - cx * cx - cy * cy).max(0.0).sqrt();
+    let now = swung_z(x, y, w);
+    let limit = swung_z(cx, cy, cw);
+    let angle = atan2(now.cross(limit).length(), now.dot(limit));
+    // The swing's x and y parts through frame B's z-axis `d` are
+    // `(−d.y, d.x) / √(2 (1 + d.z))`, so the ellipse's function is
+    // `g = (d.y²/a² + d.x²/b²) / (2 (1 + d.z))`, and a turn `ω` changes it at
+    // `ω · (d × ∇g)`: that axis, from the gradient scaled by `(1 + d.z)²` so
+    // it stays finite near a swing of π. Zero at zero swing.
+    let along = 1.0 + now.z;
+    let n = now.y * now.y / (a * a) + now.x * now.x / (b * b);
+    let gradient = DVec3::new(now.x * along / (b * b), now.y * along / (a * a), -0.5 * n);
+    (
+        if inside { angle } else { -angle },
+        now.cross(gradient).normalize_or_zero(),
+    )
+}
+
 /// `b3InvMulQuat`: `q1⁻¹ q2` for unit quaternions.
 pub(super) fn inv_mul(q1: DQuat, q2: DQuat) -> DQuat {
     q1.conjugate() * q2
@@ -213,6 +349,131 @@ mod tests {
             assert!((swing_angle(swing) - angle.abs()).abs() < 6.0e-5, "{angle}");
             assert!(twist_angle(swing).abs() < 1.0e-12, "{angle}");
         }
+    }
+
+    /// The swing part times the twist about z is the rotation it came from,
+    /// its z part is zero and its w not negative, for either sign of the
+    /// quaternion — and at a swing of π, where the twist is undefined, it is
+    /// the rotation itself.
+    #[test]
+    fn the_swing_part_and_the_twist_make_the_rotation() {
+        for (swing, twist) in [
+            (DVec3::new(0.3, -0.5, 0.0), 0.7),
+            (DVec3::new(-1.2, 0.4, 0.0), -2.9),
+            (DVec3::new(0.0, 3.1, 0.0), 1.0),
+        ] {
+            let q = rotation_from_scaled_axis(swing) * rotation_from_scaled_axis(DVec3::Z * twist);
+            for q in [q, -q] {
+                let (x, y, w) = swing_part(q);
+                assert!(w >= 0.0);
+                let s = DQuat::from_xyzw(x, y, 0.0, w);
+                let t = s.conjugate() * q;
+                assert!(t.x.abs() < 1.0e-12 && t.y.abs() < 1.0e-12, "{t:?}");
+                assert!((swung_z(x, y, w) - q * DVec3::Z).length() < 1.0e-12);
+            }
+        }
+        let half_turn =
+            rotation_from_scaled_axis(DVec3::new(0.6, 0.8, 0.0) * core::f64::consts::PI);
+        let (x, y, w) = swing_part(half_turn);
+        assert!(
+            (swung_z(x, y, w) + DVec3::Z).length() < 1.0e-12,
+            "{x} {y} {w}"
+        );
+    }
+
+    /// The closest point on an ellipse lies on it and is the nearest of a
+    /// dense sampling of it, inside and outside, in every quadrant and with
+    /// either axis the longer; and on an axis it is the known one.
+    #[test]
+    fn the_closest_point_on_an_ellipse_is_the_nearest() {
+        assert_eq!(closest_on_ellipse(2.0, 1.0, 3.0, 0.0), ((2.0, 0.0), false));
+        assert_eq!(
+            closest_on_ellipse(2.0, 1.0, 0.0, -3.0),
+            ((0.0, -1.0), false)
+        );
+        assert_eq!(closest_on_ellipse(2.0, 1.0, 0.0, 0.5), ((0.0, 1.0), true));
+        // Inside on the long axis, the nearest point is off it.
+        let ((x, y), inside) = closest_on_ellipse(2.0, 1.0, 0.5, 0.0);
+        assert!(inside && (x - 2.0 / 3.0).abs() < 1.0e-12, "{x}");
+        assert!((y - (8.0f64 / 9.0).sqrt()).abs() < 1.0e-12, "{y}");
+
+        let samples = 200_000;
+        for (a, b) in [(0.7, 0.3), (0.2, 0.9)] {
+            let ring: Vec<(f64, f64)> = (0..samples)
+                .map(|k| {
+                    let t = core::f64::consts::TAU * f64::from(k) / f64::from(samples);
+                    (a * crcbl_core::trig::cos(t), b * crcbl_core::trig::sin(t))
+                })
+                .collect();
+            for (x, y) in [
+                (0.1, 0.05),
+                (-0.5, 0.2),
+                (0.9, -0.8),
+                (-0.05, -0.6),
+                (0.3, 0.0),
+            ] {
+                let ((cx, cy), inside) = closest_on_ellipse(a, b, x, y);
+                let on = (cx / a) * (cx / a) + (cy / b) * (cy / b);
+                assert!((on - 1.0).abs() < 1.0e-12, "({x}, {y}) on {on}");
+                assert_eq!(inside, (x / a) * (x / a) + (y / b) * (y / b) <= 1.0);
+                let found = ((cx - x) * (cx - x) + (cy - y) * (cy - y)).sqrt();
+                let nearest = ring
+                    .iter()
+                    .map(|&(rx, ry)| ((rx - x) * (rx - x) + (ry - y) * (ry - y)).sqrt())
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    found <= nearest + 1.0e-12,
+                    "({x}, {y}): {found} > {nearest}"
+                );
+                assert!(nearest - found < 1.0e-9, "({x}, {y}): {found} < {nearest}");
+            }
+        }
+    }
+
+    /// An elliptical swing limit reads its gap as an angle to the nearest of
+    /// it: equal radii are the cone's gap; near either axis's end a swing
+    /// meets that axis's own half-angle, and inside on the long axis short of
+    /// its end, the nearer side; and a swing of nearly π past a limit with a
+    /// half-angle of π on the other axis reads finite.
+    #[test]
+    fn the_elliptical_gap_is_the_angle_to_the_limit() {
+        let radius = |angle: f64| crcbl_core::trig::sin(0.5 * angle);
+        for direction in [DVec3::X, DVec3::new(0.6, -0.8, 0.0), DVec3::Y] {
+            for angle in [0.2, 0.5, 0.9] {
+                let q = rotation_from_scaled_axis(direction * angle)
+                    * rotation_from_scaled_axis(DVec3::Z * 0.4);
+                let (gap, axis) = ellipse_gap(radius(0.5), radius(0.5), q);
+                assert!((gap - (0.5 - swing_angle(q))).abs() < 1.0e-4, "{gap}");
+                // About the swing's own axis, which closes the gap on either
+                // side of the limit, as the cone's does.
+                assert!((axis - direction).length() < 1.0e-9, "{axis:?}");
+            }
+        }
+        let (x, y) = (0.3, 1.1);
+        let gap = |q: DQuat| ellipse_gap(radius(x), radius(y), q).0;
+        assert!((gap(rotation_from_scaled_axis(DVec3::X * 0.1)) - (x - 0.1)).abs() < 1.0e-4);
+        assert!((gap(rotation_from_scaled_axis(DVec3::Y * 1.05)) - (y - 1.05)).abs() < 1.0e-4);
+        assert!((gap(rotation_from_scaled_axis(-DVec3::Y * 1.3)) - (y - 1.3)).abs() < 1.0e-4);
+        // Halfway out along the long axis, the short side is nearer than its
+        // end.
+        let halfway = gap(rotation_from_scaled_axis(DVec3::Y * 0.5));
+        assert!(halfway > 0.0 && halfway < y - 0.5, "{halfway}");
+        let near_half_turn = rotation_from_scaled_axis(DVec3::new(0.0, 1.0, 0.0) * 3.1);
+        let (wide, axis) = ellipse_gap(radius(core::f64::consts::PI), radius(0.4), near_half_turn);
+        assert!(
+            wide.is_finite() && wide < 0.0 && axis.is_finite(),
+            "{wide} {axis:?}"
+        );
+        let (open, _) = ellipse_gap(
+            radius(core::f64::consts::PI),
+            radius(0.4),
+            rotation_from_scaled_axis(DVec3::X * 3.1),
+        );
+        assert!(open > 0.0 && open < 0.1, "{open}");
+        assert_eq!(
+            ellipse_gap(radius(x), radius(y), DQuat::IDENTITY).1,
+            DVec3::ZERO
+        );
     }
 
     /// The first-order rotation error is the small rotation that takes a

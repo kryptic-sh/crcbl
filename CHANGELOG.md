@@ -13,6 +13,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`SphericalJoint`'s swing limit is elliptical.** `enable_cone_limit` and
+  `cone_angle` are now `enable_swing_limit`, `swing_x_angle` and
+  `swing_y_angle`; `with_cone(a)` still sets both half-angles to `a` and steps
+  exactly as before. `SphericalJoint` gains the public fields
+  `enable_soft_swing`, `soft_swing_x_angle`, `soft_swing_y_angle`, `soft_swing`,
+  `enable_soft_twist`, `soft_lower_twist_angle`, `soft_upper_twist_angle` and
+  `soft_twist`, and `RevoluteJoint` gains `enable_soft_limit`,
+  `soft_lower_angle`, `soft_upper_angle` and `soft_limit`; code building either
+  struct field by field must set them, and the builders do. `add_joint` and
+  `set_joint` refuse a swing or soft swing with exactly one zero half-angle, and
+  the out-of-range swing refusal reads "swing lies in [0, π]" where it read
+  "cone lies".
+
+### Added
+
+- **Elliptical swing limits:** `SphericalJoint::with_swing(x, y)` gives the
+  swing its own half-angle about frame A's x and y axes, Jolt's
+  `SwingTwistConstraint` form, so a shoulder can swing further one way than
+  another.
+- **Soft zones before a joint's hard stops:** `RevoluteJoint::with_soft_limits`,
+  `SphericalJoint::with_soft_swing` and `SphericalJoint::with_soft_twist`.
+  Inside the soft bounds the joint is free; past one it meets resistance that
+  grows with the square of its depth, up to the zone's `Spring` stiffness at the
+  hard limit, which stays rigid. This models muscle resisting a joint as it
+  nears the end of its range. Off by default, and joints without it hash as
+  before.
+
 ## [0.16.0] - 2026-11-01
 
 ### Changed

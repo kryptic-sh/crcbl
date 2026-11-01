@@ -11,7 +11,7 @@ use crcbl_ecs::{Entity, SystemTrait as _};
 use crcbl_phys::{
     ColliderComponent, ContactSettings, DistanceJoint, GravityForce, Joint, JointError, JointKind,
     MassProperties, PhysicsSystem, PrismaticJoint, RevoluteJoint, RigidBody, SphericalJoint,
-    SurfaceMaterial, Transform, WeldJoint, rotation_from_scaled_axis,
+    Spring, SurfaceMaterial, Transform, WeldJoint, rotation_from_scaled_axis,
 };
 use glam::{DQuat, DVec3};
 
@@ -656,6 +656,662 @@ fn a_ball_joint_twist_limit_stops_a_twist() {
 }
 
 // ---------------------------------------------------------------------------
+// Anatomical limits: an elliptical swing, and soft zones before the stops
+// ---------------------------------------------------------------------------
+
+/// Frame B's swing from frame A's in `q`, as the angles about frame A's x
+/// and y of its quaternion's x and y parts — the parts an elliptical swing
+/// limit bounds — and its twist about its own z-axis.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the platform's asin and atan2 read the angles the limits are measured against"
+)]
+fn swing_and_twist(q: DQuat) -> (f64, f64, f64) {
+    let s = (q.z * q.z + q.w * q.w).sqrt();
+    let x = (q.w * q.x - q.z * q.y) / s;
+    let y = (q.w * q.y + q.z * q.x) / s;
+    let twist = if q.w < 0.0 {
+        2.0 * (-q.z).atan2(-q.w)
+    } else {
+        2.0 * q.z.atan2(q.w)
+    };
+    (2.0 * x.asin(), 2.0 * y.asin(), twist)
+}
+
+/// A soft zone's strength, as the tests below set it.
+fn zone(hertz: f64, damping_ratio: f64) -> Spring {
+    Spring {
+        hertz,
+        damping_ratio,
+    }
+}
+
+/// The half-extents and mass of the block the loaded tests turn, centred on
+/// its joint so the joint's rows alone hold its turn.
+const LOADED_HALF: DVec3 = DVec3::new(0.3, 0.2, 0.1);
+const LOADED_MASS: f64 = 2.0;
+
+/// A weightless block centred on a joint of `kind` to a fixed anchor, both
+/// frames at the block's centre, standing at `start` and turning at `spin`,
+/// with `torque` applied every tick for `ticks`: the system, the block and
+/// the joint.
+fn loaded(
+    kind: JointKind,
+    start: DQuat,
+    spin: DVec3,
+    torque: DVec3,
+    ticks: u32,
+) -> (PhysicsSystem, Entity, crcbl_phys::JointId) {
+    let mut phys = weightless();
+    let base = anchor(&mut phys, 0, DVec3::ZERO);
+    let block = box_(&mut phys, 1, DVec3::ZERO, start, LOADED_HALF, LOADED_MASS);
+    phys.body_mut(block).expect("the block").angular_velocity = spin;
+    let joint = phys
+        .add_joint(Joint::new(
+            base,
+            block,
+            Transform::IDENTITY,
+            Transform::IDENTITY,
+            kind,
+        ))
+        .expect("a valid joint");
+    for _ in 0..ticks {
+        phys.apply_torque(block, torque);
+        phys.step(DT);
+    }
+    (phys, block, joint)
+}
+
+/// **An elliptical swing holds each axis to its own half-angle.** A
+/// weightless rod on a ball joint whose swing is 0.3 rad about x and 0.9 rad
+/// about y, with a little friction, pushed by a torque square to it that
+/// sweeps round the circle twice: about x it stops at 0.3 rad, about y it
+/// goes on to 0.9, and between them it never leaves the ellipse.
+///
+/// Measured on 2026-11-01: it reached 0.29986 rad about x and 0.90135
+/// about y, and left the ellipse by 1.8 mrad at worst, sliding round its
+/// tight end — a circular cone of 0.3, 0.6 or 0.9 rad in the same sweep
+/// leaves by 0.6 to 3.7 mrad. With the gap inside measured straight ahead
+/// rather than to the nearest of the ellipse, it left by 3.2 mrad.
+#[test]
+fn an_elliptical_swing_holds_each_axis_to_its_own_half_angle() {
+    const X: f64 = 0.3;
+    const Y: f64 = 0.9;
+    let mut phys = weightless();
+    let base = anchor(&mut phys, 0, DVec3::ZERO);
+    let rod = box_(
+        &mut phys,
+        1,
+        DVec3::new(0.0, 0.0, 0.5),
+        DQuat::IDENTITY,
+        DVec3::new(0.05, 0.05, 0.5),
+        1.0,
+    );
+    let socket = phys
+        .add_joint(joint_at(
+            &phys,
+            base,
+            rod,
+            Transform::IDENTITY,
+            JointKind::Spherical(
+                SphericalJoint::ball()
+                    .with_swing(X, Y)
+                    .with_motor(DVec3::ZERO, 0.2),
+            ),
+        ))
+        .expect("a valid ball joint");
+    let (mut most_x, mut most_y, mut past): (f64, f64, f64) = (0.0, 0.0, 0.0);
+    for tick in 0..480 {
+        let phase = core::f64::consts::TAU * f64::from(tick) / 240.0;
+        let push = 3.0
+            * DVec3::new(
+                crcbl_core::trig::cos(phase),
+                crcbl_core::trig::sin(phase),
+                0.0,
+            );
+        // Square to the rod: a swing, not a twist of its thin axis.
+        let along = rotation(&phys, rod) * DVec3::Z;
+        phys.apply_torque(rod, push - push.dot(along) * along);
+        phys.step(DT);
+        let (x, y, _) = swing_and_twist(rotation(&phys, rod));
+        most_x = most_x.max(x.abs());
+        most_y = most_y.max(y.abs());
+        past = past.max(phys.joint_drift(socket).expect("the socket").angular);
+    }
+    assert!(
+        (most_x - X).abs() < 5.0e-3,
+        "swung {most_x} rad about x, not {X}"
+    );
+    assert!(
+        (most_y - Y).abs() < 5.0e-3,
+        "swung {most_y} rad about y, not {Y}"
+    );
+    assert!(past < 5.0e-3, "past the ellipse by {past} rad");
+}
+
+/// The hard and soft bounds the soft-zone tests set, in radians, and the
+/// zone's strength at the hard bound.
+const HARD: f64 = 1.0;
+const SOFT: f64 = 0.5;
+const ZONE_HERTZ: f64 = 4.0;
+
+/// The depth past [`SOFT`] at which a zone of [`ZONE_HERTZ`] over the
+/// effective inertia `inertia` holds `load`: stiffness `I ω² x` at depth
+/// fraction `x = d / (HARD − SOFT)`, so `load = I ω² d² / (HARD − SOFT)`.
+fn zone_depth(load: f64, inertia: f64) -> f64 {
+    let omega = core::f64::consts::TAU * ZONE_HERTZ;
+    (load * (HARD - SOFT) / (inertia * omega * omega)).sqrt()
+}
+
+/// The zone's ramp, checked by its shape alone: torque `∝ depth²`, so the
+/// depth goes as the root of the load — loads in the ratio 1 : 4 : 9 hold
+/// it at depths 1 : 2 : 3, where a spring of one stiffness gives 1 : 4 : 9.
+fn assert_depth_goes_as_the_root_of_the_load(name: &str, loads: &[f64], depths: &[f64]) {
+    for (load, depth) in loads.iter().zip(depths) {
+        let expected = (load / loads[0]).sqrt();
+        let ratio = depth / depths[0];
+        assert!(
+            (ratio / expected - 1.0).abs() < 1.0e-3,
+            "{name}: {load} held it {ratio} times as deep as {}, not {expected}",
+            loads[0]
+        );
+    }
+}
+
+/// **A soft zone resists more the deeper it is pushed, and never past the
+/// hard stop.** A weightless block on a hinge with hard limits of ±1 rad and
+/// soft ones of ±0.5, its zone 4 Hz at the stop, held at rest by loads of
+/// 1, 4 and 9 N·m in turn: the joint carries each load, the depths go
+/// 1 : 2 : 3 as a stiffness rising with depth makes them, and each is the
+/// depth the ramp predicts. A load far past what the zone holds stops at the
+/// hard limit.
+///
+/// Measured on 2026-11-01: 1, 4 and 9 N·m held it 0.09555, 0.19113 and
+/// 0.28671 rad past the soft limit, the ramp's depth to 2e-4 of itself, and
+/// the joint carried each load to 1e-15 of it; 60 N·m, twice what the zone
+/// holds at the stop, rested 2.6 mrad past the hard limit, the hard limit's
+/// own softness.
+#[test]
+fn a_soft_hinge_limit_resists_more_the_deeper_it_goes() {
+    let inertia = MassProperties::cuboid(LOADED_MASS, LOADED_HALF, DVec3::ZERO)
+        .inertia
+        .z_axis
+        .z;
+    let hinge = RevoluteJoint::hinge()
+        .with_limits(-HARD, HARD)
+        .with_soft_limits(-SOFT, SOFT, zone(ZONE_HERTZ, 1.0));
+    let loads = [1.0, 4.0, 9.0];
+    let mut depths = Vec::new();
+    for load in loads {
+        let (phys, block, joint) = loaded(
+            JointKind::Revolute(hinge),
+            DQuat::IDENTITY,
+            DVec3::ZERO,
+            DVec3::Z * load,
+            300,
+        );
+        let (_, _, angle) = swing_and_twist(rotation(&phys, block));
+        let (_, carried) = phys.joint_reaction(joint).expect("the hinge");
+        assert!(
+            (carried - load).abs() < 1.0e-3 * load,
+            "{load} N·m: carried {carried}"
+        );
+        depths.push(angle - SOFT);
+    }
+    assert_depth_goes_as_the_root_of_the_load("hinge", &loads, &depths);
+    for (load, depth) in loads.into_iter().zip(depths) {
+        let predicted = zone_depth(load, inertia);
+        assert!(
+            (depth / predicted - 1.0).abs() < 1.0e-3,
+            "{load} N·m: {depth} rad past, not {predicted}"
+        );
+    }
+
+    let (phys, block, joint) = loaded(
+        JointKind::Revolute(hinge),
+        DQuat::IDENTITY,
+        DVec3::ZERO,
+        DVec3::Z * 60.0,
+        300,
+    );
+    let (_, _, angle) = swing_and_twist(rotation(&phys, block));
+    let past = phys.joint_drift(joint).expect("the hinge").angular;
+    assert!(
+        past < 5.0e-3 && angle < HARD + 5.0e-3,
+        "at {angle} rad, {past} past the stop"
+    );
+}
+
+/// **A ball joint's soft swing and soft twist resist more the deeper they
+/// are pushed.** The loaded block on a ball joint, first with a swing of
+/// ±1 rad about x and a soft one of ±0.5 pushed about x, then with a twist
+/// of ±1 rad and a soft one of ±0.5 pushed about z, by loads in the ratio
+/// 1 : 4 : 9: the depths go 1 : 2 : 3, and each is the ramp's.
+///
+/// Measured on 2026-11-01: the depths were the ramp's to 3e-4 of
+/// themselves, and neither came near its hard limit.
+#[test]
+fn a_ball_joints_soft_swing_and_twist_resist_more_the_deeper_they_go() {
+    let inertia = MassProperties::cuboid(LOADED_MASS, LOADED_HALF, DVec3::ZERO).inertia;
+    let swing = SphericalJoint::ball()
+        .with_swing(HARD, 1.4)
+        .with_soft_swing(SOFT, 0.9, zone(ZONE_HERTZ, 1.0));
+    let twist = SphericalJoint::ball()
+        .with_cone(1.4)
+        .with_twist(-HARD, HARD)
+        .with_soft_twist(-SOFT, SOFT, zone(ZONE_HERTZ, 1.0));
+    for (name, joint, axis, inertia) in [
+        ("swing", swing, DVec3::X, inertia.x_axis.x),
+        ("twist", twist, DVec3::Z, inertia.z_axis.z),
+    ] {
+        let loads = [0.5, 2.0, 4.5];
+        let mut depths = Vec::new();
+        for load in loads {
+            let (phys, block, id) = loaded(
+                JointKind::Spherical(joint),
+                DQuat::IDENTITY,
+                DVec3::ZERO,
+                axis * load,
+                300,
+            );
+            let (x, _, t) = swing_and_twist(rotation(&phys, block));
+            let past = phys.joint_drift(id).expect("the joint").angular;
+            assert!(past == 0.0, "{name} {load}: {past} rad past the hard limit");
+            depths.push(if axis == DVec3::X { x } else { t } - SOFT);
+        }
+        assert_depth_goes_as_the_root_of_the_load(name, &loads, &depths);
+        for (load, depth) in loads.into_iter().zip(depths) {
+            let predicted = zone_depth(load, inertia);
+            assert!(
+                (depth / predicted - 1.0).abs() < 1.0e-3,
+                "{name} {load}: {depth} rad past, not {predicted}"
+            );
+        }
+    }
+}
+
+/// **Inside its soft limits a joint is free.** The loaded block turning
+/// slowly from its neutral pose inside soft limits — a hinge, then a ball
+/// joint with a soft elliptical swing and a soft twist — turns as it would
+/// with no limits at all, a hinge's spin held and a ball's tumbling as a
+/// free block's does, and the joint carries no torque; set down at rest
+/// inside them, it stays where it was put. Nothing pulls it towards
+/// neutral.
+///
+/// Measured on 2026-11-01: both turned exactly as with no limits, to the
+/// bit, and carried exactly nothing.
+#[test]
+fn inside_its_soft_limits_a_joint_is_free() {
+    let hinge = JointKind::Revolute(
+        RevoluteJoint::hinge()
+            .with_limits(-HARD, HARD)
+            .with_soft_limits(-SOFT, SOFT, zone(ZONE_HERTZ, 1.0)),
+    );
+    let ball = JointKind::Spherical(
+        SphericalJoint::ball()
+            .with_swing(0.8, 1.2)
+            .with_soft_swing(0.5, 0.7, zone(ZONE_HERTZ, 1.0))
+            .with_twist(-HARD, HARD)
+            .with_soft_twist(-SOFT, SOFT, zone(ZONE_HERTZ, 1.0)),
+    );
+    for (name, kind, free, spin) in [
+        (
+            "hinge",
+            hinge,
+            JointKind::Revolute(RevoluteJoint::hinge()),
+            DVec3::Z * 0.2,
+        ),
+        (
+            "ball",
+            ball,
+            JointKind::Spherical(SphericalJoint::ball()),
+            DVec3::new(0.1, 0.15, 0.2),
+        ),
+    ] {
+        let (phys, block, joint) = loaded(kind, DQuat::IDENTITY, spin, DVec3::ZERO, 90);
+        let (unlimited, free_block, _) = loaded(free, DQuat::IDENTITY, spin, DVec3::ZERO, 90);
+        let w = body(&phys, block).angular_velocity;
+        let free_w = body(&unlimited, free_block).angular_velocity;
+        let apart = (rotation(&phys, block) * rotation(&unlimited, free_block).inverse())
+            .xyz()
+            .length();
+        let (_, carried) = phys.joint_reaction(joint).expect("the joint");
+        assert!(
+            (w - free_w).length() < 1.0e-12 && apart < 1.0e-12,
+            "{name}: spinning {w:?}, not {free_w:?}, {apart} apart"
+        );
+        assert!(
+            name != "hinge" || (w - spin).length() < 1.0e-12,
+            "{name}: spinning {w:?}, not {spin:?}"
+        );
+        assert!(carried == 0.0, "{name}: carried {carried} N·m");
+
+        let put = rotation_from_scaled_axis(spin.normalize() * 0.4);
+        let (phys, block, _) = loaded(kind, put, DVec3::ZERO, DVec3::ZERO, 120);
+        let moved = (rotation(&phys, block) * put.inverse()).xyz().length();
+        assert!(
+            moved < 1.0e-12,
+            "{name}: moved {moved} from where it was put"
+        );
+    }
+}
+
+/// The kinetic energy of `bodies` plus their weight's potential.
+fn energy(phys: &PhysicsSystem, bodies: &[Entity]) -> f64 {
+    bodies
+        .iter()
+        .map(|&e| {
+            let b = body(phys, e);
+            let t = phys.transform(e).expect("a body");
+            b.kinetic_energy(t.rotation) + G * t.position.y / b.inverse_mass
+        })
+        .sum()
+}
+
+/// **Soft zones and an elliptical swing never gain energy.** Each run
+/// undamped in its zone, so only the solver could add energy: a bar on a
+/// hinge falling from level through its soft limit into its hard stop; a
+/// block hung on a ball joint with an elliptical swing and a soft one,
+/// knocked sideways; and a weightless rod spun into its soft and hard
+/// twist. None ever rises above where it started.
+///
+/// Measured on 2026-11-01 over six seconds: the hinge never came within
+/// 5 mJ of its start and the swing within 2.5 J, and the twist rose 3e-16 J
+/// on its 0.03 J — the energy's own rounding, on its free spin.
+#[test]
+fn soft_zones_and_an_elliptical_swing_never_gain_energy() {
+    let mut runs: Vec<(&str, PhysicsSystem, Entity)> = Vec::new();
+
+    let mut phys = system();
+    let post = anchor(&mut phys, 0, DVec3::new(0.0, 3.0, 0.0));
+    let bar = box_(
+        &mut phys,
+        1,
+        DVec3::new(0.5, 3.0, 0.0),
+        DQuat::IDENTITY,
+        DVec3::new(0.5, 0.05, 0.05),
+        2.0,
+    );
+    let hinge = joint_at(
+        &phys,
+        post,
+        bar,
+        Transform::from_position(DVec3::new(0.0, 3.0, 0.0)),
+        JointKind::Revolute(
+            RevoluteJoint::hinge()
+                .with_limits(-1.2, 1.2)
+                .with_soft_limits(-0.7, 0.7, zone(8.0, 0.0)),
+        ),
+    );
+    phys.add_joint(hinge).expect("a valid hinge");
+    runs.push(("hinge", phys, bar));
+
+    let mut phys = system();
+    let ceiling = anchor(&mut phys, 0, DVec3::new(0.0, 3.0, 0.0));
+    let block = box_(
+        &mut phys,
+        1,
+        DVec3::new(0.0, 2.5, 0.0),
+        DQuat::IDENTITY,
+        DVec3::new(0.05, 0.5, 0.05),
+        2.0,
+    );
+    let down = rotation_from_scaled_axis(DVec3::X * core::f64::consts::FRAC_PI_2);
+    let socket = joint_at(
+        &phys,
+        ceiling,
+        block,
+        Transform::new(DVec3::new(0.0, 3.0, 0.0), down),
+        JointKind::Spherical(SphericalJoint::ball().with_swing(0.5, 1.0).with_soft_swing(
+            0.3,
+            0.6,
+            zone(8.0, 0.0),
+        )),
+    );
+    phys.add_joint(socket).expect("a valid ball joint");
+    phys.body_mut(block).expect("the block").velocity = DVec3::new(3.0, 0.0, 1.5);
+    runs.push(("swing", phys, block));
+
+    let mut phys = weightless();
+    let base = anchor(&mut phys, 0, DVec3::ZERO);
+    let rod = box_(
+        &mut phys,
+        1,
+        DVec3::new(0.0, 0.0, 0.5),
+        DQuat::IDENTITY,
+        DVec3::new(0.05, 0.05, 0.5),
+        1.0,
+    );
+    let twist = joint_at(
+        &phys,
+        base,
+        rod,
+        Transform::IDENTITY,
+        JointKind::Spherical(
+            SphericalJoint::ball()
+                .with_cone(0.5)
+                .with_twist(-0.6, 0.6)
+                .with_soft_twist(-0.3, 0.3, zone(8.0, 0.0)),
+        ),
+    );
+    phys.add_joint(twist).expect("a valid ball joint");
+    phys.body_mut(rod).expect("the rod").angular_velocity = DVec3::new(0.0, 0.0, 6.0);
+    runs.push(("twist", phys, rod));
+
+    for (name, mut phys, e) in runs {
+        let start = energy(&phys, &[e]);
+        let mut highest = f64::NEG_INFINITY;
+        for _ in 0..360 {
+            phys.step(DT);
+            highest = highest.max(energy(&phys, &[e]));
+        }
+        // The energy's own rounding, on the free spin before any zone.
+        assert!(
+            highest <= start * (1.0 + 1.0e-12),
+            "{name}: rose {} J over its start",
+            highest - start
+        );
+    }
+}
+
+/// A run of [`a_soft_zone_alone_never_gains_energy`]: its name, its system,
+/// the body it weighs, and how far into its zone that body is.
+type ZoneRun = (
+    &'static str,
+    PhysicsSystem,
+    Entity,
+    Box<dyn Fn(&PhysicsSystem) -> f64>,
+);
+
+/// **A soft zone alone never gains energy**, so the hard stop's losses
+/// cannot hide a gain in it: undamped zones strong enough that the joint
+/// never reaches its stop — a bar on a hinge falling from level into its
+/// soft limit, and a block hung on a ball joint with an elliptical swing,
+/// knocked into its soft ellipse. Each goes into its zone, never reaches its
+/// hard limit, and never rises above where it started.
+///
+/// Measured on 2026-11-01 over six seconds: the hinge went 0.46 of the way
+/// to its stop and never came within 5 mJ of its start, the swing 0.49 and
+/// within 1.1 J.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the platform's sine reads the swing against the ellipse it is held to"
+)]
+fn a_soft_zone_alone_never_gains_energy() {
+    const HINGE: (f64, f64) = (0.7, 1.4);
+    const SWING: [(f64, f64); 2] = [(0.3, 0.5), (1.2, 1.5)];
+
+    let mut phys = system();
+    let post = anchor(&mut phys, 0, DVec3::new(0.0, 3.0, 0.0));
+    let bar = box_(
+        &mut phys,
+        1,
+        DVec3::new(0.5, 3.0, 0.0),
+        DQuat::IDENTITY,
+        DVec3::new(0.5, 0.05, 0.05),
+        2.0,
+    );
+    let hinge = joint_at(
+        &phys,
+        post,
+        bar,
+        Transform::from_position(DVec3::new(0.0, 3.0, 0.0)),
+        JointKind::Revolute(
+            RevoluteJoint::hinge()
+                .with_limits(-HINGE.1, HINGE.1)
+                .with_soft_limits(-HINGE.0, HINGE.0, zone(8.0, 0.0)),
+        ),
+    );
+    phys.add_joint(hinge).expect("a valid hinge");
+    // How deep into the zone, as a fraction of the way to the stop.
+    let into_hinge = move |phys: &PhysicsSystem| {
+        let (_, _, angle) = swing_and_twist(rotation(phys, bar));
+        (angle.abs() - HINGE.0) / (HINGE.1 - HINGE.0)
+    };
+    let mut runs: Vec<ZoneRun> = vec![("hinge", phys, bar, Box::new(into_hinge))];
+
+    let mut phys = system();
+    let ceiling = anchor(&mut phys, 0, DVec3::new(0.0, 3.0, 0.0));
+    let block = box_(
+        &mut phys,
+        1,
+        DVec3::new(0.0, 2.5, 0.0),
+        DQuat::IDENTITY,
+        DVec3::new(0.05, 0.5, 0.05),
+        2.0,
+    );
+    let down = rotation_from_scaled_axis(DVec3::X * core::f64::consts::FRAC_PI_2);
+    let socket = joint_at(
+        &phys,
+        ceiling,
+        block,
+        Transform::new(DVec3::new(0.0, 3.0, 0.0), down),
+        JointKind::Spherical(
+            SphericalJoint::ball()
+                .with_swing(SWING[1].0, SWING[1].1)
+                .with_soft_swing(SWING[0].0, SWING[0].1, zone(8.0, 0.0)),
+        ),
+    );
+    phys.add_joint(socket).expect("a valid ball joint");
+    phys.body_mut(block).expect("the block").velocity = DVec3::new(2.0, 0.0, 1.0);
+    // The ellipse's function in the swing's own parts, at each bound: one
+    // on the bound, and the depth fraction from the soft bound to the hard.
+    let into_swing = move |phys: &PhysicsSystem| {
+        let (x, y, _) = swing_and_twist(down.inverse() * rotation(phys, block) * down);
+        let at = |(hx, hy): (f64, f64)| {
+            let (px, py) = (
+                (0.5 * x).sin() / (0.5 * hx).sin(),
+                (0.5 * y).sin() / (0.5 * hy).sin(),
+            );
+            (px * px + py * py).sqrt()
+        };
+        (at(SWING[0]) - 1.0) / (at(SWING[0]) - at(SWING[1]))
+    };
+    runs.push(("swing", phys, block, Box::new(into_swing)));
+
+    for (name, mut phys, e, into) in runs {
+        let start = energy(&phys, &[e]);
+        let (mut highest, mut deepest) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for _ in 0..360 {
+            phys.step(DT);
+            highest = highest.max(energy(&phys, &[e]));
+            deepest = deepest.max(into(&phys));
+        }
+        assert!(
+            deepest > 0.1,
+            "{name}: only {deepest} of the way into its zone"
+        );
+        assert!(deepest < 0.9, "{name}: {deepest} of the way to its stop");
+        assert!(
+            highest <= start,
+            "{name}: rose {} J over its start",
+            highest - start
+        );
+    }
+}
+
+/// **A joint with everything on still sleeps.** On a floorless system with
+/// sleep on: a bar on a hinge with its spring pulling to a target, its soft
+/// zones and its hard limits, let go from level; and a block on a ball
+/// joint with an elliptical swing, a soft swing, a twist, a soft twist and
+/// a little friction, its neutral tipped from hanging, knocked sideways.
+/// Both come to rest in a soft zone, held there by gravity, and sleep.
+///
+/// Measured on 2026-11-01: the bar rested 0.068 rad into its zone and slept
+/// at tick 83, the block 0.053 rad into its and slept at tick 313. With the
+/// zones' damping taken 1.2 below what they ask, the block never slept.
+#[test]
+fn a_joint_with_everything_on_still_sleeps() {
+    let mut phys = system_with(ContactSettings::DEFAULT);
+    let post = anchor(&mut phys, 0, DVec3::new(0.0, 3.0, 0.0));
+    let bar = box_(
+        &mut phys,
+        1,
+        DVec3::new(0.5, 3.0, 0.0),
+        DQuat::IDENTITY,
+        DVec3::new(0.5, 0.05, 0.05),
+        2.0,
+    );
+    let hinge = joint_at(
+        &phys,
+        post,
+        bar,
+        Transform::from_position(DVec3::new(0.0, 3.0, 0.0)),
+        JointKind::Revolute(
+            RevoluteJoint::hinge()
+                .with_spring(-0.3, zone(1.0, 0.5))
+                .with_limits(-1.2, 1.2)
+                .with_soft_limits(-0.7, 0.7, zone(8.0, 1.0)),
+        ),
+    );
+    phys.add_joint(hinge).expect("a valid hinge");
+
+    let ceiling = anchor(&mut phys, 2, DVec3::new(5.0, 3.0, 0.0));
+    let block = box_(
+        &mut phys,
+        3,
+        DVec3::new(5.0, 2.5, 0.0),
+        DQuat::IDENTITY,
+        DVec3::new(0.05, 0.5, 0.05),
+        2.0,
+    );
+    // Frame B's z-axis down the block; frame A's tipped 0.6 rad from it, so
+    // hanging is 0.6 rad of swing from neutral and the block rests in its
+    // soft swing.
+    let down = rotation_from_scaled_axis(DVec3::X * core::f64::consts::FRAC_PI_2);
+    let tipped = rotation_from_scaled_axis(DVec3::X * (core::f64::consts::FRAC_PI_2 + 0.6));
+    let socket = Joint::new(
+        ceiling,
+        block,
+        Transform::new(DVec3::ZERO, tipped),
+        Transform::new(DVec3::new(0.0, 0.5, 0.0), down),
+        JointKind::Spherical(
+            SphericalJoint::ball()
+                .with_swing(0.8, 1.0)
+                .with_soft_swing(0.3, 0.6, zone(8.0, 1.0))
+                .with_twist(-0.6, 0.6)
+                .with_soft_twist(-0.3, 0.3, zone(8.0, 1.0))
+                .with_motor(DVec3::ZERO, 0.5),
+        ),
+    );
+    phys.add_joint(socket).expect("a valid ball joint");
+    phys.body_mut(block).expect("the block").velocity = DVec3::new(3.0, 0.0, 1.5);
+
+    let mut asleep = [None, None];
+    for tick in 1..=900 {
+        phys.step(DT);
+        for (k, e) in [bar, block].into_iter().enumerate() {
+            if asleep[k].is_none() && phys.is_sleeping(e) {
+                asleep[k] = Some(tick);
+            }
+        }
+    }
+    assert!(asleep[0].is_some(), "the hinged bar never slept");
+    assert!(asleep[1].is_some(), "the ball-jointed block never slept");
+}
+
+// ---------------------------------------------------------------------------
 // Breaking
 // ---------------------------------------------------------------------------
 
@@ -1257,6 +1913,124 @@ fn a_joint_needs_two_registered_bodies() {
     ));
 }
 
+/// **A swing or soft zone out of range is refused**, each by the rule it
+/// breaks, and the same settings in range are accepted: a soft limit
+/// outside its hard one, backwards, or without the hard limit on; a swing
+/// half-angle below zero or past π, or zero about one axis only; a soft
+/// swing wider than its swing; a zone whose strength is negative or not
+/// finite.
+#[test]
+fn a_swing_or_soft_zone_out_of_range_is_refused() {
+    let firm = zone(4.0, 1.0);
+    let hinge = RevoluteJoint::hinge().with_limits(-1.0, 1.0);
+    let ball = SphericalJoint::ball()
+        .with_swing(0.8, 1.2)
+        .with_twist(-1.0, 1.0);
+    let cases = [
+        (
+            JointKind::Revolute(hinge.with_soft_limits(-0.5, 0.5, firm)),
+            None,
+        ),
+        (
+            JointKind::Spherical(ball.with_soft_swing(0.4, 1.2, firm)),
+            None,
+        ),
+        (
+            JointKind::Spherical(ball.with_soft_twist(-1.0, 0.2, firm)),
+            None,
+        ),
+        (
+            JointKind::Spherical(SphericalJoint::ball().with_swing(0.1, core::f64::consts::PI)),
+            None,
+        ),
+        (
+            JointKind::Spherical(SphericalJoint::ball().with_swing(0.0, 0.0)),
+            None,
+        ),
+        (
+            JointKind::Spherical(SphericalJoint::ball().with_swing(0.0, core::f64::consts::PI)),
+            Some("both zero or neither"),
+        ),
+        (
+            JointKind::Spherical(ball.with_soft_swing(0.4, 0.0, firm)),
+            Some("both zero or neither"),
+        ),
+        (
+            JointKind::Revolute(hinge.with_soft_limits(-1.5, 0.5, firm)),
+            Some("inside its hard"),
+        ),
+        (
+            JointKind::Revolute(hinge.with_soft_limits(0.5, -0.5, firm)),
+            Some("inside its hard"),
+        ),
+        (
+            JointKind::Revolute(RevoluteJoint::hinge().with_soft_limits(-0.5, 0.5, firm)),
+            Some("need its hard"),
+        ),
+        (
+            JointKind::Revolute(hinge.with_soft_limits(-0.5, 0.5, zone(-1.0, 1.0))),
+            Some("soft zone"),
+        ),
+        (
+            JointKind::Revolute(hinge.with_soft_limits(-0.5, 0.5, zone(f64::INFINITY, 1.0))),
+            Some("soft zone"),
+        ),
+        (
+            JointKind::Spherical(SphericalJoint::ball().with_swing(-0.1, 0.5)),
+            Some("swing lies"),
+        ),
+        (
+            JointKind::Spherical(SphericalJoint::ball().with_swing(0.5, 3.2)),
+            Some("swing lies"),
+        ),
+        (
+            JointKind::Spherical(ball.with_soft_swing(0.9, 0.5, firm)),
+            Some("soft swing"),
+        ),
+        (
+            JointKind::Spherical(SphericalJoint::ball().with_soft_swing(0.1, 0.1, firm)),
+            Some("soft swing"),
+        ),
+        (
+            JointKind::Spherical(ball.with_soft_twist(0.3, -0.3, firm)),
+            Some("soft twist"),
+        ),
+        (
+            JointKind::Spherical(ball.with_soft_twist(-1.1, 0.3, firm)),
+            Some("soft twist"),
+        ),
+        (
+            JointKind::Spherical(ball.with_soft_twist(-0.3, 0.3, zone(1.0, f64::NAN))),
+            Some("soft zones"),
+        ),
+    ];
+    let mut phys = weightless();
+    let a = anchor(&mut phys, 0, DVec3::ZERO);
+    let b = box_(
+        &mut phys,
+        1,
+        DVec3::ZERO,
+        DQuat::IDENTITY,
+        DVec3::splat(0.5),
+        1.0,
+    );
+    for (kind, refusal) in cases {
+        let joint = Joint::new(a, b, Transform::IDENTITY, Transform::IDENTITY, kind);
+        match (phys.add_joint(joint), refusal) {
+            (Ok(id), None) => {
+                phys.remove_joint(id);
+            }
+            (Err(JointError::Invalid(why)), Some(rule)) => {
+                assert!(
+                    why.contains(rule),
+                    "{kind:?}: refused for {why:?}, not {rule:?}"
+                );
+            }
+            (got, _) => panic!("{kind:?}: {got:?}, expected {refusal:?}"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Determinism and groups
 // ---------------------------------------------------------------------------
@@ -1319,6 +2093,98 @@ fn a_jointed_scene_hashes_the_same_on_two_runs() {
         jointed_scene_hash(0, 3.0),
         jointed_scene_hash(0, 3.5),
         "the hash did not see a joint's motor speed"
+    );
+}
+
+/// FNV-1a, 64-bit: a hasher fixed by its definition, so a digest of it can be
+/// pinned across targets, where the standard library's may change.
+struct Fnv(u64);
+
+impl std::hash::Hasher for Fnv {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+/// **Soft zones and an elliptical swing step to the same bits everywhere.**
+/// A bar on a hinge with a spring, soft zones and hard limits, let go from
+/// level, and a block on a ball joint with an elliptical swing, a soft
+/// swing, a twist and a soft twist, knocked sideways, stepped three seconds:
+/// two runs hash alike, and to the pinned digest, which every target's CI
+/// run checks.
+#[test]
+fn soft_zones_and_an_elliptical_swing_hash_the_same_everywhere() {
+    /// The digest on x86-64 Linux, 2026-11-01.
+    const PINNED: u64 = 0xf305_d87e_545a_16c9;
+
+    let run = || {
+        let mut phys = system();
+        let post = anchor(&mut phys, 0, DVec3::new(0.0, 3.0, 0.0));
+        let bar = box_(
+            &mut phys,
+            1,
+            DVec3::new(0.5, 3.0, 0.0),
+            DQuat::IDENTITY,
+            DVec3::new(0.5, 0.05, 0.05),
+            2.0,
+        );
+        let hinge = joint_at(
+            &phys,
+            post,
+            bar,
+            Transform::from_position(DVec3::new(0.0, 3.0, 0.0)),
+            JointKind::Revolute(
+                RevoluteJoint::hinge()
+                    .with_spring(-0.3, zone(1.0, 0.5))
+                    .with_limits(-1.2, 1.2)
+                    .with_soft_limits(-0.7, 0.7, zone(8.0, 1.0)),
+            ),
+        );
+        phys.add_joint(hinge).expect("a valid hinge");
+        let ceiling = anchor(&mut phys, 2, DVec3::new(5.0, 3.0, 0.0));
+        let block = box_(
+            &mut phys,
+            3,
+            DVec3::new(5.0, 2.5, 0.0),
+            DQuat::IDENTITY,
+            DVec3::new(0.05, 0.5, 0.05),
+            2.0,
+        );
+        let down = rotation_from_scaled_axis(DVec3::X * core::f64::consts::FRAC_PI_2);
+        let socket = joint_at(
+            &phys,
+            ceiling,
+            block,
+            Transform::new(DVec3::new(5.0, 3.0, 0.0), down),
+            JointKind::Spherical(
+                SphericalJoint::ball()
+                    .with_swing(0.5, 1.0)
+                    .with_soft_swing(0.3, 0.6, zone(8.0, 0.5))
+                    .with_twist(-0.6, 0.6)
+                    .with_soft_twist(-0.3, 0.3, zone(8.0, 0.5)),
+            ),
+        );
+        phys.add_joint(socket).expect("a valid ball joint");
+        phys.body_mut(block).expect("the block").velocity = DVec3::new(3.0, 0.0, 1.5);
+        phys.body_mut(block).expect("the block").angular_velocity = DVec3::new(0.0, 4.0, 0.0);
+        for _ in 0..180 {
+            phys.step(DT);
+        }
+        let mut hasher = Fnv(0xcbf2_9ce4_8422_2325);
+        phys.hash_state(&mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    };
+    let first = run();
+    assert_eq!(first, run(), "two runs hashed differently");
+    assert_eq!(
+        first, PINNED,
+        "the scene hashes to {first:#018x}, not the pinned {PINNED:#018x}"
     );
 }
 

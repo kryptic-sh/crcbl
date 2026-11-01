@@ -1303,8 +1303,10 @@ PhysX do. The 10 km/s projectile stays the ballistics topic's segment test. This
 inverted topic 5's "sweep to the time of impact, then solve".
 
 **Decision 6 — impulse joints in the same solver**: revolute, spherical with
-cone and twist limits, distance and rope, weld, prismatic; limits, motors,
-breakable by impulse; capsule ragdolls are the ragdolls topic's server ragdoll.
+swing and twist limits (the swing a circular or an elliptical cone), distance
+and rope, weld, prismatic; limits, soft zones before a hinge's or a ball's
+stops, motors, breakable by impulse; capsule ragdolls are the ragdolls topic's
+server ragdoll.
 
 **Decision 7 — `f64` positions, an `f32` solver interior (decided by the user,
 2026-09-17).** Positions stay `f64` in sector-local space, since `f32` resolves

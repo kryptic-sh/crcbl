@@ -4,12 +4,13 @@
 //!
 //! Five rows: the point constraint (three), and two collinearity rows keeping
 //! frame B's z-axis on frame A's, taken from the relative quaternion's x and
-//! y parts — plus the spring, the motor and the two limits about the axis.
+//! y parts — plus the spring, the motor, the two soft zones ([`crate::joint`]'s
+//! soft zones) and the two limits about the axis.
 
 use glam::{DQuat, DVec3};
 
 use super::math::{self, make_soft};
-use super::{Common, Prepared as Joint, Velocities, limit_bias, motion};
+use super::{Common, Impulses, Prepared as Joint, Velocities, limit_bias, motion, soft_zone};
 use crate::components::RigidBody;
 use crate::contact::solver::{Softness, SolverBody};
 use crate::joint::RevoluteJoint;
@@ -58,6 +59,16 @@ impl Prepared {
         );
     }
 
+    /// The axial impulse its limits, soft zones and motor carry, as its
+    /// reaction reads it.
+    pub(super) fn axial_reaction(&self, i: &Impulses) -> f64 {
+        let mut axial = i.motor + i.lower - i.upper;
+        if self.settings.enable_soft_limit {
+            axial += i.soft_lower - i.soft_upper;
+        }
+        axial
+    }
+
     pub(super) fn warm_start(
         &self,
         joint: &Joint,
@@ -69,7 +80,10 @@ impl Prepared {
         let ra = dqa * joint.frame_a.p;
         let rb = dqb * joint.frame_b.p;
         let i = &joint.impulses;
-        let axial = i.spring + i.motor + i.lower - i.upper;
+        let mut axial = i.spring + i.motor + i.lower - i.upper;
+        if self.settings.enable_soft_limit {
+            axial += i.soft_lower - i.soft_upper;
+        }
         let angular = i.perp[0] * self.perp_x + i.perp[1] * self.perp_y + axial * self.axis_z;
         let mut v = Velocities::read(joint, bodies);
         v.push_turning(
@@ -121,6 +135,34 @@ impl Prepared {
             let max = s.max_motor_torque * h;
             joint.impulses.motor = (old - self.axial_mass * cdot).clamp(-max, max);
             v.turn(joint, (joint.impulses.motor - old) * axis);
+        }
+
+        if s.enable_soft_limit && !joint.fixed_rotation {
+            let angle = math::twist_angle(rel);
+
+            let old = joint.impulses.soft_lower;
+            joint.impulses.soft_lower = soft_zone(
+                angle - s.soft_lower_angle,
+                angle - s.lower_angle,
+                turning(&v),
+                self.axial_mass,
+                old,
+                s.soft_limit,
+                h,
+            );
+            v.turn(joint, (joint.impulses.soft_lower - old) * axis);
+
+            let old = joint.impulses.soft_upper;
+            joint.impulses.soft_upper = soft_zone(
+                s.soft_upper_angle - angle,
+                s.upper_angle - angle,
+                -turning(&v),
+                self.axial_mass,
+                old,
+                s.soft_limit,
+                h,
+            );
+            v.turn(joint, -(joint.impulses.soft_upper - old) * axis);
         }
 
         if s.enable_limit && !joint.fixed_rotation {

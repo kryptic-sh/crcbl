@@ -50,7 +50,12 @@ fn a_leg_resolves_and_spawns_its_joints() {
     let JointKind::Spherical(hip) = kinds[0] else {
         panic!("the hip is a ball: {:?}", kinds[0]);
     };
-    assert!(hip.enable_motor && hip.max_motor_torque == 0.5 && hip.cone_angle == 1.2);
+    assert!(
+        hip.enable_motor
+            && hip.max_motor_torque == 0.5
+            && hip.swing_x_angle == 1.2
+            && hip.swing_y_angle == 1.2
+    );
     let JointKind::Revolute(knee) = kinds[1] else {
         panic!("the knee is a hinge: {:?}", kinds[1]);
     };

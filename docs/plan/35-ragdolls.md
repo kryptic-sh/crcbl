@@ -75,6 +75,105 @@ neck), **fixed** (welded segments). Limits are per-joint data.
 non-adjacent enabled so limbs don't pass through the torso. A quality knob —
 disabling it is the first thing to drop on low settings.
 
+## Anatomical joint limits: hard stop, soft zone, neutral pose (2026-11-01)
+
+Asked by the owner so ragdolls move like bodies: a knee cannot bend past its
+fold or backwards, and every joint meets resistance before its stop and drifts
+towards a neutral pose. Where it stands today: `crcbl-phys`'s `RevoluteJoint`
+has hard limits and a spring to `target_angle`; `SphericalJoint` has a
+**circular** cone, a twist range and a friction motor, and no spring;
+`RagdollRig::generate` makes every joint the same ball (its docs: "an elbow is a
+ball here, and a hinge only in an authored rig"), so a generated knee bends
+sideways and backwards as far as forwards.
+
+Three layers, built in this order:
+
+1. **Physics (`crcbl-phys`), joint capability.**
+   - **Hard limits**, rigid as now: a hinge's `[lower, upper]`; a ball's swing
+     as an **ellipse** (two half-angles about the frame's x and y, so a shoulder
+     can swing further forward than sideways), the frame itself carrying any
+     asymmetry; twist `[lower, upper]`.
+   - **The owner's resistance rules** (2026-11-01), which model muscle: the
+     joint cannot pass its hard limit; past its soft limit it meets resistance,
+     and the closer it gets to the hard limit the more it meets; at or near its
+     neutral position it meets none. So per axis a joint has a **neutral**
+     position, a free range around it bounded by **soft** limits, and **hard**
+     limits beyond those; the bounds are asymmetric offsets from neutral (a
+     knee's neutral is slightly bent). Between soft and hard the restoring
+     torque rises progressively with depth (stiffness ramping from zero at the
+     soft bound), in the solver's soft-step form so it is stable and gains no
+     energy. Off by default; zero cost when off.
+   - **A neutral spring** pulling everywhere is not the default — it would
+     resist near neutral. It stays optional (a hinge already has
+     `target_angle`), alongside the existing friction motor.
+   - The industry forms to follow: Jolt's `SwingTwistConstraint` (elliptical
+     swing, twist, motors) and PhysX's D6 soft limits (a limit with stiffness
+     and damping); Box2D v3's soft-step springs, which the solver is already
+     built on. No energy gain, determinism and the cross-target hash pins apply
+     as everywhere in the solver.
+2. **Ragdoll description (`crcbl-ragdoll`).** `JointKindDesc::Hinge` and `Ball`
+   gain the soft bounds, spring settings and a neutral angle or orientation;
+   `Ball` gains the two swing half-angles in place of one cone (the old `cone`
+   reads as both). Authored rigs set everything per joint.
+3. **Anatomical defaults in `RagdollRig::generate`.** An opt-in profile on
+   `GenerateSettings` that infers the joint type and ranges from humanoid bone
+   names (Mixamo and Unreal naming, plus EW's skeleton) and the hierarchy: knees
+   and elbows hinges about the bone's bend axis, hips and shoulders elliptical
+   balls, spine, neck and wrists small balls, fingers hinges. Bones it cannot
+   name keep today's ball.
+
+**Neutral pose for humanoids: NASA's neutral body posture** (owner's call,
+2026-11-01). The posture a relaxed body takes when no muscle works against
+gravity is exactly "the position where no resistance is met", so it is the
+humanoid profile's neutral. Source: NASA/SP-2010-3407 Rev 1, _Human Integration
+Design Handbook_, figure 4.3-2 "Neutral Body Posture in 0g" (page 59), the
+current form of NASA-STD-3000's figure built from Skylab measurements of 12
+crew. Read off the figure (mean ± spread):
+
+| Joint                               | Figure value | As joint flexion for the profile     |
+| ----------------------------------- | ------------ | ------------------------------------ |
+| Head/neck, tilt from body vertical  | 24° (±5°)    | 24° forward                          |
+| Shoulder, upper arm from torso line | 36° (±19°)   | 36° flexion                          |
+| Elbow, included angle               | 122° (±24°)  | 58° flexion                          |
+| Hip, trunk-to-thigh included angle  | 128° (±7°)   | 52° flexion                          |
+| Knee, thigh-to-calf included angle  | 133° (±8°)   | 47° flexion                          |
+| Ankle, foot to the torso line       | 111° (±6°)   | about 21° plantar flexion (see note) |
+| Shoulder, front view                | 49° (±20°)   | read as abduction; to confirm        |
+| Arm, front view (second arc)        | 39° (±11°)   | not yet attributed; to confirm       |
+| Hip, front view                     | 12° (±6°)    | 12° abduction                        |
+| Knee/leg, front view                | 200° (±10°)  | not yet attributed; to confirm       |
+
+Notes, so the numbers are used honestly: the foot angle is to "a line through
+the torso" (the handbook's own words), so its ankle value depends on the hip and
+knee angles and is converted per rig, not copied; the front-view arcs marked "to
+confirm" need the original NASA-STD-3000 section 3.3.4.3 text (not retrieved:
+its MSIS site no longer resolves) or a careful re-read of the figure before they
+are used. The figure is a mean and the handbook says individual variation is to
+be expected; NASA TM-2003-104805 (Mount, Whitmore, Stealey 2003, STS-57) found
+larger variation than Skylab suggested and no crew member in exactly the
+standard posture. So the profile treats the posture as the centre of each
+joint's free range, not a point: the ± spread (at least) sits inside the
+no-resistance zone, and resistance begins only at the soft limit beyond it. Soft
+and hard limits come from anatomical range-of-motion data (a separate source,
+owed: e.g. the AAOS normal ranges), not from this figure. NBP is a 0g posture; a
+ragdoll under gravity still falls and folds — the neutral only says where its
+joints stop being pushed.
+
+Coordination: EW is the consumer and already carries its own anatomy rig on a
+branch; its per-joint ranges are the data the defaults are checked against, and
+it adopts the API once layer 2 ships. EW's answer (2026-11-01): its rig is
+`RagdollRig::generate` with `GenerateSettings::DEFAULT` (every joint a 0.7 rad
+ball, twist ±0.5), knees and elbows fold backwards, fingers and toes tremble;
+its 55 bone names mix case (`UpperArm_L`, `lowerarm_l`, `Thigh_L`, `calf_l`), so
+names match case-insensitively. It asks for the profile to mark joints **"no
+body, rigid with parent"** (`ik_*` helpers, `eyes`/`eyebrows`, optionally
+fingers and toes) in place of its skeleton-copy trick. Limit-hit events with an
+impulse (for impact sounds) and a drive towards an animation pose are wanted
+later, not now; breakable limits are not wanted. Done when a generated
+humanoid's knees and elbows never bend backwards or sideways past tolerance
+under scripted falls, a joint inside its soft range meets no resistance, and the
+ragdoll still sleeps (the creep fix's tests).
+
 ## Corpses are gameplay objects
 
 - **Shootable**: once ragdolled, hitboxes follow the ragdoll bodies. The

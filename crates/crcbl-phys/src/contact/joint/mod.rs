@@ -88,8 +88,13 @@ pub(super) struct Impulses {
     upper: f64,
     /// A spherical joint's motor.
     motor_vector: DVec3,
-    /// A spherical joint's cone.
+    /// A spherical joint's swing limit.
     swing: f64,
+    /// A hinge's or a spherical joint's twist's soft zones.
+    soft_lower: f64,
+    soft_upper: f64,
+    /// A spherical joint's soft swing.
+    soft_swing: f64,
 }
 
 impl Impulses {
@@ -113,6 +118,31 @@ impl Impulses {
             self.motor_vector.z,
             self.swing,
         ]
+    }
+
+    /// The soft zones' impulses, which a joint hashes only while it has a
+    /// soft zone on, so one without hashes as it did before soft zones.
+    fn soft_values(&self) -> [f64; 3] {
+        [self.soft_lower, self.soft_upper, self.soft_swing]
+    }
+
+    /// These impulses with every soft zone `kind` has off forgotten: the hash
+    /// leaves a zone's impulses out while it is off, so one kept would be
+    /// state the hash cannot see, warm-started when the zone came back on.
+    fn without_soft_zones_off(mut self, kind: &JointKind) -> Self {
+        let (limit, swing) = match kind {
+            JointKind::Revolute(r) => (r.enable_soft_limit, false),
+            JointKind::Spherical(s) => (s.enable_soft_twist, s.enable_soft_swing),
+            _ => (false, false),
+        };
+        if !limit {
+            self.soft_lower = 0.0;
+            self.soft_upper = 0.0;
+        }
+        if !swing {
+            self.soft_swing = 0.0;
+        }
+        self
     }
 }
 
@@ -280,6 +310,41 @@ pub(super) fn limit_bias(
     }
 }
 
+/// A soft zone's row ([`crate::joint`]'s soft zones): the impulse it carries
+/// now, from `old`, for a gap `c` to its soft bound and `room` to its hard
+/// one — each positive while it holds — and the rate `cdot` at which `c`
+/// grows, along an axis of effective mass `mass`.
+///
+/// Inside the soft bound it carries nothing. Past it, it is Box2D v3's soft
+/// step at a stiffness ramped by depth: a one-sided spring at `zone.hertz`
+/// times the root of the depth fraction, so its stiffness goes from zero at
+/// the soft bound to `zone.hertz`'s at the hard one. It is solved in the
+/// relax too, as Box3D's springs are.
+pub(super) fn soft_zone(
+    c: f64,
+    room: f64,
+    cdot: f64,
+    mass: f64,
+    old: f64,
+    zone: crate::joint::Spring,
+    h: f64,
+) -> f64 {
+    if c >= 0.0 {
+        return 0.0;
+    }
+    let depth = -c;
+    let span = depth + room;
+    let fraction = if span > 0.0 {
+        (depth / span).min(1.0)
+    } else {
+        1.0
+    };
+    let softness = math::make_soft(zone.hertz * fraction.sqrt(), zone.damping_ratio, h);
+    let impulse = -softness.mass_scale * mass * (cdot + softness.bias_rate * c)
+        - softness.impulse_scale * old;
+    (old + impulse).max(0.0)
+}
+
 /// Every joint of a system with contacts.
 #[derive(Debug, Default)]
 pub(crate) struct Joints {
@@ -327,7 +392,8 @@ impl Joints {
     }
 
     /// Replaces a joint's settings, keeping what it carries if it is still
-    /// the same kind between the same bodies.
+    /// the same kind between the same bodies — less the impulses of any soft
+    /// zone the new settings have off.
     pub(crate) fn replace(&mut self, id: JointId, joint: Joint, a: BodyId, b: BodyId) -> bool {
         let Some(old) = self.pool.get(id.0).copied() else {
             return false;
@@ -345,7 +411,7 @@ impl Joints {
             a,
             b,
             impulses: if same {
-                old.impulses
+                old.impulses.without_soft_zones_off(&joint.kind)
             } else {
                 Impulses::default()
             },
@@ -589,12 +655,28 @@ impl Joints {
             for value in record.impulses.values() {
                 write(hasher, value);
             }
+            if has_soft_zone(&joint.kind) {
+                for value in record.impulses.soft_values() {
+                    write(hasher, value);
+                }
+            }
         }
     }
 }
 
+/// Whether a joint has a soft zone on.
+fn has_soft_zone(kind: &JointKind) -> bool {
+    match kind {
+        JointKind::Revolute(r) => r.enable_soft_limit,
+        JointKind::Spherical(s) => s.enable_soft_swing || s.enable_soft_twist,
+        _ => false,
+    }
+}
+
 /// A joint kind's settings for the hash: a tag, its switches as bits, and
-/// its numbers.
+/// its numbers. What came after a kind's first settings — the soft zones,
+/// an elliptical swing — is written only while it is on, so a joint without
+/// it hashes as it did before.
 fn settings(kind: &JointKind) -> (u8, u8, Vec<f64>) {
     let bits = |flags: &[bool]| {
         flags
@@ -616,10 +698,8 @@ fn settings(kind: &JointKind) -> (u8, u8, Vec<f64>) {
                 d.motor_speed,
             ],
         ),
-        JointKind::Revolute(r) => (
-            1,
-            bits(&[r.enable_spring, r.enable_limit, r.enable_motor]),
-            vec![
+        JointKind::Revolute(r) => {
+            let mut values = vec![
                 r.spring.hertz,
                 r.spring.damping_ratio,
                 r.target_angle,
@@ -627,8 +707,26 @@ fn settings(kind: &JointKind) -> (u8, u8, Vec<f64>) {
                 r.upper_angle,
                 r.max_motor_torque,
                 r.motor_speed,
-            ],
-        ),
+            ];
+            if r.enable_soft_limit {
+                values.extend([
+                    r.soft_lower_angle,
+                    r.soft_upper_angle,
+                    r.soft_limit.hertz,
+                    r.soft_limit.damping_ratio,
+                ]);
+            }
+            (
+                1,
+                bits(&[
+                    r.enable_spring,
+                    r.enable_limit,
+                    r.enable_motor,
+                    r.enable_soft_limit,
+                ]),
+                values,
+            )
+        }
         JointKind::Prismatic(p) => (
             2,
             bits(&[p.enable_spring, p.enable_limit, p.enable_motor]),
@@ -652,19 +750,50 @@ fn settings(kind: &JointKind) -> (u8, u8, Vec<f64>) {
                 w.angular.damping_ratio,
             ],
         ),
-        JointKind::Spherical(s) => (
-            4,
-            bits(&[s.enable_cone_limit, s.enable_twist_limit, s.enable_motor]),
-            vec![
-                s.cone_angle,
+        JointKind::Spherical(s) => {
+            // A circular swing writes its one angle where the cone's was.
+            let elliptical = s.swing_x_angle != s.swing_y_angle;
+            let mut values = vec![
+                s.swing_x_angle,
                 s.lower_twist_angle,
                 s.upper_twist_angle,
                 s.max_motor_torque,
                 s.motor_velocity.x,
                 s.motor_velocity.y,
                 s.motor_velocity.z,
-            ],
-        ),
+            ];
+            if elliptical {
+                values.push(s.swing_y_angle);
+            }
+            if s.enable_soft_swing {
+                values.extend([
+                    s.soft_swing_x_angle,
+                    s.soft_swing_y_angle,
+                    s.soft_swing.hertz,
+                    s.soft_swing.damping_ratio,
+                ]);
+            }
+            if s.enable_soft_twist {
+                values.extend([
+                    s.soft_lower_twist_angle,
+                    s.soft_upper_twist_angle,
+                    s.soft_twist.hertz,
+                    s.soft_twist.damping_ratio,
+                ]);
+            }
+            (
+                4,
+                bits(&[
+                    s.enable_swing_limit,
+                    s.enable_twist_limit,
+                    s.enable_motor,
+                    s.enable_soft_swing,
+                    s.enable_soft_twist,
+                    elliptical,
+                ]),
+                values,
+            )
+        }
     }
 }
 
@@ -799,9 +928,9 @@ fn reaction_impulses(joint: &Prepared) -> (f64, f64) {
     let i = &joint.impulses;
     match &joint.kind {
         Kind::Distance(_) => ((i.axial + i.lower - i.upper + i.motor).abs(), 0.0),
-        Kind::Revolute(_) => (
+        Kind::Revolute(r) => (
             i.linear.length(),
-            DVec3::new(i.perp[0], i.perp[1], i.motor + i.lower - i.upper).length(),
+            DVec3::new(i.perp[0], i.perp[1], r.axial_reaction(i)).length(),
         ),
         Kind::Prismatic(_) => (
             DVec3::new(i.motor + i.lower - i.upper, i.perp[0], i.perp[1]).length(),
@@ -873,8 +1002,8 @@ pub(crate) fn drift(joint: &Joint, a: &Transform, b: &Transform) -> JointDrift {
         },
         JointKind::Spherical(s) => {
             let mut angular: f64 = 0.0;
-            if s.enable_cone_limit {
-                angular = angular.max(math::swing_angle(rel) - s.cone_angle);
+            if s.enable_swing_limit {
+                angular = angular.max(-spherical::swing_gap(s, rel));
             }
             if s.enable_twist_limit {
                 angular = angular.max(outside(
@@ -896,5 +1025,131 @@ impl Presence {
     /// reading of a proxy's owner, for a body named directly.
     pub(super) fn of(bodies: Bodies<'_>, id: BodyId) -> Option<Self> {
         super::body_presence(bodies, id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::joint::{RevoluteJoint, SphericalJoint, Spring};
+    use crcbl_ecs::Entity;
+
+    fn body(index: u64) -> BodyId {
+        Handle::from_bits((1 << 32) | index).expect("generation 1 is never zero")
+    }
+
+    fn joint(kind: JointKind) -> Joint {
+        let entity = |index: u64| Entity::from_bits((1 << 32) | index).expect("generation 1");
+        Joint::new(
+            entity(1),
+            entity(2),
+            Transform::IDENTITY,
+            Transform::IDENTITY,
+            kind,
+        )
+    }
+
+    const ZONE: Spring = Spring {
+        hertz: 4.0,
+        damping_ratio: 1.0,
+    };
+
+    /// One joint of `kind` carrying `impulses`, hashed.
+    fn hash_of(kind: JointKind, impulses: Impulses) -> u64 {
+        let mut joints = Joints::default();
+        let id = joints.insert(joint(kind), body(1), body(2));
+        joints.pool.get_mut(id.0).expect("inserted").impulses = impulses;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        joints.hash_state(&Pool::default(), &mut hasher);
+        hasher.finish()
+    }
+
+    /// **Turning a soft zone off forgets what it carried**, so turning it
+    /// back on warm-starts nothing the hash did not see; a zone left on keeps
+    /// its impulses, as every other row does.
+    #[test]
+    fn turning_a_soft_zone_off_forgets_its_impulses() {
+        let carried = Impulses {
+            soft_lower: 0.5,
+            soft_upper: 0.25,
+            soft_swing: 0.125,
+            lower: 1.0,
+            ..Impulses::default()
+        };
+        let hinge = RevoluteJoint::hinge().with_limits(-1.0, 1.0);
+        let ball = SphericalJoint::ball()
+            .with_swing(0.5, 0.8)
+            .with_twist(-1.0, 1.0);
+        for (on, off) in [
+            (
+                JointKind::Revolute(hinge.with_soft_limits(-0.5, 0.5, ZONE)),
+                JointKind::Revolute(hinge),
+            ),
+            (
+                JointKind::Spherical(
+                    ball.with_soft_twist(-0.5, 0.5, ZONE)
+                        .with_soft_swing(0.2, 0.4, ZONE),
+                ),
+                JointKind::Spherical(ball),
+            ),
+        ] {
+            let mut joints = Joints::default();
+            let id = joints.insert(joint(on), body(1), body(2));
+            joints.pool.get_mut(id.0).expect("inserted").impulses = carried;
+            assert!(joints.replace(id, joint(on), body(1), body(2)));
+            // A hinge has no swing zone, so it carries no swing impulse.
+            let own = carried.without_soft_zones_off(&on);
+            assert_eq!(joints.pool.get(id.0).expect("kept").impulses, own);
+            assert_eq!(own.soft_lower, carried.soft_lower);
+            assert!(joints.replace(id, joint(off), body(1), body(2)));
+            assert!(joints.replace(id, joint(on), body(1), body(2)));
+            let kept = joints.pool.get(id.0).expect("kept").impulses;
+            assert_eq!(kept.soft_values(), [0.0; 3], "{on:?}");
+            assert_eq!(kept.lower, carried.lower, "the hard limit's is kept");
+        }
+    }
+
+    /// **The hash sees every new setting and the soft impulses**: a soft
+    /// zone's bounds and strength, an elliptical swing, and what a zone that
+    /// is on carries — and a zone that is off leaves the hash as a joint
+    /// without one.
+    #[test]
+    fn the_hash_sees_soft_zones_their_impulses_and_an_ellipse() {
+        let hinge = RevoluteJoint::hinge().with_limits(-1.0, 1.0);
+        let ball = SphericalJoint::ball().with_twist(-1.0, 1.0);
+        let none = Impulses::default();
+        let carrying = Impulses {
+            soft_lower: 0.5,
+            ..none
+        };
+        let swinging = Impulses {
+            soft_swing: 0.5,
+            ..none
+        };
+        let zoned = |lower: f64, zone: Spring| {
+            JointKind::Revolute(hinge.with_soft_limits(lower, 0.5, zone))
+        };
+        let base = hash_of(zoned(-0.5, ZONE), none);
+        let differ = [
+            ("off", hash_of(JointKind::Revolute(hinge), none)),
+            ("bound", hash_of(zoned(-0.4, ZONE), none)),
+            (
+                "strength",
+                hash_of(zoned(-0.5, Spring { hertz: 5.0, ..ZONE }), none),
+            ),
+            ("impulse", hash_of(zoned(-0.5, ZONE), carrying)),
+        ];
+        for (what, hash) in differ {
+            assert_ne!(hash, base, "the hash missed the soft zone's {what}");
+        }
+
+        let circle = JointKind::Spherical(ball.with_cone(0.5));
+        let ellipse = JointKind::Spherical(ball.with_swing(0.5, 0.8));
+        assert_ne!(hash_of(circle, none), hash_of(ellipse, none));
+        let soft = JointKind::Spherical(ball.with_cone(0.5).with_soft_swing(0.2, 0.3, ZONE));
+        assert_ne!(hash_of(soft, none), hash_of(circle, none));
+        assert_ne!(hash_of(soft, swinging), hash_of(soft, none));
+        // Off, a zone's impulses are not state.
+        assert_eq!(hash_of(circle, swinging), hash_of(circle, none));
     }
 }

@@ -109,6 +109,29 @@ with `filter box (console)`, and adding `--exec "render_scale 0.5"` ends with
 process-global convars (the way `EffectRequest` has one for effects) or a write
 that moves only the key that changed.
 
+## Joint limits layer 1: what the elliptical swing and soft zones left (2026-11-01)
+
+`crcbl-phys` has elliptical swing limits and progressive soft zones
+(`docs/plan/35-ragdolls.md`, "Anatomical joint limits"); layers 2 (ragdoll
+description) and 3 (anatomical profile) are next. Left from layer 1:
+
+- **A zero swing half-angle is refused, not supported.** Jolt's form is a
+  two-sided lock row about the locked axis with the free axis limited one-sided.
+  Build it if a ball with one axis locked is needed; until then use a hinge or a
+  small half-angle.
+- **A neutral-pose spring for `SphericalJoint` was declined**: it would resist
+  near neutral, against the owner's rule; the soft zones give resistance before
+  the stop. Revisit only if layer 2 or 3 needs a pull towards a pose.
+- **A twist held at its stop on a swung ball turns the swing round.** Inherent
+  to the swing-twist split (Box3D's and Jolt's): the twist row pushes along its
+  gradient, which is not frame B's own axis. Measured 2.04 rad of swing drift
+  under a 6 N·m axial torque at a 0.8 rad swing. Not a bug.
+- **The ragdoll debug view draws a circular cone** (`crcbl-ragdoll`'s
+  `debug.rs`, from `RigJointKind::Ball { cone }`); layer 2 draws the ellipse and
+  the soft bounds once its description carries them.
+- **Not measured:** the cost of the per-solve Eberly bisection on an elliptical
+  joint, and soft-zone hertz above the rigid rows' 60 Hz.
+
 ## Palette and IK cost after the incremental compute (2026-11-01)
 
 EW's squad-encounter callgrind on 0.15.0 put `Palette::compute` at 38.5% of a
