@@ -15,6 +15,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`Palette::compute` recomposes only what changed.** It keeps the local
+  transforms it last composed and recomposes a joint only when its local differs
+  in any bit, or its parent was recomposed in the same call; the result is still
+  the full composition bit for bit. A rig that recomputes after each small edit
+  now recomposes the joints the edit moved, though every call still compares
+  each joint's local. On a 55-joint humanoid under callgrind, a compute with
+  nothing changed fell from 11.8k to 2.8k instructions and a two-bone arm solve
+  from 20.2k to 14.5k; a compute where every joint changed costs about 6% more.
+  `rotate_joint`, `rotate_joints` and `solve_two_bone` get this through their
+  own palette update. A palette holds about 49 more bytes per joint, and
+  `Palette`'s `Debug` output now ends with `..`.
+
 - **`SpanGrid::plan` is about 8× cheaper on long routes and returns the same
   routes.** On the `patrol_routes` example grid (640×640 quarter-metre cells), a
   cross-map route fell from 862 M to 109 M instructions under callgrind, and a

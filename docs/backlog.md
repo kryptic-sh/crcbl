@@ -109,6 +109,38 @@ with `filter box (console)`, and adding `--exec "render_scale 0.5"` ends with
 process-global convars (the way `EffectRequest` has one for effects) or a write
 that moves only the key that changed.
 
+## Palette and IK cost after the incremental compute (2026-11-01)
+
+EW's squad-encounter callgrind on 0.15.0 put `Palette::compute` at 38.5% of a
+tick (about 312k calls on a 55-joint skeleton). `Palette::compute` now
+recomposes only changed joints and their descendants, bit for bit; measured on
+`crates/crcbl-anim/examples/humanoid_palette.rs`. Left:
+
+- **Decision (EW's): let IK read the palette's globals.** `ik::global` builds a
+  joint's global from the joint upward (`L_root·(L_a·L_j)`) while
+  `Palette::compute` multiplies from the root down (`(G_root·L_a)·L_j`), so the
+  two differ in the last bits and IK cannot reuse palette globals without
+  changing its results. Switching would remove most of `ik::global`'s cost (6.1k
+  of 14.5k instructions per `solve_two_bone` on the example) and make IK agree
+  exactly with the palette a caller reads, but shifts IK output by ulps, so EW's
+  exact state dumps would need re-recording. Drift not measured.
+- **Deferred: a globals-only compute.** The inverse-bind multiply is about 3.35k
+  of a 12.5k all-changed compute on the example (measured by dropping it). A
+  rig's intermediate computes read only globals; a `compute_globals` that defers
+  skinning needs an API where the stale skinning matrices cannot be read.
+- **Declined: composing as `Affine3A` or 3×4.** It drops the `Mat4` product's
+  `w·0` terms, which decide signed zeros and NaN spread, so it is not
+  bit-identical (and an inverse bind is not guaranteed affine); about 6% at
+  most.
+- **An all-changed compute is about 6% dearer** (11,827 → 12,539 instructions)
+  from the copy and compare; a cheaper full compute that stays bit-identical was
+  not found.
+- **A scratch palette shared across skeletons recomposes everything** each time
+  it switches skeleton (ids differ even for identical joints); correct, but
+  loses the saving. Not checked whether EW's rig does this.
+- **Clip sampling is next**: EW's same profile put `Clip::sample_into` at 14.8%
+  inclusive, `sample::locate` 6.0% self.
+
 ## Skinning's per-frame CPU after the binding compare (2026-10-31)
 
 EW's callgrind put over half of its raid demo's GPU-side frame CPU in

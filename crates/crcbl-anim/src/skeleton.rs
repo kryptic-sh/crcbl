@@ -1,6 +1,7 @@
 //! The joint hierarchy a clip is sampled onto and a palette is computed from.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use glam::Mat4;
 
@@ -111,9 +112,38 @@ impl std::error::Error for SkeletonError {}
 /// acceptance set (Fox, CesiumMan, RiggedFigure) are. A document that is not
 /// is a real remap job, and it is better to be told so than to be given a
 /// quietly wrong palette.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// # Immutable, and numbered for it
+///
+/// A skeleton cannot change once built, and each one [`new`](Self::new) makes
+/// carries a number no other skeleton built in the process shares — a clone
+/// keeps it, being the same joints. That number is how a [`Palette`] knows the
+/// joints it last composed are still the ones it is handed, without comparing
+/// every parent and bind matrix on each call. It takes no part in equality:
+/// two skeletons built from the same joints are equal.
+///
+/// [`Palette`]: crate::Palette
+#[derive(Clone)]
 pub struct Skeleton {
     joints: Vec<Joint>,
+    id: u64,
+}
+
+/// The number the next [`Skeleton::new`] hands out.
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+impl PartialEq for Skeleton {
+    fn eq(&self, other: &Self) -> bool {
+        self.joints == other.joints
+    }
+}
+
+impl fmt::Debug for Skeleton {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Skeleton")
+            .field("joints", &self.joints)
+            .finish()
+    }
 }
 
 impl Skeleton {
@@ -149,7 +179,16 @@ impl Skeleton {
                 });
             }
         }
-        Ok(Self { joints })
+        // Only uniqueness is asked of the number, and a relaxed increment is
+        // still a single total order on the counter itself.
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        Ok(Self { joints, id })
+    }
+
+    /// The process-unique number of this skeleton's joints — see the type docs.
+    #[inline]
+    pub(crate) fn id(&self) -> u64 {
+        self.id
     }
 
     /// The joints, in palette order.

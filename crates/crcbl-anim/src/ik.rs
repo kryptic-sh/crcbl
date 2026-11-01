@@ -24,7 +24,10 @@
 //! and scale are never touched — and then recomputes the [`Palette`] from it,
 //! so the palette is current when the call returns. Positions are read from the
 //! pose, never from the palette, so a palette that is stale on entry changes
-//! nothing about the answer.
+//! nothing about the answer. That recompute is [`Palette::compute`]'s, which
+//! recomposes only the joints whose locals changed and what hangs below them:
+//! a call that turns a hand recomposes the hand, and still compares every
+//! joint's local to find it.
 //!
 //! # What is refused, and what is handled
 //!

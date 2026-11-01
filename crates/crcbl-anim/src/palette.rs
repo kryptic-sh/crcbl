@@ -1,9 +1,11 @@
 //! The joint palette: a posed skeleton composed down its hierarchy and folded
 //! against the bind pose, which is what a skinning shader consumes.
 
+use std::fmt;
+
 use glam::Mat4;
 
-use crate::{Pose, Skeleton};
+use crate::{Pose, Skeleton, Trs};
 
 /// One skinning matrix per joint, in palette order, and the global transforms
 /// they were built from.
@@ -46,14 +48,52 @@ use crate::{Pose, Skeleton};
 ///
 /// # Cost
 ///
-/// Both buffers are allocated once by [`new`](Self::new) and refilled by
+/// The buffers are allocated once by [`new`](Self::new) and refilled by
 /// [`compute`](Self::compute), which walks the joints once, forwards. That
 /// single pass is what [`Skeleton`]'s parent-before-child invariant buys: each
 /// joint's parent has already been written when the joint is reached.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// The walk recomposes only what changed. The palette keeps the local
+/// transforms it last composed, and a joint is recomposed when its local
+/// differs from the kept one in any bit, or its parent was recomposed on this
+/// walk — the joints that changed and everything that hangs below them. The
+/// rest keep the matrices they hold, which are what recomposing them would
+/// write again: a joint's matrices are a function of its local, its parent's
+/// global and its inverse bind, and none of those moved. So the result is the
+/// full composition bit for bit, whatever the pose did since the last call,
+/// and a rig that recomputes after each of a dozen small edits to one pose
+/// pays for the joints each edit moved rather than for the skeleton a dozen
+/// times. Being handed a different skeleton than last time, or computing for
+/// the first time, recomposes everything.
+#[derive(Clone)]
 pub struct Palette {
     globals: Vec<Mat4>,
     skinning: Vec<Mat4>,
+    /// The local transforms `globals` and `skinning` were composed from.
+    composed: Vec<Trs>,
+    /// Which joints this walk recomposed, so their children follow. Scratch:
+    /// read only within one [`compute`](Self::compute).
+    recomposed: Vec<bool>,
+    /// The [`Skeleton::id`] the buffers were composed for, or `None` before
+    /// the first compute.
+    skeleton: Option<u64>,
+}
+
+impl PartialEq for Palette {
+    /// Equal when the matrices are: what was kept to compose them is not part
+    /// of what a palette *is*.
+    fn eq(&self, other: &Self) -> bool {
+        self.globals == other.globals && self.skinning == other.skinning
+    }
+}
+
+impl fmt::Debug for Palette {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Palette")
+            .field("globals", &self.globals)
+            .field("skinning", &self.skinning)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Palette {
@@ -67,10 +107,16 @@ impl Palette {
         Self {
             globals: vec![Mat4::IDENTITY; skeleton.len()],
             skinning: vec![Mat4::IDENTITY; skeleton.len()],
+            composed: vec![Trs::IDENTITY; skeleton.len()],
+            recomposed: vec![false; skeleton.len()],
+            skeleton: None,
         }
     }
 
-    /// Composes `pose` down `skeleton` and folds in the inverse bind matrices.
+    /// Composes `pose` down `skeleton` and folds in the inverse bind matrices,
+    /// recomposing only the joints whose local transform changed since the
+    /// last call and their descendants — see the type docs for why that is the
+    /// full composition bit for bit.
     ///
     /// # Panics
     ///
@@ -88,10 +134,19 @@ impl Palette {
             skeleton.len(),
             "this palette was built for a skeleton with a different joint count"
         );
-        for (index, joint) in skeleton.joints().iter().enumerate() {
-            let local = pose.locals()[index].to_mat4();
-            // The parent precedes the child, so `globals[parent]` is already
-            // this frame's value rather than the last one's.
+        let everything = self.skeleton != Some(skeleton.id());
+        let joints = skeleton.joints().iter().zip(pose.locals());
+        for (index, ((joint, local), composed)) in joints.zip(&mut self.composed).enumerate() {
+            // The parent precedes the child, so `recomposed[parent]` and
+            // `globals[parent]` are already this walk's rather than the last.
+            let parent_moved = joint.parent.is_some_and(|parent| self.recomposed[parent]);
+            let moved = everything || parent_moved || !same_bits(local, composed);
+            self.recomposed[index] = moved;
+            if !moved {
+                continue;
+            }
+            *composed = *local;
+            let local = local.to_mat4();
             let global = match joint.parent {
                 Some(parent) => self.globals[parent] * local,
                 None => local,
@@ -99,6 +154,7 @@ impl Palette {
             self.globals[index] = global;
             self.skinning[index] = global * joint.inverse_bind;
         }
+        self.skeleton = Some(skeleton.id());
     }
 
     /// The skinning matrices, in palette order — mesh space to posed space.
@@ -136,4 +192,25 @@ impl Palette {
     pub fn is_empty(&self) -> bool {
         self.skinning.is_empty()
     }
+}
+
+/// Whether two local transforms are the same in every bit — `-0.0` apart from
+/// `0.0`, and a `NaN` the same as itself — which is the sameness that makes
+/// composing them give the same bits.
+#[inline]
+fn same_bits(a: &Trs, b: &Trs) -> bool {
+    let bits = |trs: &Trs| {
+        let [tx, ty, tz] = trs.translation.to_array();
+        let [rx, ry, rz, rw] = trs.rotation.to_array();
+        let [sx, sy, sz] = trs.scale.to_array();
+        [tx, ty, tz, rx, ry, rz, rw, sx, sy, sz].map(f32::to_bits)
+    };
+    // One accumulated difference rather than a comparison per component: a
+    // branch-free form the compiler keeps in registers, where `==` on the
+    // arrays became a call to `bcmp` through two stack copies.
+    let difference = bits(a)
+        .iter()
+        .zip(bits(b))
+        .fold(0, |difference, (a, b)| difference | (a ^ b));
+    difference == 0
 }
