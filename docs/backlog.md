@@ -131,17 +131,6 @@ description) and 3 (anatomical profile) are built. Left from layer 1:
 
 ## Open at the end of the 2026-11-02 session
 
-- **Cut 0.17.0** once main is green on CI and Pages. Unreleased since 0.16.0:
-  the clip-sampling regression fix (8904feb7, EW's raid tick about 10% slower on
-  0.16), the deterministic `crcbl_core::trig::atan2` and the `crcbl-anim` lint,
-  the elliptical swing and soft joint limits (`crcbl-phys`), neutral poses and
-  soft limits in ragdoll rigs, and the anatomical humanoid profile; and from the
-  Windows session, `Shell::set_idle_inhibit`, `Shell::open_url` with `WebUrl`,
-  Win32 per-DPI window icons and the cached `SystemLink` lookup. The physics
-  changes break the API (see the CHANGELOG's Breaking section), so it is a minor
-  bump. After it, tell EW: it will adopt the profile with
-  `Humanoid { fold_digits: true }` and re-time its raid and squad probes against
-  its kept 0.15 build.
 - **Decisions still with the owner**, each recorded in its own entry: the ECS
   model and whether sample state moves into it (_ECS audit_); how to stop gate
   runs filling the disk (below); a ragdoll's joint stiffness above 24 substeps
