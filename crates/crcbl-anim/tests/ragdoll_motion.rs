@@ -1,6 +1,6 @@
 use crcbl_anim::ragdoll::{BodyJoint, RagdollBinding, RagdollError};
 use crcbl_anim::{Joint, Palette, Pose, Skeleton, Trs};
-use glam::{DVec3, Mat4, Quat, Vec3};
+use glam::{DQuat, DVec3, Mat4, Quat, Vec3};
 
 const TOLERANCE: f64 = 2e-5;
 
@@ -146,4 +146,105 @@ fn invalid_sample_intervals_and_nonrigid_history_fail_explicitly() {
         binding.motion_from_previous_pose(&pose, Mat4::ZERO, 1.0),
         Err(RagdollError::InvalidModel)
     );
+}
+
+/// The f64 turn from `previous` to `current`, the shorter way round, as a
+/// scaled axis, and whether taking the shorter way flipped its sign: the
+/// reference the handoff's angular velocity is held to.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "glam's platform-atan2 scaled axis is an independent reference, held to a tolerance"
+)]
+fn reference_turn(current: DQuat, previous: DQuat) -> (DVec3, bool) {
+    let turn = (current.normalize() * previous.normalize().conjugate()).normalize();
+    let flipped = turn.w < 0.0;
+    let turn = if flipped { -turn } else { turn };
+    (turn.to_scaled_axis(), flipped)
+}
+
+/// **A handoff's angular velocity is the f64 turn between its poses.** The
+/// poses are built from quaternions whose components are exact decimals
+/// (`0.6² + 0.8² = 1`) and the models and body offsets are pure translations,
+/// so each body's rotation is its joint's global one, and the reference
+/// composes those globals from the same components in f64. Two previous poses:
+/// one whose turn quaternion has `w > 0`, and one whose has `w < 0` and must
+/// be negated to take the shorter way round.
+///
+/// No digest is pinned across targets here, on purpose: the poses pass through
+/// glam's `f32` palette, whose `Quat * Quat` groups its sums differently on
+/// x86-64 (SSE2), on aarch64 (NEON, fused with `vfmaq_f32`) and on wasm32 and
+/// the browser (scalar, no `simd128`), so the bits legitimately differ by
+/// target. The target-independent pin is
+/// `the_scaled_axes_hash_to_the_pinned_digest` in `src/ragdoll/motion.rs`,
+/// over the f64 step alone.
+#[test]
+fn a_handoff_motion_is_the_f64_turn_between_its_poses() {
+    /// The f32 palette's rounding, relative to the turn rate. Measured worst
+    /// on x86-64 Linux, 2026-11-01: 4.3e-8, so this leaves a factor of over
+    /// twenty for another target's f32 path.
+    const RELATIVE: f64 = 1e-6;
+    let (skeleton, mut current) = rig(0.0);
+    let root_now = Quat::from_xyzw(0.0, 0.0, 0.28, 0.96);
+    let limb_now = Quat::from_xyzw(0.6, 0.0, 0.0, 0.8);
+    current.locals_mut()[0].rotation = root_now;
+    current.locals_mut()[1].rotation = limb_now;
+    let model = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
+    let mut palette = Palette::new(&skeleton);
+    palette.compute(&skeleton, &current);
+    // Each body a quarter of a unit along its joint's x axis, so the offsets
+    // are not the identity, with no rotation that would need a sine.
+    let bodies = [1, 0].map(|joint| BodyJoint {
+        joint,
+        world: model * palette.globals()[joint] * Mat4::from_translation(Vec3::new(0.25, 0.0, 0.0)),
+    });
+    let binding = RagdollBinding::new(&skeleton, &current, model, &bodies).unwrap();
+    let dt = 1.0 / 60.0;
+    let previous_model = Mat4::from_translation(Vec3::new(0.5, 2.0, 3.0));
+    let mut flips = 0;
+    for (root_then, limb_then) in [
+        (
+            Quat::from_xyzw(0.0, 0.28, 0.0, 0.96),
+            Quat::from_xyzw(0.0, 0.0, -0.28, 0.96),
+        ),
+        // The root written with `w < 0`, as glam's matrix-to-quaternion
+        // leaves it (its largest component, `z`, positive), so the turn from
+        // it to now has `w = 0.96·-0.6 + 0.28·0.8 < 0`.
+        (
+            Quat::from_xyzw(0.0, 0.0, 0.8, -0.6),
+            Quat::from_xyzw(0.0, 0.0, -0.28, 0.96),
+        ),
+    ] {
+        let mut previous = current.clone();
+        previous.locals_mut()[0].rotation = root_then;
+        previous.locals_mut()[1].rotation = limb_then;
+        let motion = binding
+            .motion_from_previous_pose(&previous, previous_model, dt)
+            .unwrap();
+        assert_eq!(
+            motion,
+            binding
+                .motion_from_previous_pose(&previous, previous_model, dt)
+                .unwrap(),
+            "two runs over the same poses disagree"
+        );
+        let (root_now, limb_now) = (root_now.as_dquat(), limb_now.as_dquat());
+        let (root_then, limb_then) = (root_then.as_dquat(), limb_then.as_dquat());
+        // Binding order: body 0 is joint 1, the limb, under the root.
+        let expected = [
+            reference_turn(root_now * limb_now, root_then * limb_then),
+            reference_turn(root_now, root_then),
+        ];
+        for (body, (motion, (expected, flipped))) in motion.iter().zip(expected).enumerate() {
+            flips += usize::from(flipped);
+            let expected = expected / dt;
+            assert!(expected.length() > 1.0, "body {body} hardly turns");
+            let error = motion.angular_velocity.distance(expected) / expected.length();
+            assert!(
+                error < RELATIVE,
+                "body {body} turns at {:?}, {error:e} from the f64 {expected:?}",
+                motion.angular_velocity
+            );
+        }
+    }
+    assert!(flips > 0, "no turn took the shorter way round");
 }

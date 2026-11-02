@@ -36,6 +36,10 @@ fn sample_one(channel: Channel, time: f32) -> Trs {
 
 /// The rotation angle a quaternion represents, in radians, taking the shorter
 /// of the two arcs — `w = cos(angle / 2)` for a unit quaternion.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test's measure of a pose, which is presentation and claims no determinism"
+)]
 fn angle_of(rotation: Quat) -> f32 {
     2.0 * rotation.w.abs().min(1.0).acos()
 }

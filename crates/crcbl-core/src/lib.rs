@@ -40,9 +40,10 @@
 //!   half of the profiler: scoped spans with static names, nesting freely and
 //!   carrying the thread they ran on, plus named `u64` counters. Compiled into
 //!   every build and gated at runtime; see the module docs for what that costs.
-//! * [`trig`] — [`sin`](trig::sin) and [`cos`](trig::cos) in `f64`, built
-//!   from operations IEEE-754 pins down so a simulation that calls them reaches
-//!   the same bits on every target. No platform `libm`; see the module docs.
+//! * [`trig`] — [`sin`](trig::sin), [`cos`](trig::cos),
+//!   [`atan`](trig::atan) and [`atan2`](trig::atan2) in `f64`, built from
+//!   operations IEEE-754 pins down so a simulation that calls them reaches the
+//!   same bits on every target. No platform `libm`; see the module docs.
 //! * [`hash`] — FNV-1a ([`fnv1a_32`](hash::fnv1a_32),
 //!   [`fnv1a_64`](hash::fnv1a_64) and the [`Fnv1a64`](hash::Fnv1a64) hasher),
 //!   for ids and digests that must be the same on every target and run.

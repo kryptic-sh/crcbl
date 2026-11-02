@@ -40,6 +40,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_core::trig::atan` and `atan2`:** the arc tangent in `f64`,
+  transcribed from musl's `atan2` as the `libm` crate carries it (over fdlibm's
+  `s_atan.c`), bit-identical on every target and within one ulp of the true
+  value over its golden table.
 - **Elliptical swing limits:** `SphericalJoint::with_swing(x, y)` gives the
   swing its own half-angle about frame A's x and y axes, Jolt's
   `SwingTwistConstraint` form, so a shoulder can swing further one way than
@@ -73,6 +77,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   bounds** (`DebugLine::SoftLimit`), which the editor draws in their own colour;
   the editor's rig panel edits both swing half-angles and the neutral, and warns
   of a rest pose outside the limits measured from the neutral.
+
+### Fixed
+
+- **`RagdollBinding::motion_from_previous_pose`** (and so `Ragdoll::spawn` with
+  a previous pose) no longer reads the platform's `atan2` through glam's
+  `DQuat::to_scaled_axis`: the turn-to-angular-velocity step is now the same
+  bits on every target, though the `f32` pose inputs feeding it are not yet.
+  `crcbl-anim` now has a `clippy.toml` refusing platform transcendentals, as
+  `crcbl-phys` and `crcbl-ragdoll` do.
 
 ## [0.16.0] - 2026-11-01
 

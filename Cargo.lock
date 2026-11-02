@@ -692,6 +692,7 @@ dependencies = [
 name = "crcbl-anim"
 version = "0.16.0"
 dependencies = [
+ "crcbl-core",
  "crcbl-rand",
  "glam",
  "ron",

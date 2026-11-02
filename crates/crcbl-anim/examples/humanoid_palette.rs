@@ -151,6 +151,10 @@ fn cycle(skeleton: &Skeleton, extremities: [usize; 4], duration: f32, stride: f3
         }
         false
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "authoring a benchmark clip's keys, which no simulation reads"
+    )]
     let wave = |time: f32, joint: usize| {
         (std::f32::consts::TAU * time / duration + 0.3 * joint as f32).sin() * stride
     };

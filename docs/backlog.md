@@ -17884,8 +17884,8 @@ cm apart where the rest ended within 2.1 mm. The test now holds the median peak
 and a quarter of eight ends. Whether the 2–4 cm ends are a tether that slept
 before it converged was not looked into.
 
-**Windows spawned the generated ragdoll to different bits; fixed, awaiting CI.**
-CI run 41298473165 on `007a68f8` failed `creep.rs`'s
+**Windows spawned the generated ragdoll to different bits; fixed (green on CI,
+9724cb89).** CI run 41298473165 on `007a68f8` failed `creep.rs`'s
 `the_ragdoll_steps_to_the_same_bits_on_every_target` on windows-latest only, at
 spawn (`0xb88e0d131d214ae1` against `0xb1c5_9aa9_6601_9c6b`); macOS and Linux
 matched. The cause, read from the emitted assembly: `f64::powi` compiles to a
@@ -17896,17 +17896,47 @@ the Linux pins unchanged. `crates/crcbl-ragdoll/clippy.toml` now refuses the
 same transcendentals as `crcbl-phys`'s. On `x86_64-pc-windows-msvc`, the only C
 runtime math calls left in `crcbl-ragdoll`, `crcbl-anim` and `crcbl-phys` are
 `debug.rs`'s drawing (`#[expect]`ed), `crcbl-phys`'s orbit, atmosphere and
-sphere-of-influence code (each `#[expect]`ed, off the rigid-body path), and one
+sphere-of-influence code (each `#[expect]`ed, off the rigid-body path), and the
 open item below.
 
-**`crcbl-anim`'s `motion_from_previous_pose` reads the platform's `atan2`.** It
-turns two poses into a body's angular velocity with `DQuat::to_scaled_axis`, and
-`Ragdoll::spawn` uses it whenever a handoff carries the previous pose, so such a
-spawn starts at different bits by target. Not fixed: `crcbl-core` has no
-deterministic `atan2` (`crcbl-phys`'s Box3D transcription is private to the
-joint solver), and `crcbl-anim` has no transcendental lint. The fix is an
-`atan2` in `crcbl_core::trig` from a named reference with known-value tests,
-then the lint on `crcbl-anim`.
+**A ragdoll handoff's spawn state still differs by architecture, through glam's
+`f32` pose path (found by reading glam 0.34.1's source, 2026-11-01; not yet seen
+on CI).** The `atan2` step is fixed: `motion.rs`'s `scaled_axis` uses
+`crcbl_core::trig::atan2`, and `the_scaled_axes_hash_to_the_pinned_digest` pins
+that `f64` step on every target. Its inputs are not portable.
+`RagdollBinding::new` and `RagdollBinding::motion_from_previous_pose`
+(`crates/crcbl-anim/src/ragdoll.rs` and `ragdoll/motion.rs`) build the previous
+and current joint globals with the `f32` `Palette::compute`, invert the body
+offsets in `f32` `Mat4`, and split them with
+`Mat4::to_scale_rotation_translation`. glam groups `Quat * Quat` differently per
+backend: SSE2 on x86-64 as `(x0w1 + w0x1) + (y0z1 - z0y1)`, NEON on aarch64
+fused with `vfmaq_f32` (`src/f32/neon/quat.rs`) and with `dot4` summed pairwise
+(`vaddvq_f32`), and the scalar path on wasm32 and the browser (no `simd128`) as
+`((w0x1 + x0w1) + y0z1) - z0y1`. So a spawn's positions, rotations and
+velocities can differ in their last bits between x86-64, aarch64 and the
+browser, which breaks lockstep and replays for animated handoffs only; a ragdoll
+spawned without a previous pose does not take this path. The fix is to compute
+the handoff's previous and current globals and the body offsets in `f64`
+(`DMat4`/`DQuat` from each `Trs`, which glam computes scalar, with no SIMD and
+no fused multiply-add), or through a scalar, unfused `f32` path, inside those
+two functions rather than through `Palette`. Until then,
+`a_handoff_motion_is_the_f64_turn_between_its_poses` holds the handoff to an
+`f64` reference within 1e-6 relative (4.3e-8 measured on x86-64 Linux) instead
+of pinning its bits.
+
+**`crcbl-phys` keeps its own Box3D `atan2` (declined swap, 2026-11-01).** It is
+`b3Atan2`, a polynomial within 3e-5 rad, used by the joint solver; swapping in
+`crcbl_core::trig::atan2` (under one ulp) would move every joint angle's bits
+and every pin built on them. Both are deterministic. A swap is a deliberate
+re-pin, not a cleanup.
+
+**`crcbl-anim`'s `f32` glam transcendentals are presentation, unlinted.**
+`Quat::slerp` (`sample.rs`, `blend.rs`) and `Quat::from_rotation_arc` (`ik.rs`,
+antiparallel branch) call the platform's `sin`/`acos`; the crate docs declare
+pose evaluation non-deterministic. `clippy.toml` lists `f32` primitives and
+glam's `f64` entry points but not glam's `f32` methods, since every test fixture
+would need an `#[expect]`; a glam `f32` call on the state machine's path would
+be caught only by review.
 
 Not reproduced exactly: EW's own rig (40 bodies, 0.96 kg `spine_01`, 2.6 kg
 pelvis) was not available. The fixture is comparable, not the same, so EW should

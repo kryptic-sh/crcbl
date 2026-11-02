@@ -18,6 +18,11 @@ rust-version.workspace = true
 # to a glTF parser would put that parser in every browser build that plays a
 # cooked clip.
 [dependencies]
+# `trig::atan2` for the angular velocity a ragdoll handoff starts with: that is
+# simulation state, and the platform's `atan2` rounds differently by target.
+# `crcbl-core` is already in every graph that reaches this crate through
+# `crcbl` or `crcbl-ragdoll`.
+crcbl-core = { workspace = true }
 glam = { workspace = true }
 # The state machine is a hand-authored RON asset (`src/machine/asset.rs`), read
 # into file-form structs `serde` derives and then resolved by name. The same

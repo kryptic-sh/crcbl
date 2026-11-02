@@ -1,4 +1,5 @@
-//! Sine and cosine in `f64`, computed without calling `sin` or `cos`.
+//! Sine, cosine and the arc tangent in `f64`, computed without calling the
+//! platform's.
 //!
 //! # Why this module exists
 //!
@@ -56,6 +57,15 @@
 //!
 //! **Not the whole real line.** Arguments past [`MAX_ARGUMENT`] saturate; see
 //! [`sin`].
+//!
+//! # The arc tangent
+//!
+//! [`atan`](fn@atan) and [`atan2`] are under the same rule, transcribed from
+//! `fdlibm`; `crates/crcbl-core/src/trig/atan.rs` documents the construction
+//! and [`MAX_ATAN2_ULP`] its measured bound.
+
+mod atan;
+pub use atan::{MAX_ATAN2_ULP, atan, atan2};
 
 /// `2/π`. Turns an angle into quarter turns, so the nearest whole number of
 /// them can be taken out of it.
