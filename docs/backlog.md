@@ -150,6 +150,26 @@ description) and 3 (anatomical profile) are built. Left from layer 1:
   (_A generated ragdoll above 24 substeps_); counting `r_ssao_split`'s pass in
   the draw counters; the CI-speed options for Pages; EW's octile nav heuristic.
 
+## Published crates' tests read files outside their package (2026-11-03)
+
+EW found that `cargo test --lib` on crates.io's `crcbl-shell` 0.17.0 does not
+compile: `the_shims_state_bits_are_the_engines` in `crcbl-shell`'s `web` module
+does `include_str!` of the repo's `web/engine/shell.js`, which the package does
+not carry. A grep of `include_str!`/`include_bytes!` paths that leave their own
+crate finds the same in `crcbl-webgpu` (`web/engine/*.js` and
+`crcbl-hal/src/*.rs` in `js_mirror`, `probe` and the hal tests), `crcbl-render`
+(`crcbl-shaders/shaders/*.slang`), `crcbl-image` and `crcbl-font` (fonts under
+`crcbl-ui`), `crcbl-wl-scanner`'s parity test (`crcbl-shell/wayland-protocols`)
+and `crcbl`'s wind e2e (`crcbl-wind/assets`). The library builds are fine, since
+publishing verifies them, so every hit sits behind test code; that was inferred
+from the publish, not checked file by file. Only the repo checkout can run these
+tests.
+
+Needs the owner's call: accept it (tests run from the repo only, as now); copy
+each fixture into the package that tests it, with a test that the copy matches
+the original; or gate the cross-crate tests behind a cfg the repo sets. Nothing
+was changed.
+
 ## Local gate runs fill the disk (2026-11-02)
 
 The full local gate (`cargo clippy` on host, wasm32, `x86_64-pc-windows-msvc`
