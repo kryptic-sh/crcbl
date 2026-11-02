@@ -26215,7 +26215,7 @@ still missing or silently lost:
   `check_animations`' `CUBICSPLINE` and morph-weight arms in particular have
   never seen a document that uses them.
 
-### The skinned draw's override is proven red only on Vulkan
+### The skinned draw's override: what is proven red where
 
 A skinned instance carries the base vertex of the region it was deformed into —
 `GpuInstance::base_vertex`, read by `mesh.slang`'s `vertexMain` and
@@ -26226,16 +26226,22 @@ A skinned instance carries the base vertex of the region it was deformed into �
 radv and on lavapipe: sabotaging either shader's base reddens exactly the case
 that draws through it. What is **not** checked:
 
-- **Metal and DX12 draw deformed meshes, but no sabotage has been run on them.**
-  `crates/crcbl/tests/mesh_e2e/skinned_motion.rs` dispatches skinning and reads
-  a skinned cube's motion back as pixels on whichever backend the registry
-  opens. All four of its tests pass in CI on WARP (`dx12-e2e`) and on Metal
-  (`mtl e2e forward + mesh`), run 41418303383, and on 2026-11-02 the whole
-  `mesh_e2e` suite passed on the RX 7900 XTX over D3D12 (122 of 122, mesh-shader
-  geometry path, `CRCBL_DX12_VALIDATION=0` since no debug layer is installed).
-  Not checked: that those tests go red on Metal or DX12 when the base-vertex
-  override is dropped, as the vk pixel tests are shown to; that needs a shader
-  rebuilt at CI's pins. WebGPU's browser gate is shown to.
+- **DX12's vertex-stage arm is proven red; its mesh-stage arm and Metal are
+  not.** `crates/crcbl/tests/mesh_e2e/skinned_motion.rs` dispatches skinning and
+  reads a skinned cube's motion back as pixels on whichever backend the registry
+  opens; all four of its tests pass in CI on WARP (`dx12-e2e`) and on Metal
+  (`mtl e2e forward + mesh`), run 41418303383, and the whole `mesh_e2e` suite
+  passed on the RX 7900 XTX over D3D12 on 2026-11-02 (122 of 122,
+  `CRCBL_DX12_VALIDATION=0`, no debug layer installed). Sabotaged the same day
+  on that card, with shaders rebuilt at CI's pins in WSL: dropping the override
+  in `mesh_cluster.slang`'s mesh stage left all four green, and dropping it in
+  `mesh.slang`'s `vertexMain` as well turned
+  `a_deformed_cube_reads_the_motion_its_palette_moved_it_by` and
+  `a_skinned_cube_back_in_view_after_a_skip_reads_rest` red. So even on a
+  mesh-shader adapter this cube draws through the vertex stage, and the mesh
+  stage's override is held only by vk's `..._through_the_mesh_stage`. Not run:
+  the sabotage on WARP or Metal, and a skinned draw through DX12's mesh stage.
+  WebGPU's browser gate is shown red without the override.
 - **The full demo description has not been run skinned.** The pixel case builds
   `cube_only_scene`, one mesh. The reason it had to — an alias id past every
   bucket and past `draw_gen.slang`'s level tables — is gone with the alias, so
