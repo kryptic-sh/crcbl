@@ -838,8 +838,12 @@ the three Metal CI jobs passed with both in (run 40758600597). What is left:
   `TIMELINE_SEMAPHORE` in its own `optional_features` on 0.12.1: the "no
   timeline semaphores" line went away and first paint stayed level (medians
   about 31.7 and 32.0 ms over seven interleaved launches). pikr runs one frame
-  in flight, so the per-frame `wait_idle` was never on its start-up path. pikr
-  will re-measure `UiRenderer::new` and first paint on the next release.
+  in flight, so the per-frame `wait_idle` was never on its start-up path.
+- **pikr re-measured on D3D12 (2026-11-02):** RX 7900 XTX, Windows 11, 12
+  interleaved pairs in a quiet window (about 1% CPU). `UiRenderer::new` medians
+  went from 13.6 ms on 0.12.1 to 9.9 ms on 0.16.0 in dmenu mode, and from 13.1
+  to 9.5 ms in drun mode. `Presenter::open` stayed about 320 ms on both, AMD's
+  `D3D12CreateDevice`. First paint on Vulkan/ANV has not been re-measured.
 
 ## System audio control, asked by lyr for the owner (2026-10-22)
 
