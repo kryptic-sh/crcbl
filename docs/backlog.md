@@ -11432,6 +11432,13 @@ dynamic-offset, froxel, exposure and cross-path groups it listed all pass on the
   `CRCBL_DX12_VALIDATION=0`); `known-red.txt` is empty.
 - No CI job runs D3D12 on hardware (`windows-latest` has no GPU), so these
   results live only in this entry.
+- **Re-run on the RX 7900 XTX on 2026-11-02** (driver 32.0.21036.18, main at
+  acc16cbb, offscreen, `CRCBL_DX12_VALIDATION=0`): render 105/105, hal-seam
+  32/32, draw-gen 20/20, forward 54/54, sprite 19/19, tiling 2/2, glTF 3/3, mesh
+  122/122, and `crcbl-dx12`'s own 103 of 105, the two failures being the
+  debug-layer self-tests
+  (`debug::tests::a_dirty_report_fails_a_test_that_says_nothing_about_it` and
+  `..::a_deliberate_violation_is_caught_by_the_layer`), as above.
 
 ## Posed bounds for deforming geometry
 
