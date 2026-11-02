@@ -113,9 +113,13 @@ impl<S: Shell + ?Sized> Editor<S> {
 /// non-headless build would open the person's own settings. Two limited
 /// frames: the first has no deadline behind it, the second has a whole
 /// period ahead.
+///
+/// The period is long because it is wall time: at 50 fps a frame that took
+/// more than its 20 ms on a loaded CI runner (run 41512658623,
+/// `windows-latest`) left no deadline ahead and so, correctly, no wait.
 #[test]
 fn a_windowed_frame_idles_only_until_the_frame_limiters_deadline() {
-    for (limit, frames, waits) in [(FrameLimit::unlimited(), 5, 0), (FrameLimit::fps(50), 2, 1)] {
+    for (limit, frames, waits) in [(FrameLimit::unlimited(), 5, 0), (FrameLimit::fps(5), 2, 1)] {
         let mut editor = headless(frames);
         editor.windowed = true;
         editor.clock_source = Clock::new(false);
