@@ -690,6 +690,79 @@ fn a_destroyed_window_stops_keeping_the_display_on() {
     assert!(!display_required());
 }
 
+/// The icon a window shows in `slot`, as `WM_GETICON` answers.
+fn icon_of(hwnd: Handle, slot: usize) -> Handle {
+    // SAFETY: a live window of this thread; `WM_GETICON` reads nothing of ours.
+    unsafe { ffi::SendMessageW(hwnd, msg::GET_ICON, slot, 0) as Handle }
+}
+
+/// A window takes the executable's icons at its own DPI, and new ones when
+/// that DPI changes; the class's stay underneath. The test binary embeds no
+/// icon, so `shell32.dll` mapped as a resource file stands in as the
+/// executable's. The window is created hidden and never shown.
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_window_takes_the_executable_icon_at_its_dpi() {
+    let module = super::super::window::tests::shell32();
+    let mut shell = shell();
+    // SAFETY: `module` stays mapped until after the shell, the only holder
+    // of the source, is dropped.
+    shell.icon_source = unsafe { window::IconSource::of(module) }.map(Rc::new);
+    let window = shell
+        .create_window(&WindowDesc {
+            visible: false,
+            ..WindowDesc::default()
+        })
+        .expect("create hidden");
+    let hwnd = hwnd_of(&shell, window);
+    let side = |metric, dpi| {
+        // SAFETY: an index and a DPI by value.
+        let side = unsafe { ffi::GetSystemMetricsForDpi(metric, dpi) };
+        Some((side, side))
+    };
+    let pixel_size = super::super::window::tests::pixel_size;
+    let dpi = shell.window(window).expect("live").dpi;
+    let big = icon_of(hwnd, ffi::value::ICON_BIG);
+    assert_eq!(pixel_size(big), side(ffi::value::SM_CX_ICON, dpi));
+    assert_eq!(
+        pixel_size(icon_of(hwnd, ffi::value::ICON_SMALL)),
+        side(ffi::value::SM_CX_SM_ICON, dpi)
+    );
+
+    // A move to a monitor at another scale, as the system reports one: the
+    // window's own rectangle as the suggestion, so it stays where it is.
+    let new_dpi = if dpi == 192 { 96 } else { 192 };
+    let mut rect = Rect::default();
+    // SAFETY: a live out-parameter and this test's own window.
+    assert_ne!(unsafe { ffi::GetWindowRect(hwnd, &raw mut rect) }, 0);
+    // SAFETY: `WM_DPICHANGED`'s `lParam` is the suggested rectangle, live
+    // for the synchronous call.
+    unsafe {
+        ffi::SendMessageW(
+            hwnd,
+            msg::DPI_CHANGED,
+            (new_dpi | new_dpi << 16) as usize,
+            (&raw const rect) as Lparam,
+        )
+    };
+    shell.pump(&mut |_| {});
+    assert_eq!(shell.window(window).expect("live").dpi, new_dpi);
+    let replaced = icon_of(hwnd, ffi::value::ICON_BIG);
+    assert_ne!(replaced, big, "a new icon, not the old one stretched");
+    assert_eq!(pixel_size(big), None, "the replaced icon was destroyed");
+    assert_eq!(pixel_size(replaced), side(ffi::value::SM_CX_ICON, new_dpi));
+    assert_eq!(
+        pixel_size(icon_of(hwnd, ffi::value::ICON_SMALL)),
+        side(ffi::value::SM_CX_SM_ICON, new_dpi)
+    );
+
+    shell.destroy_window(window).expect("destroy");
+    assert_eq!(pixel_size(replaced), None, "destroyed with the window");
+    drop(shell);
+    // SAFETY: mapped above, and nothing holds the source now.
+    unsafe { ffi::FreeLibrary(module) };
+}
+
 /// Nothing in a plain `HWND`'s messages paces presents, so a frame is answered
 /// at the next pump and the bit says the compositor is not the one pacing.
 #[test]

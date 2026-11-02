@@ -1069,6 +1069,15 @@ pub mod msg {
     pub const GET_OBJECT: u32 = 0x003D;
     /// `WM_DISPLAYCHANGE`.
     pub const DISPLAY_CHANGE: u32 = 0x007E;
+    /// `WM_GETICON` — which icon a window shows in one of the
+    /// [`ICON_BIG`](super::value::ICON_BIG) and
+    /// [`ICON_SMALL`](super::value::ICON_SMALL) slots. Test-only: the backend
+    /// keeps the icons it sets and never asks.
+    #[cfg(test)]
+    pub const GET_ICON: u32 = 0x007F;
+    /// `WM_SETICON` — gives a window its own icon in one slot, over its
+    /// class's. `lParam` is the icon, which stays the sender's to destroy.
+    pub const SET_ICON: u32 = 0x0080;
     /// `WM_WINDOWPOSCHANGED` — the window's size, position or place in the
     /// z-order changed. The default handler is what sends `WM_SIZE` and
     /// `WM_MOVE` from it.
@@ -1540,10 +1549,16 @@ pub mod value {
     pub const SM_CX_VIRTUAL_SCREEN: i32 = 78;
     /// `SM_CYVIRTUALSCREEN`.
     pub const SM_CY_VIRTUAL_SCREEN: i32 = 79;
-    /// `SM_CXICON` — the side of a large icon, at the system DPI.
+    /// `SM_CXICON` — the side of a large icon, at the system DPI, or at the
+    /// DPI `GetSystemMetricsForDpi` is given.
     pub const SM_CX_ICON: i32 = 11;
-    /// `SM_CXSMICON` — the side of a small icon, at the system DPI.
+    /// `SM_CXSMICON` — the side of a small icon, as [`SM_CX_ICON`].
     pub const SM_CX_SM_ICON: i32 = 49;
+    /// `ICON_BIG`, the `wParam` of `WM_SETICON` for the icon the taskbar and
+    /// the task switcher show.
+    pub const ICON_BIG: usize = 1;
+    /// `ICON_SMALL`, the `wParam` of `WM_SETICON` for the caption's icon.
+    pub const ICON_SMALL: usize = 0;
 
     /// `RT_GROUP_ICON`, the resource type of an icon as a whole: one entry per
     /// icon, naming the images of each size inside it. Passed as an integer
@@ -1714,11 +1729,11 @@ unsafe extern "system" {
     /// unreachable, however well tested it is by hand.
     pub fn TranslateMessage(message: *const Msg) -> Bool32;
     pub fn DispatchMessageW(message: *const Msg) -> Lresult;
-    // Test-only: the two synchronous messages this backend answers —
-    // `WM_GETMINMAXINFO` and `WM_SIZING` — are otherwise only sent by a user
-    // dragging a window edge, which CI cannot do. Sending them by hand is what
-    // makes the constraint path testable at all.
-    #[cfg(test)]
+    // `WM_SETICON`, which has no function of its own. The tests also send the
+    // two synchronous messages this backend answers — `WM_GETMINMAXINFO` and
+    // `WM_SIZING` — which are otherwise only sent by a user dragging a window
+    // edge, which CI cannot do. Sending them by hand is what makes the
+    // constraint path testable at all.
     pub fn SendMessageW(hwnd: Handle, message: u32, w_param: Wparam, l_param: Lparam) -> Lresult;
     // Test-only: a message *posted* rather than sent is the one a wait's own
     // drain dispatches, which is the case `Win32Shell::wait` returns
@@ -1845,7 +1860,10 @@ unsafe extern "system" {
         size: *mut u32,
     ) -> u32;
     pub fn GetSystemMetrics(index: i32) -> i32;
-    // The executable's own icon for the window class; see `window::module_icon`.
+    // A window's icon sizes at its own DPI; see `window::IconSides`.
+    pub fn GetSystemMetricsForDpi(index: i32, dpi: u32) -> i32;
+    // The executable's own icon for the window class and each window; see
+    // `window::IconSource`.
     pub fn LoadImageW(
         instance: Handle,
         name: *const u16,
@@ -1854,7 +1872,6 @@ unsafe extern "system" {
         height: i32,
         flags: u32,
     ) -> Handle;
-    #[cfg(test)]
     pub fn DestroyIcon(icon: Handle) -> Bool32;
     // The clipboard. `OpenClipboard` **fails while another process has it
     // open**, which is routine rather than exceptional, so every one of these

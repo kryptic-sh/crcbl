@@ -122,6 +122,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `FontLink\SystemLink` once per family** rather than on every call, which cost
   about 2 ms a call against 0.07 ms for a warm `find`, so an app asking per
   frame no longer pays it each time.
+- **Win32 windows show the executable's icon at their own monitor's scale.** The
+  window class loads it once at the system DPI, so on a monitor at another scale
+  the system stretched it; each top-level window now also gets it with
+  `WM_SETICON`, loaded at its own DPI's large and small sizes when it is created
+  and again when a DPI change alters them. Panels and popups keep the class's
+  icon, and an executable with no icon still keeps the default.
 
 ## [0.16.0] - 2026-11-01
 

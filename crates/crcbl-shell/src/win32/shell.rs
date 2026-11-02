@@ -159,6 +159,10 @@ pub(super) struct WinWindow {
     /// which [`app_id::clear`](super::app_id::clear) must remove before the
     /// window is destroyed.
     app_id: bool,
+    /// The executable's icon at this window's DPI, set over the class's;
+    /// `None` for a panel, a popup, and every window of an executable with no
+    /// icon. Dropped, and its icons destroyed, after the window is.
+    pub(super) icons: Option<window::Icons>,
 }
 
 impl WinWindow {
@@ -245,6 +249,9 @@ pub struct Win32Shell {
     /// the display on for, and this thread's execution state that follows
     /// them; see [`awake`](super::awake).
     idle: super::awake::IdleInhibit,
+    /// The executable's icon group, looked up once, that each window's
+    /// [`Icons`](window::Icons) load from; `None` when it embeds no icon.
+    pub(super) icon_source: Option<Rc<window::IconSource>>,
     caps: ShellCaps,
 }
 
@@ -359,6 +366,9 @@ impl Win32Shell {
             next_request: 1,
             frames: crate::frame::FrameRequests::default(),
             idle: super::awake::IdleInhibit::default(),
+            // SAFETY: `instance` is the executable's module, loaded for as
+            // long as the process runs.
+            icon_source: unsafe { window::IconSource::of(instance.as_ptr()) }.map(Rc::new),
             caps: Self::latch_caps(raw_motion),
         };
         shell.monitors = shell.enumerate_monitors();
@@ -970,6 +980,9 @@ impl Win32Shell {
                     };
                     state.dpi = dpi;
                     state.scale_factor = scale_factor;
+                    if let Some(icons) = &mut state.icons {
+                        icons.set_dpi(hwnd, dpi);
+                    }
                     // Set unconditionally, and after the `Resized` that the
                     // procedure's own `SetWindowPos` produced: the two share
                     // one `pending` slot, so the configuration published names
@@ -1418,6 +1431,16 @@ impl Shell for Win32Shell {
                 monitor: self.monitor_of(created.hwnd),
             },
         };
+        // Furniture has no caption and no taskbar button to show an icon in,
+        // and a popup may be made and unmade every frame.
+        let icons = match (&panel, &popup, &self.icon_source) {
+            (None, None, Some(source)) => Some(window::Icons::new(
+                hwnd.as_ptr(),
+                Rc::clone(source),
+                created.dpi,
+            )),
+            _ => None,
+        };
         let window = WinWindow {
             hwnd,
             key: proc::key(created.hwnd),
@@ -1453,6 +1476,7 @@ impl Shell for Win32Shell {
             popup,
             input_region: None,
             app_id: super::app_id::set(hwnd.as_ptr(), desc.app_id),
+            icons,
         };
         if desc.transparent {
             Self::apply_transparent_chrome(hwnd.as_ptr());
@@ -1516,6 +1540,8 @@ impl Shell for Win32Shell {
         // SAFETY: destroying this shell's own window, from the thread that
         // created it — which is this one, because a `Shell` is not `Send`.
         unsafe { ffi::DestroyWindow(removed.raw()) };
+        // Only now, with the window gone, are its icons free to destroy.
+        drop(removed);
         self.queue.push_back(ShellEvent::WindowDestroyed { window });
         Ok(())
     }

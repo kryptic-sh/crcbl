@@ -4686,11 +4686,17 @@ on shard on 2026-09-27.
   shows EW's embedded icon; the title bar's small icon was not in that capture,
   so it is unseen. No test reads a registered class's icon back with one
   present: the tests read the lookup from `shell32.dll` mapped as a resource
-  file and the null case from the test binary. **Not done:** icons per monitor
-  DPI. The class takes system-DPI sizes once, so on a monitor at another scale
-  the system rescales them; `WM_SETICON` per window at `GetSystemMetricsForDpi`
-  sizes would fix that. A `WindowDesc` icon field was the other option EW
-  offered, not needed while the exe's resource is enough.
+  file and the null case from the test binary. **Per-DPI icons (2026-11-02):**
+  each top-level window (not panels or popups) gets `window::Icons`, loaded at
+  `GetSystemMetricsForDpi` sizes and set with `WM_SETICON` at creation and on a
+  DPI change that alters the sizes; the class's system-DPI icons stay the
+  fallback. Unit-tested without a window: the sizes at 96, 144 and 192 DPI, the
+  loaded icons' pixel sizes read back from `shell32.dll`'s, the reload decision
+  and `OwnedIcon` destroying on drop. **Not run yet:** the wiring through a real
+  window (`a_window_takes_the_executable_icon_at_its_dpi`, ignored, for
+  `run-win32-e2e.ps1`), and nobody has looked at a caption on a scaled monitor.
+  A `WindowDesc` icon field was the other option EW offered, not needed while
+  the exe's resource is enough.
 
 - **Pad chord routing constraints retained after EW migration.** **Decision.**
   The routing is a per-action mark, not a per-binding one. Overrides replace an
