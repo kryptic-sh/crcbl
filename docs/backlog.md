@@ -28941,6 +28941,14 @@ The measurements — what macOS and Windows each answered, and what the two jobs
 gate on now — are in docs/notes/browser.md under the same heading. What is still
 open:
 
+**Run by hand on Windows hardware, 2026-11-02:**
+`web/run-probe-e2e.sh --headless` with `CRCBL_WEB_E2E_ADAPTER=hardware` on the
+Windows desktop (RX 7900 XTX, Chrome's Dawn, adapter `amd rdna-3`, main at
+d9330a5c) passed 89 of 89, groups `X`, `Y`, `Z` and `AA` included. So the four
+groups CI's `probe-windows` job excuses fail there for its software adapter's
+canvas readback, not for WebGPU on Windows. One machine, by hand; CI still has
+no Windows adapter.
+
 **Also seen and not chased:** `actions/download-artifact` logged
 `digest-mismatch: error` on the Windows job while still extracting the site. It
 did not cause the failure — the probe page loaded and asked for an adapter — but
