@@ -14,10 +14,11 @@ use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
     LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PhysicalSize,
     PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
-    SizeConstraints, TextPurpose, WindowConfiguration, WindowDesc, WindowId, WindowState,
+    SizeConstraints, TextPurpose, WebUrl, WindowConfiguration, WindowDesc, WindowId, WindowState,
 };
 
 use super::TimeBase;
+use super::browser;
 use super::clipboard::{self, Clipboard, Opened};
 use super::devices::{Attribution, DeviceTable};
 use super::events::RawEvent;
@@ -407,7 +408,8 @@ impl Win32Shell {
             .union(ShellCaps::TRANSPARENT)
             .union(ShellCaps::CURSOR_SHAPE)
             .union(ShellCaps::INPUT_REGION)
-            .union(ShellCaps::IDLE_INHIBIT);
+            .union(ShellCaps::IDLE_INHIBIT)
+            .union(ShellCaps::OPEN_URL);
         #[cfg(feature = "accesskit")]
         let caps = caps.union(ShellCaps::ACCESSIBILITY);
         if raw_motion {
@@ -1328,6 +1330,9 @@ impl Shell for Win32Shell {
     /// * [`IDLE_INHIBIT`](ShellCaps::IDLE_INHIBIT) —
     ///   `SetThreadExecutionState` on the loop thread, held while any window
     ///   asks; see [`set_idle_inhibit`](Shell::set_idle_inhibit).
+    /// * [`OPEN_URL`](ShellCaps::OPEN_URL) — `ShellExecuteW`, which starts
+    ///   whatever is registered for `http` and `https`; see
+    ///   [`open_url`](Shell::open_url).
     /// * [`ACCESSIBILITY`](ShellCaps::ACCESSIBILITY), only when built with the
     ///   `accesskit` feature — each window has a UI Automation adapter that
     ///   answers `WM_GETOBJECT` with the tree `update_accessibility` sent, and
@@ -2242,6 +2247,12 @@ impl Shell for Win32Shell {
     fn set_idle_inhibit(&mut self, window: WindowId, inhibit: bool) -> Result<(), ShellError> {
         self.window(window)?;
         self.idle.set(window, inhibit)
+    }
+
+    /// `ShellExecuteW` with the `open` verb and the window as its owner, in a
+    /// COM apartment entered for the call. See [`browser`] for both.
+    fn open_url(&mut self, window: WindowId, url: &WebUrl) -> Result<(), ShellError> {
+        browser::open(self.window(window)?.raw(), url)
     }
 }
 

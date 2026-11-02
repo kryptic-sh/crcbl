@@ -353,6 +353,18 @@ bitflags::bitflags! {
         /// answers [`ShellError::Unsupported`](crate::ShellError::Unsupported)
         /// and the display sleeps on the user's schedule.
         const IDLE_INHIBIT = 1 << 26;
+
+        /// [`Shell::open_url`](crate::Shell::open_url) is acted on: the
+        /// [`WebUrl`](crate::WebUrl) is handed to the user's web browser.
+        ///
+        /// Win32 passes it to `ShellExecuteW`, which starts whatever is
+        /// registered for `http` and `https`. Clear on Wayland and X11
+        /// (`org.freedesktop.portal.OpenURI` or `xdg-open`), AppKit
+        /// (`NSWorkspace openURL:`) and the web (`window.open`), none of which
+        /// is wired; there the call answers
+        /// [`ShellError::Unsupported`](crate::ShellError::Unsupported), and a
+        /// game can show the address for the player to copy instead.
+        const OPEN_URL = 1 << 27;
     }
 }
 

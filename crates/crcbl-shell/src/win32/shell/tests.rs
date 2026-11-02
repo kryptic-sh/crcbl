@@ -651,6 +651,18 @@ fn the_display_can_be_kept_on() {
     }
 }
 
+/// `ShellExecuteW` is in every Windows, so the bit is a constant. The call
+/// itself opens a browser, so no test here makes it.
+#[test]
+fn a_url_can_be_opened() {
+    for raw_motion in [false, true] {
+        assert!(
+            Win32Shell::latch_caps(raw_motion).contains(ShellCaps::OPEN_URL),
+            "ShellExecuteW opens the browser"
+        );
+    }
+}
+
 /// This thread's `ES_DISPLAY_REQUIRED`, read by setting `ES_CONTINUOUS` and
 /// putting back what that replaced.
 fn display_required() -> bool {
@@ -801,6 +813,7 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
         ShellCaps::CURSOR_SHAPE,
         ShellCaps::INPUT_REGION,
         ShellCaps::IDLE_INHIBIT,
+        ShellCaps::OPEN_URL,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
     }

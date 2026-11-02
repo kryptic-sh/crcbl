@@ -2642,6 +2642,28 @@ mod tests {
         assert!(shell.surface_target(foreign).is_err());
     }
 
+    /// The web backend keeps `Shell::open_url`'s provided default, which is
+    /// what every backend without `OPEN_URL` answers: the handle is checked
+    /// first, then the request is refused by name rather than dropped.
+    #[test]
+    fn opening_a_url_is_the_provided_refusal() {
+        let (mut shell, window) = shell_with_window(0);
+        let url = crate::WebUrl::parse("https://example.com/").expect("a web URL");
+        assert!(!shell.caps().contains(ShellCaps::OPEN_URL));
+        assert!(matches!(
+            shell.open_url(window, &url),
+            Err(ShellError::Unsupported {
+                backend: ShellBackend::Web,
+                what: "opening a URL",
+            })
+        ));
+        let foreign = WindowId::from_bits(0xDEAD_BEEF_0001_0001).expect("valid bits");
+        assert!(matches!(
+            shell.open_url(foreign, &url),
+            Err(ShellError::InvalidWindow { .. })
+        ));
+    }
+
     #[test]
     fn key_codes_are_the_w3c_code_names() {
         assert_eq!(key_code_of("KeyA"), Some(KeyCode::KeyA));

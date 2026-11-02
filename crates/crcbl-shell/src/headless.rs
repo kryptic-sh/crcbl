@@ -150,7 +150,7 @@ use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
     KeyCode, LogicalRect, LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint,
     PhysicalRect, PhysicalSize, PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps,
-    ShellError, ShellEvent, ShellWaker, SizeConstraints, TextPurpose, WindowConfiguration,
+    ShellError, ShellEvent, ShellWaker, SizeConstraints, TextPurpose, WebUrl, WindowConfiguration,
     WindowDesc, WindowId, WindowState,
 };
 
@@ -366,6 +366,9 @@ pub struct HeadlessShell {
     /// Whether the outputs are on, so frame requests are answered. See
     /// [`set_outputs_powered`](HeadlessShell::set_outputs_powered).
     outputs_powered: bool,
+    /// Every [`Shell::open_url`] accepted, in order, with the window that
+    /// asked; see [`opened_urls`](HeadlessShell::opened_urls).
+    opened_urls: Vec<(WindowId, WebUrl)>,
 }
 
 /// The headless shell's doorbell: a flag and the condition variable a wait
@@ -454,6 +457,7 @@ impl HeadlessShell {
             wake: None,
             frames: FrameRequests::default(),
             outputs_powered: true,
+            opened_urls: Vec::new(),
         }
     }
 
@@ -1233,6 +1237,18 @@ impl HeadlessShell {
     /// [`ShellError::InvalidWindow`] if the handle is stale.
     pub fn idle_inhibited(&self, window: WindowId) -> Result<bool, ShellError> {
         Ok(self.window(window)?.idle_inhibit)
+    }
+
+    /// Every URL [`Shell::open_url`] accepted, oldest first, with the window
+    /// that asked.
+    ///
+    /// Headless-only, for the same reason as [`title`](Self::title): there is
+    /// no browser to open, so a test of a menu's "Wishlist" button reads that
+    /// it asked for the store page. Kept when the window is destroyed, since
+    /// the browser it would have opened stays open too.
+    #[must_use]
+    pub fn opened_urls(&self) -> &[(WindowId, WebUrl)] {
+        &self.opened_urls
     }
 
     /// Turns every output off or back on, as far as frame requests go.
@@ -2066,6 +2082,19 @@ impl Shell for HeadlessShell {
             return Err(self.unsupported("idle inhibit"));
         }
         self.window_mut(window)?.idle_inhibit = inhibit;
+        Ok(())
+    }
+
+    /// Records the request, which
+    /// [`opened_urls`](HeadlessShell::opened_urls) reads back; there is no
+    /// browser to open. Refused without [`ShellCaps::OPEN_URL`], as a backend
+    /// that cannot act on it refuses.
+    fn open_url(&mut self, window: WindowId, url: &WebUrl) -> Result<(), ShellError> {
+        if !self.caps.contains(ShellCaps::OPEN_URL) {
+            return Err(self.unsupported("opening a URL"));
+        }
+        self.check_window(window)?;
+        self.opened_urls.push((window, url.clone()));
         Ok(())
     }
 
@@ -3641,6 +3670,56 @@ mod tests {
             })
         ));
         assert!(!shell.idle_inhibited(window).expect("live"));
+    }
+
+    fn url(text: &str) -> WebUrl {
+        WebUrl::parse(text).expect("a web URL")
+    }
+
+    #[test]
+    fn an_opened_url_is_recorded_in_order() {
+        let (mut shell, window) = shell_with_configured_window();
+        let other = shell.create_window(&WindowDesc::default()).expect("window");
+        assert!(shell.opened_urls().is_empty());
+        let store = url("https://store.example/app/1");
+        let privacy = url("HTTPS://EXAMPLE.COM/privacy");
+        shell.open_url(window, &store).expect("store page");
+        shell.open_url(other, &privacy).expect("privacy policy");
+        shell
+            .open_url(window, &store)
+            .expect("asking twice opens twice");
+        assert_eq!(
+            shell.opened_urls(),
+            [
+                (window, store.clone()),
+                (other, privacy),
+                (window, store.clone())
+            ]
+        );
+        shell.destroy_window(window).expect("destroy");
+        assert!(matches!(
+            shell.open_url(window, &store),
+            Err(ShellError::InvalidWindow { .. })
+        ));
+        assert_eq!(
+            shell.opened_urls().len(),
+            3,
+            "the history outlives the window"
+        );
+    }
+
+    #[test]
+    fn opening_a_url_is_refused_without_the_capability() {
+        let mut shell = HeadlessShell::new().with_caps(ShellCaps::DESKTOP - ShellCaps::OPEN_URL);
+        let window = shell.create_window(&WindowDesc::default()).expect("window");
+        assert!(matches!(
+            shell.open_url(window, &url("https://example.com/")),
+            Err(ShellError::Unsupported {
+                backend: ShellBackend::Headless,
+                ..
+            })
+        ));
+        assert!(shell.opened_urls().is_empty());
     }
 
     fn frames_for(events: &[ShellEvent], window: WindowId) -> usize {

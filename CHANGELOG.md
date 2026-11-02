@@ -44,6 +44,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Opening a link in the user's browser:** `Shell::open_url(window, &url)`
+  opens a store page, community link or licence in the browser. It takes only a
+  `WebUrl`, made by `WebUrl::parse`, which accepts an absolute `http` or `https`
+  URL and refuses everything else with a `WebUrlError` before any system call:
+  other schemes (`file:`, `javascript:`, `ms-msdt:`), paths, user information,
+  and any character a URL must percent-encode, so a link a server sent cannot
+  run a program or open a file. The new `ShellCaps::OPEN_URL` says where it is
+  acted on: Win32, through `ShellExecuteW`; and `HeadlessShell`, which records
+  it for `opened_urls`. The other backends answer `ShellError::Unsupported`.
 - **Keeping the display on during play:**
   `Shell::set_idle_inhibit(window, inhibit)` stops the display sleeping and the
   screensaver starting while any window asks, so a gamepad-only player or a

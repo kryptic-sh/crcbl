@@ -1,6 +1,6 @@
 //! Hand-written FFI to `user32`, `gdi32`, `shcore`, `shell32`, `imm32`,
-//! `dwmapi` and `kernel32`, and the wire structures the Win32 backend passes
-//! across it.
+//! `dwmapi`, `ole32` and `kernel32`, and the wire structures the Win32 backend
+//! passes across it.
 //!
 //! # Decision: `#[link]`, not `dlopen` — the opposite of the two Linux backends
 //!
@@ -12,12 +12,12 @@
 //! machine without libwayland is an ordinary machine.
 //!
 //! **That premise does not hold here, and the asymmetry is deliberate rather
-//! than an oversight.** `user32.dll`, `gdi32.dll`, `shell32.dll`, `imm32.dll`
-//! and `kernel32.dll` are part of the operating system: a Windows that lacks
-//! them is not a Windows this engine failed to support, it is a Windows that
-//! cannot run any process at all. `shcore.dll` ships with every Windows since
-//! 8.1 and `dwmapi.dll` with every one since Vista, both below this backend's
-//! floor. There is nothing for a runtime
+//! than an oversight.** `user32.dll`, `gdi32.dll`, `shell32.dll`, `imm32.dll`,
+//! `ole32.dll` and `kernel32.dll` are part of the operating system: a Windows
+//! that lacks them is not a Windows this engine failed to support, it is a
+//! Windows that cannot run any process at all. `shcore.dll` ships with every
+//! Windows since 8.1 and `dwmapi.dll` with every one since Vista, both below
+//! this backend's floor. There is nothing for a runtime
 //! probe to discover, and `LoadLibraryW` + `GetProcAddress` for the system
 //! libraries would buy exactly one thing: a fallible code path with no failure.
 //!
@@ -1404,6 +1404,21 @@ pub mod value {
     /// whatever the thread held.
     pub const ES_CONTINUOUS: u32 = 0x8000_0000;
 
+    /// `COINIT_APARTMENTTHREADED` — the single-threaded apartment, which is
+    /// what `ShellExecuteW`'s documentation asks its caller to be in.
+    pub const COINIT_APARTMENT_THREADED: u32 = 0x2;
+    /// `COINIT_DISABLE_OLE1DDE` — no OLE 1 DDE window, as the same
+    /// documentation asks.
+    pub const COINIT_DISABLE_OLE1DDE: u32 = 0x4;
+    /// `S_OK` from `CoInitializeEx`: this call made the apartment.
+    pub const S_OK: i32 = 0;
+    /// `S_FALSE` from `CoInitializeEx`: the thread was already in a
+    /// single-threaded apartment. Still owes a `CoUninitialize`.
+    pub const S_FALSE: i32 = 1;
+    /// `RPC_E_CHANGED_MODE` — the thread is already in the multithreaded
+    /// apartment. Nothing was initialized and nothing is owed.
+    pub const RPC_E_CHANGED_MODE: i32 = 0x8001_0106_u32.cast_signed();
+
     /// `HTCLIENT` — the `WM_SETCURSOR` hit-test code for the drawable area.
     ///
     /// Every other value is a piece of the frame the *system* owns a cursor
@@ -1896,7 +1911,8 @@ unsafe extern "system" {
     pub fn GetOpenClipboardWindow() -> Handle;
 }
 
-// The `shell32` surface: file drops, and nothing else.
+// The `shell32` surface: file drops, the appbar a reserving panel is, and
+// `ShellExecuteW` for `open_url`.
 //
 // The fifth system library, on the same terms as `shcore` above — `shell32.dll`
 // is present on every Windows this backend can run on, so there is nothing for
@@ -1924,6 +1940,29 @@ unsafe extern "system" {
     // Releases the `HDROP`. Not optional: the memory is the shell's and is
     // leaked without it.
     pub fn DragFinish(hdrop: Handle);
+    // Answers a pseudo-`HINSTANCE` that is greater than 32 on success and is
+    // otherwise the error code. `owner` owns any message box it shows. See
+    // `win32::browser`.
+    pub fn ShellExecuteW(
+        owner: Handle,
+        verb: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show: i32,
+    ) -> Handle;
+}
+
+// The `ole32` surface: entering and leaving a COM apartment around
+// `ShellExecuteW`, which may hand the request to a COM handler. On the same
+// terms as `shell32`: part of every Windows. See `win32::browser`.
+#[cfg(target_os = "windows")]
+#[link(name = "ole32")]
+unsafe extern "system" {
+    // An `HRESULT`: `S_OK` or `S_FALSE` owe a `CoUninitialize` on this
+    // thread, `RPC_E_CHANGED_MODE` does not.
+    pub fn CoInitializeEx(reserved: *const c_void, flags: u32) -> i32;
+    pub fn CoUninitialize();
 }
 
 // The `imm32` surface: the input method's composition string, and where its

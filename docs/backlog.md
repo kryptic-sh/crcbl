@@ -649,11 +649,15 @@ have.
   not wired and answer `Unsupported`. A gamepad-only player or a cutscene gets
   the screen blanked mid-game there; SDL inhibits by default for this reason.
   Nothing in the engine calls it yet. Small, P1.
-- **No way to open a URL in the system browser.** No `xdg-open`, portal
-  `OpenURI`, `ShellExecuteW`, `NSWorkspace openURL` or `window.open`; only
-  Steam's `Friends::open_overlay_to_web_page`. Needed for "Wishlist", Discord,
-  EULA and privacy links. Builds on `crcbl_spawn::command` and a `Shell` method.
-  Unrecorded. Small, P2.
+- **Only Win32 opens a URL in the system browser.** `Shell::open_url`,
+  `ShellCaps::OPEN_URL` and the validated `WebUrl` exist, and Win32 calls
+  `ShellExecuteW`; Wayland/X11 (portal `OpenURI`, else `xdg-open` through
+  `crcbl_spawn::command`), macOS `NSWorkspace openURL` and the web's
+  `window.open` are not wired and answer `Unsupported`. Needed for "Wishlist",
+  Discord, EULA and privacy links. Nothing in the engine calls it yet. **Not
+  run:** the real `ShellExecuteW` call and its error mapping (no test may open a
+  browser on CI's desktop); only the validation, the COM apartment's balance and
+  the cap are tested. Small, P2.
 - **No runtime window icon on Wayland, X11 or AppKit.** `WindowDesc::app_id`
   sets `xdg_toplevel.set_app_id` and `WM_CLASS`, so Linux shows an icon only
   with an installed `.desktop` file (not a tarball, itch build or dev run). No

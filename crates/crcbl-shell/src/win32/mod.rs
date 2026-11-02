@@ -241,6 +241,8 @@ mod app_id;
 #[cfg(target_os = "windows")]
 mod awake;
 #[cfg(target_os = "windows")]
+mod browser;
+#[cfg(target_os = "windows")]
 mod icon;
 #[cfg(target_os = "windows")]
 mod input;

@@ -272,6 +272,7 @@ pub mod geom;
 pub mod headless;
 pub mod monitor;
 pub mod role;
+pub mod url;
 pub mod waker;
 pub mod window;
 
@@ -344,6 +345,7 @@ pub use role::{
     Margins, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, PopupDesc, PopupInput,
     PopupPlacement, Reserve, WindowRole,
 };
+pub use url::{WebUrl, WebUrlError};
 pub use waker::ShellWaker;
 pub use window::{
     CloseReply, DisplayMode, SizeConstraints, Window, WindowConfiguration, WindowDesc, WindowId,
@@ -1052,6 +1054,44 @@ pub trait Shell: core::fmt::Debug {
         Err(ShellError::Unsupported {
             backend: self.backend(),
             what: "idle inhibit",
+        })
+    }
+
+    /// Opens `url` in the user's web browser, for a store page, a community
+    /// link, or the end-user licence and privacy policy.
+    ///
+    /// Only a [`WebUrl`] is taken: an absolute `http` or `https` URL, checked
+    /// by [`WebUrl::parse`] before any backend sees it. The system's own
+    /// "open" would also run a program, open a file with whatever is
+    /// associated with it, or start any registered protocol handler, and a
+    /// game passing on a link a server sent it must never reach any of that;
+    /// see the [`url`] module.
+    ///
+    /// `window` owns whatever the system shows while it opens the browser,
+    /// such as Win32's message box when no browser is registered, as Wayland's
+    /// `org.freedesktop.portal.OpenURI` takes a parent window. Whether the
+    /// browser opened the page is not reported back: success means the system
+    /// accepted the request. Leave the browser's window to come forward on its
+    /// own; a fullscreen game may want to leave fullscreen first.
+    ///
+    /// # A provided method
+    ///
+    /// The default validates the handle and answers
+    /// [`ShellError::Unsupported`], since a link that silently does nothing
+    /// leaves the player clicking it again. [`ShellCaps::OPEN_URL`] is set
+    /// only where it is acted on, and says which backends that is.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale,
+    /// [`ShellError::Unsupported`] without [`ShellCaps::OPEN_URL`], and
+    /// [`ShellError::Backend`] if the system refused.
+    fn open_url(&mut self, window: WindowId, url: &WebUrl) -> Result<(), ShellError> {
+        let _ = url;
+        self.window_state(window)?;
+        Err(ShellError::Unsupported {
+            backend: self.backend(),
+            what: "opening a URL",
         })
     }
 
