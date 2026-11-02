@@ -97,6 +97,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Clip sampling is back to its 0.15 speed.** 0.16.0's `Clip::sample_into`
+  grouped channels by keyframe timeline and searched once per group: fewer
+  instructions, but about 24% slower in wall time on a crowd of characters, so
+  it is reverted to one search per channel. On `humanoid_palette crowd`
+  (mxaddict-pc, 10 interleaved rounds, load 4.6 → 2.4) median seconds in-cache /
+  beyond-LLC went from 3.058 / 2.465 to 2.329 / 1.881, faster than 0.15 with the
+  incremental palette kept. Results are unchanged.
 - **`RagdollBinding::motion_from_previous_pose`** (and so `Ragdoll::spawn` with
   a previous pose) no longer reads the platform's `atan2` through glam's
   `DQuat::to_scaled_axis`: the turn-to-angular-velocity step is now the same

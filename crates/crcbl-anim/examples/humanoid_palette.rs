@@ -12,6 +12,8 @@
 //! two-bone   solve_two_bone: a hand put on a target, alternating between two
 //! sample     Clip::sample_into: a walk cycle at advancing times
 //! blend      blend_into: a walk pose and a run pose mixed, alternating weights
+//! crowd      a crowd's tick: per character, two clips sampled, blended, the
+//!            palette computed, a lean turned and a hand put on a target
 //! ```
 //!
 //! The walk and the run are shaped like an exported locomotion clip: a
@@ -28,6 +30,22 @@
 //! The second argument is how many calls to make. The difference between the
 //! two runs' totals, divided by the calls, is what one call costs, with the
 //! setup cancelled out.
+//!
+//! `crowd` counts ticks rather than calls, and takes the number of characters
+//! as a third argument. Each character owns its poses and palette, and plays
+//! two of eight clips: four shaped like the walk and the run, and four
+//! keyframe-reduced, where every joint is keyed at a count of its own between
+//! 30 and 60, so the clip has a timeline per joint rather than one or two.
+//! Its working set is the crowd's, not one character's, which is what a cache
+//! simulation needs to see what a game sees:
+//!
+//! ```text
+//! valgrind --tool=callgrind --cache-sim=yes --LL=33554432,16,64 \
+//!     target/release/examples/humanoid_palette crowd 20 150
+//! ```
+//!
+//! It prints a checksum of every character's palette, which is the same on
+//! every version that composes the same bits.
 
 use std::hint::black_box;
 
@@ -206,6 +224,104 @@ fn cycle(skeleton: &Skeleton, extremities: [usize; 4], duration: f32, stride: f3
     Clip::new(channels)
 }
 
+/// A keyframe-reduced clip `duration` seconds long: a rotation channel on
+/// every joint, each keyed `30..=60` times at a count that depends on the joint
+/// and `seed`, so almost every channel has a timeline of its own.
+fn reduced(skeleton: &Skeleton, duration: f32, seed: usize) -> Clip {
+    let channels = (0..skeleton.len())
+        .map(|joint| {
+            let keys = 30 + (joint * 13 + seed * 7) % 31;
+            let times: Vec<f32> = (0..keys)
+                .map(|key| duration * key as f32 / (keys - 1) as f32)
+                .collect();
+            // A triangle wave, so the keys vary without a transcendental.
+            let rotations = (0..keys)
+                .map(|key| {
+                    let phase = ((key + joint + seed) % 20) as f32 / 10.0;
+                    let swing = 0.3 * (1.0 - (phase - 1.0).abs());
+                    Quat::from_euler(glam::EulerRot::YXZ, 0.2 * swing, swing, -0.1 * swing)
+                })
+                .collect();
+            Channel::new(
+                joint,
+                times,
+                Interpolation::Linear,
+                Track::Rotation(rotations),
+            )
+            .expect("well formed")
+        })
+        .collect();
+    Clip::new(channels)
+}
+
+/// One member of the crowd: what it samples into, blends into and composes.
+struct Character {
+    from: Pose,
+    to: Pose,
+    pose: Pose,
+    palette: Palette,
+}
+
+/// Runs `ticks` ticks of `characters` characters and prints a checksum of every
+/// palette they end on.
+fn crowd(ticks: u32, characters: usize) {
+    const TICK: f32 = 1.0 / 60.0;
+    let (skeleton, arm, lean, extremities) = humanoid();
+    let clips: Vec<Clip> = [(1.0, 0.8), (1.2, 0.6), (1.5, 0.4), (2.0, 0.3)]
+        .into_iter()
+        .map(|(duration, stride)| cycle(&skeleton, extremities, duration, stride))
+        .chain((0..4).map(|seed| reduced(&skeleton, 1.0 + 0.25 * seed as f32, seed)))
+        .collect();
+    let mut crowd: Vec<Character> = (0..characters)
+        .map(|_| Character {
+            from: Pose::new(&skeleton),
+            to: Pose::new(&skeleton),
+            pose: Pose::new(&skeleton),
+            palette: Palette::new(&skeleton),
+        })
+        .collect();
+    let model = Mat4::from_translation(Vec3::new(3.0, 0.0, -2.0));
+    let turns = lean.map(|joint| (joint, Quat::from_rotation_x(0.001)));
+    let targets = [Vec3::new(3.4, 1.2, -1.7), Vec3::new(3.3, 1.4, -1.6)];
+    for tick in 0..ticks {
+        for (index, character) in crowd.iter_mut().enumerate() {
+            let (from, to) = (&clips[index % 8], &clips[(index * 3 + 1) % 8]);
+            let time = tick as f32 * TICK + 0.037 * index as f32;
+            from.sample_into(time % from.duration(), &skeleton, &mut character.from);
+            to.sample_into(time % to.duration(), &skeleton, &mut character.to);
+            let weight = (index % 7) as f32 / 7.0 + 0.05;
+            blend_into(&character.from, &character.to, weight, &mut character.pose);
+            character.palette.compute(&skeleton, &character.pose);
+            rotate_joints(
+                &skeleton,
+                model,
+                &mut character.pose,
+                &mut character.palette,
+                &turns,
+            )
+            .expect("the lean's joints are conformal");
+            solve_two_bone(
+                &skeleton,
+                model,
+                &mut character.pose,
+                &mut character.palette,
+                arm,
+                targets[(tick as usize + index) % 2],
+                Vec3::NEG_Z,
+            )
+            .expect("the arm is a chain");
+        }
+    }
+    let checksum = crowd
+        .iter()
+        .flat_map(|character| character.palette.matrices())
+        .flat_map(Mat4::to_cols_array)
+        .fold(0_u64, |sum, value| {
+            sum.rotate_left(5) ^ u64::from(value.to_bits())
+        });
+    println!("crowd: {ticks} ticks of {characters} characters, checksum {checksum:016x}");
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().expect("the first argument is the mode");
@@ -213,6 +329,14 @@ fn main() {
         .next()
         .map_or(Ok(100_000), |count| count.parse())
         .expect("the second argument is a call count");
+    if mode == "crowd" {
+        let characters = args
+            .next()
+            .map_or(Ok(150), |count| count.parse())
+            .expect("the third argument is a character count");
+        crowd(calls, characters);
+        return;
+    }
     let (skeleton, arm, lean, extremities) = humanoid();
     assert_eq!(skeleton.len(), 55, "the humanoid EW measured has 55 joints");
     let poses = [posed(&skeleton, 0.0), posed(&skeleton, 0.1)];
@@ -257,7 +381,9 @@ fn main() {
                 black_box([0.3, 0.7][which]),
                 &mut pose,
             ),
-            other => panic!("unknown mode {other}: full, repeat, turns, two-bone, sample or blend"),
+            other => panic!(
+                "unknown mode {other}: full, repeat, turns, two-bone, sample, blend or crowd"
+            ),
         }
     }
     let wrist = palette.globals()[arm[2]].w_axis;

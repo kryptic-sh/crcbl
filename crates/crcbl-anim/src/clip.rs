@@ -1,7 +1,6 @@
 //! Clips and the keyframe channels they are made of.
 
-use std::collections::HashSet;
-use std::{fmt, mem};
+use std::fmt;
 
 use glam::{Quat, Vec3};
 
@@ -271,80 +270,10 @@ const fn values_per_keyframe(interpolation: Interpolation) -> usize {
 }
 
 /// A set of channels over one skeleton, and the time span they cover.
-///
-/// Two clips are equal when their channels and durations are, and print as
-/// their channels and duration: the sampling plan is derived from the channels
-/// and is not part of what a clip is.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Clip {
     channels: Vec<Channel>,
     duration: f32,
-    /// The channels [`Clip::sample_into`](crate::Clip::sample_into) evaluates,
-    /// by index into `channels`, grouped so that channels with the same
-    /// keyframe times sit together. Built once, by [`schedule`].
-    pub(crate) schedule: Vec<usize>,
-    /// Where each group of `schedule` ends; each starts where the one before
-    /// it ended.
-    ///
-    /// Every channel of a group has the same keyframe times, bit for bit.
-    /// Sampling finds a time's segment from the times alone, so the whole group
-    /// lands in one segment and the search is done once for all of it. Baked
-    /// and exported clips commonly key every channel on one shared timeline,
-    /// which turns one search per channel into one per sample.
-    pub(crate) timeline_ends: Vec<usize>,
-}
-
-/// Which channels a sample evaluates, and in which groups.
-///
-/// **A channel overwritten by a later one is left out.** Two channels driving
-/// the same component of the same joint leave the later one's value, per
-/// [`Clip::new`], and sampling a channel has no other effect — so the earlier
-/// is dropped here rather than evaluated and discarded. That is also what lets
-/// the rest be evaluated in any order: no two of them write the same place.
-///
-/// The rest are grouped by keyframe times, compared **bit for bit** rather than
-/// as numbers. Equal bits are what makes sharing the search provably the same
-/// answer, since the search reads nothing else; a `-0.0` against a `0.0` is two
-/// timelines, which costs a second search and changes nothing.
-fn schedule(channels: &[Channel]) -> (Vec<usize>, Vec<usize>) {
-    let mut written = HashSet::new();
-    let mut live: Vec<usize> = (0..channels.len())
-        .rev()
-        .filter(|&index| {
-            let channel = &channels[index];
-            written.insert((channel.joint, mem::discriminant(&channel.track)))
-        })
-        .collect();
-    let bits = |index: usize| channels[index].times.iter().map(|time| time.to_bits());
-    // Equal time arrays sort next to each other; within one, channel order.
-    live.sort_by(|&a, &b| bits(a).cmp(bits(b)).then(a.cmp(&b)));
-    let mut ends: Vec<usize> = Vec::new();
-    for (position, &index) in live.iter().enumerate() {
-        let shares = position > 0 && bits(live[position - 1]).eq(bits(index));
-        match ends.last_mut() {
-            Some(end) if shares => *end = position + 1,
-            _ => ends.push(position + 1),
-        }
-    }
-    (live, ends)
-}
-
-impl PartialEq for Clip {
-    fn eq(&self, other: &Self) -> bool {
-        // The plan is left out: it follows from the channels, but compares
-        // their times by bits, so two clips with equal channels may differ in
-        // it — a `0.0` key against a `-0.0` one.
-        self.channels == other.channels && self.duration == other.duration
-    }
-}
-
-impl fmt::Debug for Clip {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Clip")
-            .field("channels", &self.channels)
-            .field("duration", &self.duration)
-            .finish()
-    }
 }
 
 impl Clip {
@@ -362,13 +291,7 @@ impl Clip {
             .iter()
             .map(Channel::end_time)
             .fold(0.0_f32, f32::max);
-        let (schedule, timeline_ends) = schedule(&channels);
-        Self {
-            channels,
-            duration,
-            schedule,
-            timeline_ends,
-        }
+        Self { channels, duration }
     }
 
     /// The clip's channels, in the order they were given.
@@ -504,35 +427,6 @@ mod tests {
         )
         .expect_err("a NaN timestamp makes every comparison in the sampler false");
         assert_eq!(error, ClipError::TimeNotFinite { keyframe: 1 });
-    }
-
-    fn lift(joint: usize, start: f32) -> Channel {
-        Channel::new(
-            joint,
-            vec![start, 1.0],
-            Interpolation::Linear,
-            Track::Translation(vec![Vec3::ZERO, Vec3::Y]),
-        )
-        .expect("well formed")
-    }
-
-    /// Timelines are grouped by bits, not by value: a `0.0` start and a `-0.0`
-    /// start are two groups, while two arrays equal in bits are one.
-    #[test]
-    fn groups_timelines_by_bits() {
-        let clip = Clip::new(vec![lift(0, 0.0), lift(1, -0.0), lift(2, 0.0)]);
-        assert_eq!(clip.timeline_ends.len(), 2, "{:?}", clip.timeline_ends);
-        assert_eq!(clip.schedule.len(), 3);
-    }
-
-    /// The plan is not part of a clip's equality: equal channels are equal
-    /// clips, as before the plan existed, even where the plan differs.
-    #[test]
-    fn equality_ignores_the_plan() {
-        let positive = Clip::new(vec![lift(0, 0.0), lift(1, 0.0)]);
-        let negative = Clip::new(vec![lift(0, 0.0), lift(1, -0.0)]);
-        assert_ne!(positive.timeline_ends, negative.timeline_ends);
-        assert_eq!(positive, negative);
     }
 
     #[test]

@@ -34,20 +34,11 @@
 //! scan or a remembered cursor — a scan is `O(n)` in a clip's keyframe count on
 //! every channel of every frame, and a cursor would have to be per-playback
 //! state that a shared clip cannot hold.
-//!
-//! **The search is made once per timeline, not once per channel.** A clip
-//! groups its channels by keyframe times when it is built, comparing the times
-//! bit for bit, and a sample searches each group's times once and reads every
-//! channel of the group at that segment. An exported clip usually keys every
-//! channel at the same instants, so most samples make one or two searches
-//! whatever the joint count. The answer cannot change: the segment is a
-//! function of the times and the requested time and nothing else, and equal
-//! bits are equal times.
 
 use glam::{Quat, Vec3};
 
 use crate::clip::CUBIC_SPLINE_VALUES_PER_KEYFRAME;
-use crate::{Channel, Clip, Interpolation, Skeleton, Track, Trs};
+use crate::{Clip, Interpolation, Skeleton, Track, Trs};
 
 /// One local transform per joint, in palette order.
 ///
@@ -314,41 +305,25 @@ impl Clip {
         for (local, joint) in pose.locals.iter_mut().zip(skeleton.joints()) {
             *local = joint.rest;
         }
-        let mut start = 0;
-        for &end in &self.timeline_ends {
-            // One search for the whole group, made by the first channel that
-            // drives a joint of this skeleton: every channel here has the same
-            // times bit for bit, and the search reads nothing else.
-            let mut found = None;
-            for &index in &self.schedule[start..end] {
-                let channel = &self.channels()[index];
-                // A channel naming a joint outside this skeleton drives
-                // something else in the source document; see the module docs.
-                let Some(local) = pose.locals.get_mut(channel.joint()) else {
-                    continue;
-                };
-                let segment = *found.get_or_insert_with(|| locate(channel.times(), time));
-                sample_channel(channel, segment, local);
+        for channel in self.channels() {
+            // A channel naming a joint outside this skeleton drives something
+            // else in the source document; see the module docs.
+            let Some(local) = pose.locals.get_mut(channel.joint()) else {
+                continue;
+            };
+            let interpolation = channel.interpolation();
+            let segment = locate(channel.times(), time);
+            match channel.track() {
+                Track::Translation(values) => {
+                    local.translation = sample_vec3(values, interpolation, segment);
+                }
+                Track::Rotation(values) => {
+                    local.rotation = sample_quat(values, interpolation, segment);
+                }
+                Track::Scale(values) => {
+                    local.scale = sample_vec3(values, interpolation, segment);
+                }
             }
-            start = end;
-        }
-    }
-}
-
-/// Writes what `channel` holds at `segment` into the component of `local` it
-/// drives.
-#[inline]
-fn sample_channel(channel: &Channel, segment: Segment, local: &mut Trs) {
-    let interpolation = channel.interpolation();
-    match channel.track() {
-        Track::Translation(values) => {
-            local.translation = sample_vec3(values, interpolation, segment);
-        }
-        Track::Rotation(values) => {
-            local.rotation = sample_quat(values, interpolation, segment);
-        }
-        Track::Scale(values) => {
-            local.scale = sample_vec3(values, interpolation, segment);
         }
     }
 }

@@ -228,16 +228,22 @@ recomposes only changed joints and their descendants, bit for bit; measured on
 - **A scratch palette shared across skeletons recomposes everything** each time
   it switches skeleton (ids differ even for identical joints); correct, but
   loses the saving. Not checked whether EW's rig does this.
-- **Clip sampling: what grouping by timeline left (2026-11-01).** `sample_into`
-  now searches once per timeline (14.7k → 9.5k instructions a sample on the
-  example). A keyframe cursor for sequential sampling was declined: the search
-  is now about 2% of a sample, and a cursor needs caller-held state since `Clip`
-  is shared and `Sync`. `blend_into` and linear rotation sampling are dominated
-  by glam's `Quat::slerp` (about 120 instructions a joint) and cannot be cut
-  bit-identically, since `slerp(q, q, t)` takes glam's lerp-and-normalize
-  fallback; any further win means accepting different bits, the user's call.
-  `Clip::translation_of` still searches per channel; it reads one channel, so
-  grouping would not help it.
+- **Clip sampling by timeline: declined for wall time (2026-11-02).** e7814a87
+  (in 0.16.0) grouped a clip's channels by bit-equal keyframe times and searched
+  once per group: about 6% fewer instructions on `humanoid_palette crowd` under
+  callgrind, but wall time rose, and EW measured its raid-demo tick about 10%
+  slower (13% on an i7 laptop). Medians on mxaddict-pc, 10 interleaved rounds
+  pinned to one core, load 4.6 → 2.4, in-cache / beyond-LLC seconds: before both
+  0.16 anim changes 2.470 / 1.989; the incremental palette only 2.364 / 1.886;
+  with the grouping 3.058 / 2.465; reverted 2.329 / 1.881. A storage-order
+  rework (reusing the segment only for a neighbour with bit-equal times,
+  mispredicts back to the old level under callgrind's branch simulation)
+  measured 3.054 / 2.463, so the cost lies in that code path, not in visiting
+  order. Reverted. Cause unconfirmed: no `perf` on mxaddict-pc, and callgrind's
+  extra mispredicts are too few to explain it. Profile any further search-saving
+  attempt with hardware counters first. `blend_into` and linear rotation
+  sampling stay dominated by glam's `Quat::slerp`, which cannot be cut
+  bit-identically.
 
 ## Skinning's per-frame CPU after the binding compare (2026-10-31)
 
