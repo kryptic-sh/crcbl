@@ -282,3 +282,48 @@ fn room_behind_a_thin_wall_is_refused() {
         Err(RiseError::Blocked)
     );
 }
+
+/// **A slab overhead is not a floor to rise onto.** A standing capsule with
+/// its feet at the hips' height overlaps a thin slab nearer its feet than its
+/// head, so the solve's push out of it is upward, onto the slab's top: a
+/// character revived under a table would stand on the tabletop. A stand more
+/// than a step above the hips is refused as no room, however small the shift
+/// across. Measured on the fixture: before the refusal, this answered `Ok`
+/// with the feet on the slab.
+#[test]
+fn a_slab_overhead_is_not_ground_to_rise_onto() {
+    let (mut physics, ragdoll) = corpse(true);
+    let hips = hips(&physics, &ragdoll);
+    // Its underside 0.65 m over the hips: under half the standing capsule's
+    // height, so out of it is up, and well over a step.
+    block(
+        &mut physics,
+        2,
+        DVec3::new(hips.x, hips.y + 0.7, hips.z),
+        DVec3::new(3.0, 0.05, 3.0),
+    );
+    assert_eq!(
+        ragdoll.rise_point(&mut physics, &QUERY),
+        Err(RiseError::Blocked)
+    );
+
+    // A step's height up is still a stand: the same slab low enough to step
+    // onto.
+    let (mut physics, ragdoll) = corpse(true);
+    let hips = self::hips(&physics, &ragdoll);
+    let top = hips.y + QUERY.character.step_offset - 0.05;
+    block(
+        &mut physics,
+        2,
+        DVec3::new(hips.x, top - 0.05, hips.z),
+        DVec3::new(3.0, 0.05, 3.0),
+    );
+    let centre = ragdoll
+        .rise_point(&mut physics, &QUERY)
+        .expect("a step up is room to stand");
+    let standing = QUERY.character.radius + QUERY.character.half_height;
+    assert!(
+        (centre.y - standing - top).abs() <= 2.0 * QUERY.character.skin_width,
+        "feet on the low slab: {centre}"
+    );
+}

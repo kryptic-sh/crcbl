@@ -14,7 +14,9 @@
 //! it starts inside and dropped to the ground. A push is a relocation, so it
 //! is reported and capped ([`RiseQuery::max_shift`]) rather than taken
 //! silently: a corpse against a wall rises a hand's width out from it, and one
-//! wedged under a vehicle does not rise metres away.
+//! wedged under a vehicle does not rise metres away. A push up is capped the
+//! same way, at the character's step: a corpse under a table does not rise
+//! onto the tabletop.
 //!
 //! When the hips themselves have no room — a corpse half under a table — the
 //! same solve is tried at points on rings around them, nearest ring first,
@@ -67,7 +69,10 @@ pub enum RiseError {
         shift: f64,
     },
     /// Where the solve left the standing capsule, it still overlaps
-    /// something: a ceiling too low to stand under.
+    /// something: a ceiling too low to stand under. Also when the solve
+    /// pushed the capsule up out of something overhead, its feet more than
+    /// the character's `step_offset` above the hips: a slab over the body is
+    /// no floor to rise onto.
     Blocked,
     /// The solve left the standing capsule somewhere the hips cannot reach:
     /// something stands between them at the hips' height, such as a wall the
@@ -144,7 +149,8 @@ impl Ragdoll {
 
 /// Stand the query's character up over `at` (at the hips' height) and check
 /// what it lands on against the hips — where they are, and their body's
-/// collider: within the cap, clear of everything, and reachable from them.
+/// collider: no more than a step above them, within the cap, clear of
+/// everything, and reachable from them.
 ///
 /// The reach ray starts at the hips' centre, inside their own body, and a ray
 /// fired from inside a shape strikes its far wall, so under a mask that sees
@@ -168,6 +174,12 @@ fn stand_from(
         return Err(RiseError::NoGround);
     }
     let centre = preview.capsule.centre;
+    // A capsule overlapping something nearer its feet than its head is pushed
+    // up out of it, onto its top: under a table, the tabletop. A stand more
+    // than a step above the hips is no room where the body lies.
+    if centre.y - standing > hips.y + config.step_offset {
+        return Err(RiseError::Blocked);
+    }
     let across = (centre - hips).with_y(0.0);
     let shift = across.length();
     if shift > query.max_shift {

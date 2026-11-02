@@ -13,6 +13,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Ragdoll::rise_point` no longer stands a corpse on top of something
+  overhead.** A standing capsule overlapping a slab nearer its feet than its
+  head was pushed up out of it, so an enemy revived under a table could answer
+  `Ok` standing on the tabletop, about a metre over its hips, while `max_shift`
+  capped only the move across the ground. A stand whose feet end more than the
+  character's `step_offset` above the hips is now refused with
+  `RiseError::Blocked`, and the ring search refuses such points the same way.
+
 ## [0.17.0] - 2026-11-03
 
 ### Breaking
