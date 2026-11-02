@@ -118,6 +118,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   bits on every target, though the `f32` pose inputs feeding it are not yet.
   `crcbl-anim` now has a `clippy.toml` refusing platform transcendentals, as
   `crcbl-phys` and `crcbl-ragdoll` do.
+- **`SystemFonts::fallbacks` on Windows reads the registry's
+  `FontLink\SystemLink` once per family** rather than on every call, which cost
+  about 2 ms a call against 0.07 ms for a warm `find`, so an app asking per
+  frame no longer pays it each time.
 
 ## [0.16.0] - 2026-11-01
 

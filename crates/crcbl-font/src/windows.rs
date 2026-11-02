@@ -13,6 +13,8 @@
 //! per lookup rather than a walk of the Fonts directory. The registry is read
 //! once per [`SystemFonts`](crate::SystemFonts), on its first lookup, and
 //! every file's faces once, on the first lookup that opens it.
+//! `FontLink\SystemLink` is read once per family, on the first
+//! [`fallbacks`](crate::SystemFonts::fallbacks) for it.
 //!
 //! A font whose display name shares nothing with its family name is not
 //! found. Windows lists the fonts it ships under their full names, and the
@@ -312,9 +314,12 @@ fn installed() -> Vec<Installed> {
     out
 }
 
+/// One `SystemLink` entry: its file, and the face it names if it names one.
+type Link = (String, Option<String>);
+
 /// What `FontLink\SystemLink` lists for `family`: each entry's file and the
 /// face it names.
-fn system_link(family: &str) -> Vec<(String, Option<String>)> {
+fn system_link(family: &str) -> Vec<Link> {
     let Some((REG_MULTI_SZ, data)) =
         Key::open(HKEY_LOCAL_MACHINE, SYSTEM_LINK_KEY).and_then(|key| key.value(family))
     else {
@@ -332,6 +337,9 @@ pub(crate) struct Platform {
     /// Each file opened so far, and its faces: empty for one that could not
     /// be read, so it is not tried again.
     files: Mutex<HashMap<PathBuf, Vec<Face>>>,
+    /// Each family's `SystemLink` entries read so far: empty for one the key
+    /// does not list, so it is not read again.
+    links: Mutex<HashMap<String, Vec<Link>>>,
 }
 
 impl Platform {
@@ -339,6 +347,7 @@ impl Platform {
         Self {
             installed: OnceLock::new(),
             files: Mutex::new(HashMap::new()),
+            links: Mutex::new(HashMap::new()),
         }
     }
 
@@ -354,7 +363,8 @@ impl Platform {
         let family = self
             .find(query)
             .map_or_else(|| query.family.clone(), |primary| primary.family);
-        let linked = system_link(&family)
+        let linked = self
+            .links_of(&family)
             .into_iter()
             .filter_map(|(file, face)| self.linked(query, &file, face.as_deref()))
             .collect();
@@ -404,6 +414,18 @@ impl Platform {
         out
     }
 
+    /// `family`'s `SystemLink` entries, read on first asking.
+    fn links_of(&self, family: &str) -> Vec<Link> {
+        // As in `faces_in`: a panic mid-insert costs only a second read.
+        let lock = || self.links.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(links) = lock().get(family) {
+            return links.clone();
+        }
+        let links = system_link(family);
+        lock().insert(family.to_owned(), links.clone());
+        links
+    }
+
     /// The faces of the file at `path`, read on first asking.
     fn faces_in(&self, path: &Path) -> Vec<Face> {
         // A panic mid-insert leaves at worst a file missing from the cache,
@@ -415,5 +437,26 @@ impl Platform {
         let faces = face::read_faces(path).unwrap_or_default();
         lock().insert(path.to_owned(), faces.clone());
         faces
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_familys_system_link_is_read_once_and_kept() {
+        let platform = Platform::new();
+        let first = platform.fallbacks(&FontQuery::new("Segoe UI"));
+        let kept = platform
+            .links
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get("Segoe UI")
+            .cloned()
+            .expect("the first fallbacks kept Segoe UI's links");
+        assert!(!kept.is_empty(), "Segoe UI is linked to Tahoma and more");
+        assert_eq!(kept, system_link("Segoe UI"));
+        assert_eq!(platform.fallbacks(&FontQuery::new("Segoe UI")), first);
     }
 }
