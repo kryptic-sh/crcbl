@@ -1385,6 +1385,16 @@ pub mod value {
     /// the return value is read.
     pub const WAIT_FAILED: u32 = 0xFFFF_FFFF;
 
+    /// `ES_SYSTEM_REQUIRED` — the system does not sleep while it is held.
+    pub const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+    /// `ES_DISPLAY_REQUIRED` — the display stays on, and with it the
+    /// screensaver stays off, while it is held.
+    pub const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
+    /// `ES_CONTINUOUS` — the other flags passed with it hold until the next
+    /// call, rather than resetting the idle timer once. Passed alone, it ends
+    /// whatever the thread held.
+    pub const ES_CONTINUOUS: u32 = 0x8000_0000;
+
     /// `HTCLIENT` — the `WM_SETCURSOR` hit-test code for the drawable area.
     ///
     /// Every other value is a piece of the frame the *system* owns a cursor
@@ -2034,6 +2044,10 @@ unsafe extern "system" {
         name: *const u16,
     ) -> Handle;
     pub fn SetEvent(event: Handle) -> Bool32;
+    // What keeps the display on for `set_idle_inhibit`: the calling thread's
+    // execution state, held until it is changed or the thread exits. Answers
+    // the state it replaced, or zero for a refusal. See `win32::awake`.
+    pub fn SetThreadExecutionState(flags: u32) -> u32;
 }
 
 // ---------------------------------------------------------------------------

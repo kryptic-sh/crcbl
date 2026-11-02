@@ -614,6 +614,59 @@ fn an_input_region_is_applied() {
     }
 }
 
+/// `SetThreadExecutionState` is in every Windows, so the bit is a constant.
+/// That the thread's state follows the windows asking is `awake`'s tests' to
+/// show, and that a destroyed window lets go is
+/// `a_destroyed_window_stops_keeping_the_display_on`'s.
+#[test]
+fn the_display_can_be_kept_on() {
+    for raw_motion in [false, true] {
+        assert!(
+            Win32Shell::latch_caps(raw_motion).contains(ShellCaps::IDLE_INHIBIT),
+            "SetThreadExecutionState holds the display"
+        );
+    }
+}
+
+/// This thread's `ES_DISPLAY_REQUIRED`, read by setting `ES_CONTINUOUS` and
+/// putting back what that replaced.
+fn display_required() -> bool {
+    // SAFETY: flag words by value; together the two calls leave this thread's
+    // execution state where they found it.
+    let previous = unsafe { ffi::SetThreadExecutionState(ffi::value::ES_CONTINUOUS) };
+    assert_ne!(previous, 0, "SetThreadExecutionState refused");
+    // SAFETY: as above.
+    assert_ne!(unsafe { ffi::SetThreadExecutionState(previous) }, 0);
+    previous & ffi::value::ES_DISPLAY_REQUIRED != 0
+}
+
+/// The shell's half of `awake`'s bookkeeping: a destroyed window's request
+/// ends with it, and a stale handle is refused. The window is created hidden
+/// and never shown.
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_destroyed_window_stops_keeping_the_display_on() {
+    let mut shell = shell();
+    let window = shell
+        .create_window(&WindowDesc {
+            visible: false,
+            ..WindowDesc::default()
+        })
+        .expect("create hidden");
+    assert!(!display_required(), "nothing asked yet");
+    shell
+        .set_idle_inhibit(window, true)
+        .expect("keeping the display on");
+    assert!(display_required());
+    shell.destroy_window(window).expect("destroy");
+    assert!(!display_required(), "the destroyed window let go");
+    assert!(matches!(
+        shell.set_idle_inhibit(window, true),
+        Err(ShellError::InvalidWindow { .. })
+    ));
+    assert!(!display_required());
+}
+
 /// Nothing in a plain `HWND`'s messages paces presents, so a frame is answered
 /// at the next pump and the bit says the compositor is not the one pacing.
 #[test]
@@ -651,6 +704,7 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
         ShellCaps::TRANSPARENT,
         ShellCaps::CURSOR_SHAPE,
         ShellCaps::INPUT_REGION,
+        ShellCaps::IDLE_INHIBIT,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
     }

@@ -337,6 +337,22 @@ bitflags::bitflags! {
         /// the request whatever is on screen, so the loop that waits for it
         /// runs unchanged and the pacing is the present mode's.
         const FRAME_CALLBACK = 1 << 25;
+
+        /// [`Shell::set_idle_inhibit`](crate::Shell::set_idle_inhibit) is
+        /// acted on: while a window asks, the display stays on and the
+        /// screensaver does not start, however long nobody touches the
+        /// keyboard or the mouse.
+        ///
+        /// What a gamepad-only player and a cutscene need, since neither moves
+        /// the input the system counts as activity. Win32 holds
+        /// `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED |
+        /// ES_SYSTEM_REQUIRED)` on the loop thread while any window asks.
+        /// Clear on Wayland (`zwp_idle_inhibit_manager_v1`), X11
+        /// (`XScreenSaverSuspend`), AppKit (`IOPMAssertionCreateWithName`) and
+        /// the web (Screen Wake Lock), none of which is wired; there the call
+        /// answers [`ShellError::Unsupported`](crate::ShellError::Unsupported)
+        /// and the display sleeps on the user's schedule.
+        const IDLE_INHIBIT = 1 << 26;
     }
 }
 

@@ -641,14 +641,14 @@ have.
 
 ### Platform and shell
 
-- **Nothing stops the display sleeping or the screensaver starting.** No
-  `zwp_idle_inhibit_manager_v1` (not among
-  `crates/crcbl-shell/wayland-protocols/`), X11 `XScreenSaverSuspend`, Win32
-  `SetThreadExecutionState`, macOS `IOPMAssertionCreateWithName`, or browser
-  Screen Wake Lock (absence re-checked by the parent). A gamepad-only player or
-  a cutscene gets the screen blanked mid-game; SDL inhibits by default for this
-  reason. Builds on the `Shell` trait plus a `ShellCaps` bit, and `web/engine`.
-  Unrecorded. Small, P1.
+- **Only Win32 stops the display sleeping or the screensaver starting.**
+  `Shell::set_idle_inhibit` and `ShellCaps::IDLE_INHIBIT` exist, and Win32 holds
+  `SetThreadExecutionState`; Wayland `zwp_idle_inhibit_manager_v1` (not among
+  `crates/crcbl-shell/wayland-protocols/`), X11 `XScreenSaverSuspend`, macOS
+  `IOPMAssertionCreateWithName` and browser Screen Wake Lock (`web/engine`) are
+  not wired and answer `Unsupported`. A gamepad-only player or a cutscene gets
+  the screen blanked mid-game there; SDL inhibits by default for this reason.
+  Nothing in the engine calls it yet. Small, P1.
 - **No way to open a URL in the system browser.** No `xdg-open`, portal
   `OpenURI`, `ShellExecuteW`, `NSWorkspace openURL` or `window.open`; only
   Steam's `Friends::open_overlay_to_web_page`. Needed for "Wishlist", Discord,

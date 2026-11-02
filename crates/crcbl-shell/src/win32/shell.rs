@@ -241,6 +241,10 @@ pub struct Win32Shell {
     /// `HWND`'s messages paces presents, so
     /// [`ShellCaps::FRAME_CALLBACK`] is clear.
     frames: crate::frame::FrameRequests,
+    /// The windows [`set_idle_inhibit`](Shell::set_idle_inhibit) is keeping
+    /// the display on for, and this thread's execution state that follows
+    /// them; see [`awake`](super::awake).
+    idle: super::awake::IdleInhibit,
     caps: ShellCaps,
 }
 
@@ -354,6 +358,7 @@ impl Win32Shell {
             visibility: Visibility::default(),
             next_request: 1,
             frames: crate::frame::FrameRequests::default(),
+            idle: super::awake::IdleInhibit::default(),
             caps: Self::latch_caps(raw_motion),
         };
         shell.monitors = shell.enumerate_monitors();
@@ -390,7 +395,8 @@ impl Win32Shell {
             .union(ShellCaps::POPUP_REPOSITION)
             .union(ShellCaps::TRANSPARENT)
             .union(ShellCaps::CURSOR_SHAPE)
-            .union(ShellCaps::INPUT_REGION);
+            .union(ShellCaps::INPUT_REGION)
+            .union(ShellCaps::IDLE_INHIBIT);
         #[cfg(feature = "accesskit")]
         let caps = caps.union(ShellCaps::ACCESSIBILITY);
         if raw_motion {
@@ -475,6 +481,20 @@ impl Win32Shell {
         self.queue.retain(|event| {
             !matches!(event, ShellEvent::ClipboardData { window: asked, .. } if *asked == window)
         });
+    }
+
+    /// Drops everything kept for a window just taken out of the pool, whether
+    /// this shell destroyed it or the system did.
+    fn forget_window(&mut self, window: WindowId, key: isize) {
+        self.shared.forget(key);
+        self.drop_clipboard_answers(window);
+        self.forget_input(window);
+        // The window is gone whatever this answers, so a refused release is
+        // reported rather than failing the destroy; it is tried again on the
+        // next change and when the shell is dropped.
+        if let Err(error) = self.idle.forget(window) {
+            crcbl_core::log::warn!("releasing the display for a destroyed window: {error}");
+        }
     }
 
     /// The clipboard's content in `mime`, read now.
@@ -1013,9 +1033,7 @@ impl Win32Shell {
                     // second `WindowDestroyed`.
                     let Some(window) = window else { continue };
                     if let Some(removed) = self.windows.remove(window.cast()) {
-                        self.shared.forget(removed.key);
-                        self.drop_clipboard_answers(window);
-                        self.forget_input(window);
+                        self.forget_window(window, removed.key);
                         self.queue.push_back(ShellEvent::WindowDestroyed { window });
                     }
                 }
@@ -1293,6 +1311,9 @@ impl Shell for Win32Shell {
     ///   only reaches windows of the same thread. The region also clips what
     ///   the window draws, and keeps the frame of a captioned window; see
     ///   [`set_input_region`](Shell::set_input_region).
+    /// * [`IDLE_INHIBIT`](ShellCaps::IDLE_INHIBIT) —
+    ///   `SetThreadExecutionState` on the loop thread, held while any window
+    ///   asks; see [`set_idle_inhibit`](Shell::set_idle_inhibit).
     /// * [`ACCESSIBILITY`](ShellCaps::ACCESSIBILITY), only when built with the
     ///   `accesskit` feature — each window has a UI Automation adapter that
     ///   answers `WM_GETOBJECT` with the tree `update_accessibility` sent, and
@@ -1480,9 +1501,7 @@ impl Shell for Win32Shell {
             .windows
             .remove(window.cast())
             .ok_or_else(|| ShellError::invalid_window(window))?;
-        self.shared.forget(removed.key);
-        self.drop_clipboard_answers(window);
-        self.forget_input(window);
+        self.forget_window(window, removed.key);
         if removed.panel.is_some_and(|panel| panel.appbar) {
             self.remove_appbar(removed.raw());
         }
@@ -2187,6 +2206,16 @@ impl Shell for Win32Shell {
         let composes = field.is_some_and(|purpose| !purpose.is_sensitive());
         input::enable_ime(self.window(window)?.raw(), composes)
     }
+
+    /// `ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED`, continuous, held on this
+    /// thread while any window asks and released when the last one stops, is
+    /// destroyed, or the shell is dropped. Whether the window is shown does
+    /// not matter here. See [`awake`](super::awake) for why the thread's own
+    /// state is the right one to hold.
+    fn set_idle_inhibit(&mut self, window: WindowId, inhibit: bool) -> Result<(), ShellError> {
+        self.window(window)?;
+        self.idle.set(window, inhibit)
+    }
 }
 
 impl Drop for Win32Shell {
@@ -2216,6 +2245,10 @@ impl Drop for Win32Shell {
     /// * The **`ShowCursor` count**, for the same reason and with the same
     ///   asymmetry: one hide outstanding is an invisible cursor over every
     ///   window this thread owns afterwards.
+    ///
+    /// The thread's execution state, held while a window asked
+    /// [`set_idle_inhibit`](Shell::set_idle_inhibit), is a third, and the
+    /// `idle` field releases it when it is dropped after this.
     fn drop(&mut self) {
         input::release_clip();
         Self::show_cursor(self.visibility.want(false));

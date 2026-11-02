@@ -239,6 +239,8 @@ mod access;
 #[cfg(target_os = "windows")]
 mod app_id;
 #[cfg(target_os = "windows")]
+mod awake;
+#[cfg(target_os = "windows")]
 mod input;
 #[cfg(target_os = "windows")]
 mod monitors;

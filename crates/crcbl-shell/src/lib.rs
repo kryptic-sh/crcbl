@@ -1017,6 +1017,44 @@ pub trait Shell: core::fmt::Debug {
         self.window_state(window).map(|_| ())
     }
 
+    /// Keeps the display on and the screensaver from starting while `window`
+    /// asks: `true` to ask, `false` to stop.
+    ///
+    /// For a game played on a gamepad, or a cutscene, which nothing the system
+    /// counts as user activity interrupts. Ask while the game is being played
+    /// and stop in the menus, as a video player stops at pause; asking for the
+    /// whole session keeps a desktop awake that its user walked away from.
+    ///
+    /// Per window, because Wayland's `zwp_idle_inhibit_manager_v1` inhibits
+    /// per surface, and its compositor honours that only while the surface is
+    /// shown; Win32 keeps the display on whether or not the window is. The
+    /// display is kept on while **any** window of the shell asks. Asking twice
+    /// is asking once, and stopping a window that never asked does nothing.
+    /// Destroying a window ends its request, and dropping the shell ends them
+    /// all.
+    ///
+    /// # A provided method
+    ///
+    /// The default validates the handle and answers
+    /// [`ShellError::Unsupported`], since a request nothing acts on would let
+    /// the display sleep while the caller thinks otherwise.
+    /// [`ShellCaps::IDLE_INHIBIT`] is set only where it is acted on, and says
+    /// which backends that is.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale,
+    /// [`ShellError::Unsupported`] without [`ShellCaps::IDLE_INHIBIT`], and
+    /// [`ShellError::Backend`] if the system refused.
+    fn set_idle_inhibit(&mut self, window: WindowId, inhibit: bool) -> Result<(), ShellError> {
+        let _ = inhibit;
+        self.window_state(window)?;
+        Err(ShellError::Unsupported {
+            backend: self.backend(),
+            what: "idle inhibit",
+        })
+    }
+
     /// Asks for a [`ShellEvent::FrameReady`] when `window` should present its
     /// next frame.
     ///

@@ -257,6 +257,8 @@ struct HeadlessWindow {
     text_input_area: Option<PhysicalRect>,
     /// [`Shell::set_input_region`]'s last word: `None` for the whole window.
     input_region: Option<Vec<PhysicalRect>>,
+    /// [`Shell::set_idle_inhibit`]'s last word.
+    idle_inhibit: bool,
     /// Whether a pretend assistive technology is reading the window, and what
     /// it has been sent since it started.
     #[cfg(feature = "accesskit")]
@@ -1219,6 +1221,20 @@ impl HeadlessShell {
         Ok(self.frames.contains(window))
     }
 
+    /// Whether the window is asking, with [`Shell::set_idle_inhibit`], for
+    /// the display to be kept on.
+    ///
+    /// Headless-only, for the same reason as [`title`](Self::title): there
+    /// is no display to keep on, so a test of a game that should keep it on
+    /// during play reads whether it asked.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    pub fn idle_inhibited(&self, window: WindowId) -> Result<bool, ShellError> {
+        Ok(self.window(window)?.idle_inhibit)
+    }
+
     /// Turns every output off or back on, as far as frame requests go.
     ///
     /// **A compositor's frame pacing, modelled.** Where
@@ -1727,6 +1743,7 @@ impl Shell for HeadlessShell {
                 text_input: None,
                 text_input_area: None,
                 input_region: None,
+                idle_inhibit: false,
                 #[cfg(feature = "accesskit")]
                 accessibility: None,
             })
@@ -2037,6 +2054,18 @@ impl Shell for HeadlessShell {
         region: Option<&[PhysicalRect]>,
     ) -> Result<(), ShellError> {
         self.window_mut(window)?.input_region = region.map(<[PhysicalRect]>::to_vec);
+        Ok(())
+    }
+
+    /// Records the request, which
+    /// [`idle_inhibited`](HeadlessShell::idle_inhibited) reads back; there is
+    /// no display to keep on. Refused without [`ShellCaps::IDLE_INHIBIT`], as
+    /// a backend that cannot act on it refuses.
+    fn set_idle_inhibit(&mut self, window: WindowId, inhibit: bool) -> Result<(), ShellError> {
+        if !self.caps.contains(ShellCaps::IDLE_INHIBIT) {
+            return Err(self.unsupported("idle inhibit"));
+        }
+        self.window_mut(window)?.idle_inhibit = inhibit;
         Ok(())
     }
 
@@ -3579,6 +3608,39 @@ mod tests {
             Err(ShellError::InvalidWindow { .. })
         ));
         assert!(shell.input_region(window).is_err());
+    }
+
+    #[test]
+    fn an_idle_inhibit_is_recorded_and_ends_with_its_window() {
+        let (mut shell, window) = shell_with_configured_window();
+        assert!(!shell.idle_inhibited(window).expect("live"));
+        shell.set_idle_inhibit(window, true).expect("inhibit");
+        shell.set_idle_inhibit(window, true).expect("asking twice");
+        assert!(shell.idle_inhibited(window).expect("live"));
+        shell.set_idle_inhibit(window, false).expect("stop");
+        assert!(!shell.idle_inhibited(window).expect("live"));
+        shell.set_idle_inhibit(window, true).expect("inhibit again");
+        shell.destroy_window(window).expect("destroy");
+        assert!(matches!(
+            shell.set_idle_inhibit(window, false),
+            Err(ShellError::InvalidWindow { .. })
+        ));
+        assert!(shell.idle_inhibited(window).is_err());
+    }
+
+    #[test]
+    fn an_idle_inhibit_is_refused_without_the_capability() {
+        let mut shell =
+            HeadlessShell::new().with_caps(ShellCaps::DESKTOP - ShellCaps::IDLE_INHIBIT);
+        let window = shell.create_window(&WindowDesc::default()).expect("window");
+        assert!(matches!(
+            shell.set_idle_inhibit(window, true),
+            Err(ShellError::Unsupported {
+                backend: ShellBackend::Headless,
+                ..
+            })
+        ));
+        assert!(!shell.idle_inhibited(window).expect("live"));
     }
 
     fn frames_for(events: &[ShellEvent], window: WindowId) -> usize {

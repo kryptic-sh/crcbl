@@ -44,6 +44,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Keeping the display on during play:**
+  `Shell::set_idle_inhibit(window, inhibit)` stops the display sleeping and the
+  screensaver starting while any window asks, so a gamepad-only player or a
+  cutscene no longer gets the screen blanked. The new `ShellCaps::IDLE_INHIBIT`
+  says where it is acted on: Win32, through `SetThreadExecutionState` on the
+  loop thread, released when the window stops asking, is destroyed or the shell
+  is dropped; and `HeadlessShell`, which records it for `idle_inhibited`. The
+  other backends answer `ShellError::Unsupported`.
 - **An anatomical profile for generated ragdolls:**
   `GenerateSettings::anatomy: Some(Humanoid { fold_digits })` reads Mixamo,
   Unreal and EW bone names (any case, checked against the hierarchy) and the
