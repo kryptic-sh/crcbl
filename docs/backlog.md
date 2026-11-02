@@ -26215,7 +26215,7 @@ still missing or silently lost:
   `check_animations`' `CUBICSPLINE` and morph-weight arms in particular have
   never seen a document that uses them.
 
-### The skinned draw is unverified on the Metal and DX12 seams
+### The skinned draw's override is proven red only on Vulkan
 
 A skinned instance carries the base vertex of the region it was deformed into —
 `GpuInstance::base_vertex`, read by `mesh.slang`'s `vertexMain` and
@@ -26226,13 +26226,16 @@ A skinned instance carries the base vertex of the region it was deformed into �
 radv and on lavapipe: sabotaging either shader's base reddens exactly the case
 that draws through it. What is **not** checked:
 
-- **No Metal or DX12 run has drawn a deformed mesh.** Their artifacts are
-  generated and the `GpuInstance` stride was confirmed to agree on every target
-  — 96 then, 160 since motion vectors landed in `1d6d604` — but nothing
-  dispatches skinning and reads a pixel back off those two seams. Both backends
-  are deferred, so this is a known gap rather than a task. WebGPU is no longer
-  in this list: `apps/viewer`'s browser gate draws a deformed mesh on
-  `crcbl-webgpu` and the check goes red when the override is dropped.
+- **Metal and DX12 draw deformed meshes, but no sabotage has been run on them.**
+  `crates/crcbl/tests/mesh_e2e/skinned_motion.rs` dispatches skinning and reads
+  a skinned cube's motion back as pixels on whichever backend the registry
+  opens. All four of its tests pass in CI on WARP (`dx12-e2e`) and on Metal
+  (`mtl e2e forward + mesh`), run 41418303383, and on 2026-11-02 the whole
+  `mesh_e2e` suite passed on the RX 7900 XTX over D3D12 (122 of 122, mesh-shader
+  geometry path, `CRCBL_DX12_VALIDATION=0` since no debug layer is installed).
+  Not checked: that those tests go red on Metal or DX12 when the base-vertex
+  override is dropped, as the vk pixel tests are shown to; that needs a shader
+  rebuilt at CI's pins. WebGPU's browser gate is shown to.
 - **The full demo description has not been run skinned.** The pixel case builds
   `cube_only_scene`, one mesh. The reason it had to — an alias id past every
   bucket and past `draw_gen.slang`'s level tables — is gone with the alias, so
