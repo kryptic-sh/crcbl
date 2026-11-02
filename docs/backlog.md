@@ -5085,6 +5085,14 @@ Each of these has failed once and passed on a rerun with the code unchanged. A
 failure of one wants a rerun before a diagnosis; one that repeats on an idle
 machine, or twice in CI, is real.
 
+- **`crcbl forward_e2e shadow::a_shadowed_point_lights_faces_are_the_six_the_host_built`**
+  — failed on `mtl e2e forward + mesh (macos-15)` (main `168586e7`, run
+  41438372516, 2026-11-02) building its `ForwardRenderer`: "the mesh pool's
+  uploads did not complete within 10s"
+  (`crcbl_render::mesh_pool::UPLOAD_TIMEOUT`). The runner was slow throughout
+  (36 tests in 399 s), the commit touched no rendering code, and the failed job
+  passed when re-run.
+
 - **`crcbl engine::tests::frame_gate::a_held_frame_sleeps_until_the_next_tick`**
   — failed on `build + test (macos-latest)` (main `7b41e2c0`, run 39677150501,
   2026-10-22) with 2 sleeps where it asserts exactly 3, on a commit touching
