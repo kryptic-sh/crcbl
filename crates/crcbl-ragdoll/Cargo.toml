@@ -15,6 +15,7 @@ rust-version.workspace = true
 # to re-exports. Every dependency was already in the workspace graph.
 [dependencies]
 crcbl-anim = { workspace = true }
+crcbl-core = { workspace = true }
 crcbl-ecs = { workspace = true }
 crcbl-phys = { workspace = true }
 glam = { workspace = true }

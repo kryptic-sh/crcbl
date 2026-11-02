@@ -186,6 +186,7 @@ fn a_rig_round_trips_through_its_file() {
     let names = names();
     let fitted = crcbl_ragdoll::RagdollRig::generate(
         &skeleton,
+        &names,
         model(0.0),
         &crcbl_ragdoll::GenerateSettings {
             radius_ratio: 0.3,

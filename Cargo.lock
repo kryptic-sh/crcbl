@@ -966,6 +966,7 @@ name = "crcbl-ragdoll"
 version = "0.16.0"
 dependencies = [
  "crcbl-anim",
+ "crcbl-core",
  "crcbl-ecs",
  "crcbl-phys",
  "glam",

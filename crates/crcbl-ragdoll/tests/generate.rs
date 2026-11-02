@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{index, model, skeleton};
+use common::{index, model, names, skeleton};
 use crcbl_anim::{Joint as Bone, Skeleton, Trs};
 use crcbl_phys::Transform;
 use crcbl_ragdoll::{BodyShape, GenerateError, GenerateSettings, RagdollRig, RigJointKind};
@@ -11,7 +11,13 @@ use glam::{DVec3, Mat4, Vec3};
 const TOLERANCE: f64 = 1e-5;
 
 fn rig() -> RagdollRig {
-    RagdollRig::generate(&skeleton(), model(0.0), &GenerateSettings::DEFAULT).expect("a rig")
+    RagdollRig::generate(
+        &skeleton(),
+        &names(),
+        model(0.0),
+        &GenerateSettings::DEFAULT,
+    )
+    .expect("a rig")
 }
 
 fn body_at(rig: &RagdollRig, bone: &str) -> Option<usize> {
@@ -140,7 +146,7 @@ fn shapes_overlapping_at_rest_are_ignored() {
         radius_ratio: 0.3,
         ..GenerateSettings::DEFAULT
     };
-    let rig = RagdollRig::generate(&skeleton(), model(0.0), &fat).expect("a rig");
+    let rig = RagdollRig::generate(&skeleton(), &names(), model(0.0), &fat).expect("a rig");
     assert!(thighs(&rig), "fat thighs overlap and are ignored");
     for &(a, b) in rig.ignored() {
         let jointed = rig
@@ -170,13 +176,13 @@ fn bad_settings_and_a_degenerate_model_are_refused() {
         },
     ] {
         assert_eq!(
-            RagdollRig::generate(&skeleton, model(0.0), &settings),
+            RagdollRig::generate(&skeleton, &names(), model(0.0), &settings),
             Err(GenerateError::InvalidSettings)
         );
     }
     let flat = Mat4::from_scale(Vec3::new(1.0, 0.0, 1.0));
     assert!(matches!(
-        RagdollRig::generate(&skeleton, flat, &GenerateSettings::DEFAULT),
+        RagdollRig::generate(&skeleton, &names(), flat, &GenerateSettings::DEFAULT),
         Err(GenerateError::InvalidFrame { .. })
     ));
     // A chain with no branch, every bone shorter than the minimum: nothing
@@ -202,7 +208,7 @@ fn bad_settings_and_a_degenerate_model_are_refused() {
         ..GenerateSettings::DEFAULT
     };
     assert!(matches!(
-        RagdollRig::generate(&chain, model(0.0), &tiny),
+        RagdollRig::generate(&chain, &["root", "tip"], model(0.0), &tiny),
         Err(GenerateError::Rig(_))
     ));
 }
@@ -244,7 +250,7 @@ fn a_coarse_rig_stays_one_tree() {
         min_length: 0.2,
         ..GenerateSettings::DEFAULT
     };
-    let rig = RagdollRig::generate(&skeleton(), model(0.0), &coarse).expect("a rig");
+    let rig = RagdollRig::generate(&skeleton(), &names(), model(0.0), &coarse).expect("a rig");
     assert!(body_at(&rig, "hips").is_some(), "the hips carry no body");
     assert!(
         body_at(&rig, "clavicle_l").is_none(),

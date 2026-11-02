@@ -130,7 +130,30 @@ Three layers, built in this order:
    names (Mixamo and Unreal naming, plus EW's skeleton) and the hierarchy: knees
    and elbows hinges about the bone's bend axis, hips and shoulders elliptical
    balls, spine, neck and wrists small balls, fingers hinges. Bones it cannot
-   name keep today's ball.
+   name keep today's ball. **Built 2026-11-02:** `GenerateSettings::anatomy`
+   takes a `Humanoid` (its one setting `fold_digits`), and `generate` takes the
+   bones' names. It matches Mixamo, Unreal and EW names without regard to case
+   and confirms them by the hierarchy; reads the body's left, up and forward
+   from the bind's hip line and trunk, so a T-pose and an A-pose facing any way
+   get the same joints; makes knees, elbows and digit segments hinges whose
+   positive bend is flexion, and hips, shoulders, spine, neck, head, wrists,
+   ankles and a thumb's base balls whose frame's x is flexion. It folds `ik_*`,
+   twist and corrective bones with no limb below them, everything past the head,
+   everything off the pelvis's tree (and, with `fold_digits`, fingers and toes)
+   with all below them, and splices out clavicles, metacarpals, a second neck
+   bone and a twist bone in a limb's chain, whose children hang from the bone
+   above. The head is a sphere sized from its folded bones or the body's height
+   (de Leva's head length to stature), about de Leva's share of the mass. Three
+   departures from the plan as written: a ball's neutral is the centre of the
+   ellipse fitted through its four stops, not NASA's posture, because the swing
+   ellipse is centred on its neutral and the ranges are lopsided about the
+   posture (NASA's posture sits inside the free ellipse instead), and the
+   shoulder, whose flexion and abduction meet overhead, stops both 10° short;
+   the clavicle has no joint, because the shoulder ranges below include the
+   shoulder girdle; and a light body at tight limits between heavy ones (a
+   clavicle, a second neck bone) made the solver gain up to 1.5 kJ in the strike
+   runs, so both are spliced. The details, and every value's source, are on
+   `Humanoid`'s docs in `crates/crcbl-ragdoll/src/anatomy.rs`.
 
 **Neutral pose for humanoids: NASA's neutral body posture** (owner's call,
 2026-11-01). The posture a relaxed body takes when no muscle works against
@@ -164,10 +187,36 @@ larger variation than Skylab suggested and no crew member in exactly the
 standard posture. So the profile treats the posture as the centre of each
 joint's free range, not a point: the ± spread (at least) sits inside the
 no-resistance zone, and resistance begins only at the soft limit beyond it. Soft
-and hard limits come from anatomical range-of-motion data (a separate source,
-owed: e.g. the AAOS normal ranges), not from this figure. NBP is a 0g posture; a
+and hard limits come from anatomical range-of-motion data, not from this figure.
+The "to confirm" rows are not used by the profile. NBP is a 0g posture; a
 ragdoll under gravity still falls and folds — the neutral only says where its
 joints stop being pushed.
+
+**Range of motion** (sourced 2026-11-01; degrees from the anatomical position):
+
+| Joint           | Range used                                                                | Source                         |
+| --------------- | ------------------------------------------------------------------------- | ------------------------------ |
+| Shoulder        | flexion 180, abduction 180 (each stopped 10° short), rotation 90 each way | 38 CFR §4.71, Plate I          |
+| Shoulder        | extension 50, adduction 30                                                | DSHS 13-585A                   |
+| Elbow           | flexion 0 to 145                                                          | 38 CFR §4.71, Plate I          |
+| Forearm (wrist) | pronation 80, supination 85                                               | 38 CFR §4.71, Plate I          |
+| Wrist           | extension 70, flexion 80, radial 20, ulnar 45                             | 38 CFR §4.71, Plate I          |
+| Fingers II–V    | MCP 90, PIP 100, DIP 70 (the note's "70 or 80")                           | 38 CFR §4.71a, digits note (1) |
+| Thumb           | MP flexion 60, IP flexion 80                                              | DSHS 13-585A                   |
+| Hip             | flexion 125, abduction 45                                                 | 38 CFR §4.71, Plate II         |
+| Hip             | extension 30, adduction 20                                                | DSHS 13-585A                   |
+| Knee            | flexion 0 to 140                                                          | 38 CFR §4.71, Plate II         |
+| Ankle           | dorsiflexion 20, plantar flexion 45                                       | 38 CFR §4.71, Plate II         |
+| Ankle           | inversion 30, eversion 20                                                 | DSHS 13-585A                   |
+| Cervical spine  | flexion, extension, lateral 45 each; rotation 80                          | 38 CFR §4.71a, spine note (2)  |
+| Thoracolumbar   | flexion 90; extension, lateral, rotation 30 each                          | 38 CFR §4.71a, spine note (2)  |
+
+38 CFR §4.71 and §4.71a are the US Department of Veterans Affairs' schedule for
+rating disabilities (read at law.cornell.edu/cfr/text/38/4.71 and 4.71a, the
+plates as their SVG figures); DSHS 13-585A is Washington State's "Range of Joint
+Motion Evaluation Chart", rev. 03/2014. No source was found for hip rotation, a
+thumb's base, the ankle's toe-in and toe-out, or the toes; the profile uses
+stated engineering values there.
 
 Coordination: EW is the consumer and already carries its own anatomy rig on a
 branch; its per-joint ranges are the data the defaults are checked against, and

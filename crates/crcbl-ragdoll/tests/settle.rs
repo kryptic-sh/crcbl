@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{entities, model, skeleton, world};
+use common::{entities, model, names, skeleton, world};
 use crcbl_anim::Pose;
 use crcbl_phys::{PhysicsSystem, QueryFilter, Transform, rotation_from_scaled_axis};
 use crcbl_ragdoll::{
@@ -14,7 +14,13 @@ use glam::{DQuat, DVec3};
 const DT: f64 = 1.0 / 60.0;
 
 fn rig() -> RagdollRig {
-    RagdollRig::generate(&skeleton(), model(0.0), &GenerateSettings::DEFAULT).expect("a rig")
+    RagdollRig::generate(
+        &skeleton(),
+        &names(),
+        model(0.0),
+        &GenerateSettings::DEFAULT,
+    )
+    .expect("a rig")
 }
 
 /// A ragdoll standing at `x`, half a metre up, on entities from `first`.

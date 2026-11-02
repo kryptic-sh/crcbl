@@ -21,14 +21,20 @@
 //! volume, then evened until no body is more than
 //! [`GenerateSettings::max_mass_ratio`] times a body it is jointed to: a pelvis
 //! sphere a hundredth the mass of the thighs hanging from it is what makes a
-//! joint solver throw a ragdoll apart. Joint types are not inferred from
-//! names: an elbow is a ball here, and a hinge only in an authored rig. Bodies whose rest shapes overlap
-//! without a joint between them are kept from colliding.
+//! joint solver throw a ragdoll apart. Without
+//! [`GenerateSettings::anatomy`] joint types are not inferred from names: an
+//! elbow is a ball, and a hinge only in an authored rig. With it, the
+//! [`Humanoid`] profile makes the joints it can name anatomical — knees and
+//! elbows hinges, their limits and neutrals from anatomical ranges and NASA's
+//! neutral posture — and folds its helper bones into their parents. Bodies
+//! whose rest shapes overlap without a joint between them are kept from
+//! colliding.
 
 use crcbl_anim::{Pose, Skeleton};
 use crcbl_phys::Transform;
 use glam::{DVec3, Mat4};
 
+use crate::anatomy::{Humanoid, Profile};
 use crate::frames::{body_worlds, overlapping_pairs, rigid_frames};
 use crate::limits::SwingTwist;
 use crate::rig::{
@@ -56,6 +62,10 @@ pub struct GenerateSettings {
     pub max_mass_ratio: f64,
     /// The solver substeps the bodies ask for; zero for the system's.
     pub substeps: u32,
+    /// The anatomical profile for a humanoid's joints, if any: off, every
+    /// joint is the ball `cone` and `twist` describe and every bone long
+    /// enough carries a body.
+    pub anatomy: Option<Humanoid>,
 }
 
 impl GenerateSettings {
@@ -75,6 +85,7 @@ impl GenerateSettings {
         joint_friction: 0.1,
         max_mass_ratio: 4.0,
         substeps: 16,
+        anatomy: None,
     };
 
     fn is_valid(&self) -> bool {
@@ -107,6 +118,14 @@ pub enum GenerateError {
     /// A setting is out of range.
     #[error("ragdoll generation settings are out of range")]
     InvalidSettings,
+    /// The names given are not one per skeleton joint.
+    #[error("{names} bone names for a skeleton of {joints} joints")]
+    NameCount {
+        /// How many names were given.
+        names: usize,
+        /// How many joints the skeleton has.
+        joints: usize,
+    },
     /// The model or a rest transform leaves a joint with no usable frame.
     #[error("skeleton joint {joint} has no usable rest frame")]
     InvalidFrame {
@@ -130,31 +149,54 @@ struct Fitted {
 
 impl RagdollRig {
     /// Fits a rig to `skeleton`'s rest pose, placed at the scale `model`
-    /// gives it: see the module docs for the rules.
+    /// gives it: see the module docs for the rules. `names` are the joints'
+    /// names in palette order, which only [`GenerateSettings::anatomy`]
+    /// reads.
     ///
     /// # Errors
     ///
-    /// [`GenerateError`] for settings out of range, a rest pose with no
-    /// usable frame, or a skeleton with no bone long enough for a body.
+    /// [`GenerateError`] for settings out of range, names that are not one
+    /// per joint, a rest pose with no usable frame, or a skeleton with no
+    /// bone long enough for a body.
     pub fn generate(
         skeleton: &Skeleton,
+        names: &[&str],
         model: Mat4,
         settings: &GenerateSettings,
     ) -> Result<Self, GenerateError> {
         if !settings.is_valid() {
             return Err(GenerateError::InvalidSettings);
         }
+        if names.len() != skeleton.len() {
+            return Err(GenerateError::NameCount {
+                names: names.len(),
+                joints: skeleton.len(),
+            });
+        }
         let frames = rigid_frames(skeleton, &Pose::new(skeleton), model)
             .map_err(|joint| GenerateError::InvalidFrame { joint })?;
         let joints = skeleton.joints();
+        let at = |joint: usize| frames[joint].position;
+        let mut profile = settings.anatomy.map(|humanoid| {
+            let parents: Vec<Option<usize>> = joints.iter().map(|joint| joint.parent).collect();
+            Profile::new(&humanoid, names, &parents, &at)
+        });
+        let folded = |joint: usize| profile.as_ref().is_some_and(|p| p.is_folded(joint));
+        // Each bone is fitted against its nearest ancestor the profile
+        // leaves standing: its parent, without one.
+        let kept_parent = |joint: usize| {
+            profile
+                .as_ref()
+                .map_or(joints[joint].parent, |p| p.kept_parent(joint))
+        };
         let mut children = vec![Vec::new(); joints.len()];
-        for (index, joint) in joints.iter().enumerate() {
-            if let Some(parent) = joint.parent {
+        for index in (0..joints.len()).filter(|&joint| !folded(joint)) {
+            if let Some(parent) = kept_parent(index) {
                 children[parent].push(index);
             }
         }
-        let at = |joint: usize| frames[joint].position;
         let fitted: Vec<Fitted> = (0..joints.len())
+            .filter(|&joint| !folded(joint))
             .filter_map(|joint| {
                 // A branching joint keeps every child however short: its body
                 // is what joins the subtrees, and without one a coarse rig's
@@ -168,13 +210,30 @@ impl RagdollRig {
                     .copied()
                     .filter(|&child| reaching(child))
                     .collect();
-                let from_parent = joints[joint].parent.map(|parent| at(joint) - at(parent));
+                let from_parent = kept_parent(joint).map(|parent| at(joint) - at(parent));
+                // A head whose face bones are folded is sized from them.
+                let head = if long.is_empty() {
+                    profile.as_ref().and_then(|p| p.head_sphere(joint, &at))
+                } else {
+                    None
+                };
+                if let Some((centre, radius)) = head {
+                    return Some(Fitted {
+                        joint,
+                        shape: BodyShape::Sphere { radius },
+                        world: Transform::from_position(centre),
+                        axis: (centre - at(joint)) / radius,
+                    });
+                }
                 fit(joint, &long, from_parent, &at, settings)
             })
             .collect();
         let mut body_of = vec![None; joints.len()];
         for (index, body) in fitted.iter().enumerate() {
             body_of[body.joint] = Some(index);
+        }
+        if let Some(profile) = &mut profile {
+            profile.count_bodies(fitted.iter().map(|body| body.joint));
         }
         let mut rig_joints = Vec::new();
         for (child, body) in fitted.iter().enumerate() {
@@ -188,22 +247,30 @@ impl RagdollRig {
             let Some(parent) = ancestor.and_then(|joint| body_of[joint]) else {
                 continue;
             };
-            let rotation = rotation_onto(DVec3::Z, body.axis).unwrap_or_default();
+            let profiled = profile
+                .as_ref()
+                .and_then(|profile| profile.joint(body.joint, body.axis, &at));
+            let (rotation, kind) = profiled.unwrap_or_else(|| {
+                (
+                    rotation_onto(DVec3::Z, body.axis).unwrap_or_default(),
+                    RigJointKind::Ball {
+                        swing_x: settings.cone,
+                        swing_y: settings.cone,
+                        twist_lower: -settings.twist,
+                        twist_upper: settings.twist,
+                        neutral: SwingTwist::REST,
+                        soft_swing: None,
+                        soft_twist: None,
+                    },
+                )
+            });
             let frame = Transform::new(at(body.joint), rotation);
             rig_joints.push(RigJoint {
                 parent,
                 child,
                 frame_parent: compose(&inverse(&fitted[parent].world), &frame),
                 frame_child: compose(&inverse(&body.world), &frame),
-                kind: RigJointKind::Ball {
-                    swing_x: settings.cone,
-                    swing_y: settings.cone,
-                    twist_lower: -settings.twist,
-                    twist_upper: settings.twist,
-                    neutral: SwingTwist::REST,
-                    soft_swing: None,
-                    soft_twist: None,
-                },
+                kind,
                 friction: 0.0,
             });
         }

@@ -26,6 +26,7 @@
 //! [`Ragdoll::debug_lines`] and [`divergence_lines`] are the plan's debug
 //! view, as line segments for a debug draw layer.
 
+mod anatomy;
 mod debug;
 mod desc;
 mod frames;
@@ -37,6 +38,10 @@ mod rise;
 mod settle;
 mod tether;
 
+pub use anatomy::{
+    BIND_SLACK, HEAD_FROM_HEIGHT, HEAD_REACH, Humanoid, SHOULDER_SHORT_OF_OVERHEAD, SOFT_FRACTION,
+    ZONE,
+};
 pub use debug::{CIRCLE_SEGMENTS, DebugLine, JOINT_AXIS_LENGTH, TWIST_RADIUS, divergence_lines};
 pub use desc::{BodyDesc, DescError, JointDesc, JointKindDesc, RagdollDesc, ShapeDesc};
 pub use frames::REST_CLEARANCE;

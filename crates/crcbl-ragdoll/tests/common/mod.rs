@@ -188,3 +188,27 @@ pub fn joint_positions(skeleton: &Skeleton, pose: &Pose, model: Mat4) -> Vec<Vec
         .map(|global| (model * *global).w_axis.truncate())
         .collect()
 }
+
+/// FNV-1a over the bytes a hash is fed: a fixed algorithm, so a pinned value
+/// means the same on every target and toolchain.
+pub struct Fnv(u64);
+
+impl std::hash::Hasher for Fnv {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+/// The physics state's hash.
+pub fn state_hash(physics: &PhysicsSystem) -> u64 {
+    use crcbl_ecs::SystemTrait as _;
+    let mut hasher = Fnv(0xcbf2_9ce4_8422_2325);
+    physics.hash_state(&mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}

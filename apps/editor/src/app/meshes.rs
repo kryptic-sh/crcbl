@@ -365,7 +365,7 @@ fn fitted(
     names: &[&str],
     hangs: Mat4,
 ) -> (Option<RagdollDesc>, Option<RagdollRig>) {
-    let ragdoll = match RagdollRig::generate(skeleton, hangs, &GenerateSettings::DEFAULT) {
+    let ragdoll = match RagdollRig::generate(skeleton, names, hangs, &GenerateSettings::DEFAULT) {
         Ok(ragdoll) => ragdoll,
         Err(error) => {
             crcbl::log::warn!("editor: `{asset}` fits no ragdoll rig: {error}");

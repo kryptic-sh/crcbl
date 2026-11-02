@@ -15,6 +15,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`RagdollRig::generate` takes the skeleton's bone names**, as
+  `generate(skeleton, names, model, settings)`; `GenerateSettings` gains
+  `anatomy: Option<Humanoid>` (`None` in `DEFAULT`), and `GenerateError` gains
+  `NameCount` for names that are not one per joint.
 - **`SphericalJoint`'s swing limit is elliptical.** `enable_cone_limit` and
   `cone_angle` are now `enable_swing_limit`, `swing_x_angle` and
   `swing_y_angle`; `with_cone(a)` still sets both half-angles to `a` and steps
@@ -40,6 +44,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **An anatomical profile for generated ragdolls:**
+  `GenerateSettings::anatomy: Some(Humanoid { fold_digits })` reads Mixamo,
+  Unreal and EW bone names (any case, checked against the hierarchy) and the
+  bind pose. Knees, elbows, finger and toe segments become hinges that bend only
+  the anatomical way; hips, shoulders, spine, neck, head, wrists and ankles
+  become balls whose swing ellipse passes through their sourced stops (38 CFR
+  §4.71/§4.71a, DSHS 13-585A). Neutrals come from NASA's neutral body posture,
+  and soft zones resist towards each stop. IK, face and corrective-root bones,
+  and with `fold_digits` fingers and toes, carry no body; clavicles,
+  metacarpals, a second neck bone and twist bones inside a limb's chain are
+  spliced out; the head is one sphere sized from its folded bones or the body's
+  height (de Leva's head-to-stature ratio), at about de Leva's share of the
+  mass. Off by default, and rigs without it are unchanged to the bit.
 - **`crcbl_core::trig::atan` and `atan2`:** the arc tangent in `f64`,
   transcribed from musl's `atan2` as the `libm` crate carries it (over fdlibm's
   `s_atan.c`), bit-identical on every target and within one ulp of the true

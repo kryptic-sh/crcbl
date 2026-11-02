@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{entities, model, skeleton, world};
+use common::{entities, model, names, skeleton, world};
 use crcbl_anim::Pose;
 use crcbl_ecs::Entity;
 use crcbl_phys::{CharacterConfig, ColliderComponent, PhysicsSystem, Transform};
@@ -65,8 +65,8 @@ fn corpse(ground: bool) -> (PhysicsSystem, Ragdoll) {
         );
     }
     let skeleton = skeleton();
-    let rig =
-        RagdollRig::generate(&skeleton, model(0.0), &GenerateSettings::DEFAULT).expect("a rig");
+    let rig = RagdollRig::generate(&skeleton, &names(), model(0.0), &GenerateSettings::DEFAULT)
+        .expect("a rig");
     let pose = Pose::new(&skeleton);
     let handoff = Handoff {
         pose: &pose,

@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{entities, world};
+use common::{entities, state_hash, world};
 use crcbl_anim::{Joint, Pose, Skeleton, Trs};
 use crcbl_phys::PhysicsSystem;
 use crcbl_ragdoll::{GenerateSettings, Handoff, Ragdoll, RagdollRig};
@@ -162,8 +162,14 @@ struct Run {
 /// The generated rig and its bones' names, in rig order.
 fn rig() -> (RagdollRig, Vec<String>) {
     let bones = bones();
-    let rig = RagdollRig::generate(&skeleton(&bones), model(0.0), &GenerateSettings::DEFAULT)
-        .expect("a rig");
+    let bone_names: Vec<&str> = bones.iter().map(|(name, _, _)| name.as_str()).collect();
+    let rig = RagdollRig::generate(
+        &skeleton(&bones),
+        &bone_names,
+        model(0.0),
+        &GenerateSettings::DEFAULT,
+    )
+    .expect("a rig");
     let names = rig
         .bodies()
         .iter()
@@ -281,30 +287,6 @@ fn a_generated_ragdoll_on_a_plane_falls_asleep() {
             "struck with {impulse}, still awake after {SLEEP_WITHIN} s"
         );
     }
-}
-
-/// FNV-1a over the bytes a hash is fed: a fixed algorithm, so a pinned value
-/// means the same on every target and toolchain.
-struct Fnv(u64);
-
-impl std::hash::Hasher for Fnv {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-}
-
-/// The physics state's hash.
-fn state_hash(physics: &PhysicsSystem) -> u64 {
-    use crcbl_ecs::SystemTrait as _;
-    let mut hasher = Fnv(0xcbf2_9ce4_8422_2325);
-    physics.hash_state(&mut hasher);
-    std::hash::Hasher::finish(&hasher)
 }
 
 /// The state, freshly spawned and two seconds into the no-launch run, taken

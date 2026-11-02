@@ -113,7 +113,7 @@ that moves only the key that changed.
 
 `crcbl-phys` has elliptical swing limits and progressive soft zones
 (`docs/plan/35-ragdolls.md`, "Anatomical joint limits"); layers 2 (ragdoll
-description) and 3 (anatomical profile) are next. Left from layer 1:
+description) and 3 (anatomical profile) are built. Left from layer 1:
 
 - **A zero swing half-angle is refused, not supported.** Jolt's form is a
   two-sided lock row about the locked axis with the free axis limited one-sided.
@@ -145,11 +145,44 @@ gate runs (`CARGO_INCREMENTAL=0`, smaller and slower to rebuild), clean
 before a gate and stop with a clear message. The owner's call, since each trades
 rebuild time for disk.
 
+## Joint limits layer 3: what the anatomical profile left (2026-11-02)
+
+- **Unsourced ranges:** hip rotation (±30°), a thumb's base (±20°, twist ±15°),
+  the ankle's toe-in and toe-out (±10°) and the toes (ball −40° to 30°, toes 0°
+  to 50°) are engineering values in `Humanoid`'s docs; replace them when a
+  source is found. NASA's front-view arcs (shoulder 49°, arm 39°, leg 200°) stay
+  unconfirmed and unused.
+- **Unmatched names:** a jaw, eyelids and MetaHuman `FACIAL_*` are fine only
+  under a matched head, where everything past the head folds. Rigify `DEF-*` and
+  Daz (`lThighBend`, `lShldrBend`, `lForearmBend`, ...) are not matched, so
+  those skeletons keep the default ball everywhere; a `pelvis` the matcher
+  misses also turns off the off-tree fold.
+- **Assumptions not checked against real assets:** elbows bend forwards from the
+  bind (wrong for a T-pose with externally rotated upper arms); the thumb bends
+  towards palm minus radial (approximate); `_l` is the character's left; wrists,
+  ankles, spine and neck stand at their anatomical zero in the bind. Run on EW's
+  real skeleton and a real Mixamo export.
+- **The shoulder stops 10° short of overhead** (`SHOULDER_SHORT_OF_OVERHEAD`):
+  its sourced flexion and abduction meet overhead, where no ellipse fits.
+- **The head floor assumes an upright bind and a head joint level with the jaw's
+  angle:** `HEAD_FROM_HEIGHT` reads the head joint's height over the lowest body
+  joint, so a crouched or seated bind gets a small head.
+- **A twist bone is spliced only when a matched limb bone hangs below it.** Daz
+  names are not matched, so Daz rigs still keep the default ball everywhere.
+- **Considered and declined:** a clavicle joint and a second neck joint (a light
+  body at tight limits between heavy ones gained up to about 1.5 kJ); a head
+  sized from the neck chain (26.97% and 5.56% of the mass on the Unreal and
+  long-necked humanoids); NASA's posture as a ball's neutral (the ellipse is
+  centred on its neutral, and the ranges are lopsided, so the posture sits
+  inside the free zone instead).
+- **Transient limit breaches at impacts predate the profile:** the default rig's
+  finger cones broke by up to 2.6 rad for a tick in head-strike runs.
+- **The editor still generates with the profile off.**
+- **Not verified:** Rigify, Daz, MetaHuman and UE4 mannequin skeletons; the
+  shoulder's twist sign (its range is symmetric, so the test cannot see it).
+
 ## Joint limits layer 2: what the ragdoll description left (2026-11-01)
 
-- **`generate` cannot fold yet.** In `RagdollRig::generate` a folded bone should
-  also be left out of fitting; today an `eyes` or `ik_*` child turns its parent
-  into a "several children" sphere. Layer 3, with the profile.
 - **The editor has no rows for soft zones, `swing_x_axis` or `fold`.**
   `apps/editor/src/panel/rig.rs` keeps them as the file has them while other
   rows change; Reflect reads no `Option` or list, so this needs an on/off row

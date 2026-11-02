@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{entities, index, model, skeleton, world};
+use common::{entities, index, model, names, skeleton, world};
 use crcbl_anim::{Palette, Pose, Trs};
 use crcbl_ecs::Entity;
 use crcbl_phys::{JointKind, KineticContact, KineticSource, PhysicsSystem, Spring, Transform};
@@ -21,7 +21,13 @@ const LIFT: f32 = 0.5;
 const RUN: f64 = 1.5;
 
 fn rig() -> RagdollRig {
-    RagdollRig::generate(&skeleton(), model(0.0), &GenerateSettings::DEFAULT).expect("a rig")
+    RagdollRig::generate(
+        &skeleton(),
+        &names(),
+        model(0.0),
+        &GenerateSettings::DEFAULT,
+    )
+    .expect("a rig")
 }
 
 fn body_world(physics: &PhysicsSystem, entity: Entity) -> Transform {
@@ -394,6 +400,7 @@ fn chase(follow: Follow, blow: f64) -> (f64, f64, f64) {
     let skeleton = skeleton();
     let coarse = RagdollRig::generate(
         &skeleton,
+        &names(),
         model(0.0),
         &GenerateSettings {
             min_length: 0.2,
