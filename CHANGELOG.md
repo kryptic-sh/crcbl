@@ -13,6 +13,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-03
+
 ### Breaking
 
 - **`RagdollRig::generate` takes the skeleton's bone names**, as
@@ -22578,7 +22580,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/kryptic-sh/crcbl/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/kryptic-sh/crcbl/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/kryptic-sh/crcbl/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/kryptic-sh/crcbl/compare/v0.13.0...v0.14.0
