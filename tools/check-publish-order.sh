@@ -34,9 +34,9 @@ crcbl-image
 crcbl-golden
 crcbl-reflect-derive
 crcbl-wl-scanner
-crcbl-anim
 crcbl-spawn
 crcbl-core
+crcbl-anim
 crcbl-reflect
 crcbl-shaders
 crcbl-net
