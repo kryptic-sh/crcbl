@@ -4907,6 +4907,15 @@ same pin.
   latest major; the one the first survey missed, `actions/cache@v4` inside the
   local `apt-packages` action, went to v6, and Dependabot's `github-actions`
   entry now reads `/.github/actions/*` as well.
+- **Held, with the reason: `windows-core` stays on 0.62** (Dependabot PR #33
+  proposes 0.100.0, red on 2026-11-02). No `windows` release builds on
+  `windows-core` 0.100 yet (`cargo info windows` reports 0.62.2 as the latest),
+  and `cpal` 0.18.2 depends on `windows-core` 0.62 too, so the bump alone puts
+  two copies in the tree: `cargo-deny` refuses the duplicate, and
+  `crcbl-mixer`'s COM interfaces (`windows/notify.rs`, `policy_config.rs`) stop
+  matching the `windows` 0.62 traits they implement. Move `windows`,
+  `windows-core` and the crates pinning them together once a `windows` release
+  on the new line exists and `cpal` follows.
 
 ## Wasm `--all-targets` builds fail, and CI does not build them (2026-09-28)
 
@@ -27729,8 +27738,13 @@ four excused groups. Every demo gate reads the canvas, so there was no
 configuration left to try. **This is a real gap in Windows coverage**, not
 something the other two platforms make good: what goes untested there is the
 demo gates' own subject — real input, touch, focus, and the canvas a visitor
-looks at. What would close it is a Windows runner with a GPU, or a Chrome whose
-SwiftShader canvas can be read; neither is available.
+looks at. What would close it in CI is a Windows runner with a GPU, or a Chrome
+whose SwiftShader canvas can be read; neither is available. **Run by hand on
+2026-11-02** on the Windows desktop (RX 7900 XTX, Chrome's Dawn over
+`--use-angle=d3d11`, adapter `amd rdna-3`, `--headless --hardware`, main at
+33fc348d): all 16 demos `pages.yml`'s macOS leg runs passed every check, from
+breakout's 65 of 65 to orbit's 49 of 49, groups A to I. That is one run on one
+machine, not a gate; nothing repeats it.
 
 **The Windows harness leg works and is only slow.** Its first run was cancelled
 at 45m20s having reached `11/11 scene(s) rendered and saved`, with the clock
