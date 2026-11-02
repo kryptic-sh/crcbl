@@ -129,6 +129,22 @@ description) and 3 (anatomical profile) are next. Left from layer 1:
 - **Not measured:** the cost of the per-solve Eberly bisection on an elliptical
   joint, and soft-zone hertz above the rigid rows' 60 Hz.
 
+## Local gate runs fill the disk (2026-11-02)
+
+The full local gate (`cargo clippy` on host, wasm32, `x86_64-pc-windows-msvc`
+and `aarch64-apple-darwin`, the workspace tests, `cargo nextest --all-features`,
+the GPU e2e scripts and the browser gates) builds every profile and target into
+the one `target/` directory, and its incremental caches grow without bound: on
+2026-11-01 and 2026-11-02 `target/debug` reached 171 GB and then 271 GB on
+mxaddict-pc, the root disk hit 100% twice, and a nextest run and a sub-agent's
+gate failed with `No space left on device (os error 28)` — which reads as a
+compile failure. Each time `cargo clean --profile dev` (with the owner's
+approval) freed it. Options, none chosen: turn off incremental compilation for
+gate runs (`CARGO_INCREMENTAL=0`, smaller and slower to rebuild), clean
+`target/debug/incremental` at the start of each full gate, or check free space
+before a gate and stop with a clear message. The owner's call, since each trades
+rebuild time for disk.
+
 ## Joint limits layer 2: what the ragdoll description left (2026-11-01)
 
 - **`generate` cannot fold yet.** In `RagdollRig::generate` a folded bone should
