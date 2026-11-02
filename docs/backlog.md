@@ -139,11 +139,6 @@ description) and 3 (anatomical profile) are built. Left from layer 1:
   the API (see the CHANGELOG's Breaking section), so it is a minor bump. After
   it, tell EW: it will adopt the profile with `Humanoid { fold_digits: true }`
   and re-time its raid and squad probes against its kept 0.15 build.
-- **Install `perf` on mxaddict-pc (owner's call).** Twice this session a
-  wall-clock regression had no per-function profile: callgrind counts
-  instructions and simulated caches, not real mispredicts or stalls, and showed
-  the 0.16 clip grouping as an improvement while it cost 24% in wall time. EW
-  has asked the owner too.
 - **Decisions still with the owner**, each recorded in its own entry: the ECS
   model and whether sample state moves into it (_ECS audit_); how to stop gate
   runs filling the disk (below); a ragdoll's joint stiffness above 24 substeps
@@ -260,11 +255,11 @@ recomposes only changed joints and their descendants, bit for bit; measured on
   rework (reusing the segment only for a neighbour with bit-equal times,
   mispredicts back to the old level under callgrind's branch simulation)
   measured 3.054 / 2.463, so the cost lies in that code path, not in visiting
-  order. Reverted. Cause unconfirmed: no `perf` on mxaddict-pc, and callgrind's
-  extra mispredicts are too few to explain it. Profile any further search-saving
-  attempt with hardware counters first. `blend_into` and linear rotation
-  sampling stay dominated by glam's `Quat::slerp`, which cannot be cut
-  bit-identically.
+  order. Reverted. Cause unconfirmed: `perf` was not installed then (it is since
+  2026-11-02), and callgrind's extra mispredicts are too few to explain it.
+  Profile any further search-saving attempt with hardware counters first.
+  `blend_into` and linear rotation sampling stay dominated by glam's
+  `Quat::slerp`, which cannot be cut bit-identically.
 
 ## Skinning's per-frame CPU after the binding compare (2026-10-31)
 
