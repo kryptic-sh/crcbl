@@ -4691,7 +4691,7 @@ on shard on 2026-09-27.
   so it is unseen. No test reads a registered class's icon back with one
   present: the tests read the lookup from `shell32.dll` mapped as a resource
   file and the null case from the test binary. **Per-DPI icons (2026-11-02):**
-  each top-level window (not panels or popups) gets `window::Icons`, loaded at
+  each top-level window (not panels or popups) gets `icon::Icons`, loaded at
   `GetSystemMetricsForDpi` sizes and set with `WM_SETICON` at creation and on a
   DPI change that alters the sizes; the class's system-DPI icons stay the
   fallback. Unit-tested without a window: the sizes at 96, 144 and 192 DPI, the

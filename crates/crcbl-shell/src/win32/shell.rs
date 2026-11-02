@@ -23,6 +23,7 @@ use super::devices::{Attribution, DeviceTable};
 use super::events::RawEvent;
 use super::ffi::{self, Handle, Msg, WindowPlacement, value};
 use super::geometry;
+use super::icon;
 use super::input;
 use super::input::Contact;
 use super::keys::{Consumed, Utf16};
@@ -162,7 +163,7 @@ pub(super) struct WinWindow {
     /// The executable's icon at this window's DPI, set over the class's;
     /// `None` for a panel, a popup, and every window of an executable with no
     /// icon. Dropped, and its icons destroyed, after the window is.
-    pub(super) icons: Option<window::Icons>,
+    pub(super) icons: Option<icon::Icons>,
 }
 
 impl WinWindow {
@@ -250,8 +251,8 @@ pub struct Win32Shell {
     /// them; see [`awake`](super::awake).
     idle: super::awake::IdleInhibit,
     /// The executable's icon group, looked up once, that each window's
-    /// [`Icons`](window::Icons) load from; `None` when it embeds no icon.
-    pub(super) icon_source: Option<Rc<window::IconSource>>,
+    /// [`Icons`](icon::Icons) load from; `None` when it embeds no icon.
+    pub(super) icon_source: Option<Rc<icon::IconSource>>,
     caps: ShellCaps,
 }
 
@@ -368,7 +369,7 @@ impl Win32Shell {
             idle: super::awake::IdleInhibit::default(),
             // SAFETY: `instance` is the executable's module, loaded for as
             // long as the process runs.
-            icon_source: unsafe { window::IconSource::of(instance.as_ptr()) }.map(Rc::new),
+            icon_source: unsafe { icon::IconSource::of(instance.as_ptr()) }.map(Rc::new),
             caps: Self::latch_caps(raw_motion),
         };
         shell.monitors = shell.enumerate_monitors();
@@ -1434,7 +1435,7 @@ impl Shell for Win32Shell {
         // Furniture has no caption and no taskbar button to show an icon in,
         // and a popup may be made and unmade every frame.
         let icons = match (&panel, &popup, &self.icon_source) {
-            (None, None, Some(source)) => Some(window::Icons::new(
+            (None, None, Some(source)) => Some(icon::Icons::new(
                 hwnd.as_ptr(),
                 Rc::clone(source),
                 created.dpi,

@@ -1863,7 +1863,7 @@ unsafe extern "system" {
     // A window's icon sizes at its own DPI; see `window::IconSides`.
     pub fn GetSystemMetricsForDpi(index: i32, dpi: u32) -> i32;
     // The executable's own icon for the window class and each window; see
-    // `window::IconSource`.
+    // `icon::IconSource`.
     pub fn LoadImageW(
         instance: Handle,
         name: *const u16,

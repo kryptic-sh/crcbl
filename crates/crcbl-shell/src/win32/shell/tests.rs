@@ -703,11 +703,11 @@ fn icon_of(hwnd: Handle, slot: usize) -> Handle {
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_window_takes_the_executable_icon_at_its_dpi() {
-    let module = super::super::window::tests::shell32();
+    let module = super::super::icon::tests::shell32();
     let mut shell = shell();
     // SAFETY: `module` stays mapped until after the shell, the only holder
     // of the source, is dropped.
-    shell.icon_source = unsafe { window::IconSource::of(module) }.map(Rc::new);
+    shell.icon_source = unsafe { icon::IconSource::of(module) }.map(Rc::new);
     let window = shell
         .create_window(&WindowDesc {
             visible: false,
@@ -720,7 +720,7 @@ fn a_window_takes_the_executable_icon_at_its_dpi() {
         let side = unsafe { ffi::GetSystemMetricsForDpi(metric, dpi) };
         Some((side, side))
     };
-    let pixel_size = super::super::window::tests::pixel_size;
+    let pixel_size = super::super::icon::tests::pixel_size;
     let dpi = shell.window(window).expect("live").dpi;
     let big = icon_of(hwnd, ffi::value::ICON_BIG);
     assert_eq!(pixel_size(big), side(ffi::value::SM_CX_ICON, dpi));
