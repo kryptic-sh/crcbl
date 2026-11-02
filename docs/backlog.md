@@ -128,6 +128,17 @@ description) and 3 (anatomical profile) are built. Left from layer 1:
   under a 6 N·m axial torque at a 0.8 rad swing. Not a bug.
 - **Not measured:** the cost of the per-solve Eberly bisection on an elliptical
   joint, and soft-zone hertz above the rigid rows' 60 Hz.
+- **EW's engaged raid tick p95 rose about 6% from 0.15 to 0.17 while its medians
+  fell** (EW, Windows, 9950X3D, quiet window, four interleaved rounds: tick p95
+  0.665–0.685 → 0.714–0.752 ms, frame p95 about +4%; patrol and squad medians
+  4–7% faster). The engaged raid has deaths, but the 0.17 limits are not
+  confirmed as the cause: EW generates with `GenerateSettings::DEFAULT` and no
+  profile, so its joints enable no ellipse or soft zone and step to 0.16's bits.
+  Suspects, all unconfirmed: 6632d416 (0.16; the midpoint split for a jointed
+  body on contacts adds work and changes when ragdolls sleep), and 007a68f8 and
+  9724cb89 (0.16; Windows rig bits changed, so 0.15 and 0.17 deaths are
+  different trajectories). Asked EW to time 0.16.0 against 0.17.0 and to count
+  awake ragdoll bodies at the p95 ticks.
 
 ## Open at the end of the 2026-11-02 session
 
