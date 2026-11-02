@@ -4819,13 +4819,15 @@ turned box's turned normal. EW now uses `sweep_capsule_all` in
   ties by broadphase order (`closest_hit_core`); only the sweeps were changed.
   Both are small once a caller asks.
 
-- **Repeat the Windows cursor test in a foreground-capable session.**
-  `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` in
-  `crates/crcbl-shell/src/win32/shell/tests.rs` fails in `focus_and_confirm`
-  because `SetForegroundWindow` is refused, before the cursor assertions run.
-  The isolated retry also failed (`cursor-focus-retry.log`). Possible user
-  desktop activity was reported but is not a confirmed cause. Preserve the focus
-  precondition; cursor balancing remains unverified in this session.
+- **Re-run the Win32 focus-taking desktop tests from a background shell.**
+  `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` (and every
+  test through `focus_and_confirm`) failed locally because `SetForegroundWindow`
+  was refused: the foreground lock grants it only to the process that sent the
+  last input. EW measured that on 2026-11-02 (refused 2 of 2; granted 3 of 3
+  after the calling process injected a zero mouse move), and `make_foreground`
+  now injects that move first. Not yet run locally from a background shell,
+  which is the case it fixes; CI's desktop job was granted the foreground before
+  and only shows that the move breaks nothing there.
 
 ## First priority: every dependency on its latest stable release, CI green (2026-09-25)
 

@@ -100,7 +100,30 @@ fn send_leave(hwnd: Handle) {
 /// Returns whether `SetForegroundWindow` said it took. A refusal is not an
 /// error Windows reports anywhere else: `ClipCursor` then does nothing and
 /// still succeeds, so the refusal has to be read here or not at all.
+///
+/// The foreground lock grants `SetForegroundWindow` only to the process that
+/// sent the last input event, so a run launched from a background shell was
+/// refused every time. A zero mouse move injected by **this** process first
+/// makes it that sender without moving the cursor; one injected by another
+/// process (the `crcbl-e2e-win32-input` helper) credits that process instead.
+/// EW measured it on 2026-11-02: plain calls refused 2 of 2, after the move
+/// granted 3 of 3.
 fn make_foreground(hwnd: Handle) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput,
+    };
+    let nudge = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dwFlags: MOUSEEVENTF_MOVE,
+                ..MOUSEINPUT::default()
+            },
+        },
+    };
+    // SAFETY: one fully initialised `INPUT`, its size as `cbSize`. A refused
+    // injection only leaves the grant below to be refused, which is read.
+    unsafe { SendInput(&[nudge], size_of::<INPUT>() as i32) };
     // SAFETY: this shell's own window, from the thread that created it.
     unsafe { ffi::SetForegroundWindow(hwnd) != 0 }
 }
