@@ -129,6 +129,27 @@ description) and 3 (anatomical profile) are built. Left from layer 1:
 - **Not measured:** the cost of the per-solve Eberly bisection on an elliptical
   joint, and soft-zone hertz above the rigid rows' 60 Hz.
 
+## Open at the end of the 2026-11-02 session
+
+- **Cut 0.17.0** once main is green on CI and Pages. Unreleased since 0.16.0:
+  the clip-sampling regression fix (8904feb7, EW's raid tick about 10% slower on
+  0.16), the deterministic `crcbl_core::trig::atan2` and the `crcbl-anim` lint,
+  the elliptical swing and soft joint limits (`crcbl-phys`), neutral poses and
+  soft limits in ragdoll rigs, and the anatomical humanoid profile. All break
+  the API (see the CHANGELOG's Breaking section), so it is a minor bump. After
+  it, tell EW: it will adopt the profile with `Humanoid { fold_digits: true }`
+  and re-time its raid and squad probes against its kept 0.15 build.
+- **Install `perf` on mxaddict-pc (owner's call).** Twice this session a
+  wall-clock regression had no per-function profile: callgrind counts
+  instructions and simulated caches, not real mispredicts or stalls, and showed
+  the 0.16 clip grouping as an improvement while it cost 24% in wall time. EW
+  has asked the owner too.
+- **Decisions still with the owner**, each recorded in its own entry: the ECS
+  model and whether sample state moves into it (_ECS audit_); how to stop gate
+  runs filling the disk (below); a ragdoll's joint stiffness above 24 substeps
+  (_A generated ragdoll above 24 substeps_); counting `r_ssao_split`'s pass in
+  the draw counters; the CI-speed options for Pages; EW's octile nav heuristic.
+
 ## Local gate runs fill the disk (2026-11-02)
 
 The full local gate (`cargo clippy` on host, wasm32, `x86_64-pc-windows-msvc`
