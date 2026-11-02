@@ -16523,6 +16523,97 @@ in `docs/notes/simulation.md` under _What the deleted 04-ecs-server-client plan
 left behind_. What it left unbuilt is below; the ECS access declarations and the
 parallel schedule are under _Jobs and threading_.
 
+### ECS audit: storage, queries and how the engine uses it (2026-11-02)
+
+Asked by the owner: is the ECS stored contiguously for performance, and do the
+engine and the samples actually use it? A read-only audit; its claims about
+`System<T>`, `SystemTrait`, `set_pool`, horde, towers and the registry were
+re-checked against the code.
+
+**What it is.** Not an archetype or sparse-set ECS: each `System<T>`
+(`crates/crcbl-ecs/src/system.rs`) owns one dense `Vec<T>` plus an
+`entity_to_index: HashMap<Entity, usize>` (std SipHash) and an
+`index_to_entity: Vec<Entity>`, by design (`docs/notes/simulation.md`, "Systems
+own arrays; an entity is only an id"). Walking one system is as fast as a plain
+`Vec`; there is no query joining several component types, and reading another
+system's value per entity hashes the handle. Measured with a scratch bench
+(Ryzen 9 9950X3D, `taskset -c 6`, best of 7, load 1.6–1.9, pos += vel·dt/mass),
+ns per entity at N = 1k / 10k / 100k / 1M:
+
+| Layout                                        | 1k   | 10k  | 100k | 1M   |
+| --------------------------------------------- | ---- | ---- | ---- | ---- |
+| One `Vec<struct>` (AoS)                       | 0.62 | 0.64 | 0.65 | 0.64 |
+| One `Vec` per field (SoA)                     | 0.61 | 0.62 | 0.65 | 0.65 |
+| One `System<Row>`, `iter_mut`                 | 0.64 | 0.64 | 0.66 | 0.64 |
+| Three `System<T>` joined by `get`, same order | 17.9 | 21.9 | 35.6 | 71.1 |
+| Same join, rows shuffled                      | 18.6 | 25.0 | 43.9 | 94.6 |
+| Sparse set (`Vec<u32>` by entity), shuffled   | 1.28 | 1.38 | 1.92 | 2.21 |
+
+**Actionable:**
+
+- **Swap `System<T>::entity_to_index`'s SipHash map for a sparse `Vec<u32>`**
+  indexed by `Entity::index()` and generation-checked through `index_to_entity`:
+  a cross-system read drops from 18–95 ns to about 2 ns per entity (table
+  above). Confined to `System<T>`, no API change; about a day.
+- **A shared downcast:** add `SystemTrait::as_any(&self)` and
+  `World::system::<T>()`; today only `as_any_mut` exists, so every read borrows
+  the whole `World` mutably (`Registry::component` says so). Then drop
+  `&mut World` from the read-only `Registry` methods (`component`, `placement`,
+  `placing_system`, `systems_of`). Every `SystemTrait` implementor changes in
+  the same commit.
+- **`scene_physics` `BodyPlay::tick` / `follow`** (`crates/crcbl/src/`): per
+  dynamic body per tick it allocates `Simulation::poses()`, walks the registry
+  by name (`placing_system` returns a cloned `String`; `system_named` scans the
+  schedule comparing names) and `format!`s field paths. Resolve the placing
+  system and paths once at `register`. Editor play mode only.
+- **Towers' editor-play mirror** (`apps/towers/src/game/play.rs`, `mirror`)
+  copies the whole `Stage` into four systems every tick with linear
+  `known.retain(... rows.iter().any(...))` scans, O(N²), and allocates per tick:
+  make the identity→entity lookup O(1) and reuse the buffers.
+- **Per-snapshot allocations:** `crcbl-server`'s `peer::collect_systems` builds
+  `Inspector::collect` (cloned names, a `runs_after` Vec each) only to read
+  entity counts; towers' `FieldReplica::entity_count` builds a whole
+  `RenderState` just to count, twice per snapshot; horde's `refresh_views`
+  collects a `Vec<Entity>` every tick. Reuse buffers.
+- **Doc fix:** `crates/crcbl-ecs/src/lib.rs` calls `System<T>` storage "SoA"; it
+  is an array of `T` (SoA only across systems).
+
+**Decisions for the owner:**
+
+- **Keep "systems own their arrays", or add queries?** (a) Keep it and say in
+  the notes that multi-component logic lives in one system's row. (b) Add an
+  EnTT-style sparse-set query joining `System<T>`s; after the sparse-index swap
+  it costs about 2 ns per entity; medium work. (c) Archetype tables (Bevy,
+  flecs); large, and at odds with each system owning its wire format.
+- **Should sample game state move into the ECS?** Today breakout, flappy,
+  asteroids, breach, shard, orbit, puppet, hud and towers share game state
+  between server and client through `Arc<Mutex<…>>`, horde keeps
+  `enemies: Vec<Enemy>` plus a `by_entity: HashMap` (a hand copy of
+  `System<T>`), and breach holds a raw `PhysicsWorld` with no entities. That
+  state is invisible to `System::hash_state` (the determinism hash), to
+  replication and to the inspector; towers patches the hash by hashing its
+  `Stage`. Moving it pays only after the previous decision, at P2 scale per
+  sample.
+- **Should the server tick its schedule on a pool by default?** The parallel
+  schedule is sound (each system owns its arrays; `Shared<T>` is a `RwLock`),
+  but in non-test code only `crcbl-cli`'s bench and `sim` call `set_pool`; every
+  game ticks serially in `GameModule::tick`, and horde parallelises its crowd
+  with its own `Pool::par_for`.
+
+**Already fine:** `crcbl_core::Pool`'s generational handles and LIFO slot reuse
+(a stale handle fails rather than aliases; an exhausted generation retires its
+slot); O(1) swap-remove `detach`; deferred despawn and `sweep`; the
+order-independent `hash_state`; dense `System<T>` iteration at plain-`Vec`
+speed; `PhysicsSystem`'s one `Vec` per field for awake bodies and `crcbl-vfx`'s
+`ParticlePool`, both rightly outside the entity model.
+
+**Not audited:** horde's per-tick `PhysicsSystem::transform`/`body_mut` lookup
+cost (inferred from the same map, not measured); a comparison against hecs or
+Bevy (would need a dependency); the apps alcove, bracket, lantern, options,
+quarry, sparks, sundial, tide, tumble and viewer and the editor's internals
+(they call no `World::spawn`); `crcbl-client`'s query world, `crcbl-nav`,
+`crcbl-inventory`, `crcbl-anim`; the wasm build.
+
 ### Client jitter buffer: what the adaptive playout delay leaves (2026-10-01)
 
 **Built (2026-10-01): `crcbl_client::playout`.** Decided 2026-10-01 for the long
