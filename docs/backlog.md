@@ -15260,20 +15260,14 @@ behind_.
 - **Jitter and binary-search refinement in the march**: see the determinism rule
   in the notes.
 
-### `apps/quarry`'s mesh-path goldens have no local dx12 run (2026-09-25)
+### `apps/quarry`'s device suite has no local run on lavapipe (2026-11-04)
 
-`GpuContext` now honours `CRCBL_ADAPTER`, and quarry's device suite on dx12
-opens `"Microsoft Basic Render Driver" type=Cpu` under `CRCBL_ADAPTER=cpu`. The
-four indirect-path goldens pass there (dolly start: 69.4 % of pixels differ, max
-channel delta 18, 5 over tolerance; dolly end: 23.6 % differ, max delta 1, none
-over), as they do on the RX 7900 XTX. The other 18 tests fail on dx12 on
-**both** adapters, before any pixel, with `UnsupportedFeatures` missing
-`MESH_SHADER`: `crcbl-dx12` does not report the feature (the pending "dx12 mesh
-flag" decision), and every quarry fixture that asks for
-`GeometryPath::MeshShader` stops there. So the two mesh-path goldens are still
-verified only where CI runs them, on lavapipe; that, and the rest of the suite
-on dx12, waits on the mesh flag. Not run: the suite on vk pinned to lavapipe
-through `CRCBL_VK_ICD`.
+On dx12 the whole suite now passes on both of mxaddict-pc's adapters, mesh-path
+goldens included, since `crcbl-dx12` reports `MESH_SHADER`: 25 of 25 on the RX
+7900 XTX and 25 of 25 on WARP (`CRCBL_ADAPTER=cpu`, which reports
+`geometry=MeshShader`), 2026-11-04 at 5ecbfa6c. Still not run locally: the suite
+on vk pinned to lavapipe through `CRCBL_VK_ICD`, which is where CI checks the
+mesh-path goldens.
 
 ### MSAA was reopened rather than reversed (2026-08-27)
 
