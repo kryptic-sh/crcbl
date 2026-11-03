@@ -259,6 +259,12 @@ reproducible here, and nothing narrows it further than "lavapipe, on the runner,
 once". Worth reading this entry before chasing a second one: a repeat with a
 different test index is a real race, and a repeat at the same index is not.
 
+**Resolved 2026-11-04.** It was a real race, in the Vulkan loader rather than
+lavapipe: `vkSetDebugUtilsObjectNameEXT` on one instance crashed while another
+instance's `vkEnumeratePhysicalDevices` was unloading drivers. `crcbl-vk`'s
+`loader` module serialises those calls. The viewer step then ran 40 passes clean
+under gdb on CI (run 41719598970), where one pass had caught the crash before.
+
 ### `gh run list --commit <sha>` returns nothing here (2026-08-29)
 
 A CI watcher built on `gh run list --commit 8586d82 --json ...` printed no rows
