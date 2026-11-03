@@ -15,6 +15,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_phys::orbit::eccentricity_vector`:** the vector `Orbit::from_state`
+  keeps only the length of — it points at periapsis and is as long as the
+  eccentricity — for a map that draws the apsides. `from_state` now computes
+  through it, to the same bits.
 - **`crcbl_hal::null::Recorder::bind_group_entries`.** The null backend's
   recorder answers what a live bind group binds — its creation's entries with
   every accepted `update_bind_group` write applied — so a test can assert which

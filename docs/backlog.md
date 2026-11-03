@@ -23948,12 +23948,6 @@ by `apps/orbit/src/page.rs` — but these are not:
 - **The art is placeholder, written as text**, as towers' icons are. An art pass
   would replace the three sheets; nothing else would change, because
   `crate::art` finds every frame by name.
-- **The apsis direction is a second copy of the eccentricity vector.** `apsides`
-  in `apps/orbit/src/game.rs` forms it from the state, and
-  `crcbl_phys::Orbit::from_state` already forms the same vector and keeps only
-  its length. Exposing the direction from `crcbl-phys` would delete the copy;
-  not done here because `crcbl-phys` was being changed in another worktree at
-  the time. A test pins orbit's copy to known states either way.
 - **No golden pins the picture.** Orbit has no image golden and its browser-gate
   row reads the `[HUD]` line only, so a sprite drawn in the wrong place passes
   every gate that does not read the draw list. `page`'s tests hold each sprite

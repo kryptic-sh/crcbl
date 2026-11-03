@@ -117,13 +117,7 @@ impl Orbit {
         // second would leave a full revolution a few picoseconds short of one.
         let semi_major_axis = 1.0 / inverse_semi_major_axis(mu, radius, speed_squared);
 
-        // The eccentricity vector points at periapsis and has the eccentricity
-        // for its length. Formed from the state rather than from angles, so it
-        // is as defined for a circular orbit as for any other — it just comes
-        // out near zero, and nothing divides by it.
-        let eccentricity_vector =
-            ((speed_squared - mu / radius) * position - position.dot(velocity) * velocity) / mu;
-        let eccentricity = eccentricity_vector.length();
+        let eccentricity = eccentricity_vector(mu, position, velocity).length();
 
         // `h²/mu`, which stays finite where the semi-major axis does not.
         let semi_latus_rectum = position.cross(velocity).length_squared() / mu;
@@ -189,6 +183,22 @@ impl Orbit {
                 * (self.semi_major_axis * self.semi_major_axis * self.semi_major_axis / mu).sqrt()
         })
     }
+}
+
+/// The eccentricity vector of a body at `position` (from the centre of
+/// attraction) moving at `velocity` about a body of gravitational parameter
+/// `mu`: `((v² − μ/r)·r − (r·v)·v) / μ` (Vallado, _Fundamentals of
+/// Astrodynamics and Applications_, the `RV2COE` algorithm).
+///
+/// It points at periapsis and is as long as the eccentricity, which is what
+/// [`Orbit::from_state`] keeps of it; a map that draws the apsides needs the
+/// direction too. Formed from the state rather than from angles, so it is as
+/// defined for a circular orbit as for any other — it just comes out near zero,
+/// where its direction is rounding, and nothing here divides by it.
+#[must_use]
+pub fn eccentricity_vector(mu: f64, position: glam::DVec3, velocity: glam::DVec3) -> glam::DVec3 {
+    let radius = position.length();
+    ((velocity.length_squared() - mu / radius) * position - position.dot(velocity) * velocity) / mu
 }
 
 /// Where a body at `state` will be `dt` seconds later, coasting under the

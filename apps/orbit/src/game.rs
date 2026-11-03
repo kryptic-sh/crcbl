@@ -891,20 +891,15 @@ const MIN_APSIS_ECCENTRICITY: f64 = 1e-9;
 /// `position` moving at `velocity` about a body of gravitational parameter
 /// `mu` — or `None` for an orbit too near circular to have one.
 ///
-/// The eccentricity vector, `((v² − μ/r)·r − (r·v)·v) / μ` (Vallado,
-/// _Fundamentals of Astrodynamics and Applications_, the `RV2COE` algorithm),
-/// which points at periapsis and is as long as the eccentricity.
-/// `crcbl::phys::Orbit::from_state` forms the same vector and keeps only its
-/// length, because an orbit's size and shape are all its readouts need; the map
-/// is what needs the direction too.
+/// The direction of [`crcbl::phys::orbit::eccentricity_vector`], the vector
+/// `crcbl::phys::Orbit::from_state` keeps only the length of, because an
+/// orbit's size and shape are all its readouts need; the map is what needs the
+/// direction too.
 fn apsides(mu: f64, position: DVec3, velocity: DVec3) -> Option<DVec3> {
-    let radius = position.length();
-    if !(mu > 0.0 && radius > 0.0) {
+    if !(mu > 0.0 && position.length() > 0.0) {
         return None;
     }
-    let eccentricity = ((velocity.length_squared() - mu / radius) * position
-        - position.dot(velocity) * velocity)
-        / mu;
+    let eccentricity = crcbl::phys::orbit::eccentricity_vector(mu, position, velocity);
     let length = eccentricity.length();
     (length > MIN_APSIS_ECCENTRICITY && length.is_finite()).then(|| eccentricity / length)
 }
