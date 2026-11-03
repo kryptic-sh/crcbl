@@ -12220,7 +12220,7 @@ mod tests {
     mod draw_pipelines;
     mod frame_extents;
     mod instance_upload;
-    mod lazy_content;
+    pub(super) mod lazy_content;
     mod lazy_passes;
     mod load_service;
     mod mesh_variants;

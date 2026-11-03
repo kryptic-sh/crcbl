@@ -9182,13 +9182,8 @@ No shader changed.
   environment times the `dfg` pair `fragmentMain` already reads), which is the
   `mesh.slang` edit the vk surprise below makes risky. **Decided 2026-09-25: no
   shader change until a tier without reflections actually ships.** No consumer
-  has asked for one (EW's presets were not read from here); the owed part is
-  making the dependency visible, a sentence on `ViewLighting::Fixed` saying the
-  sheen needs `RenderEffects::REFLECTIONS` in the view's effects.
-- **Not verified on a metal.** The sheen e2e
-  (`a_fixed_view_s_environment_gives_a_dark_glossy_icon_a_sheen`) covers a
-  near-black dielectric only; a metallic icon should reflect the environment
-  tinted by its base colour through the same path, but no test draws one.
+  has asked for one (EW's presets were not read from here). The dependency is
+  documented on `ViewLighting::Fixed`'s `environment` field.
 - **Declined: the environment in the fixed probe row.** One lit row would reach
   both the diffuse gather and the reflection fallback, but both weigh it by the
   frame's probe visibility map layer 0 and divide back out, which could round
@@ -9203,12 +9198,24 @@ No shader changed.
   near an icon's model is lighting it by accident, since icon models sit away
   from the world. A fixed rig of several lights would be a `Fixed` carrying rows
   rather than one `DirectionalLight`; not built until an icon needs rim light.
-- **Water under a fixed view is not tested.** It now binds `View::fixed_probes`
-  and reflects the view's environment through the march's block, but no test
-  draws water or grass through a fixed view, and `water.slang`'s other frame
-  reads under one were not reviewed.
+- **Water and grass under a fixed view are checked on the null backend only.**
+  `a_fixed_view_draws_water_and_grass_by_its_own_light` asserts the groups each
+  pass bound: the view's frame block, light list, zero probe row and march
+  block, and a water block lit by the key with `froxels` off. No GPU e2e draws
+  water or grass through a fixed view. A review of `water.slang` and
+  `grass.slang` (2026-11-04) found no read that brings the frame's light in, but
+  four bindings still name the frame's resources and are only unread: the
+  water's volumetric block (written from the frame's fog and sun, read only when
+  `WaterParams::froxels` is set, which a fixed view clears), its sky-view LUT
+  (read only when the march block's atmosphere arm is on), its probe visibility
+  map (the empty probe header returns before any probe is read, so the zero row
+  is not read either) and the shadow atlas both passes bind (every rectangle is
+  empty). A shader change that read any of them unconditionally would let the
+  frame's light into an icon.
 - **Not run: Metal and wgpu.** The fixed-icon e2e ran on D3D12 (hardware and
-  WARP) and Vulkan on the Windows box only.
+  WARP) and Vulkan on the Windows box only; the metal e2e
+  (`a_fixed_view_s_environment_reaches_a_metal_tinted_by_its_base_colour`) on
+  D3D12 hardware and WARP only.
 
 ## What `text-overflow: ellipsis` and `Ui::text` left open (2026-09-25)
 

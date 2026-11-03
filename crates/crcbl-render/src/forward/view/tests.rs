@@ -1153,6 +1153,169 @@ fn a_fixed_view_records_no_pass_that_brings_the_frames_light_in() {
     renderer.destroy(device);
 }
 
+/// **A fixed view draws the frame's water and grass by its own light**: its
+/// `water` and `grass` passes bind its frame block, its light list and its
+/// zero probe row, and its water surface reflects through its own march block
+/// under its key — where the primary camera's passes, executed in the same
+/// frame, bind the scene's table, the frame's sun and a froxel column.
+///
+/// Read off the groups each pass actually bound, so a pass that built its
+/// group from the scene's handles fails here whatever the view's own fields
+/// hold.
+#[test]
+fn a_fixed_view_draws_water_and_grass_by_its_own_light() {
+    use crate::forward::tests::lazy_content::{drawn, lawn, pond};
+
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = renderer_lit_by_everything(device, queue);
+    renderer.set_water(&[pond()]).expect("a square meshes");
+    renderer
+        .set_grass(device, queue, Some(&lawn()))
+        .expect("the null backend uploads every map");
+    let view = renderer
+        .create_view(
+            device,
+            queue,
+            &ViewDesc {
+                lighting: FIXED,
+                ..ViewDesc::default()
+            },
+        )
+        .expect("built");
+    recorder.clear();
+    let labels = drawn(device, queue, &mut renderer, Some(view), |_| {});
+    for label in ["water", "grass"] {
+        assert_eq!(
+            labels.iter().filter(|each| *each == label).count(),
+            2,
+            "the primary camera and the fixed view each record `{label}`"
+        );
+    }
+
+    // What every group bound inside a pass labelled `label` binds, in bind
+    // order across the frame.
+    let bound_in = |label: &str| -> Vec<Vec<BindGroupEntry>> {
+        let mut inside = false;
+        let mut groups = Vec::new();
+        for command in recorder.commands() {
+            if let Some((_, opened)) = command.opens_pass() {
+                inside = opened == Some(label);
+            } else if let crcbl_hal::null::Command::BindGroup { group, .. } = command
+                && inside
+            {
+                groups.push(recorder.bind_group_entries(group).expect("a live group"));
+            }
+        }
+        groups
+    };
+    let binds = |entries: &[BindGroupEntry], buffer: BufferHandle| {
+        entries.iter().any(|entry| {
+            matches!(entry.resource, BindingResource::Buffer { buffer: bound, .. } if bound == buffer)
+        })
+    };
+
+    let slot = renderer.frame;
+    let built = renderer.views[view.index() - 1].as_ref().expect("built");
+    let primary = &renderer.primary;
+    let scene_probes = renderer.probes.buffer(slot);
+    let zero_row = built.fixed_probes.expect("a fixed view owns a zero row");
+
+    // --- the water surface ---
+    let water = bound_in("water");
+    let pick = |frame_block: BufferHandle| {
+        let mut named = water.iter().filter(|entries| binds(entries, frame_block));
+        let entries = named.next().expect("the camera's water pass bound a group");
+        assert!(named.next().is_none(), "one surface group per camera");
+        entries
+    };
+    let primary_water = pick(primary.uniforms[slot]);
+    let fixed_water = pick(built.uniforms[slot]);
+    assert!(
+        binds(primary_water, scene_probes),
+        "the primary camera's surface reads the scene's probe table, or the check below \
+         proves nothing"
+    );
+    assert!(
+        binds(fixed_water, zero_row) && !binds(fixed_water, scene_probes),
+        "the fixed view's surface reads its zero row in the scene's place"
+    );
+    assert!(
+        binds(fixed_water, built.ssr.uniforms(slot))
+            && !binds(fixed_water, primary.ssr.uniforms(slot)),
+        "and reflects through its own march block, which carries its environment"
+    );
+    assert!(
+        !binds(fixed_water, primary.uniforms[slot]),
+        "and reads none of the primary camera's frame block"
+    );
+
+    // Each surface's own block, found by the label its buffer was made with.
+    let water_params = |entries: &[BindGroupEntry]| {
+        let block = entries
+            .iter()
+            .find_map(|entry| match entry.resource {
+                BindingResource::Buffer { buffer, .. }
+                    if recorder.buffer_label(buffer).as_deref() == Some("water params") =>
+                {
+                    Some(buffer)
+                }
+                _ => None,
+            })
+            .expect("the surface binds its own block");
+        let bytes = recorder.buffer_bytes(block).expect("live");
+        crcbl_shaders::water::WaterParams::from_bytes(
+            bytes[..].try_into().expect("the whole block"),
+        )
+    };
+    let primary_params = water_params(primary_water);
+    let fixed_params = water_params(fixed_water);
+    assert!(
+        primary_params.froxels,
+        "the frame's surface reads the froxel column, or the check below proves nothing"
+    );
+    assert_eq!(
+        fixed_params,
+        crcbl_shaders::water::WaterParams {
+            sun_direction: KEY.direction.normalize_or_zero().extend(0.0).to_array(),
+            sun_color: KEY.color.extend(0.0).to_array(),
+            froxels: false,
+        },
+        "the fixed view's surface is lit by its key and fogged by no froxel column"
+    );
+    assert_ne!(
+        primary_params.sun_color, fixed_params.sun_color,
+        "the frame's sun is not the key, or the check above proves nothing"
+    );
+
+    // --- the grass field ---
+    let grass = bound_in("grass");
+    let fixed_grass: Vec<&Vec<BindGroupEntry>> = grass
+        .iter()
+        .filter(|entries| binds(entries, built.uniforms[slot]))
+        .collect();
+    assert!(
+        grass
+            .iter()
+            .any(|entries| binds(entries, primary.uniforms[slot])),
+        "the primary camera's field binds its own frame block, or the check below proves \
+         nothing"
+    );
+    assert!(
+        !fixed_grass.is_empty(),
+        "the fixed view's field binds its frame block"
+    );
+    for entries in fixed_grass {
+        assert!(
+            binds(entries, built.lights.lights(slot))
+                && !binds(entries, primary.lights.lights(slot))
+                && !binds(entries, primary.uniforms[slot]),
+            "and its light list — the key alone — and nothing of the primary camera's"
+        );
+    }
+    renderer.destroy(device);
+}
+
 /// **A fixed view's zero probe row is released with it**, by `destroy_view`
 /// and by the renderer, like everything else a view builds.
 #[test]

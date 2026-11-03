@@ -4311,6 +4311,66 @@ fn updating_a_group_without_update_after_bind_is_refused() {
     assert_eq!(recorder.bind_group_updates(), 1);
 }
 
+/// A live group's entries are read back by its handle — the creation's, with
+/// an accepted update written over the element it names — and a destroyed
+/// group has none.
+#[test]
+fn a_bind_groups_entries_are_read_back_by_its_handle() {
+    let recorder = Recorder::new();
+    let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+    let device = open(&instance);
+    let layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            label: None,
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::ALL,
+                kind: BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: crate::BindingFlags::UPDATE_AFTER_BIND,
+            }],
+        })
+        .expect("layout");
+    let buffer = || {
+        device
+            .create_buffer(&BufferDesc {
+                label: None,
+                size: 256,
+                usage: BufferUsage::UNIFORM,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("buffer")
+    };
+    let (first, second) = (buffer(), buffer());
+    let entry = |buffer| BindGroupEntry {
+        binding: 0,
+        array_index: 0,
+        resource: crate::BindingResource::whole_buffer(buffer),
+    };
+
+    let group = device
+        .create_bind_group(&BindGroupDesc {
+            label: None,
+            layout,
+            entries: &[entry(first)],
+            variable_count: None,
+        })
+        .expect("group");
+    assert_eq!(recorder.bind_group_entries(group), Some(vec![entry(first)]));
+
+    device
+        .update_bind_group(group, &[entry(second)])
+        .expect("UPDATE_AFTER_BIND");
+    assert_eq!(
+        recorder.bind_group_entries(group),
+        Some(vec![entry(second)]),
+        "the update replaces the element it names"
+    );
+
+    device.destroy_bind_group(group);
+    assert_eq!(recorder.bind_group_entries(group), None);
+}
+
 /// A buffer's label is read back by its handle, and a handle that is not a
 /// live buffer has none.
 #[test]

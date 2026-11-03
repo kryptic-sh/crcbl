@@ -1457,6 +1457,7 @@ impl Device for NullDevice {
             Detail::BindGroup {
                 layout: desc.layout,
                 update_after_bind: layout.update_after_bind,
+                entries: desc.entries.to_vec(),
             },
         ))
     }
@@ -1475,6 +1476,7 @@ impl Device for NullDevice {
             let Detail::BindGroup {
                 layout,
                 update_after_bind,
+                ..
             } = &object.detail
             else {
                 unreachable!("a bind group handle always carries bind group detail");
@@ -1490,7 +1492,23 @@ impl Device for NullDevice {
         }
         let layout = self.layout_of(layout_handle)?;
         self.check_entries_against(&layout, entries)?;
-        self.recorder.lock().bind_group_updates += 1;
+        let mut state = self.recorder.lock();
+        let Some(object) = state.get_mut(ObjectKind::BindGroup, group.to_bits()) else {
+            return Err(HalError::invalid_handle("bind group", group));
+        };
+        let Detail::BindGroup { entries: bound, .. } = &mut object.detail else {
+            unreachable!("a bind group handle always carries bind group detail");
+        };
+        for entry in entries {
+            match bound
+                .iter_mut()
+                .find(|each| each.binding == entry.binding && each.array_index == entry.array_index)
+            {
+                Some(each) => *each = *entry,
+                None => bound.push(*entry),
+            }
+        }
+        state.bind_group_updates += 1;
         Ok(())
     }
 

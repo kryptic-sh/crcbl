@@ -13,6 +13,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`crcbl_hal::null::Recorder::bind_group_entries`.** The null backend's
+  recorder answers what a live bind group binds — its creation's entries with
+  every accepted `update_bind_group` write applied — so a test can assert which
+  buffer a pass read through a group built while recording, which
+  `Command::BindGroup`'s handle alone does not say.
+
 ### Changed
 
 - **The D3D12 backend's `reconfigure_swapchain` names the command buffer that

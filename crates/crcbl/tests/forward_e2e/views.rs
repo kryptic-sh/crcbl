@@ -1108,19 +1108,27 @@ fn glossy_scene() -> (crcbl::render::scene::SceneDesc<'static>, usize) {
     (scene, row)
 }
 
-/// The mean of `picture`'s colour channels over the pixels it covers, on the
-/// 0–255 scale the target stores.
-fn covered_mean(picture: &crcbl_golden::Image) -> f64 {
-    let mut sum = 0u64;
+/// The mean of each of `picture`'s colour channels over the pixels it covers,
+/// on the 0–255 scale the target stores.
+fn covered_channels(picture: &crcbl_golden::Image) -> [f64; 3] {
+    let mut sums = [0u64; 3];
     let mut count = 0u64;
     for pixel in picture.pixels().as_chunks::<4>().0 {
         if pixel[3] == COVERED {
-            sum += pixel[..3].iter().map(|&c| u64::from(c)).sum::<u64>();
-            count += 3;
+            for (sum, &channel) in sums.iter_mut().zip(&pixel[..3]) {
+                *sum += u64::from(channel);
+            }
+            count += 1;
         }
     }
     assert!(count > 0, "the picture covers something");
-    sum as f64 / count as f64
+    sums.map(|sum| sum as f64 / count as f64)
+}
+
+/// The mean of `picture`'s colour channels over the pixels it covers, on the
+/// 0–255 scale the target stores.
+fn covered_mean(picture: &crcbl_golden::Image) -> f64 {
+    covered_channels(picture).iter().sum::<f64>() / 3.0
 }
 
 /// The mean colour channel of a 5 × 5 patch of `picture` around where the cube
@@ -1243,6 +1251,115 @@ fn a_fixed_view_s_environment_gives_a_dark_glossy_icon_a_sheen() {
     assert_eq!(
         fixed_differing, 0,
         "a fixed icon with an environment is the same picture whatever lights the world"
+    );
+    headless.finish();
+}
+
+/// A glossy metal whose base colour runs from red down to blue — the `F0` a
+/// metal reflects its environment through — glossy enough that the reflection
+/// march takes it, as [`GLOSSY_BLACK`] is.
+const WARM_METAL: crcbl::shaders::mesh::GpuMaterial = crcbl::shaders::mesh::GpuMaterial {
+    base_color: [0.9, 0.5, 0.15, 1.0],
+    metallic: 1.0,
+    roughness: 0.2,
+    ..crcbl::shaders::mesh::GpuMaterial::UNTINTED
+};
+
+/// [`WARM_METAL`] with its base colour's channels reversed, so a tint that
+/// came from anything but the base colour — the pipeline favouring one
+/// channel, say — cannot order both metals' reflections the way their bases
+/// are ordered.
+const COOL_METAL: crcbl::shaders::mesh::GpuMaterial = crcbl::shaders::mesh::GpuMaterial {
+    base_color: [0.15, 0.5, 0.9, 1.0],
+    ..WARM_METAL
+};
+
+/// **A fixed view's environment reaches a metal tinted by its base colour.**
+///
+/// A metal has no diffuse half, so under a fixed light it is the key's
+/// highlight and nothing else until the environment gives it something to
+/// reflect, and that reflection is the environment times the metal's own `F0`
+/// — its base colour. Each of [`WARM_METAL`] and [`COOL_METAL`] is drawn on
+/// the cube through a fixed view under [`ICON_KEY`] twice, with no environment
+/// and with the white [`ICON_ENVIRONMENT`], and what the environment added is
+/// the difference of the two pictures' covered means, channel by channel:
+///
+/// * **with no environment** the metal is dark — the control, without which
+///   the light the environment added could be the key's;
+/// * **the environment adds visible light**, so it reached the surface;
+/// * **what it added is ordered as the base colour is**, red over green over
+///   blue on the warm metal and blue over green over red on the cool one. A
+///   white environment reflected untinted, as a dielectric reflects it, would
+///   add the three channels alike; and since the two metals' bases are each
+///   other reversed, no tint the pipeline applies on its own can order both.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn a_fixed_view_s_environment_reaches_a_metal_tinted_by_its_base_colour() {
+    let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
+    let mut scene = crcbl::render::scene::demo();
+    scene.materials.extend([WARM_METAL, COOL_METAL]);
+    let warm = scene.materials.len() - 2;
+    let cool = scene.materials.len() - 1;
+    let fixed = |environment| ViewLighting::Fixed {
+        key: ICON_KEY,
+        environment,
+    };
+    // The fixed icon of `material` with no environment and with the white one.
+    let pair = |material| {
+        let [dark, lit] = [Vec3::ZERO, ICON_ENVIRONMENT].map(|environment| {
+            draw_icons(
+                &headless,
+                &scene,
+                &DirectionalLight::default(),
+                (fixed(environment), material),
+                |_| {},
+            )
+            .fixed
+        });
+        (dark, lit)
+    };
+    let (warm_dark, warm_lit) = pair(warm);
+    let (cool_dark, cool_lit) = pair(cool);
+
+    let added = |dark: &crcbl_golden::Image, lit: &crcbl_golden::Image| {
+        let (before, after) = (covered_channels(dark), covered_channels(lit));
+        [0, 1, 2].map(|c| after[c] - before[c])
+    };
+    let warm_added = added(&warm_dark, &warm_lit);
+    let cool_added = added(&cool_dark, &cool_lit);
+    let (warm_dark_mean, cool_dark_mean) = (covered_mean(&warm_dark), covered_mean(&cool_dark));
+    eprintln!(
+        "crcbl forward e2e: views — metal icons: warm dark mean {warm_dark_mean:.2}, added \
+         {warm_added:.2?}; cool dark mean {cool_dark_mean:.2}, added {cool_added:.2?}"
+    );
+
+    for (name, dark_mean, added) in [
+        ("warm", warm_dark_mean, warm_added),
+        ("cool", cool_dark_mean, cool_added),
+    ] {
+        assert!(
+            dark_mean < 12.0,
+            "with no environment the {name} metal is dark (covered mean {dark_mean:.2})"
+        );
+        let mean = added.iter().sum::<f64>() / 3.0;
+        assert!(
+            mean > 20.0,
+            "the environment lights the {name} metal visibly (it added {added:.2?})"
+        );
+    }
+    // Ten levels between neighbours, the margin the sheen test orders its faces
+    // by: far above rounding, and an untinted reflection adds the three
+    // channels alike.
+    let ordered = |high: f64, middle: f64, low: f64| high > middle + 10.0 && middle > low + 10.0;
+    assert!(
+        ordered(warm_added[0], warm_added[1], warm_added[2]),
+        "the warm metal reflects the white environment red over green over blue, as its base \
+         colour is: it added {warm_added:.2?}"
+    );
+    assert!(
+        ordered(cool_added[2], cool_added[1], cool_added[0]),
+        "the cool metal reflects it blue over green over red, as its base colour is: it added \
+         {cool_added:.2?}"
     );
     headless.finish();
 }

@@ -23,8 +23,8 @@ use core::ops::Range;
 use crcbl_core::{Handle, Pool};
 
 use crate::{
-    AdapterId, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle, BufferBarrier,
-    BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle, CompositeAlpha,
+    AdapterId, BindGroupEntry, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle,
+    BufferBarrier, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle, CompositeAlpha,
     ComputePipelineHandle, DepthStencilAttachment, DrawIndirect, DrawIndirectCount,
     GraphicsPipelineHandle, ImageBarrier, ImageCopy, ImageHandle, IndexFormat, MemoryLocation,
     PushConstantRange, QuerySetHandle, QueueHandle, Rect2d, SemaphoreSignal, SemaphoreWait,
@@ -731,10 +731,14 @@ pub(super) enum Detail {
         /// if any.
         variable_binding: Option<u32>,
     },
-    /// A bind group: the layout it conforms to, resolved at creation.
+    /// A bind group: the layout it conforms to, resolved at creation, and
+    /// what it binds — the creation's entries with every accepted
+    /// `update_bind_group` write applied over them. See
+    /// [`Recorder::bind_group_entries`].
     BindGroup {
         layout: BindGroupLayoutHandle,
         update_after_bind: bool,
+        entries: Vec<BindGroupEntry>,
     },
     /// A shader module: the DXIL container it offered per entry point.
     ///
@@ -1169,6 +1173,25 @@ impl Recorder {
             .get(ObjectKind::Buffer, buffer.to_bits())?
             .label
             .clone()
+    }
+
+    /// What a live bind group binds: the entries it was created with, each
+    /// replaced by the last accepted `update_bind_group` write to the same
+    /// binding and array element, and a write to an element creation left
+    /// empty added after them. `None` for a handle that is not a live bind
+    /// group.
+    ///
+    /// What says **which resource** a pass read through a group, rather than
+    /// that it bound one: [`Command::BindGroup`] carries the handle, and a
+    /// caller that builds its group while recording leaves nothing else that
+    /// names the buffers behind it.
+    #[must_use]
+    pub fn bind_group_entries(&self, group: BindGroupHandle) -> Option<Vec<BindGroupEntry>> {
+        let state = self.lock();
+        match &state.get(ObjectKind::BindGroup, group.to_bits())?.detail {
+            Detail::BindGroup { entries, .. } => Some(entries.clone()),
+            _ => unreachable!("a bind group handle always carries bind group detail"),
+        }
     }
 
     /// Every shader module created so far, as `(label, formats the descriptor

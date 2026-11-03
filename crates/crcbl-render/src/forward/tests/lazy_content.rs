@@ -58,7 +58,7 @@ fn counts<const N: usize>(recorder: &Recorder, labels: [&str; N]) -> [usize; N] 
 }
 
 /// A body of water the null backend meshes.
-fn pond() -> crcbl_water::WaterBody {
+pub(in crate::forward) fn pond() -> crcbl_water::WaterBody {
     crcbl_water::WaterBody {
         outline: vec![[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0]],
         level: 0.25,
@@ -70,7 +70,7 @@ fn pond() -> crcbl_water::WaterBody {
 }
 
 /// A one-tile field of cards.
-fn lawn() -> crate::grass::GrassField {
+pub(in crate::forward) fn lawn() -> crate::grass::GrassField {
     crate::grass::GrassField::new(
         [1, 1],
         4.0,
@@ -109,7 +109,7 @@ fn lawn() -> crate::grass::GrassField {
 ///
 /// `between` runs after the frame's `begin_frame` and before its passes are
 /// recorded — where a caller's late `set_grass` would land.
-fn drawn(
+pub(in crate::forward) fn drawn(
     device: &dyn Device,
     queue: QueueHandle,
     renderer: &mut ForwardRenderer,
