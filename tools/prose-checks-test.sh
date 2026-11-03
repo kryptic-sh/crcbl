@@ -75,3 +75,21 @@ check tools/check-doc-citations.sh clean 1 "$missing"
 check tools/check-doc-citations.sh clean 1 tools
 check tools/check-wrapped-strings.sh clean 2 "$missing"
 check tools/check-wrapped-strings.sh clean 2 tools
+
+# The wrapped-strings pattern itself: a joined literal is reported whatever the
+# continuation resumes with, and the shapes it must leave alone are not — an
+# aligned `label      {value}` column, and indentation after an escaped
+# newline. The capital, `(` and `[` rows are the shapes the pattern missed
+# until 2026-11-04.
+probe=$(mktemp -t crcbl-wrapped-XXXXXX.rs)
+trap 'rm -f "$probe"' EXIT
+wrapped() {
+  printf '%s\n' "$1" >"$probe"
+  check tools/check-wrapped-strings.sh clean "$2" "$probe"
+}
+wrapped 'const A: &str = "the hint says press it,          and hold it";' 1
+wrapped 'const B: &str = "the hint says press it,          Then hold it";' 1
+wrapped 'const C: &str = "this backend refused the window          ({error}); next";' 1
+wrapped 'const D: &str = "the menu opens here          [when asked] by the player";' 1
+wrapped 'const E: &str = "{label}:          {value}";' 0
+wrapped 'const F: &str = "a line of text\n          Indented on purpose";' 0

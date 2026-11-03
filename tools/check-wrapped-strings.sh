@@ -50,8 +50,12 @@ fi
 # have and a wrapped sentence always does. Both widenings were added on
 # 2026-09-02 after a stray run reached a CI panic message with the guard green:
 # a gate that reports success while the thing it names sits in the tree is worse
-# than no gate.
-pattern='"[^"]*[a-z] [a-z][^"]*(?<!\\)[a-z,;.:] {6,}[a-z{][^"]*"'
+# than no gate. The clause after the run also accepts a capital, `(` and `[`
+# since 2026-11-04: rustfmt itself once joined a literal that outgrew
+# `max_width` back onto one line keeping the indentation, before a capitalised
+# word, and a log line resumed with `({error})` the same way; both passed while
+# the clause was `[a-z{]`.
+pattern='"[^"]*[a-z] [a-z][^"]*(?<!\\)[a-z,;.:] {6,}[a-zA-Z{(\[][^"]*"'
 
 if grep -nP "$pattern" "${files[@]}"; then
   printf '\nEach line above is a string literal wrapped without the trailing\n'
