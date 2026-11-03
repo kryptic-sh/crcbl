@@ -36566,7 +36566,7 @@ divergence — the call works, it is the _checking_ that happens elsewhere.
 The three options as they were argued are in `docs/notes/backends.md` under this
 heading.
 
-## Do `crcbl-mtl` and `crcbl-dx12` report an adapter's limits on a narrower device? (2026-08-24)
+## Does `crcbl-mtl` report an adapter's limits on a narrower device? (2026-08-24)
 
 `crcbl-vk` did, and it was a real bug: device caps were built as
 `features: granted, limits: <the adapter's>`, so every feature-gated limit
@@ -36574,27 +36574,24 @@ overstated what the device would accept. Fixed by
 `adapter::gate_limits_on_features`, which both the adapter and the device now
 apply, and guarded by
 `a_devices_limits_are_narrowed_to_the_features_it_was_granted` in `crcbl-vk`'s
-`device_request.rs`.
+`device_request.rs`. `crcbl-dx12` narrows too: its device open reports
+`desc.granted(caps.features)` with `adapter::limits_of` of that set, guarded by
+`a_d3d12_device_reports_only_what_it_asked_for` in its `device` tests (passed on
+the RX 7900 XTX, 2026-11-04).
 
-**The same shape is visible in the other two and is NOT verified.**
-`crcbl-mtl`'s `adapter.rs` builds
-`DeviceCaps { features, limits: limits_of(device, features) }` from what the
-adapter supports, and its `Device::caps` returns `self.inner.caps`;
-`crcbl-dx12`'s `Device::caps` does the same, and its `adapter.rs` gates
-`max_sampler_anisotropy` on a `features` whose provenance I did not trace.
-Whether either narrows at device open is the open question — I read the caps
-accessors, not the open paths.
-
-Not chased because both backends are deferred. What it would take: read each
-`open_device`/`request_device`, see whether the granted feature set is
-re-applied to the limits, and if not, mirror the vk fix.
+**`crcbl-mtl` is NOT verified, and reads as not narrowing.** Its `adapter.rs`
+builds `DeviceCaps { features, limits: limits_of(device, features) }` from what
+the adapter supports, its `Device::caps` returns `self.inner.caps`, and nothing
+under `crates/crcbl-mtl/src` calls `DeviceDesc::granted` (grep, 2026-11-04).
+What it would take: mirror `crcbl-dx12`'s open path (granted features, limits
+derived from them) and its test, on a Mac.
 
 **The agnostic suite deliberately does not assert this**, which is why the gap
 can persist quietly. `a_sampler_above_the_anisotropy_ceiling_is_refused` takes
 its accepting value from `caps().features` rather than trusting `caps().limits`,
-precisely so a backend overstating a limit does not red the macOS and Windows
-runners for a bug that is its own. Closing the two backends' half is what would
-let that test assert the limit directly, which is the stronger rule.
+precisely so a backend overstating a limit does not red the macOS runners for a
+bug that is its own. Closing Metal's half is what would let that test assert the
+limit directly, which is the stronger rule.
 
 ## `apps/orbit` — what the first slice left (2026-08-24)
 
