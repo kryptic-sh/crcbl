@@ -3302,6 +3302,58 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("a scratch dir of this test's own");
     }
 
+    /// **The screen reaches a real frame**, not only a `Screen` and a `Menus`
+    /// built side by side: a headless loop on the null backend, driven frame
+    /// by frame, puts the settings page up on every one of them and the UI
+    /// pass into the graph that draws it.
+    ///
+    /// The pass labels are the half no other test here can see. The page's
+    /// words reach the draw list whether or not the UI renderer was handed it
+    /// that frame; only the dump says the frame drew them.
+    #[test]
+    fn a_driven_frame_draws_the_settings_page() {
+        use crcbl::engine::ExitReason;
+        use crcbl::shell::HeadlessShell;
+        use crcbl_sample_test::{
+            assert_menu_art_above_the_cut_and_under, headless_common, pass_labels, ui_text,
+        };
+
+        let options = Options {
+            common: headless_common(crate::args::DEFAULT_TICK_HZ, 8),
+        };
+        let mut engine =
+            with_shell(Box::new(HeadlessShell::new()), &options).expect("headless always starts");
+        for frame in 0..4 {
+            engine.frame().expect("a frame");
+            assert_eq!(
+                engine.menu_kind(),
+                MenuKind::Settings,
+                "frame {frame}: the screen is up on every frame",
+            );
+        }
+
+        assert!(
+            ui_text(engine.gpu().draw_list())
+                .iter()
+                .any(|t| t == "SETTINGS"),
+            "the page's title is not in the frame's draw list",
+        );
+        assert_menu_art_above_the_cut_and_under(
+            engine.gpu().draw_list(),
+            engine.gpu().menu_skin(),
+            "SETTINGS",
+        );
+        // No `ui-composite`: `Screen::draw` puts nothing below the overlay
+        // cut, so the page is the overlay half alone.
+        assert_eq!(
+            pass_labels(engine.gpu().last_dump()),
+            ["backdrop", "ui-overlay"],
+            "the settings frame's passes, in declaration order:\n{}",
+            engine.gpu().last_dump(),
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// **The beat `web/tools/browser-e2e.mjs` divides by is this sample's
     /// heartbeat**: [`HEARTBEAT_TICKS`] at [`crate::args::DEFAULT_TICK_HZ`], in milliseconds.
     #[test]

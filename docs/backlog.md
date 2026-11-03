@@ -23638,24 +23638,9 @@ five slices on 2026-09-07 and the entries for them are gone; `git log` holds
 what shipped. `docs/notes/samples.md` holds the rest of the review under "The
 demo seam review of 2026-09-07" — what it ruled out, what was already hoisted,
 what each hoist's landing ruled out along the way, what was decided since, and
-what it never read. What is below is what the programme left owed: one coverage
-gap and one half-measure.
-
-### `apps/options` has no test that drives a frame at all (2026-09-10)
-
-The menu-on-a-frame gap is closed for the three `PageBundle` demos that run a
-headless loop under test: hud's, orbit's and bracket's pause tests now assert
-the paused frame's pass labels through `crcbl_sample_test::pass_labels`, and
-deleting `menu.begin_frame` from `PageBundle::frame` reddens all three with the
-sprite pass missing from the list. `apps/options` is the fourth bundle and is
-not covered: every test in its `app.rs` builds a `Screen` and a `Menus`
-directly, so there is no `scripted()`/`engine.frame()` harness to read a dump
-from, and the crate does not dev-depend on `apps/crcbl-sample-test`. **What it
-would take:** the dev-dependency plus the `scripted`/`headless` pair the other
-demos have, which is the same three-line shape eleven samples carry — and the
-settings screen's menu is up on every frame, so the assertion itself is one line
-once a frame can be driven. Three hand-written lines, per the
-`scripted`/`headless` decision recorded in `docs/notes/samples.md`.
+what it never read. What is below is what the programme left owed. (The
+menu-on-a-frame gap closed for all four `PageBundle` demos on 2026-11-04, when
+`apps/options` got `a_driven_frame_draws_the_settings_page`.)
 
 ### A demo's beat test holds its constant, not its use (2026-10-29)
 

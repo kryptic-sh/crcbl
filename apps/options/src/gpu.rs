@@ -68,6 +68,11 @@ impl Gpu {
     /// [`GpuError`] if the UI compositor refused the device.
     fn from_context(ctx: GpuContext) -> Result<Self, GpuError> {
         let bundle = PageBundle::new(ctx, crate::APP_NAME, BACKDROP)?;
+        // The loop's own tests read the graph back out of the bundle; a build
+        // that is not a test never formats the string.
+        #[cfg(test)]
+        let bundle = bundle.recording_graph_dumps();
+
         Ok(Self(bundle))
     }
 
@@ -119,6 +124,18 @@ impl Gpu {
     #[must_use]
     pub const fn atlas(&self) -> &FontAtlas {
         self.0.atlas()
+    }
+
+    /// The UI geometry this frame handed over, for the loop's own tests.
+    #[cfg(test)]
+    pub const fn draw_list(&self) -> &DrawList {
+        self.0.draw_list()
+    }
+
+    /// The last frame's render-graph dump, for the loop's own tests.
+    #[cfg(test)]
+    pub fn last_dump(&self) -> &str {
+        self.0.last_dump()
     }
 
     /// Records, submits and presents one frame.
