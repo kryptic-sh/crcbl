@@ -31350,14 +31350,9 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   covered by the same e2e test; recorded because a caller offering only `https:`
   URLs or POSIX paths will find Explorer's Paste greyed out, and
   `clipboard_offer` still succeeds on the registered format alone.
-- **The POSIX and Windows `file:` decoders disagree about a raw `#` or `?`.**
-  `clipboard::windows_uri::file_uri_to_windows_path` ends the path there, as RFC
-  3986 section 3.3 says; `clipboard::file_uri_to_posix_path` keeps both as part
-  of the name, so `file:///tmp/a#b` is `/tmp/a#b` on Linux and macOS. Every real
-  encoder escapes both, so no real drop has been seen to differ; aligning the
-  POSIX side is a behaviour change for the other backends and was left out of
-  the Win32 slice. A `CF_HDROP` name that is not valid Unicode (an unpaired
-  surrogate) has no URI and is left out of the list, logged.
+- **A `CF_HDROP` name that is not valid Unicode has no URI.** An unpaired
+  surrogate cannot be percent-encoded as UTF-8, so the name is left out of the
+  uri-list and logged.
 - **A clipboard payload whose last bytes are NUL loses them.** Payloads are
   written NUL-terminated and read back with trailing NULs trimmed, which is what
   makes a `GlobalSize` larger than the request harmless — and what would

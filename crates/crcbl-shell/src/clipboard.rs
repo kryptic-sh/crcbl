@@ -502,6 +502,14 @@ pub(crate) fn file_uri_to_posix_path(uri: &[u8]) -> Option<PathBuf> {
     if !prefix.eq_ignore_ascii_case(SCHEME) {
         return None;
     }
+    // The path ends at a `?` or `#`, which RFC 3986 section 3.3 makes a query
+    // or fragment delimiter rather than part of any name — an encoder that
+    // meant the character escapes it. `windows_uri` ends it the same way.
+    let end = rest
+        .iter()
+        .position(|byte| matches!(byte, b'?' | b'#'))
+        .unwrap_or(rest.len());
+    let rest = &rest[..end];
 
     let path = if let Some(authority) = rest.strip_prefix(b"//") {
         // `file://<authority>/<path>`. The authority ends at the first `/`,
@@ -771,6 +779,25 @@ mod tests {
         assert_eq!(
             posix_uri_list(b"file:///tmp/trailing%"),
             vec![PathBuf::from("/tmp/trailing%")]
+        );
+
+        // A query or fragment is not part of the name; an escaped `#` or `?`
+        // is, which is how an encoder spells a name holding one.
+        assert_eq!(
+            posix_uri_list(
+                b"file:///tmp/a%23b#fragment\nfile:///tmp/c?query\nfile:///tmp/d%3Fe\n\
+                  file://localhost/tmp/f#g"
+            ),
+            vec![
+                PathBuf::from("/tmp/a#b"),
+                PathBuf::from("/tmp/c"),
+                PathBuf::from("/tmp/d?e"),
+                PathBuf::from("/tmp/f"),
+            ]
+        );
+        assert!(
+            posix_uri_list(b"file://#/tmp/x").is_empty(),
+            "a fragment that swallows the whole path leaves no file"
         );
     }
 

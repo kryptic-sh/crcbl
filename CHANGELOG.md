@@ -47,6 +47,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A dropped or pasted `file:` URI on Linux and macOS ends its path at a raw
+  `?` or `#`.** `parse_uri_list` and the AppKit pasteboard's file URL read
+  `file:///tmp/a#b` as `/tmp/a#b`; RFC 3986 makes both characters query and
+  fragment delimiters, so it is now `/tmp/a`, as it already was on Windows. A
+  name holding either character arrives escaped (`%23`, `%3F`) from every real
+  encoder and decodes as before.
 - **`crcbl-vk` works around an intermittent segfault when two Vulkan instances
   are used at once in one process.** The Vulkan loader (seen on 1.4.341, with
   the validation layer on) walks its global instance list inside
