@@ -1162,6 +1162,44 @@ mod tests {
             "GetCurrentBackBufferIndex never moved off one buffer: {indices:?}"
         );
 
+        // **The encode happens in the view.** The back buffer is created in
+        // `present::buffer_format`'s linear format and only the render target
+        // view is sRGB, so a copy of the buffer reads whatever bytes the view
+        // wrote. An encoded clear lands at `SRGB_CLEAR`'s bytes; a view that
+        // lost the cast writes the linear ones, dozens of levels away.
+        const FRAME_BYTES: usize = (EXTENT.0 * EXTENT.1 * 4) as usize;
+        let (colour, [r, g, b, a]) = SRGB_CLEAR;
+        let encoded = match format {
+            Format::Rgba8UnormSrgb => [r, g, b, a],
+            Format::Bgra8UnormSrgb => [b, g, r, a],
+            other => panic!("the preferred format is no longer 8-bit sRGB: {other:?}"),
+        };
+        let readback = readback_buffer(&device, FRAME_BYTES);
+        clear_copy_and_present(&device, swapchain, format, 5, colour, readback)
+            .unwrap_or_else(|error| panic!("stage=present id=5: {error:?}"));
+        device.wait_idle().expect("the queue drains");
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: Some("crcbl-dx12 e2e sRGB readback"),
+                buffer: readback,
+                offset: 0,
+                size: FRAME_BYTES as u64,
+                after: None,
+            })
+            .expect("a readback of a finished copy");
+        let read = drain(&device, request, FRAME_BYTES);
+        device.destroy_readback(request);
+        device.destroy_buffer(readback);
+        for texel in read.as_chunks::<4>().0 {
+            assert!(
+                texel
+                    .iter()
+                    .zip(encoded)
+                    .all(|(got, want)| got.abs_diff(want) <= 1),
+                "a back buffer texel is {texel:?}, not the encoded clear {encoded:?}"
+            );
+        }
+
         // **The resize, and the numbering restarting with it.** `ResizeBuffers`
         // is where a swapchain forgets every id it was given, which is what
         // `PresentInfo::present_id` documents and what would otherwise leave a
@@ -1461,6 +1499,17 @@ mod tests {
     const HALF_CLEAR: ([f32; 4], [u8; 4]) = (
         [34.0 / 255.0, 17.0 / 255.0, 51.0 / 255.0, 136.0 / 255.0],
         [0x22, 0x11, 0x33, 0x88],
+    );
+
+    /// A linear clear colour and the bytes its sRGB encode lands as, within a
+    /// level each way.
+    ///
+    /// The channels are `64, 128, 191` as unorm8, so a buffer that took the
+    /// clear unencoded is 34 to 73 levels from these — the same colour
+    /// `crcbl`'s `hal_seam_e2e` clear test encodes.
+    const SRGB_CLEAR: ([f32; 4], [u8; 4]) = (
+        [64.0 / 255.0, 128.0 / 255.0, 191.0 / 255.0, 1.0],
+        [137, 188, 225, 255],
     );
 
     /// Clears the acquired back buffer to `colour`, copies it into `readback`,

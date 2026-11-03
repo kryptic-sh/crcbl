@@ -27872,24 +27872,20 @@ whether `crcbl-webgpu` names the adapter it opened is unchecked.
 lines come from `contentscript.js` / `inpage.js` — a MetaMask content script
 injected into the page. Unrelated to crcbl.
 
-### The sRGB encode is still unproven on dx12's and Metal's presented path
+### The sRGB encode is still unproven on Metal's presented path
 
 The swapchain now must offer an sRGB format and `preferred_format` must pick it,
 asserted on every backend, and the clear test asserts the encoded bytes exactly.
-Two gaps remain in the same bug class:
-
-- **dx12's flip-model path is uncovered.** `buffer_format` creates linear back
-  buffers and casts to an sRGB RTV — the same "the view is where the encode
-  happens" mechanism that broke on WebGPU — but every GPU suite here creates
-  `SurfaceTarget::Offscreen`, whose ring uses real sRGB resources and never
-  exercises the cast. `crcbl-mtl`'s `CAMetalLayer` path versus its offscreen
-  ring is the same shape. **A windowed harness now exists, and only on vk**:
-  `tools/run-samples-windowed.sh` and
-  `crates/crcbl-shell/tests/run-{x11,wayland}-e2e.sh` drive real surfaces
-  against a real compositor, but neither backend under discussion has a runner
-  that can reach one here. Both are DEFERRED, so this stays open by that
-  decision rather than for want of a harness shape — the shape is settled and
-  the vk copy is the template.
+dx12's flip-model path, where a linear back buffer takes its encode from an sRGB
+render target view, is now covered: `crcbl-dx12`'s
+`a_windowed_swapchain_presents_paces_and_resizes_on_a_real_hwnd` copies a clear
+back and asserts the encoded bytes (a view without the cast reads the linear
+ones; checked on CI with that mutant). **Metal is the gap left:** `crcbl-mtl`'s
+`CAMetalLayer` path versus its offscreen ring is the same shape, and every GPU
+suite there presents offscreen. A windowed harness exists only on vk
+(`tools/run-samples-windowed.sh` and
+`crates/crcbl-shell/tests/run-{x11,wayland}-e2e.sh`); the dx12 test is the
+template for a Metal one, which needs a Mac with a window server.
 
 ### The seam audit — where the seam is not backend agnostic
 
