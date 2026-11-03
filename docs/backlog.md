@@ -14807,38 +14807,19 @@ These belong here rather than there, because they are gaps rather than plans:
   remains a text guard worth exactly what it says: the read is written down, not
   that it is right.
 
-### The two-media rule has no frame-level test (2026-09-24)
+### The two-media rule's frame-level test: covered, the unlit one declined (2026-11-04)
 
 The volumetrics plan's rule is that when the froxel column is present it owns
-the transmittance and `mesh.slang`'s height fog is off for that frame; charging
-both darkens the frame by the square of what the medium does. It is enforced in
-`ForwardRenderer`'s frame-block upload
-(`crates/crcbl-render/src/forward/view.rs`), which writes a zero `fog_params`
-density on a frame whose effects contain `RenderEffects::VOLUMETRIC_FOG` — see
-`crcbl_render::volumetric`'s module doc, _The medium is charged exactly once_.
-
-**The check the plan listed is not built** (verified 2026-09-24 by listing the
-test functions in `crates/crcbl/tests/mesh_e2e/hdr.rs` and
-`crates/crcbl/tests/mesh_e2e/froxels.rs`): "switching volumetrics on does not
-darken an unlit frame" — a scene with **no lights** and the same fog rows,
-rendered once per path, demanding the same frame. Unlit matters: with no sun and
-no lamps the column's source is the environment term alone, so the two frames
-are algebraically equal, and a doubled transmittance reads directly as a darker
-frame rather than hiding under the lit cube's shading.
-
-**What probably covers it already, unverified:**
-`the_froxel_volume_integrates_the_same_medium_the_closed_form_does` compares the
-two paths' transmittance on the lit cube at a density where the closed form
-leaves under 0.9, so charging the air twice should push the gap far past
-`FROXEL_TRACKS`. That is reasoning from the test's code; nobody has removed the
-zeroing and watched it redden.
-
-**What it would take:** one `#[ignore]`d GPU test in `hdr.rs` beside the other
-froxel tests, built on `fogged_cube_hdr_via` with the fixture's lights removed,
-comparing the two paths texel by texel on the background and the cube. Show it
-red by making the `fog_params` density ignore `VOLUMETRIC_FOG`, and run the
-closed-form test under the same sabotage to settle the paragraph above. Blocks
-nothing.
+the transmittance and `mesh.slang`'s height fog is off for that frame
+(`ForwardRenderer`'s frame-block upload writes a zero `fog_params` density on a
+frame with `RenderEffects::VOLUMETRIC_FOG`; see `crcbl_render::volumetric`'s
+module doc, _The medium is charged exactly once_). **It is guarded already**:
+with the zeroing removed,
+`the_froxel_volume_integrates_the_same_medium_the_closed_form_does` in
+`crates/crcbl/tests/mesh_e2e/hdr.rs` goes red on D3D12 (RX 7900 XTX, 2026-11-04:
+worst transmittance gap 0.2409 against its 0.012 tolerance, and 0.0087 with the
+zeroing in place). The plan's own check, an unlit scene rendered once per path,
+was therefore **declined**: it would guard the same line a second way.
 
 ### Froxel rungs 3 and 4: a filtered 3D target and a density field (2026-09-24)
 
