@@ -28467,7 +28467,14 @@ and it is spent only on the path that would otherwise have failed. **Whether
 that is enough is not yet known** — the next occurrence is the measurement, and
 it will say a longer time rather than the same one.
 
-### The viewer's suite has segfaulted five times on lavapipe (2026-08-19, 08-28, 09-05, 11-01, 11-03)
+### The viewer's suite has segfaulted six times on lavapipe (2026-08-19, 08-28, 09-05, 11-01, 11-03 twice)
+
+**2026-11-03, again**, run 41706002497 on `a42ee919`: the same step and signal,
+every other job green, on a push that touched `crcbl-audio`, `crcbl-ui`'s dock
+tests and `tools/` — and the crashing test binary was the same build as the
+morning's, `crcbl_viewer-7617d499a57a4f28`, so one unchanged binary passed and
+crashed on different runs. Two in a day is the highest rate yet; the job was
+re-run. The step-looping run that would capture a stack is still the next move.
 
 **2026-11-03**, run 41681307895 on `5a80cc31`: the same step and the same
 `signal: 11, SIGSEGV` from `crcbl_viewer-… --quiet`, with every other job green.
