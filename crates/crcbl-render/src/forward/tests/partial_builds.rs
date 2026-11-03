@@ -720,3 +720,129 @@ fn a_lazy_build_failing_inside_a_frame_is_finished_by_the_next() {
     assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
     recorder.assert_valid();
 }
+
+/// The buffers one ring slot holds the water bodies' mesh in — see
+/// `WaterBodies::begin_frame`.
+const WATER_MESH: [&str; 3] = ["water vertices", "water indices", "water media"];
+
+/// Gives `renderer` a body of water and a field of grass, whose passes its
+/// next frame builds out of one `View::build_content` call — see
+/// `lazy_content.rs`.
+fn set_water_and_grass(device: &dyn Device, queue: QueueHandle, renderer: &mut ForwardRenderer) {
+    renderer
+        .set_water(&[super::lazy_content::pond()])
+        .expect("a square meshes");
+    renderer
+        .set_grass(device, queue, Some(&super::lazy_content::lawn()))
+        .expect("the null backend uploads every map");
+}
+
+/// **A content build that fails part-way through a frame leaks nothing, and
+/// the next frame builds it whole** — `View::build_content` failed inside
+/// `begin_frame`, as [`a_lazy_build_failing_inside_a_frame_is_finished_by_the_next`]
+/// fails `View::build_passes`.
+///
+/// The failure lands on the grass passes' first uniform buffer: after both
+/// pipeline sets and the whole water pass were built, and after the grass
+/// pass's samplers, which `Grass::new` must release with its set. Unlike the
+/// contact march there, the water pass built before it is **not** kept: one
+/// call builds both, all or nothing — see `ContentPasses::new` — so the frame
+/// reports the injected error and the view holds neither pass. What the frame
+/// does keep is its slot's copy of the bodies' mesh, [`WATER_MESH`], which
+/// `WaterBodies::begin_frame` uploaded before any view began and which that
+/// slot draws from when it comes round again; the device holds exactly that
+/// more than before, readbacks aside — see [`besides_readbacks`]. The next
+/// frame builds both passes; a lap of the ring later the device holds what the
+/// same lap of clean frames leaves, and the renderer still releases whole.
+#[test]
+fn a_content_build_failing_inside_a_frame_is_finished_by_the_next() {
+    // The clean run, on the sibling test's terms: a default frame first to
+    // retire the build's uploads, then the content, then a lap of frames.
+    let (clean, clean_device, clean_queue) = open();
+    let clean_device = clean_device.as_ref();
+    let mut renderer =
+        ForwardRenderer::new(clean_device, clean_queue, Format::Rgba8UnormSrgb).expect("built");
+    frame(clean_device, &mut renderer, clean_queue).release(clean_device);
+    set_water_and_grass(clean_device, clean_queue, &mut renderer);
+    clean.clear();
+    for _ in 0..FRAMES {
+        frame(clean_device, &mut renderer, clean_queue).release(clean_device);
+    }
+    let built = clean.total_live_objects();
+    let created = creations(&clean);
+    renderer.destroy(clean_device);
+    let position = |kind: ObjectKind, label: &str| {
+        created
+            .iter()
+            .position(|(created, named)| *created == kind && named.as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("the content frame created no {kind:?} labelled `{label}`"))
+    };
+    let failing = position(ObjectKind::Buffer, "grass params");
+    // The batch's last member, then the water pass, then the grass pass's
+    // samplers: every pipeline and the whole water pass precede the failure.
+    assert!(
+        position(ObjectKind::ComputePipeline, "grass generate")
+            < position(ObjectKind::Buffer, "water params")
+            && position(ObjectKind::Buffer, "water params")
+                < position(ObjectKind::Sampler, "grass card")
+            && position(ObjectKind::Sampler, "grass card") < failing,
+        "the failure does not land in the grass pass after the water pass was built, so \
+         it is not a partial build: {created:?}"
+    );
+
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    frame(device, &mut renderer, queue).release(device);
+    set_water_and_grass(device, queue, &mut renderer);
+    let before = besides_readbacks(&recorder);
+    recorder.clear();
+    recorder.fail_create_after(u32::try_from(failing).expect("fits"));
+    let error = begin(device, &mut renderer)
+        .expect_err("the frame went on although its content build failed");
+    let tried = creations(&recorder);
+    for label in WATER_MESH {
+        assert_eq!(
+            tried
+                .iter()
+                .filter(|made| **made == (ObjectKind::Buffer, Some(label.into())))
+                .count(),
+            1,
+            "the failed frame did not upload the bodies' mesh into its slot once: {tried:?}"
+        );
+    }
+    assert!(
+        !recorder.create_failure_pending(),
+        "the frame failed before reaching creation {failing}: {error}"
+    );
+    assert!(
+        matches!(error, HalError::OutOfDeviceMemory),
+        "the frame did not report the injected failure: {error}"
+    );
+    assert!(
+        renderer.primary.water.is_none() && renderer.primary.grass.is_none(),
+        "the view holds a content pass although the build of both failed"
+    );
+    assert_eq!(
+        besides_readbacks(&recorder),
+        before + WATER_MESH.len(),
+        "the failed frame left something besides its slot's mesh alive"
+    );
+
+    for _ in 0..FRAMES {
+        frame(device, &mut renderer, queue).release(device);
+    }
+    assert!(
+        renderer.primary.water.is_some() && renderer.primary.grass.is_some(),
+        "the next frame did not build what the failed one left"
+    );
+    assert_eq!(
+        recorder.total_live_objects(),
+        built,
+        "a lap from the retried frame left a different device from a lap of clean frames"
+    );
+
+    renderer.destroy(device);
+    assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
+    recorder.assert_valid();
+}
