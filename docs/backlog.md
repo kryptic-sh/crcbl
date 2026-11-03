@@ -28976,10 +28976,11 @@ groups CI's `probe-windows` job excuses fail there for its software adapter's
 canvas readback, not for WebGPU on Windows. One machine, by hand; CI still has
 no Windows adapter.
 
-**Also seen and not chased:** `actions/download-artifact` logged
-`digest-mismatch: error` on the Windows job while still extracting the site. It
-did not cause the failure — the probe page loaded and asked for an adapter — but
-nobody has looked at why the digest disagrees on that runner and not on macOS.
+**The `digest-mismatch: error` on the Windows job is not a mismatch.** It is
+`actions/download-artifact`'s input of that name (fail when the digests differ)
+echoed in the step's log. In Pages run 41584125784's `probe the seam on Windows`
+the downloaded site's SHA-256 equals the expected digest (`8f5e793d…`, checked
+2026-11-04).
 
 **One behaviour change on Linux:** `--enable-unsafe-webgpu` is now passed in
 hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
