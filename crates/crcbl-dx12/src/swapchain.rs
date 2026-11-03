@@ -821,6 +821,10 @@ mod tests {
     /// is a finding rather than a flake, short enough that a suite hitting it
     /// on every frame still finishes inside nextest's `slow-timeout`.
     const PRESENT_WAIT: Duration = Duration::from_secs(2);
+    /// The variables that let [`TestWindow`] open, any one set and non-empty:
+    /// `CI`, which GitHub Actions sets on every job, and an explicit local
+    /// opt-in.
+    const DESKTOP_ALLOWED: [&str; 2] = ["CI", "CRCBL_DESKTOP_TESTS"];
 
     /// A real `HWND` for the length of a test, destroyed on drop.
     ///
@@ -840,6 +844,13 @@ mod tests {
     /// [`open_transparent`](Self::open_transparent) adds
     /// `WS_EX_NOREDIRECTIONBITMAP`, which is what the Win32 shell gives a
     /// transparent window, and names the target transparent to match.
+    ///
+    /// **Visible means on someone's screen**, so it opens only where a
+    /// desktop is there to be used: on CI (see [`DESKTOP_ALLOWED`]). These
+    /// tests share their `#[ignore]` reason with the offscreen device tests
+    /// beside them, and a local `--run-ignored all` on a developer's machine
+    /// showed this window on their desktop several times before anyone
+    /// noticed; refused, it is a red test naming why instead.
     struct TestWindow {
         hwnd: HWND,
         transparent: bool,
@@ -855,6 +866,14 @@ mod tests {
         }
 
         fn create(size: (u32, u32), ex_style: WINDOW_EX_STYLE, transparent: bool) -> Self {
+            assert!(
+                DESKTOP_ALLOWED
+                    .iter()
+                    .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty())),
+                "this test shows a window on the real desktop, so it runs only where one of \
+                 {DESKTOP_ALLOWED:?} is set: CI sets the first, and a developer who wants the \
+                 window on their own screen sets the second"
+            );
             let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
             let title: Vec<u16> = "crcbl-dx12 swapchain\0".encode_utf16().collect();
             let width = i32::try_from(size.0).expect("a test window fits in an i32");
