@@ -624,7 +624,7 @@ The rules, each with its _why_:
   per-block parameter smoothing, and crossfaded dual delay lines for large jumps
   and ear swaps; all three are built for the ITD since 2026-11-04
   (`crcbl_audio::itd`), and level, pan and pitch ramp over the same length
-  (`crcbl_audio::mix_ramp`).
+  (`crcbl_audio::mix_ramp`), as does a bus's gain (`crcbl_audio::bus_ramp`).
 - **A golden pins a waveform, never bytes.** The one golden began as a digest of
   every sample's `f32::to_bits` and failed on macOS and Windows at its first CI
   run; Windows being `x86_64` like the Linux runner pins that on libm, not the

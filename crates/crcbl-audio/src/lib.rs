@@ -39,6 +39,7 @@
 //!   detunes. The browser reports `AudioContext.sampleRate` and [`web`]
 //!   resamples between the two rather than passing it down.
 
+mod bus_ramp;
 pub mod event;
 pub mod itd;
 mod mix_ramp;

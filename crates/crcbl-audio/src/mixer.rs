@@ -7,6 +7,7 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::bus_ramp::{BusGains, BusRamp};
 use crate::itd::VoiceItd;
 use crate::mix_ramp::{MixParams, MixRamp};
 use crate::occlusion::{Occlusion, VoiceOcclusion};
@@ -454,8 +455,9 @@ impl Voice {
     /// The playhead steps by *frames*, not samples: stepping by samples would
     /// make any `pitch != 1.0` read one interleaved channel into both outputs.
     ///
-    /// `bus` and `master` are the two gains above the voice, and they are
-    /// applied **here**, before the sum, rather than to the finished buffer:
+    /// `bus` and `master` are the two gains above the voice, each a ramp read
+    /// at every frame ([`crate::bus_ramp`]), and they are applied **here**,
+    /// before the sum, rather than to the finished buffer:
     /// The audio rules call a bus a gain on the way in, which is what
     /// keeps the buffer count at one and the arithmetic order stateable in a
     /// single line. That line is
@@ -477,8 +479,8 @@ impl Voice {
         &mut self,
         buffer: &mut [AudioSample],
         sample_rate: u32,
-        bus: f32,
-        master: f32,
+        bus: BusRamp,
+        master: BusRamp,
     ) -> bool {
         if self.stopped {
             return false;
@@ -535,6 +537,7 @@ impl Voice {
             let [volume, left, right, pitch] = self.mix_ramp.step(self.mix_params());
             let occlusion = self.occlusion.step();
             let delayed = self.itd.process([self.data[base], self.data[base + 1]]);
+            let (bus, master) = (bus.at(i + 1), master.at(i + 1));
             let sample = self.occlusion.process(0, delayed[0], occlusion);
             out[0] += sample * volume * left * fade * bus * master;
             let sample = self.occlusion.process(1, delayed[1], occlusion);
@@ -586,13 +589,13 @@ pub struct Mixer {
     /// The next handle to hand out. Monotonic; ids are never reused, so a
     /// stale [`VoiceId`] can never name a later voice.
     next_id: AtomicU64,
-    /// One linear gain per [`Bus`], indexed by [`Bus::index`], all starting at
-    /// unity so a mixer nobody has configured sounds exactly as it did before
-    /// buses existed.
+    /// One linear gain per [`Bus`], each on its own ramp
+    /// ([`crate::bus_ramp`]), all starting at unity so a mixer nobody has
+    /// configured sounds exactly as it did before buses existed.
     ///
     /// Behind the same kind of [`Mutex`] the voice lists are, for the reason
     /// `listener` gives: every entry point takes `&self`.
-    bus_gains: Mutex<[f32; Bus::ALL.len()]>,
+    bus_gains: Mutex<BusGains>,
     /// The most voices [`Mixer::play`] lets sound at once, or
     /// [`UNLIMITED_VOICES`] for no budget. See [`Mixer::set_voice_budget`].
     ///
@@ -632,7 +635,7 @@ impl Mixer {
             listener: Mutex::new(Listener::ORIGIN),
             cue_grammar: Mutex::new(CueGrammar::default()),
             next_id: AtomicU64::new(1),
-            bus_gains: Mutex::new([1.0; Bus::ALL.len()]),
+            bus_gains: Mutex::new(BusGains::new()),
             voice_budget: AtomicUsize::new(UNLIMITED_VOICES),
             refused: AtomicU64::new(0),
             stolen: AtomicU64::new(0),
@@ -694,23 +697,31 @@ impl Mixer {
 
     /// Set `bus`'s linear gain, clamped to `[0, 1]`.
     ///
-    /// **Takes effect on the next block**, for every voice on that bus
+    /// **Takes effect from the next block**, for every voice on that bus
     /// including the ones already playing — which is the difference between a
     /// bus and [`Voice::with_volume`], and the whole point of having one: a
     /// player turning the music down expects the music that is playing to get
     /// quieter, not the next track.
     ///
+    /// **It ramps rather than steps**, linearly over
+    /// [`ITD_RAMP_FRAMES`](crate::itd::ITD_RAMP_FRAMES) from the gain the bus
+    /// is at, so a move mid-ramp starts from where that ramp had got to and a
+    /// fader dragged across a menu does not click. A gain set before the first
+    /// block takes effect at once, as [`Voice::with_mix`] does; re-sending the
+    /// gain a bus already has changes nothing.
+    ///
     /// Non-finite values fall back to unity rather than to silence: a NaN
     /// arriving from a settings file is a broken file, and a mixer that answers
     /// it by going silent is a bug report nobody can diagnose by listening.
     pub fn set_bus_gain(&self, bus: Bus, gain: f32) {
-        self.lock_bus_gains()[bus.index()] = finite_or(gain, 1.0, 0.0, 1.0);
+        self.lock_bus_gains()
+            .set(bus, finite_or(gain, 1.0, 0.0, 1.0));
     }
 
-    /// `bus`'s current linear gain.
+    /// The linear gain `bus` was set to, which it is at or ramping toward.
     #[must_use]
     pub fn bus_gain(&self, bus: Bus) -> f32 {
-        self.lock_bus_gains()[bus.index()]
+        self.lock_bus_gains().get(bus).target()
     }
 
     /// The multiply a voice routed to `bus` takes **above its own volume and
@@ -723,15 +734,15 @@ impl Mixer {
     /// exactly those voices by its square — a master at a half turning them down
     /// to a quarter, which reads as a bug in the routing rather than in the
     /// arithmetic.
-    fn route_gain(&self, bus: Bus) -> f32 {
+    fn route_gain(ramps: &[BusRamp; Bus::ALL.len()], bus: Bus) -> BusRamp {
         match bus {
-            Bus::Master => 1.0,
-            other => self.bus_gain(other),
+            Bus::Master => BusRamp::settled(1.0),
+            other => ramps[other.index()],
         }
     }
 
-    /// The bus-gain array, on `lock`'s terms.
-    fn lock_bus_gains(&self) -> std::sync::MutexGuard<'_, [f32; Bus::ALL.len()]> {
+    /// The bus gains, on `lock`'s terms.
+    fn lock_bus_gains(&self) -> std::sync::MutexGuard<'_, BusGains> {
         self.bus_gains.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -1122,9 +1133,11 @@ impl AudioSource for Mixer {
     fn fill(&self, buffer: &mut [AudioSample], sample_rate: u32) {
         // Read once for the whole block rather than per voice: a gain that moved
         // between two voices of one block would put a step inside the buffer
-        // that neither voice asked for.
-        let master = self.bus_gain(Bus::Master);
-        let routes = Bus::ALL.map(|bus| self.route_gain(bus));
+        // that neither voice asked for. Each voice reads its frame's gain off
+        // the ramp the block began with.
+        let ramps = self.lock_bus_gains().begin_block(buffer.len() / CHANNELS);
+        let master = ramps[Bus::Master.index()];
+        let routes = Bus::ALL.map(|bus| Self::route_gain(&ramps, bus));
         self.lock().retain_mut(|(_, voice)| {
             voice.mix_block(buffer, sample_rate, routes[voice.bus.index()], master)
         });
@@ -1173,6 +1186,9 @@ impl std::fmt::Debug for Mixer {
 mod tests {
     use super::*;
     use crate::itd::{ITD_RAMP_FRAMES, MAX_ITD_DELAY};
+
+    /// The bus and master gains of a voice mixed on its own: unity, settled.
+    const UNITY_BUS: BusRamp = BusRamp::settled(1.0);
 
     /// Interleaved stereo data whose left and right channels differ, so a
     /// decoder that reads the wrong channel is visible.
@@ -1333,7 +1349,7 @@ mod tests {
         let mut voice = Voice::new(data);
         let mut buf = vec![0.0f32; 32 * CHANNELS];
 
-        assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
+        assert!(voice.mix_block(&mut buf, 48_000, UNITY_BUS, UNITY_BUS));
         for &s in &buf {
             assert!((s - 0.5).abs() < 0.001);
         }
@@ -1345,8 +1361,8 @@ mod tests {
         let mut voice = Voice::new(data);
         let mut buf = vec![0.0f32; 16 * CHANNELS];
 
-        assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
-        assert!(!voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
+        assert!(voice.mix_block(&mut buf, 48_000, UNITY_BUS, UNITY_BUS));
+        assert!(!voice.mix_block(&mut buf, 48_000, UNITY_BUS, UNITY_BUS));
     }
 
     #[test]
@@ -1355,7 +1371,7 @@ mod tests {
         let mut voice = Voice::new(data).with_looping();
         let mut buf = vec![0.0f32; 32 * CHANNELS];
 
-        assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
+        assert!(voice.mix_block(&mut buf, 48_000, UNITY_BUS, UNITY_BUS));
         for &s in &buf {
             assert!((s - 0.5).abs() < 0.001);
         }
@@ -2024,7 +2040,7 @@ mod tests {
             ..VoiceMix::UNITY
         });
         let mut buf = vec![0.0f32; 32 * CHANNELS];
-        assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
+        assert!(voice.mix_block(&mut buf, 48_000, UNITY_BUS, UNITY_BUS));
 
         for (k, frame) in buf.as_chunks::<CHANNELS>().0.iter().enumerate() {
             let expected_right = if k >= 2 {
@@ -2055,7 +2071,7 @@ mod tests {
             ..VoiceMix::UNITY
         });
         let mut buf = vec![0.0f32; 32 * CHANNELS];
-        assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
+        assert!(voice.mix_block(&mut buf, 48_000, UNITY_BUS, UNITY_BUS));
 
         for (k, frame) in buf.as_chunks::<CHANNELS>().0.iter().enumerate() {
             let expected_left = if k >= 2 { (k - 2) as f32 * 0.5 } else { 0.0 };
@@ -2082,7 +2098,7 @@ mod tests {
             ..VoiceMix::UNITY
         });
         let mut buf = vec![0.0f32; 32 * CHANNELS];
-        assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
+        assert!(voice.mix_block(&mut buf, 48_000, UNITY_BUS, UNITY_BUS));
 
         for (k, frame) in buf.as_chunks::<CHANNELS>().0.iter().enumerate() {
             let prev = if k >= 1 { 1000.0 + (k - 1) as f32 } else { 0.0 };
@@ -2243,7 +2259,7 @@ mod tests {
         // channel into both outputs; L and R here have opposite signs.
         let mut voice = Voice::new(split_channels(64)).with_pitch(2.0);
         let mut buf = vec![0.0f32; 16 * CHANNELS];
-        assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
+        assert!(voice.mix_block(&mut buf, 48_000, UNITY_BUS, UNITY_BUS));
 
         for frame in buf.as_chunks::<CHANNELS>().0 {
             assert!((frame[0] - 1.0).abs() < 1e-6, "left: {}", frame[0]);
@@ -2263,7 +2279,7 @@ mod tests {
         }
         let mut voice = Voice::new(data).with_pitch(2.0);
         let mut buf = vec![0.0f32; 8 * CHANNELS];
-        assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
+        assert!(voice.mix_block(&mut buf, 48_000, UNITY_BUS, UNITY_BUS));
 
         // Output frame i must be input frame 2i.
         for (i, frame) in buf.as_chunks::<CHANNELS>().0.iter().enumerate() {
@@ -2315,7 +2331,7 @@ mod tests {
         // `pos % 0` used to panic inside the audio callback.
         let mut voice = Voice::new(Vec::new()).with_looping();
         let mut buf = vec![0.0f32; 8 * CHANNELS];
-        assert!(!voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
+        assert!(!voice.mix_block(&mut buf, 48_000, UNITY_BUS, UNITY_BUS));
         assert!(buf.iter().all(|s| *s == 0.0));
     }
 

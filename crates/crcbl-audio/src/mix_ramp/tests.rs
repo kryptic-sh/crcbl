@@ -23,7 +23,7 @@ const SETTLED_TOLERANCE: f32 = 1e-6;
 /// The tone started a quarter period in, so it begins at its positive peak,
 /// and so does every block boundary — [`PERIOD`] divides [`BLOCK`]. A gain that
 /// steps there jumps by the whole step times the peak, the most it can.
-fn peak_tone() -> Vec<f32> {
+pub(crate) fn peak_tone() -> Vec<f32> {
     let mut out = tone();
     out.rotate_left(PERIOD / 4 * CHANNELS);
     out

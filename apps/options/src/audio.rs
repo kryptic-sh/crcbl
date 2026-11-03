@@ -425,6 +425,18 @@ mod tests {
         (block.iter().map(|s| s * s).sum::<f32>() / block.len() as f32).sqrt()
     }
 
+    /// Renders, and discards, as much mix as a moved fader takes to arrive
+    /// ([`ITD_RAMP_FRAMES`](crcbl::audio::itd::ITD_RAMP_FRAMES), which a bus's
+    /// gain ramps over), so the next [`block_rms`] measures the gain the fader
+    /// was moved to rather than the ramp toward it.
+    fn settle(audio: &Audio) {
+        use crcbl::audio::AudioSource as _;
+
+        let frames = crcbl::audio::itd::ITD_RAMP_FRAMES as usize;
+        let mut block = vec![0.0f32; frames * crcbl::audio::CHANNELS];
+        audio.mixer.fill(&mut block, SAMPLE_RATE);
+    }
+
     /// **The bus is a gain stage and not a number.**
     ///
     /// Every other test here reads a gain back from wherever it was written,
@@ -438,6 +450,7 @@ mod tests {
         assert!(loud > 0.0, "the bed is writing silence at unity");
 
         audio.set_bus_gain(Bus::Music, 0.25);
+        settle(&audio);
         let quiet = block_rms(&audio);
         assert!(
             quiet < loud * 0.5,
@@ -445,6 +458,7 @@ mod tests {
         );
 
         audio.set_bus_gain(Bus::Music, 1.0);
+        settle(&audio);
         assert!(
             block_rms(&audio) > loud * 0.5,
             "the bed did not come back when the fader did",

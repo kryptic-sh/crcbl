@@ -73,6 +73,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   256-frame blocks, about 0.2% slow. Such voices now play at the requested rate,
   so their samples differ from before; a voice that advances a whole number of
   frames per block renders the same samples.
+- **`Mixer::set_bus_gain` no longer steps a bus's gain while it plays.** A new
+  gain used to take effect at the next block boundary, so pulling a fader down
+  clicked every voice on that bus, by the step times whatever it was playing. A
+  bus, the master included, now ramps linearly over `ITD_RAMP_FRAMES` from the
+  gain it is at, so a fader moved again mid-ramp starts from where it had got
+  to; `Mixer::bus_gain` still answers the gain that was set. A gain set before
+  the mixer's first block still takes effect at once, and a gain that does not
+  change renders the same samples as before.
 
 ## [0.17.1] - 2026-11-03
 

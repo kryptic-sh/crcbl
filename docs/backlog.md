@@ -21521,8 +21521,12 @@ does not advance a whole number of frames per block slightly flat (device rates
 other than 48 kHz included). Re-sending an unchanged mix starts nothing, and
 digests captured from the old mixer pin that (`mix_ramp::tests`). The release
 fade of `Mixer::stop` and a steal is a separate factor on top and was left as it
-is; `Mixer::set_bus_gain` still steps a bus's gain, which nothing here was asked
-to cover.
+is. `Mixer::set_bus_gain` ramps a bus's gain the same way
+(`crcbl_audio::bus_ramp`): linearly over `ITD_RAMP_FRAMES` from the gain the bus
+is at, a move mid-ramp starting from where it had got to, a gain set before the
+first block taking effect at once, and an unchanged gain rendering the bits it
+did before (digests in `bus_ramp::tests`). Nothing else ramped a bus gain: there
+is no ducking yet (_The mixer limiter_).
 
 **Unblocked:** the grammar-continuity property test under _Audio unit and
 property tests the plan specifies_ (an orbiting emitter shows no pitch glide
@@ -21617,8 +21621,6 @@ Left, and why:
   see it, and puppet's `HostedGame::set_bus_gain` is untested on a headless run
   (it has no audio there).
 - **The gain's `powf`** is libm's, under _Audio's transcendentals and deny_.
-- **`Mixer::set_mix` still steps a beacon's pan and level each frame** (see _ITD
-  parameter smoothing_); the occlusion ramp does not cover it.
 
 ### Golden audio buffers per sample, and `crcbl audio render` (2026-08-27)
 
