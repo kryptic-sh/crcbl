@@ -146,13 +146,6 @@ pub(crate) struct SwapchainEntry {
     /// every [`AcquiredFrame::extent`](crcbl_hal::AcquiredFrame::extent) per
     /// the seam's obligation 3.
     pub(crate) extent: (u32, u32),
-    /// The seam format the *views* carry. The buffers are
-    /// [`present::buffer_format`] of it.
-    ///
-    /// An offscreen ring's images carry it directly: there is no flip-discard
-    /// rule to strip the sRGB encoding for, so the resource and the view are
-    /// the one format the caller asked for.
-    pub(crate) format: Format,
     /// The composite alpha it was created with, kept because `ResizeBuffers`
     /// cannot change the alpha mode, so `reconfigure_swapchain` refuses a
     /// descriptor that asks it to rather than ignoring the field.
@@ -187,6 +180,14 @@ pub(crate) struct SwapchainEntry {
     /// a swapchain that no longer counts frames.
     pub(crate) flags: DXGI_SWAP_CHAIN_FLAG,
     /// One [`ImageHandle`] per back buffer, reissued on every reconfigure.
+    ///
+    /// Each image records the seam format its view carries, which is the only
+    /// place the swapchain's format is kept: a windowed swapchain's buffers are
+    /// [`present::buffer_format`] of it, and an offscreen ring's images are it
+    /// exactly. The entry holds no copy because `reconfigure_swapchain` hands
+    /// `ResizeBuffers` the format of the descriptor it was given, so a copy
+    /// would be read by nothing — and would be one more field a reconfigure
+    /// that failed half-way could leave disagreeing with DXGI.
     pub(crate) images: Vec<ImageHandle>,
     /// One whole-image render target view per back buffer, owned by the
     /// swapchain and handed out through `AcquiredFrame::view`.
@@ -573,6 +574,12 @@ pub(crate) fn check_back_buffers_released<'a>(
 /// `ResizeBuffers` for a reconfigure, with the same flags the swapchain was
 /// created with.
 ///
+/// `format` is the seam format the caller's descriptor asked for, already
+/// checked against what the surface offers; the buffers take
+/// [`present::buffer_format`] of it, exactly as [`create`] does, so a
+/// reconfigure into an sRGB format resizes into the linear buffer its view
+/// casts from.
+///
 /// Every reference to the old back buffers must already be gone — the caller's
 /// job, and `crate::device`'s `reconfigure_swapchain` does it by refusing while
 /// a command buffer still holds one ([`check_back_buffers_released`]), then
@@ -586,6 +593,7 @@ pub(crate) fn resize(
     entry: &SwapchainEntry,
     extent: (u32, u32),
     buffers: u32,
+    format: Format,
 ) -> Result<(), SurfaceError> {
     // An offscreen ring reconfigures by recreating its images, and
     // `crate::device`'s `reconfigure_swapchain` branches before it reaches
@@ -594,15 +602,16 @@ pub(crate) fn resize(
         .raw
         .as_ref()
         .unwrap_or_else(|| unreachable!("a windowed swapchain always has a DXGI object"));
-    // SAFETY: `raw` is a live swapchain this device created. The format
-    // and flags are the ones it was created with, which is what `ResizeBuffers`
-    // requires of a swapchain that carries the waitable-object flag.
+    // SAFETY: `raw` is a live swapchain this device created. The flags are
+    // the ones it was created with, which is what `ResizeBuffers` requires of
+    // a swapchain that carries the waitable-object flag; the format is a
+    // flip-model buffer format, which `check` confined the caller's to.
     unsafe {
         raw.ResizeBuffers(
             buffers,
             extent.0,
             extent.1,
-            conv::dxgi_format(present::buffer_format(entry.format)),
+            conv::dxgi_format(present::buffer_format(format)),
             entry.flags,
         )
     }
@@ -1028,6 +1037,9 @@ mod tests {
     ///   D3D12 requires.
     /// * `ResizeBuffers` succeeds after the views and images are released, and
     ///   the swapchain reports the new extent.
+    /// * `ResizeBuffers` accepts a different buffer format on the same
+    ///   swapchain, and a frame renders and presents through the views rebuilt
+    ///   in it.
     ///
     /// The assertions that are *not* about the display are strict. The one that
     /// is — whether the pacing wait genuinely blocked — is **printed as a
@@ -1197,6 +1209,43 @@ mod tests {
             started.elapsed()
         );
         draw_and_present(&device, swapchain, format, 5).expect("a frame at the new size");
+
+        // **A format change, through `ResizeBuffers`.** Picked so the back
+        // buffer's own format changes rather than only the view's — an sRGB
+        // request and its linear twin share a buffer — so the views are
+        // rebuilt over buffers DXGI genuinely reformatted, not over the same
+        // layout under another name. Skipped, by name, on a surface that
+        // offers no such second format.
+        match caps
+            .formats
+            .iter()
+            .copied()
+            .find(|&other| present::buffer_format(other) != present::buffer_format(format))
+        {
+            Some(other) => {
+                let reformatted = SwapchainDesc {
+                    format: other,
+                    ..resized
+                };
+                device
+                    .reconfigure_swapchain(swapchain, &reformatted)
+                    .unwrap_or_else(|error| panic!("stage=reformat to {other:?}: {error:?}"));
+                let frame = device
+                    .acquire_next_frame(swapchain)
+                    .unwrap_or_else(|error| panic!("stage=acquire in {other:?}: {error:?}"));
+                assert_eq!(
+                    frame.extent, RESIZED,
+                    "a format change keeps the size it was given"
+                );
+                draw_and_present(&device, swapchain, other, 1)
+                    .unwrap_or_else(|error| panic!("stage=present in {other:?}: {error:?}"));
+            }
+            None => println!(
+                "crcbl-dx12: the surface offers no second buffer format, so no format change \
+                 was tried: {:?}",
+                caps.formats
+            ),
+        }
 
         // Obligation 2's teardown order: the swapchain, then the surface, then
         // the device and the window. Reversing the first two is the case the

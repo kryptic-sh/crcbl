@@ -2341,7 +2341,6 @@ impl Dx12Device {
             waitable: swapchain::Waitable::none(),
             hwnd: OFFSCREEN_HWND,
             extent,
-            format: desc.format,
             composite_alpha: desc.composite_alpha,
             buffers: count,
             next_offscreen: 0,
@@ -4674,7 +4673,6 @@ impl Device for Dx12Device {
             waitable: created.waitable,
             hwnd: window.hwnd.0 as usize,
             extent: created.extent,
-            format: desc.format,
             composite_alpha: desc.composite_alpha,
             buffers: created.buffers,
             next_offscreen: 0,
@@ -4722,6 +4720,29 @@ impl Device for Dx12Device {
     /// fresh one, so a wait for an id the old configuration presented is
     /// answered at once instead of blocking on a swapchain that has forgotten
     /// it.
+    ///
+    /// # The format may change; the composite alpha may not
+    ///
+    /// A new [`SwapchainDesc::format`] is checked against what the surface
+    /// offers exactly as `create_swapchain` checks it, then handed to
+    /// `ResizeBuffers` as [`present::buffer_format`] of it — so an sRGB
+    /// request still gets a linear buffer under an sRGB view — or, on an
+    /// offscreen ring, used for the replacement images. A new composite alpha
+    /// is refused, because `ResizeBuffers` takes none.
+    ///
+    /// # What a failed reconfigure leaves
+    ///
+    /// A refusal before the queue is waited on — a different surface, a
+    /// descriptor the surface did not offer, a changed composite alpha, a
+    /// command buffer holding a back buffer — changes nothing. A failure after
+    /// it leaves the swapchain **with no images, no views and no outstanding
+    /// acquire**, so `acquire_next_frame` is an error rather than a dead view,
+    /// and the handle valid for another reconfigure or a destroy. The entry
+    /// records no format of its own, so it cannot claim one DXGI does not have
+    /// whether `ResizeBuffers` failed (the buffers are whatever DXGI left) or
+    /// succeeded and the views did not (the buffers are the new format); the
+    /// next reconfigure hands `ResizeBuffers` its own descriptor's format
+    /// either way.
     fn reconfigure_swapchain(
         &self,
         swapchain: SwapchainHandle,
@@ -4749,19 +4770,10 @@ impl Device for Dx12Device {
                         .to_string(),
                 )));
             }
-            if entry.format != desc.format {
-                // `ResizeBuffers` does take a new format, and this backend
-                // still refuses one: the views are created from the swapchain's
-                // format and the entry's `format` is what a later reconfigure
-                // resizes with, so a changed format would have to be threaded
-                // through the failure path too. Refused by name rather than
-                // half-applied.
-                return Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
-                    "reconfigure_swapchain cannot change a swapchain's format from {:?} to {:?} \
-                     on this backend; destroy it and create another",
-                    entry.format, desc.format
-                ))));
-            }
+            // No format comparison: a changed format is a reconfigure like a
+            // changed extent. `check` and `check_offscreen` above already
+            // confined it to what the surface offers, `ResizeBuffers` takes
+            // the new one, and the views below are built from `desc`.
             if entry.composite_alpha != desc.composite_alpha {
                 // `ResizeBuffers` takes no alpha mode at all, so a changed one
                 // would be accepted and silently not applied.
@@ -4850,7 +4862,7 @@ impl Device for Dx12Device {
                 let state = self.state();
                 let entry =
                     handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
-                swapchain::resize(&self.inner.raw, entry, extent, buffers)?;
+                swapchain::resize(&self.inner.raw, entry, extent, buffers, desc.format)?;
             }
 
             // Re-fetched after the lock was released, because `create_image_view`
@@ -12730,6 +12742,91 @@ pub(crate) mod tests {
             let text = error.to_string();
             assert!(text.contains(kind), "{what}: {text}");
         }
+    }
+
+    /// **An offscreen ring reconfigured into another format it is offered in
+    /// is rebuilt in that format, and in the first one again on the way
+    /// back.**
+    ///
+    /// Each acquire is checked in three places that must agree: the image
+    /// table's record (what the encoder resolves), the view's record (what a
+    /// render pass is checked against), and the `ID3D12Resource` D3D12 actually
+    /// created. Red when the replacement images are built in the old format —
+    /// all three still say `Rgba8Unorm` after the first reconfigure — and red
+    /// when a format change is refused again, at the reconfigure itself. The
+    /// two formats differ in texel size as well as name, so a resource that
+    /// kept its old layout cannot pass as the new one.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn an_offscreen_ring_reconfigures_into_another_offered_format_and_back() {
+        let (instance, device) = open_device();
+        let adapter = pinned_adapter(&instance);
+        // SAFETY: `Offscreen` names no platform object, so there is nothing
+        // here that could dangle and nothing that has to outlive the surface.
+        let surface = unsafe { instance.create_surface(&crcbl_core::SurfaceTarget::Offscreen) }
+            .expect("an offscreen surface needs no window");
+        let caps = instance
+            .surface_caps(surface, adapter)
+            .expect("a live offscreen surface on a real adapter");
+        let (first, second) = (Format::Rgba8Unorm, Format::Rgba16Float);
+        assert!(
+            caps.formats.contains(&first) && caps.formats.contains(&second),
+            "the ring must offer both formats this test moves between: {:?}",
+            caps.formats
+        );
+        let ring = |format| SwapchainDesc {
+            label: Some("crcbl-dx12 test ring changing format"),
+            surface,
+            format,
+            extent: (64, 4),
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: CompositeAlpha::Opaque,
+        };
+        let swapchain = device
+            .create_swapchain(&ring(first))
+            .expect("a ring of plain images");
+
+        let assert_ring_in = |format: Format, stage: &str| {
+            let frame = device
+                .acquire_next_frame(swapchain)
+                .unwrap_or_else(|error| panic!("stage={stage}-acquire: {error}"));
+            let image = device
+                .inner
+                .image(frame.image)
+                .unwrap_or_else(|error| panic!("stage={stage}-image: {error}"));
+            assert_eq!(image.format, format, "stage={stage}: the image's record");
+            // SAFETY: `image.raw` is a live resource this device created and
+            // holds a reference to; `GetDesc` reads it and returns by value.
+            let created = unsafe { image.raw.GetDesc() }.Format;
+            assert_eq!(
+                created,
+                conv::dxgi_format(format),
+                "stage={stage}: the resource D3D12 created"
+            );
+            let view = device
+                .inner
+                .color_attachment(frame.view)
+                .unwrap_or_else(|error| panic!("stage={stage}-view: {error}"));
+            assert_eq!(
+                view.attached.format, format,
+                "stage={stage}: the view's record"
+            );
+        };
+
+        assert_ring_in(first, "created");
+        device
+            .reconfigure_swapchain(swapchain, &ring(second))
+            .expect("a format the ring is offered in is a reconfigure, not a refusal");
+        assert_ring_in(second, "reformatted");
+        device
+            .reconfigure_swapchain(swapchain, &ring(first))
+            .expect("and back again");
+        assert_ring_in(first, "restored");
+
+        device.destroy_swapchain(swapchain);
+        instance.destroy_surface(surface);
+        device.wait_idle().expect("the queue drains");
     }
 
     /// A present whose `waits` name a semaphore is refused on the semaphore,

@@ -24,6 +24,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `HalError::InvalidDescriptor` naming the live command buffer's handle and
   asking for `destroy_command_buffer` first, before anything is changed, so the
   swapchain stays usable. Offscreen rings are unaffected.
+- **The D3D12 backend's `reconfigure_swapchain` accepts a format change.** It
+  used to refuse any `SwapchainDesc::format` other than the one the swapchain
+  was created with and ask for destroy-and-recreate, which the seam's
+  `Device::reconfigure_swapchain` never licensed. A windowed swapchain now
+  passes the new format to `ResizeBuffers` (linear buffers under sRGB views, as
+  at creation) and rebuilds its views in it; an offscreen ring recreates its
+  images in it. The format must still be one `Instance::surface_caps` offers,
+  and a changed composite alpha is still refused.
 
 ## [0.17.1] - 2026-11-03
 

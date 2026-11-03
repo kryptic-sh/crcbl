@@ -32768,12 +32768,6 @@ arithmetic (host-testable, and its tests run on any `cargo test`);
   outstanding; it was **considered and declined** for this slice as machinery
   ahead of a caller that needs it.
 
-- **`reconfigure_swapchain` refuses a format change**, by name. `ResizeBuffers`
-  does take a new format, but the entry's `format` is what the views are built
-  from and what a _later_ reconfigure resizes with, so changing it means
-  threading the new format through the failure path too. Destroy and recreate
-  works today.
-
 - **The sRGB-through-the-view path is the one place this backend performs the
   differing-format cast `create_image_view` refuses**, and it is legal only
   because a flip-model back buffer is the case D3D12 permits it on. DX2's entry
