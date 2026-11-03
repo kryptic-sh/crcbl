@@ -8911,10 +8911,12 @@ in `crcbl_input::list`). Decisions, then what is left.
   when the expansion moves, is 12.5 µs at 10 001 rows and 134.7 µs at 100 001.
   `default.css` grew 1795 bytes, which is the whole raw wasm growth of a 2D demo
   (+1800 B raw, +5.9 KB gzipped on breakout).
-- **Not tested**: an outliner inside a modal or nested scroll containers; a dock
-  nested more than two levels deep; duplicate pane names in a `DockLayout` (the
-  editing methods refuse to make one, a hand-built layout can); and a tab strip
-  in a parsed font — the `ui_layout` golden's labels are the bitmap font.
+- **Not tested**: an outliner inside a modal or nested scroll containers — the
+  outliner virtualises against its own viewport, and no fixture yet builds one
+  under an outer scroll or a modal, so which rows it builds there is unpinned;
+  and a tab strip in a parsed font — the `ui_layout` golden's labels are the
+  bitmap font. (Duplicate pane names and a dock nested four deep are covered in
+  `tree/widgets/tests/dock.rs` since 2026-11-04.)
 
 ## What the reflection crate shipped without (2026-09-16)
 

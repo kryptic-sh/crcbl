@@ -22,9 +22,11 @@
 //!
 //! Each pane is a `.dock-pane` block keyed by its name and made a focus scope
 //! root, as the UI's focus rules say a pane is, so focus remembers where it was in
-//! each pane and a directional move resumes there. A name appearing twice is a
-//! duplicate key: the tree warns and derives a key, and the layout's own
-//! editing methods refuse to make one.
+//! each pane and a directional move resumes there. A name appearing twice, which
+//! only a hand-built layout can hold (the layout's own editing methods refuse to
+//! make one), builds two panes with distinct keys and no warning, because each
+//! pane is keyed under its own split pane; what the two share is the name the
+//! pane builder is handed, so state a caller keeps by name is shared too.
 
 use std::panic::Location;
 

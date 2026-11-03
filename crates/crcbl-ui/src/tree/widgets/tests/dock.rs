@@ -1,6 +1,7 @@
 //! Dock layouts: the value's own editing, a nested layout's geometry, a drag
-//! written back into the value, the clamping a nested divider keeps, and a
-//! layout saved and restored into a tree that never saw it.
+//! written back into the value, the clamping a nested divider keeps, a layout
+//! saved and restored into a tree that never saw it, one name held twice, and
+//! a layout nested four levels deep.
 
 use super::*;
 use crate::tree::{DockLayout, DockSide, Response, SplitAxis};
@@ -425,5 +426,187 @@ fn moving_a_pane_between_docks_rebuilds_it_where_the_value_says() {
         height(&ui, viewport),
         HEIGHT,
         "the viewport did not take the whole right side"
+    );
+}
+
+/// **Two panes of one name in a hand-built layout build as two panes, and the
+/// tree never sees a duplicate key**: each pane's block is keyed by its name
+/// under the split pane that holds it, and no two panes of a dock share that
+/// parent, so the second keeps a key of its own without the tree having to
+/// derive one or warn. The editing methods then refuse to move the name, since
+/// taking one copy out still leaves it held.
+#[test]
+fn a_hand_built_layout_with_one_name_twice_builds_two_panes() {
+    let logs = crcbl_core::log::capture();
+    let mut ui = Ui::new();
+    let mut layout = DockLayout::split(
+        SplitAxis::Row,
+        DockLayout::pane("twin"),
+        DockLayout::split(
+            SplitAxis::Column,
+            DockLayout::pane("twin"),
+            DockLayout::pane("console"),
+        ),
+    );
+    assert_eq!(layout.panes(), ["twin", "twin", "console"]);
+    dock_page(&mut ui, &mut layout, idle(), NavInput::default());
+    let page = dock_page(&mut ui, &mut layout, idle(), NavInput::default());
+    assert_eq!(page.names(), ["twin", "twin", "console"]);
+
+    assert!(
+        ui.duplicate_keys().is_empty(),
+        "the tree reported a duplicate key: {:?}",
+        ui.duplicate_keys()
+    );
+    let warnings = logs
+        .records()
+        .into_iter()
+        .filter(|record| record.message.contains("share the key"))
+        .count();
+    assert_eq!(warnings, 0, "the tree warned of a duplicate key");
+
+    let left = pane_of(&ui, page.panes[0].1);
+    let right = pane_of(&ui, page.panes[1].1);
+    assert_ne!(left, right, "the two panes share one key, and so its state");
+    assert_eq!(width(&ui, left), (WIDTH - DIVIDER) / 2.0);
+    assert_eq!(height(&ui, left), HEIGHT);
+    assert_eq!(height(&ui, right), (HEIGHT - DIVIDER) / 2.0);
+    assert_eq!(rect(&ui, left).1.x + DIVIDER, rect(&ui, right).0.x);
+
+    let before = layout.clone();
+    assert!(!layout.move_pane("twin", "console", DockSide::Left));
+    assert_eq!(
+        layout, before,
+        "a refused move of a doubled name changed it"
+    );
+}
+
+/// **No editing method makes a name appear twice**: [`DockLayout::dock`]
+/// refuses a name the layout holds, beside every pane and on every side, and
+/// every move of every pane to every side of every other keeps each name
+/// exactly once.
+#[test]
+fn the_editing_methods_never_make_a_name_appear_twice() {
+    let sides = [
+        DockSide::Left,
+        DockSide::Right,
+        DockSide::Top,
+        DockSide::Bottom,
+    ];
+    let layout = three_panes();
+    let names = layout.panes();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    for name in &names {
+        for beside in &names {
+            for side in sides {
+                let mut docked = layout.clone();
+                assert!(
+                    !docked.dock(name, beside, side),
+                    "docked a second {name} {side:?} of {beside}"
+                );
+                assert_eq!(docked, layout, "a refused dock changed the layout");
+
+                let mut moved = layout.clone();
+                let did = moved.move_pane(name, beside, side);
+                assert_eq!(did, name != beside, "{name} {side:?} of {beside}");
+                let mut after = moved.panes();
+                after.sort_unstable();
+                assert_eq!(after, sorted, "{name} {side:?} of {beside}");
+            }
+        }
+    }
+}
+
+/// **A dock nested four levels deep lays every pane out inside every split
+/// that holds it**: each pane is built once, at a rectangle with room in it,
+/// and that rectangle sits inside each of its ancestors' up to the dock.
+///
+/// ```text
+/// ┌──────┬──────────────┐
+/// │      │      b       │
+/// │  a   ├──────┬───────┤
+/// │      │  c   │   d   │
+/// │      │      ├───────┤
+/// │      │      │   e   │
+/// └──────┴──────┴───────┘
+/// ```
+#[test]
+fn a_dock_nested_four_deep_keeps_every_pane_inside_its_splits() {
+    let mut layout = DockLayout::split(
+        SplitAxis::Row,
+        DockLayout::pane("a"),
+        DockLayout::split(
+            SplitAxis::Column,
+            DockLayout::pane("b"),
+            DockLayout::split(
+                SplitAxis::Row,
+                DockLayout::pane("c"),
+                DockLayout::split(
+                    SplitAxis::Column,
+                    DockLayout::pane("d"),
+                    DockLayout::pane("e"),
+                ),
+            ),
+        ),
+    );
+    let mut ui = Ui::new();
+    let mut built = Vec::new();
+    let mut dock = None;
+    for _ in 0..2 {
+        built.clear();
+        dock = Some(frame(&mut ui, idle(), NavInput::default(), |ui| {
+            ui.dock("#deep", &mut layout, MIN, |ui, name| {
+                built.push((name.to_owned(), ui.block("", &[], |_| {}).key));
+            })
+        }));
+    }
+    let dock = dock.expect("built").key;
+    assert_eq!(
+        built
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c", "d", "e"]
+    );
+
+    let (dock_min, dock_max) = rect(&ui, dock);
+    assert_eq!(
+        dock_max - dock_min,
+        Vec2::splat(PAGE),
+        "the dock is not full"
+    );
+    for (name, inner) in &built {
+        let pane = pane_of(&ui, *inner);
+        let (min, max) = rect(&ui, pane);
+        assert!(
+            max.x - min.x >= MIN[0] && max.y - min.y >= MIN[0],
+            "{name} has no room: {min:?}..{max:?}"
+        );
+        let mut index = ui
+            .nodes
+            .iter()
+            .position(|node| node.key == pane)
+            .expect("built this frame");
+        let mut ancestors = 0;
+        while ui.nodes[index].key != dock {
+            index = ui.nodes[index].parent.expect("the dock holds every pane");
+            let (outer_min, outer_max) = rect(&ui, ui.nodes[index].key);
+            assert!(
+                min.x >= outer_min.x
+                    && min.y >= outer_min.y
+                    && max.x <= outer_max.x
+                    && max.y <= outer_max.y,
+                "{name} at {min:?}..{max:?} leaves {outer_min:?}..{outer_max:?}"
+            );
+            ancestors += 1;
+        }
+        assert!(ancestors >= 2, "{name} was not checked against a split");
+    }
+    let deepest = pane_of(&ui, built[4].1);
+    assert_eq!(
+        height(&ui, deepest),
+        ((PAGE - DIVIDER) / 2.0 - DIVIDER) / 2.0,
+        "the fourth level's split is not even"
     );
 }
