@@ -794,10 +794,17 @@ small each.
   machine); decisions are hand-written per sample (`apps/breach/src/bots.rs`).
   Recorded only in `docs/notes/samples.md`. Medium, P3.
 
-### Possibly stale record
+### glTF still decodes PNG only, though the workspace has a JPEG decoder
 
-The line "no JPEG decoder exists in the workspace" under _glTF reaches the
-renderer_ looks stale: `crates/crcbl-image/src/jpeg.rs` exists. Not re-verified.
+Re-verified 2026-11-04: `crcbl_image::jpeg::decode` exists (behind
+`crcbl-image`'s `jpeg` feature), but `crcbl_scene::gltf_render::decode_image`
+still decodes through `crcbl_sprite::load::decode_png` and refuses a JPEG with
+"this build decodes PNG only", so a glTF's JPEG textures shade through their
+factors alone. (The old line "no JPEG decoder exists in the workspace" is gone
+from the docs.) Wiring it in needs a layering call: `crcbl-scene` depends on
+`crcbl-sprite` for images today, not on `crcbl-image`, so either `crcbl-scene`
+takes `crcbl-image` (optional, behind `render`) or `crcbl-sprite`'s loader
+routes JPEG to it.
 
 ### Coverage
 
