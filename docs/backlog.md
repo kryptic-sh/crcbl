@@ -4346,9 +4346,11 @@ adoption:
 - **No arrival forecast in the crate.** `Steer::reach_m` and
   `FollowDistances::reach_for` are the reach EW's `route_arrival` measures to;
   the forecast itself (controller previews) stays EW's.
-- **Not covered by a test:** the reach comparison's boundary (a waypoint at
-  exactly the reach counts as reached, as in EW) and `plan_toward`'s skip of a
-  floor already tried, which saves a plan and changes no answer.
+- **`plan_toward`'s skip of a floor already tried is untested, deliberately.**
+  It saves a `plan` and changes no answer, so a test of the answer passes with
+  or without it; observing it would take a plan counter on `SpanGrid` kept only
+  for tests. Declined 2026-11-04. (The reach boundary is covered by
+  `a_waypoint_exactly_at_the_reach_is_reached`.)
 
 Raised by EW on 2026-10-19, not a request yet:
 

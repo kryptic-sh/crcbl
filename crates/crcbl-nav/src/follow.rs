@@ -520,6 +520,46 @@ mod tests {
         assert_eq!(follower.advance(DVec3::ZERO), None);
     }
 
+    /// **A waypoint exactly at the reach is reached**, as in EW, and one the
+    /// next `f64` farther out is not; for a waypoint on the way and for the
+    /// last. Each waypoint lies along `x` from feet at the origin, so the
+    /// ground distance is the reach to the bit.
+    #[test]
+    fn a_waypoint_exactly_at_the_reach_is_reached() {
+        let distances = FollowDistances::new(1.0);
+        let follower_to =
+            |waypoints: Vec<DVec3>| RouteFollower::new(GroundRoute { waypoints }, distances);
+        let far = DVec3::new(10.0, 0.0, 0.0);
+        for (reach, last) in [
+            (distances.waypoint_reach_m, false),
+            (distances.last_reach_m, true),
+        ] {
+            let at = DVec3::X * reach;
+            assert_eq!(ground_distance(DVec3::ZERO, at), reach);
+            let beyond = DVec3::X * reach.next_up();
+            let route = |waypoint| {
+                if last {
+                    vec![waypoint]
+                } else {
+                    vec![waypoint, far]
+                }
+            };
+
+            let reached = follower_to(route(at)).advance(DVec3::ZERO);
+            assert_eq!(
+                reached.map(|steer| steer.waypoint),
+                (!last).then_some(far),
+                "at exactly the reach ({reach} m) the waypoint is reached; last: {last}"
+            );
+            let held = follower_to(route(beyond)).advance(DVec3::ZERO);
+            assert_eq!(
+                held.map(|steer| steer.waypoint),
+                Some(beyond),
+                "one ulp past the reach the waypoint still holds; last: {last}"
+            );
+        }
+    }
+
     /// The reach a forecast reads is the one the follower drops by: the
     /// waypoint reach on the way, the last reach at the end.
     #[test]
