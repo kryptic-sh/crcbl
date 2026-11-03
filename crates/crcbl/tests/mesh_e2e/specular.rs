@@ -13,7 +13,7 @@
 //! specular columns alone, drawn under one light, and a reading that tells them
 //! apart.
 //!
-//! Three claims, and they fail for different reasons.
+//! Four claims, and they fail for different reasons.
 //!
 //! * **The row's `F0` and `F90` are the lobe's.** A black dielectric under a
 //!   sun is its specular highlight and nothing else; a row with both columns at
@@ -26,6 +26,10 @@
 //!   ambient-lit dielectric with the layer turned off reads brighter than the
 //!   default by exactly the default layer's share, `1 / (1 - DIELECTRIC_F0)`,
 //!   and one whose layer reflects everything scatters nothing.
+//! * **A rectangle light's split sum scales its bias by the row's `F90`.** The
+//!   area-light path never calls the sun's lobe: it weights a polygon integral
+//!   by `f0 * dfg.x + f90 * dfg.y`, so with `F0` zero its highlight is the
+//!   `F90` term alone, and it reads zero, half and full as `F90` does.
 //!
 //! # What the frame is
 //!
@@ -43,7 +47,7 @@ use crcbl::math::{Mat4, Vec3};
 use crcbl::render::scene::{Capacities, PageDesc, ProbeGrid, SceneDesc};
 use crcbl::render::{
     Antialiasing, DirectionalLight, EffectOverride, EffectRequest, ForwardRenderer, InstanceDesc,
-    RenderEffects, TransientPool,
+    Light, RectLight, RenderEffects, TransientPool,
 };
 use crcbl_shaders::mesh::{GpuMaterial, GpuMesh};
 
@@ -69,6 +73,13 @@ const TINTED_ROW: usize = 3;
 /// which an IOR of zero reaches.
 const FULL_ROW: usize = 4;
 
+/// [`GRAZING_ROW`] with its `F90` halved, so what it reflects is half of what
+/// that row's `F90` term carries.
+const HALF_F90_ROW: usize = 5;
+
+/// [`HALF_F90_ROW`]'s `F90`.
+const HALF_F90: f32 = 0.5;
+
 /// [`TINTED_ROW`]'s `F0`: the default reflectance in red and then halved twice,
 /// so a highlight that took one channel for all three reads flat.
 const TINTED_F0: [f32; 3] = [0.04, 0.02, 0.01];
@@ -87,6 +98,7 @@ fn rows(base_color: [f32; 4]) -> Vec<GpuMaterial> {
         row([0.0; 3], 1.0),
         row(TINTED_F0, 1.0),
         row([1.0; 3], 1.0),
+        row([0.0; 3], HALF_F90),
     ]
 }
 
@@ -168,6 +180,16 @@ fn centre() -> (u32, u32) {
 /// The centre texel of one frame of `description` with the quad drawn under
 /// material row `material`, from the raw `Rgba16Float` target.
 fn read(description: &SceneDesc<'_>, material: usize, light: &DirectionalLight) -> [f32; 4] {
+    read_with(description, material, light, &[])
+}
+
+/// [`read`], with `lights` set beside the sun.
+fn read_with(
+    description: &SceneDesc<'_>,
+    material: usize,
+    light: &DirectionalLight,
+    lights: &[Light],
+) -> [f32; 4] {
     let headless = Headless::open_for_mesh();
     let mut pool = TransientPool::new();
     let mut renderer = ForwardRenderer::with_scene(
@@ -185,6 +207,7 @@ fn read(description: &SceneDesc<'_>, material: usize, light: &DirectionalLight) 
             .force(RenderEffects::AMBIENT_OCCLUSION, Some(false)),
         ..EffectRequest::default()
     });
+    renderer.set_lights(lights);
     renderer
         .add_instance(&InstanceDesc {
             mesh: 0,
@@ -418,3 +441,135 @@ fn a_layer_that_reflects_less_leaves_more_to_the_diffuse() {
 /// thousand; this is a few times that and far under the four per cent the
 /// claim is about.
 const WEIGHT_TOLERANCE: f32 = 0.004;
+
+/// No sun and no ambient: whatever a frame under this reads, the lights set
+/// beside it put there.
+fn dark() -> DirectionalLight {
+    DirectionalLight {
+        direction: Vec3::Z,
+        color: Vec3::ZERO,
+        ambient: Vec3::ZERO,
+    }
+}
+
+/// How far in front of the quad the panel hangs.
+const PANEL_DISTANCE: f32 = 1.0;
+
+/// Half the panel's edge: wider than the quad, so the mirror direction at the
+/// centre texel is well inside it and the polygon integral is a large share
+/// of the lobe.
+const PANEL_HALF: f32 = 0.6;
+
+/// The radiance leaving the panel's face. Far above one, because the `F90`
+/// term is the split sum's bias and head on that is Schlick's fifth power of
+/// nearly nothing: the panel has to be bright for its share to land far above
+/// the half-float target's smallest steps.
+const PANEL_RADIANCE: f32 = 64.0;
+
+/// How far the panel's influence reaches from its centre: far past its own
+/// half-diagonal and the quad's corners, so the window is not what shapes the
+/// reading.
+const PANEL_REACH: f32 = 8.0;
+
+/// A square panel straight in front of the quad and facing it, so the eye's
+/// mirror direction at the centre texel points into it.
+fn panel() -> Light {
+    Light::Rect(RectLight {
+        position: Vec3::new(0.0, 0.0, PANEL_DISTANCE),
+        radius: PANEL_REACH,
+        color: Vec3::splat(PANEL_RADIANCE),
+        direction: Vec3::NEG_Z,
+        tangent: Vec3::X,
+        half_width: PANEL_HALF,
+        half_height: PANEL_HALF,
+        fill: false,
+    })
+}
+
+/// **A rectangle light's highlight scales with the row's `F90`** — the
+/// area-light path's `f90 * dfg.y`, which the three claims above never reach:
+/// each is drawn under the sun, and the sun is shaded by `ggx_lobe`.
+///
+/// A black dielectric with `F0` zero under [`panel`] alone. The diffuse term is
+/// zero, the sun and the ambient are off, and `specular_compensation` is one
+/// where `F0` is zero, so the reading is the polygon integral times
+/// `f90 * dfg.y` times the panel's radiance and nothing else. The `F90`-one
+/// row reads black without the panel and above [`PANEL_FLOOR`] with it, which
+/// is what says the rectangle and nothing else lights this texel. Then three
+/// rows that differ in `F90` alone: `F90` zero reads exactly black and `F90` a
+/// half reads half of `F90` one. A shading path that left `F90` out of the
+/// split sum — a literal one where `f90` stands — reads all three alike.
+///
+/// # Sweep
+///
+/// Measured 2026-11-04 on the RX 7900 XTX under D3D12 and Vulkan, and on WARP:
+/// identical readings on all three. Without the panel the `F90`-one row reads
+/// exactly zero; under it, `F90` one reads `0.0049324036`, `F90` a half
+/// `0.0024662018` — a ratio of exactly `0.5` — and `F90` zero exactly zero.
+///
+/// # Sabotage
+///
+/// The shaders are committed artifacts, so the sabotage was on the host:
+/// `GpuMaterial::to_bytes` writing a literal one in place of `specular_f90`.
+/// Red on D3D12 on 2026-11-04 with `"a row with zero F0 and F90 read
+/// [0.0049324036, …] under the panel where an F90 of one read [0.0049324036,
+/// …]"`. It writing one wherever `specular_f90` is above zero, and zero
+/// elsewhere: red with `"channel 0: F90 0.5 read 0.0049324036 against F90 one's
+/// 0.0049324036, a ratio of 1"`, which is why the half row exists. Both reach
+/// every light, not the rectangle's arm alone — the sun's grazing half above
+/// went red under the first — so they show this test can fail, and the panel
+/// being the only light is what makes its readings the area path's.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_rectangle_lights_the_f90_term_by_the_row() {
+    let description = scene(BLACK);
+    let unlit = read_with(&description, GRAZING_ROW, &dark(), &[]);
+    let full = read_with(&description, GRAZING_ROW, &dark(), &[panel()]);
+    let half = read_with(&description, HALF_F90_ROW, &dark(), &[panel()]);
+    let off = read_with(&description, OFF_ROW, &dark(), &[panel()]);
+    eprintln!(
+        "{}: without the panel F90 one reads {unlit:?}; under it, F90 one reads {full:?}, F90 \
+         {HALF_F90} reads {half:?} and F90 zero reads {off:?} at {:?}",
+        crate::SUITE,
+        centre()
+    );
+    assert_eq!(
+        unlit[..3],
+        [0.0; 3],
+        "the F90-one row read {unlit:?} with no light on; something other than the panel lights \
+         this frame, so the readings below are not the area light's"
+    );
+    assert!(
+        full[..3].iter().all(|channel| *channel > PANEL_FLOOR),
+        "a row with zero F0 and an F90 of one read {full:?} under the panel alone, under the \
+         {PANEL_FLOOR} floor; the rectangle is not lighting this texel, and every comparison \
+         below would be vacuous"
+    );
+    assert_eq!(
+        off[..3],
+        [0.0; 3],
+        "a row with zero F0 and F90 read {off:?} under the panel where an F90 of one read \
+         {full:?}; the area light's split sum is not scaling its bias by the row's F90"
+    );
+    for channel in 0..3 {
+        let ratio = half[channel] / full[channel];
+        assert!(
+            (ratio - HALF_F90).abs() < F90_RATIO_TOLERANCE,
+            "channel {channel}: F90 {HALF_F90} read {} against F90 one's {}, a ratio of \
+             {ratio}; with F0 zero the highlight is linear in F90",
+            half[channel],
+            full[channel]
+        );
+    }
+}
+
+/// The least the `F90`-one row may read under [`panel`], in every channel.
+///
+/// A floor against a texel the rectangle does not reach, not a prediction:
+/// far over the half-float target's steps near zero and far under the reading.
+const PANEL_FLOOR: f32 = 0.001;
+
+/// How far the half row's share may sit from [`HALF_F90`]. Two half-float
+/// readings carry about one part in a thousand between them; this is a few
+/// times that and far under the half the claim is about.
+const F90_RATIO_TOLERANCE: f32 = 0.01;

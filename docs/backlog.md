@@ -9506,9 +9506,6 @@ asset key per process. Still owed:
   Schlick rises to one. It is exactly one where `F0` is zero, so a disabled
   layer still reflects nothing; a partly disabled one gets the factor its `F0`
   implies.
-- **The area-light split-sum term `f90 * dfg.y` is untested on a device.** The
-  mesh-e2e `specular` tests use a directional sun and ambient light; no test
-  draws a rectangle light over a row with `specular_f90 < 1`.
 - **What was verified where.** The bit-for-bit claim for a default row was
   measured on Vulkan on an RX 7900 XTX (AMD proprietary 25.10.36) by hashing
   full HDR frames drawn by the old and the new arithmetic. The MSL and DXIL are
