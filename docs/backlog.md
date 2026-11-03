@@ -552,15 +552,24 @@ have to build them first.
   `GrassScene::new` (two 1×1 calm wind textures, no pipeline) stays in the build
   on purpose.
 
-### A failed lazy build is not tested through a frame
+### A failed lazy content build is not tested through a frame
 
-Every render pass constructor releases what it made when a create fails
-(`crate::partial::Partial`, pinned per constructor by
-`crates/crcbl-render/src/forward/tests/partial_builds.rs`). Nothing yet fails a
-create inside `View::build_passes` or `View::build_content` during `begin_frame`
-and retries on the next frame, checking `total_live_objects()` across both; in
-the engine loop such a failure still ends the game where it used to fail at
-start-up.
+`partial_builds.rs`'s
+`a_lazy_build_failing_inside_a_frame_is_finished_by_the_next` fails a create
+part-way through `View::build_passes` inside `begin_frame` (in `Bloom::new`,
+after the contact march was built) and checks the error, the live count and the
+retry on the next frames. `View::build_content` has no such test: its
+constructors are checked directly
+(`the_content_passes_release_on_every_failure`) but nothing yet fails one inside
+a frame with water or grass set and retries. Also unchanged: in the engine loop
+such a failure still ends the game where it used to fail at start-up.
+
+Noticed while writing it, not a defect: a frame that fails in a view's build has
+already requested the culling counters' readback (`CullStatsRing`), so the live
+count after the failure is one readback higher; the next frame resolves it. And
+the retried frame lands in a different ring slot from a clean run's, so the live
+counts only match a clean run's after a full lap of `FRAMES_IN_FLIGHT` frames
+(each slot caches its own bind groups).
 
 ### Start-up: what `ForwardRenderer`'s build still submits on its own
 

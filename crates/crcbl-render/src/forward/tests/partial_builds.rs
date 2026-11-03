@@ -571,3 +571,152 @@ fn a_views_pipeline_sets_release_on_every_failure() {
     );
     assert_eq!(recorder.total_live_objects(), 0);
 }
+
+/// The four settings-driven passes the default build leaves to a frame, asked
+/// for at once — see `lazy_passes.rs`: the contact march and the bloom chain by
+/// their effect bits, the cheap antialiasing tier with CMAA2 forced off, and
+/// the upscale by a render scale below one.
+fn ask_for_every_lazy_pass(renderer: &mut ForwardRenderer) {
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(
+                RenderEffects::BLOOM
+                    .union(RenderEffects::CONTACT_SHADOWS)
+                    .union(RenderEffects::ANTIALIASING),
+                Some(true),
+            )
+            .force(RenderEffects::CMAA2, Some(false)),
+        ..EffectRequest::default()
+    });
+    renderer.set_render_scale(0.5);
+}
+
+/// Every object `recorder` holds alive but the readbacks in flight: a frame
+/// requests the culling counters' readback before any view begins, so a frame
+/// that fails in a view's build still has one out, which the ring resolves
+/// when its slot comes round.
+fn besides_readbacks(recorder: &Recorder) -> usize {
+    recorder.total_live_objects() - recorder.live_objects(ObjectKind::Readback)
+}
+
+/// A frame of [`TEST_EXTENT`] under the default camera and sun, begun and
+/// nothing more: what a game loop's `begin_frame` does before it records.
+fn begin(device: &dyn Device, renderer: &mut ForwardRenderer) -> Result<(), HalError> {
+    renderer.begin_frame(
+        device,
+        &Camera::default(),
+        &DirectionalLight::default(),
+        TEST_EXTENT,
+    )
+}
+
+/// **A lazy build that fails part-way through a frame leaks nothing, and the
+/// next frame builds the rest** — `View::build_passes` failed inside
+/// `begin_frame`, which is where a game meets it.
+///
+/// The failure lands on the bloom chain's composite pipeline: after the
+/// contact march was built whole, which the view keeps, and after the chain's
+/// own layouts and first pipelines, which `Bloom::new` must release. The frame
+/// reports the injected error, the view holds the march and no chain, and the
+/// device holds exactly the march's objects more than before, readbacks
+/// aside — see [`besides_readbacks`]. The next frame, with creation succeeding
+/// again, builds what is missing; a lap of the ring later the device holds
+/// what the same lap of clean frames leaves — so nothing failed was built twice
+/// or left half-built — and the renderer still releases whole.
+///
+/// A lap and not one frame, because the failed frame took a slot of the ring:
+/// the retry draws in a different slot from the clean run's first lazy frame,
+/// and each slot caches its own bind groups the first time a frame draws there
+/// under these passes.
+#[test]
+fn a_lazy_build_failing_inside_a_frame_is_finished_by_the_next() {
+    // The clean run: what the first frame asking for every lazy pass creates,
+    // and what the device holds a lap of the ring later. Both runs draw a
+    // default frame first, which retires the build's uploads, so the counts
+    // below move only with the lazy build.
+    let (clean, clean_device, clean_queue) = open();
+    let clean_device = clean_device.as_ref();
+    let mut renderer =
+        ForwardRenderer::new(clean_device, clean_queue, Format::Rgba8UnormSrgb).expect("built");
+    frame(clean_device, &mut renderer, clean_queue).release(clean_device);
+    ask_for_every_lazy_pass(&mut renderer);
+    clean.clear();
+    for _ in 0..FRAMES {
+        frame(clean_device, &mut renderer, clean_queue).release(clean_device);
+    }
+    let built = clean.total_live_objects();
+    let created = creations(&clean);
+    renderer.destroy(clean_device);
+    let position = |label: &str| {
+        created
+            .iter()
+            .position(|(_, named)| named.as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("the lazy frame created nothing labelled `{label}`"))
+    };
+    let failing = created
+        .iter()
+        .position(|created| {
+            *created == (ObjectKind::GraphicsPipeline, Some("bloom composite".into()))
+        })
+        .expect("the lazy frame built the bloom chain's composite");
+    assert!(
+        position("contact shadow params") < position("bloom chain")
+            && position("bloom chain") < failing,
+        "the failure does not land in the bloom chain after the contact march was \
+         built, so it is not a partial build: {created:?}"
+    );
+
+    // What the contact march alone keeps alive on this device.
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let empty = recorder.total_live_objects();
+    let march = ContactShadows::new(device, FRAMES, ForwardRenderer::build_fullscreen)
+        .expect("the null backend accepts every descriptor");
+    let march_objects = recorder.total_live_objects() - empty;
+    march.destroy(device);
+    assert_eq!(recorder.total_live_objects(), empty);
+
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    frame(device, &mut renderer, queue).release(device);
+    ask_for_every_lazy_pass(&mut renderer);
+    let before = besides_readbacks(&recorder);
+    recorder.fail_create_after(u32::try_from(failing).expect("fits"));
+    let error =
+        begin(device, &mut renderer).expect_err("the frame went on although its lazy build failed");
+    assert!(
+        !recorder.create_failure_pending(),
+        "the frame failed before reaching creation {failing}: {error}"
+    );
+    assert!(
+        matches!(error, HalError::OutOfDeviceMemory),
+        "the frame did not report the injected failure: {error}"
+    );
+    assert!(
+        renderer.primary.contact_shadows.is_some() && renderer.primary.bloom.is_none(),
+        "the view does not hold the march built before the failure and no chain"
+    );
+    assert_eq!(
+        besides_readbacks(&recorder),
+        before + march_objects,
+        "the failed frame left something besides the contact march alive"
+    );
+
+    for _ in 0..FRAMES {
+        frame(device, &mut renderer, queue).release(device);
+    }
+    assert!(
+        renderer.primary.bloom.is_some()
+            && renderer.primary.fxaa.is_some()
+            && renderer.primary.upscale.is_some(),
+        "the next frame did not build what the failed one left"
+    );
+    assert_eq!(
+        recorder.total_live_objects(),
+        built,
+        "a lap from the retried frame left a different device from a lap of clean frames"
+    );
+
+    renderer.destroy(device);
+    assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
+    recorder.assert_valid();
+}
