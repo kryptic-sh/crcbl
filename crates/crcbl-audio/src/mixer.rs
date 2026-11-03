@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::itd::VoiceItd;
+use crate::mix_ramp::{MixParams, MixRamp};
 use crate::occlusion::{Occlusion, VoiceOcclusion};
 use crate::spatial::{CueGrammar, Listener, SpatialCue, compute_cue};
 use crate::{AudioSample, AudioSource, CHANNELS, INTERNAL_SAMPLE_RATE};
@@ -228,9 +229,13 @@ pub struct Voice {
     /// copied the whole sound on each one while this was owned data.
     data: Arc<[AudioSample]>,
     /// Current playback position in **frames** (one frame = [`CHANNELS`]
-    /// interleaved samples).
-    playhead: usize,
-    /// Linear volume multiplier (0.0 = silent, 1.0 = full).
+    /// interleaved samples), fractional under a pitch or device rate that does
+    /// not advance a whole frame per output frame. The fraction is kept from
+    /// one block to the next: dropped at each boundary, it detuned every such
+    /// voice and jumped the read position of every pitch ramp.
+    playhead: f64,
+    /// Linear volume multiplier (0.0 = silent, 1.0 = full): the target, which
+    /// a re-aimed voice ramps to (see `mix_ramp`).
     volume: f32,
     /// Whether to loop back to the start when the voice finishes.
     looping: bool,
@@ -241,12 +246,16 @@ pub struct Voice {
     /// voice stopped mid-cycle ramps down instead of clicking.
     releasing: bool,
     /// Per-channel gains applied during mixing: `[left, right]`.
-    /// Defaults to `(1.0, 1.0)` — un-panned, centre.
+    /// Defaults to `(1.0, 1.0)` — un-panned, centre. The target, as `volume`.
     gains: (f32, f32),
     /// Pitch ratio for varispeed playback (1.0 = normal).
     /// Values > 1.0 play faster/higher; < 1.0 play slower/lower.
-    /// Applied by advancing the playhead at the adjusted rate.
+    /// Applied by advancing the playhead at the adjusted rate. The target, as
+    /// `volume`.
     pitch: f32,
+    /// The move from the level, pan and pitch a voice was at toward the
+    /// targets above, after [`Mixer::set_mix`] changes them.
+    mix_ramp: MixRamp,
     /// The interaural delay: the target ITD in samples (positive delays the
     /// right channel, negative the left — the [`crate::spatial::SpatialCue`]
     /// contract), the move toward it, and one fractional delay line per output
@@ -278,13 +287,14 @@ impl Voice {
     pub fn from_shared(data: Arc<[AudioSample]>) -> Self {
         Self {
             data,
-            playhead: 0,
+            playhead: 0.0,
             volume: 1.0,
             looping: false,
             stopped: false,
             releasing: false,
             gains: (1.0, 1.0),
             pitch: 1.0,
+            mix_ramp: MixRamp::settled(),
             itd: VoiceItd::new(),
             bus: Bus::default(),
             priority: 0,
@@ -364,9 +374,9 @@ impl Voice {
 
     /// Set level, pan and speed together, clamped as the individual setters do.
     ///
-    /// **The ITD is in force from the first frame**, unlike
-    /// [`Mixer::set_mix`]'s, which moves to it: a voice that starts off to one
-    /// side was never heard anywhere else.
+    /// **All of it is in force from the first frame**, unlike
+    /// [`Mixer::set_mix`], which moves to it: a voice that starts quiet and off
+    /// to one side was never heard anywhere else.
     #[must_use]
     pub fn with_mix(mut self, mix: VoiceMix) -> Self {
         self.apply_mix(mix);
@@ -374,7 +384,8 @@ impl Voice {
         self
     }
 
-    /// The parameters currently in force.
+    /// The parameters in force, or being moved toward after a
+    /// [`Mixer::set_mix`].
     #[must_use]
     pub fn mix(&self) -> VoiceMix {
         VoiceMix {
@@ -407,6 +418,11 @@ impl Voice {
     #[must_use]
     pub fn occlusion(&self) -> Occlusion {
         self.occlusion.target()
+    }
+
+    /// The level, pan and pitch targets, in the order [`MixRamp`] holds them.
+    const fn mix_params(&self) -> MixParams {
+        [self.volume, self.gains.0, self.gains.1, self.pitch]
     }
 
     /// The shared clamp behind [`Voice::with_mix`] and [`Mixer::set_mix`], for
@@ -475,7 +491,7 @@ impl Voice {
         }
 
         // f64 playhead for sub-sample precision under pitch shift.
-        let mut pos = self.playhead as f64;
+        let mut pos = self.playhead;
         // Voices are authored for INTERNAL_SAMPLE_RATE; a device at some other
         // rate must not step one source frame per output frame or every sound
         // detunes (147 cents at 44.1 kHz — the exact failure the browser path
@@ -487,7 +503,6 @@ impl Voice {
         } else {
             INTERNAL_SAMPLE_RATE as f64 / f64::from(sample_rate)
         };
-        let step = self.pitch as f64 * ratio;
 
         // The release ramp: a releasing voice mixes ONE final block, faded
         // linearly to silence, and is then dropped by the caller. With `N`
@@ -503,7 +518,7 @@ impl Voice {
                 if self.looping {
                     pos %= frames as f64;
                 } else {
-                    self.playhead = frames;
+                    self.playhead = frames as f64;
                     return false;
                 }
             }
@@ -517,15 +532,18 @@ impl Voice {
             } else {
                 1.0
             };
+            let [volume, left, right, pitch] = self.mix_ramp.step(self.mix_params());
             let occlusion = self.occlusion.step();
             let delayed = self.itd.process([self.data[base], self.data[base + 1]]);
             let sample = self.occlusion.process(0, delayed[0], occlusion);
-            out[0] += sample * self.volume * self.gains.0 * fade * bus * master;
+            out[0] += sample * volume * left * fade * bus * master;
             let sample = self.occlusion.process(1, delayed[1], occlusion);
-            out[1] += sample * self.volume * self.gains.1 * fade * bus * master;
-            pos += step;
+            out[1] += sample * volume * right * fade * bus * master;
+            // Each frame's own rate, so a pitch ramp accelerates the read
+            // position rather than jumping it.
+            pos += pitch as f64 * ratio;
         }
-        self.playhead = (pos as usize).min(frames);
+        self.playhead = pos.min(frames as f64);
         !self.releasing
     }
 }
@@ -908,17 +926,24 @@ impl Mixer {
     /// field is one voice whose pan and volume move under it, not a new voice
     /// per frame. Clamped exactly as [`Voice::with_mix`] is.
     ///
+    /// **Level, pan and pitch ramp rather than step**, linearly over
+    /// [`ITD_RAMP_FRAMES`](crate::itd::ITD_RAMP_FRAMES) from the values the
+    /// voice is at, so a re-aim mid-ramp starts from where that ramp had got
+    /// to. A pitch ramp moves the playback rate, never the read position.
+    ///
     /// **The ITD moves rather than steps**, over
     /// [`ITD_RAMP_FRAMES`](crate::itd::ITD_RAMP_FRAMES): a small change sweeps
     /// the delay, and a large one or an ear swap crossfades from the old delay
     /// to the new, so neither clicks nor bends the pitch (see [`crate::itd`]).
-    /// Re-sending the ITD a voice already has changes nothing.
+    /// Re-sending the mix a voice already has changes nothing.
     pub fn set_mix(&self, id: VoiceId, mix: VoiceMix) -> bool {
         let mut voices = self.lock();
         let Some((_, voice)) = voices.iter_mut().find(|(voice_id, _)| *voice_id == id) else {
             return false;
         };
+        let old = voice.mix_params();
         voice.apply_mix(mix);
+        voice.mix_ramp.retarget(old, voice.mix_params());
         voice.itd.set(mix.itd_samples);
         true
     }
@@ -1147,7 +1172,7 @@ impl std::fmt::Debug for Mixer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::itd::MAX_ITD_DELAY;
+    use crate::itd::{ITD_RAMP_FRAMES, MAX_ITD_DELAY};
 
     /// Interleaved stereo data whose left and right channels differ, so a
     /// decoder that reads the wrong channel is visible.
@@ -1707,8 +1732,9 @@ mod tests {
     /// held sound on a moving emitter needs.
     ///
     /// Measured on the output either side of the call: hard left, then hard
-    /// right, from one voice that never restarts. A `set_mix` that silently
-    /// missed would leave the second block panned left like the first.
+    /// right once the pan has ramped across, from one voice that never
+    /// restarts. A `set_mix` that silently missed would leave the second block
+    /// panned left like the first.
     #[test]
     fn set_mix_re_aims_a_voice_that_is_already_playing() {
         let mixer = Mixer::new();
@@ -1738,6 +1764,8 @@ mod tests {
             },
         ));
 
+        let mut ramp = vec![0.0f32; ITD_RAMP_FRAMES as usize * CHANNELS];
+        mixer.fill(&mut ramp, 48_000);
         buf.fill(0.0);
         mixer.fill(&mut buf, 48_000);
         for frame in buf.as_chunks::<CHANNELS>().0 {

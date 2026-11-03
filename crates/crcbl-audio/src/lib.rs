@@ -41,6 +41,7 @@
 
 pub mod event;
 pub mod itd;
+mod mix_ramp;
 pub mod mixer;
 pub mod occlusion;
 pub mod qoa;

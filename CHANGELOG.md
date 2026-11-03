@@ -57,6 +57,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   to the new one, so it is never swept and never pitched. A voice built with
   `Voice::with_mix` still starts at its ITD, and a voice whose ITD does not
   change renders the same samples as before.
+- **`Mixer::set_mix` no longer steps a playing voice's level, pan or pitch.**
+  The new volume, channel gains and pitch ratio used to take effect at the next
+  block boundary, so a cut in level or a pan swap clicked and a pitch change
+  jumped the tone's frequency in one frame. All three now ramp linearly over
+  `ITD_RAMP_FRAMES` from the values the voice is at, so a re-aim during a ramp
+  starts from where it had got to. A pitch ramp moves the playback rate, and the
+  read position follows it continuously. `Voice::with_mix` and the `with_*`
+  builders still start at their values, and a voice whose mix does not change
+  renders the same samples as before.
+- **A voice's playhead keeps its fraction of a frame between blocks.** It was
+  truncated to a whole frame at every block boundary, which played any voice
+  whose pitch, or whose device rate against the internal rate, did not advance a
+  whole number of frames per block slightly flat: at a pitch of 1.37 and
+  256-frame blocks, about 0.2% slow. Such voices now play at the requested rate,
+  so their samples differ from before; a voice that advances a whole number of
+  frames per block renders the same samples.
 
 ## [0.17.1] - 2026-11-03
 

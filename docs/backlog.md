@@ -21493,7 +21493,7 @@ slots must keep that, which means the id and the slot cannot be the same thing.
 
 ### ITD parameter smoothing and crossfaded delay lines (2026-08-27)
 
-**The ITD half is built (2026-11-04); level, pan and pitch still step.** The
+**Built (2026-11-04): the ITD, and level, pan and pitch with it.** The
 2026-07-27 correction named three pieces: interpolated fractional delay,
 per-block parameter smoothing, and crossfaded dual delay lines for large jumps
 and ear swaps. `crcbl_audio::itd` now owns the delay lines and `VoiceItd`, and
@@ -21509,17 +21509,24 @@ sweep had got to; one during a crossfade waits for it to finish.
 bits it did before (pinned by digests captured from the old mixer in
 `itd::tests`).
 
-**What is left:** `Voice::apply_mix` still assigns `volume`, `gains` and `pitch`
-straight in, so a re-aimed voice steps its level and pan at the block boundary
-(a gain step is a smaller click than a delay step, but it is one), and a pitch
-change takes effect in one frame. Smoothing them is the occlusion ramp's pattern
-again: a target, a ramp from where the voice is, and each frame worked out from
-the ramp's two ends.
+Level, pan and pitch followed the same day (`crcbl_audio::mix_ramp`, `MixRamp`):
+`set_mix` ramps volume, both channel gains and the pitch ratio linearly over
+`ITD_RAMP_FRAMES` from the values the voice is at, each frame worked out from
+the ramp's two ends as the occlusion ramp does. The ITD's length rather than one
+of its own, so the level and time differences between the ears move together. A
+pitch ramp changes the rate the playhead advances by each frame, and the
+playhead now keeps its fraction of a frame between blocks; it was truncated at
+every block boundary, which jumped every pitch ramp and played any voice that
+does not advance a whole number of frames per block slightly flat (device rates
+other than 48 kHz included). Re-sending an unchanged mix starts nothing, and
+digests captured from the old mixer pin that (`mix_ramp::tests`). The release
+fade of `Mixer::stop` and a steal is a separate factor on top and was left as it
+is; `Mixer::set_bus_gain` still steps a bus's gain, which nothing here was asked
+to cover.
 
 **Unblocked:** the grammar-continuity property test under _Audio unit and
 property tests the plan specifies_ (an orbiting emitter shows no pitch glide
-beyond a stated cents bound) no longer waits on this for the ITD. It still waits
-on the pitch half above.
+beyond a stated cents bound) no longer waits on this.
 
 ### Audio's transcendentals and deny (2026-08-27, re-decided 2026-09-17)
 

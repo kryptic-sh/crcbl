@@ -3,13 +3,13 @@ use crate::mixer::{Mixer, Voice, VoiceMix};
 use crate::{AudioSource, CHANNELS, INTERNAL_SAMPLE_RATE};
 
 /// The block every test renders in, and the boundary a re-aim lands on.
-const BLOCK: usize = 256;
+pub(crate) const BLOCK: usize = 256;
 
 /// The tone's period in frames. A whole number, so the looped data joins
 /// without a seam, and a power of two dividing [`CHANGE_FRAME`], so every
 /// re-aim lands on an upward zero crossing: where the tone is steepest and a
 /// delay that steps shows the most.
-const PERIOD: usize = 128;
+pub(crate) const PERIOD: usize = 128;
 
 /// The tone's peak level.
 const AMPLITUDE: f32 = 0.5;
@@ -28,13 +28,13 @@ const STILL_FRAMES: usize = 16 * BLOCK;
 
 /// The first frame a step is measured from: by then the deepest delay a test
 /// starts at has filled with tone, so the line's silent start is not counted.
-const MEASURE_FROM: usize = 2 * BLOCK;
+pub(crate) const MEASURE_FROM: usize = 2 * BLOCK;
 
 /// How far above the tone's own steepest step the output may step. The
 /// smoothing adds a sliver to the slope (a sweep runs the tone a little faster
 /// or slower, a crossfade moves between two taps), and a delay that steps adds
 /// a multiple of it.
-const STEP_MARGIN: f32 = 1.10;
+pub(crate) const STEP_MARGIN: f32 = 1.10;
 
 /// How close the settled output must sit to the tone delayed by the new ITD
 /// written out: the gain chain's rounding at unity gains.
@@ -44,7 +44,7 @@ const SETTLED_TOLERANCE: f32 = 1e-6;
 ///
 /// `crcbl_core::trig::sin` rather than `f64::sin`, so the samples are the same
 /// bits on every target and the digest below can pin them.
-fn tone() -> Vec<f32> {
+pub(crate) fn tone() -> Vec<f32> {
     let mut out = Vec::with_capacity(PERIOD * CHANNELS);
     for n in 0..PERIOD {
         let phase = core::f64::consts::TAU * n as f64 / PERIOD as f64;
@@ -63,7 +63,7 @@ fn tone_at(n: isize) -> f32 {
 }
 
 /// The tone's largest sample-to-sample step: the slope every bound is made of.
-fn tone_slope() -> f32 {
+pub(crate) fn tone_slope() -> f32 {
     let x = tone();
     (0..PERIOD)
         .map(|n| (x[((n + 1) % PERIOD) * CHANNELS] - x[n * CHANNELS]).abs())
@@ -98,7 +98,7 @@ fn render(before: f32, changes: &[(usize, f32)], frames: usize) -> Vec<f32> {
 
 /// The largest step either channel takes from [`MEASURE_FROM`] on, with the
 /// frame and channel it was taken at.
-fn largest_step(out: &[f32]) -> (f32, usize, usize) {
+pub(crate) fn largest_step(out: &[f32]) -> (f32, usize, usize) {
     let frames = out.as_chunks::<CHANNELS>().0;
     let mut largest = (0.0, 0, 0);
     for (n, pair) in frames.windows(2).enumerate().skip(MEASURE_FROM - 1) {
@@ -247,7 +247,7 @@ fn a_re_aim_during_a_change_still_lands_without_a_step() {
 }
 
 /// The FNV-1a digest of `out`'s sample bits.
-fn digest(out: &[f32]) -> u64 {
+pub(crate) fn digest(out: &[f32]) -> u64 {
     let bytes: Vec<u8> = out.iter().flat_map(|s| s.to_bits().to_le_bytes()).collect();
     crcbl_core::hash::fnv1a_64(&bytes)
 }
