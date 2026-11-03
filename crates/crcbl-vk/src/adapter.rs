@@ -30,6 +30,7 @@ use ash::{ext, khr, vk};
 
 use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
 
+use crate::loader;
 use crate::present_timing;
 
 /// One enumerated physical device, with everything selection needs.
@@ -701,8 +702,12 @@ pub(crate) fn enumerate(
     surface_caps2: bool,
     one_driver: bool,
 ) -> Vec<AdapterRecord> {
+    // Exclusive: the loader re-scans its drivers here, `dlclose`-ing some,
+    // which is the half of the race the gdb capture caught — see `loader`.
+    // Held for this call alone; `describe` below needs no lock.
+    //
     // SAFETY: `instance` is live and the call only reads driver-owned tables.
-    let physicals = match unsafe { instance.enumerate_physical_devices() } {
+    let physicals = match loader::exclusive(|| unsafe { instance.enumerate_physical_devices() }) {
         Ok(physicals) => physicals,
         // A driver opened alone fails this when it has no device here —
         // Intel's Gen7/8 driver beside a newer Intel GPU — and the caller

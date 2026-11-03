@@ -28471,6 +28471,27 @@ it will say a longer time rather than the same one.
 
 ### The viewer's suite has segfaulted six times on lavapipe (2026-08-19, 08-28, 09-05, 11-01, 11-03 twice)
 
+**2026-11-04: a stack, and a workaround for a loader bug.** The step looped
+under gdb on a diagnostic branch (run 41714978409: loader `libvulkan1` 1.4.341,
+Mesa 26.0.8 llvmpipe, validation on) caught it on the first pass. The crashing
+thread was in `vkSetDebugUtilsObjectNameEXT`, reached from
+`VkDevice::create_buffer` (`DeviceInner::set_object_name`) via
+`UiRenderer::begin_frame` in `the_shelf_row_opens_the_model_it_names`; it had
+passed through the validation layer and crashed in the loader's own terminator.
+At the same moment another test thread, on a different instance, was in
+`vkEnumeratePhysicalDevices` (`adapter::enumerate`, from
+`VkInstance::open_with`) deep in `dlclose`: the loader rescanning its drivers.
+The spec asks external synchronisation only per instance and per device, so this
+is the loader's bug; it needs two live instances in one process, which test
+suites have constantly and applications almost never do. It replaces the
+parallel-device-creation theory below.
+
+`crcbl-vk`'s `loader` module now holds a process-wide `RwLock` across the
+conflicting calls: exclusive for instance creation, physical-device enumeration,
+the pre-instance queries and instance destruction; shared for
+`vkSetDebugUtilsObjectNameEXT`. Command-buffer labels are left unlocked, on a
+reading of the loader rather than an observation.
+
 **2026-11-03, again**, run 41706002497 on `a42ee919`: the same step and signal,
 every other job green, on a push that touched `crcbl-audio`, `crcbl-ui`'s dock
 tests and `tools/` — and the crashing test binary was the same build as the
@@ -28538,12 +28559,11 @@ test count but not in kind, and that the CI runner has four cores against this
 machine's 32 — so local parallelism is _higher_ and still does not fire it,
 which argues the trigger is contention or timing rather than thread count.
 
-**What would settle it**, in order of cost: serialise the device-opening viewer
-tests and watch whether the class disappears over the next few weeks — cheap,
-but unfalsifiable at two failures in forty-odd runs, so it would be a change
-made on a hypothesis and would have to say so; or loop the step in CI until it
-fires, which is the only thing that would produce a stack. Neither has been
-done. A third occurrence should stop being treated as a flake.
+**Keep this entry open until a CI loop of the viewer step on lavapipe runs
+clean** for well past the iterations it took to catch the stack. If it still
+fires, read the new stack; the next suspects are `vkCreateDevice` and
+`vkDestroyDevice`, which change the per-driver device list the name terminator
+walks and are not locked.
 
 ### Eight CI steps declare a lavapipe pin that pins nothing (2026-08-28)
 

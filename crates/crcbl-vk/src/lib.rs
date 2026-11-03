@@ -218,6 +218,7 @@ pub(crate) mod deletion;
 pub(crate) mod device;
 pub(crate) mod display;
 pub(crate) mod instance;
+pub(crate) mod loader;
 pub(crate) mod mem;
 pub(crate) mod pipeline;
 pub(crate) mod present_timing;

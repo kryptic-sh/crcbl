@@ -47,6 +47,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk` works around an intermittent segfault when two Vulkan instances
+  are used at once in one process.** The Vulkan loader (seen on 1.4.341, with
+  the validation layer on) walks its global instance list inside
+  `vkSetDebugUtilsObjectNameEXT` while another instance's
+  `vkEnumeratePhysicalDevices` re-scans drivers and unloads libraries, which
+  crashed `apps/viewer`'s parallel tests on lavapipe. A process-wide lock now
+  serialises instance creation, physical-device enumeration, the pre-instance
+  queries and instance destruction against object naming; naming on different
+  devices still runs concurrently, and command-buffer labels are untouched.
 - **`crcbl_audio::mixer::Mixer::set_mix` no longer steps a playing voice's
   interaural delay.** A new `itd_samples` used to replace the old one between
   blocks, which clicked: a held sound re-aimed across the field jumped its

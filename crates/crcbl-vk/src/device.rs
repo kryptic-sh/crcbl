@@ -66,6 +66,7 @@ use crate::conv;
 use crate::debug::{self, VALIDATION_LAYER};
 use crate::deletion::{Pins, RetireQueue};
 use crate::instance::{InstanceInner, next_owner_id};
+use crate::loader;
 use crate::mem::{self, MemoryRequest};
 use crate::pipeline::{
     BindGroupEntryRecord, BindGroupLayoutEntryRecord, PipelineEntry, PipelineLayoutEntry,
@@ -1230,8 +1231,10 @@ impl DeviceInner {
             .object_handle(handle)
             .object_name(&name);
         // SAFETY: `handle` names a live object created from this device, and
-        // `name` outlives the call.
-        let _ = unsafe { debug_ext.set_debug_utils_object_name(&info) };
+        // `name` outlives the call. Shared: the loader's terminator for this
+        // call walks every instance's driver list, which instance creation,
+        // enumeration and destruction rewrite — see `loader`.
+        let _ = loader::shared(|| unsafe { debug_ext.set_debug_utils_object_name(&info) });
     }
 
     fn queue_slot(&self, queue: QueueHandle) -> Result<QueueSlot, HalError> {

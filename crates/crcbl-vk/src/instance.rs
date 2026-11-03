@@ -14,6 +14,7 @@ use crcbl_hal::{
 use crate::adapter::{self, AdapterRecord};
 use crate::conv;
 use crate::debug::{self, ValidationReport, ValidationSink};
+use crate::loader;
 
 /// The Vulkan API version this backend targets.
 ///
@@ -349,8 +350,9 @@ impl Drop for InstanceInner {
         }
         // SAFETY: no device or surface remains (both are gone above; a live
         // device would still be holding an `Arc` to this struct and `Drop`
-        // would not be running).
-        unsafe { self.raw.destroy_instance(None) };
+        // would not be running). Exclusive: it removes this instance from the
+        // loader's global list — see `loader`.
+        loader::exclusive(|| unsafe { self.raw.destroy_instance(None) });
         // Strictly after the messenger, which is the only thing that could
         // still dereference it.
         // SAFETY: this is the pointer `debug::messenger_user_data` produced in
@@ -511,10 +513,15 @@ impl VkInstance {
         let entry = unsafe { ash::Entry::load() }
             .map_err(|error| OpenError::NoLoader(error.to_string()))?;
 
+        // Exclusive, as are the other pre-instance queries below: the loader
+        // answers them by loading and unloading layer and driver libraries —
+        // see `loader`.
+        //
         // SAFETY: `entry` is a freshly loaded, valid entry table.
-        let loader_version = unsafe { entry.try_enumerate_instance_version() }
-            .map_err(|error| OpenError::Instance(format!("{error:?}")))?
-            .unwrap_or(vk::API_VERSION_1_0);
+        let loader_version =
+            loader::exclusive(|| unsafe { entry.try_enumerate_instance_version() })
+                .map_err(|error| OpenError::Instance(format!("{error:?}")))?
+                .unwrap_or(vk::API_VERSION_1_0);
         if vk::api_version_major(loader_version) < 1
             || (vk::api_version_major(loader_version) == 1
                 && vk::api_version_minor(loader_version) < 3)
@@ -537,7 +544,7 @@ impl VkInstance {
             Vec::new()
         } else {
             // SAFETY: `entry` is valid; the call only reads the loader's tables.
-            unsafe { entry.enumerate_instance_extension_properties(None) }
+            loader::exclusive(|| unsafe { entry.enumerate_instance_extension_properties(None) })
                 .map_err(|error| OpenError::Instance(format!("{error:?}")))?
         };
         let has_extension = |name: &CStr| {
@@ -552,8 +559,9 @@ impl VkInstance {
         };
 
         // SAFETY: as above.
-        let available_layers = unsafe { entry.enumerate_instance_layer_properties() }
-            .map_err(|error| OpenError::Instance(format!("{error:?}")))?;
+        let available_layers =
+            loader::exclusive(|| unsafe { entry.enumerate_instance_layer_properties() })
+                .map_err(|error| OpenError::Instance(format!("{error:?}")))?;
         let validation_available = available_layers.iter().any(|properties| {
             properties
                 .layer_name_as_c_str()
@@ -639,9 +647,9 @@ impl VkInstance {
         let layer_extensions = if validation_enabled {
             // SAFETY: `entry` is valid and `VALIDATION_LAYER_C` is a NUL-
             // terminated name the loader just reported as available.
-            unsafe {
+            loader::exclusive(|| unsafe {
                 entry.enumerate_instance_extension_properties(Some(debug::VALIDATION_LAYER_C))
-            }
+            })
             .unwrap_or_default()
         } else {
             Vec::new()
@@ -750,7 +758,11 @@ impl VkInstance {
         // SAFETY: every pointer in `create_info` borrows a local that outlives
         // this call, both name arrays are NUL-terminated `&CStr` pointers, and
         // the chained structs are `push_next`ed exactly once each.
-        let raw = match unsafe { entry.create_instance(&create_info, None) } {
+        //
+        // Exclusive: creation adds to the loader's global instance list, which
+        // `vkSetDebugUtilsObjectNameEXT` walks — see `loader`. The messenger
+        // chained above may call back inside; it only logs and counts.
+        let raw = match loader::exclusive(|| unsafe { entry.create_instance(&create_info, None) }) {
             Ok(raw) => raw,
             Err(error) => {
                 // SAFETY: the messenger was never created, so nothing can call
@@ -856,7 +868,7 @@ impl VkInstance {
                 unsafe { debug_ext.destroy_debug_utils_messenger(messenger, None) };
             }
             // SAFETY: nothing was created from this instance.
-            unsafe { raw.destroy_instance(None) };
+            loader::exclusive(|| unsafe { raw.destroy_instance(None) });
             // SAFETY: the messenger is gone, so nothing can call back.
             unsafe { debug::drop_messenger_user_data(user_data) };
             return Err(OpenError::NoAdapters);
@@ -919,12 +931,16 @@ impl VkInstance {
     /// raises.
     #[must_use]
     pub fn loader_version(&self) -> (u32, u32, u32) {
+        // Exclusive like `open`'s own version query: the loader runs it
+        // through every implicit layer, which it loads to do so.
+        //
         // SAFETY: `entry` is the live entry table this instance was created
         // from; the call only reads the loader's own version.
-        let raw = unsafe { self.inner.entry.try_enumerate_instance_version() }
-            .ok()
-            .flatten()
-            .unwrap_or(vk::API_VERSION_1_0);
+        let raw =
+            loader::exclusive(|| unsafe { self.inner.entry.try_enumerate_instance_version() })
+                .ok()
+                .flatten()
+                .unwrap_or(vk::API_VERSION_1_0);
         (
             vk::api_version_major(raw),
             vk::api_version_minor(raw),
