@@ -201,9 +201,6 @@ pub(crate) struct RootPlan {
     /// This binding's own visibility. A root descriptor is one binding, so it
     /// need not widen to the union of the set's the way a table does.
     visibility: ShaderStages,
-    /// A storage buffer's element stride, as [`RangePlan::stride`]; zero for a
-    /// uniform buffer.
-    stride: u32,
 }
 
 impl RootPlan {
@@ -516,7 +513,6 @@ pub(crate) fn plan_layout(
                 range_type: range_type
                     .unwrap_or_else(|| unreachable!("a dynamic binding is a buffer")),
                 visibility: entry.visibility,
-                stride: storage_stride(entry.kind),
             });
             continue;
         }
@@ -583,9 +579,8 @@ fn register_bindings(layout: &BindGroupLayoutRecord) -> Vec<root::Binding> {
         .collect()
 }
 
-/// A storage buffer's declared element stride, or zero for any other kind —
-/// which is what marks a plan as a storage buffer, since a sampled image takes
-/// an SRV range too.
+/// A storage buffer's declared element stride, or zero for any other kind,
+/// whose view never reads it.
 const fn storage_stride(kind: BindingKind) -> u32 {
     match kind {
         BindingKind::StorageBuffer { stride, .. } => stride,
@@ -653,10 +648,6 @@ pub(crate) struct SetTables {
     /// The union of the *table* entries' visibilities, which is what a
     /// descriptor table takes. Each root descriptor carries its own.
     pub(crate) visibility: ShaderStages,
-    /// Every storage buffer the set declares, at the register it was assigned —
-    /// tables and root descriptors alike, since both are `StructuredBuffer`s in
-    /// the source.
-    pub(crate) storage: Vec<dxil::StorageRegister>,
 }
 
 /// One root descriptor, ready to become a `D3D12_ROOT_PARAMETER`.
@@ -705,40 +696,11 @@ pub(crate) fn ranges(layout: &BindGroupLayoutRecord, space: u32) -> SetTables {
         })
         .collect();
 
-    let storage = layout
-        .views
-        .iter()
-        .zip(&assigned)
-        .map(|(plan, register)| (plan.binding, plan.range_type, plan.stride, *register))
-        .chain(
-            layout
-                .roots
-                .iter()
-                .zip(
-                    assigned
-                        .iter()
-                        .skip(layout.views.len() + layout.samplers.len()),
-                )
-                .map(|(plan, register)| (plan.binding, plan.range_type, plan.stride, *register)),
-        )
-        .filter(|(.., stride, _)| *stride > 0)
-        .map(
-            |(binding, range_type, stride, register)| dxil::StorageRegister {
-                set: space,
-                binding,
-                class: register_class(range_type),
-                register,
-                stride,
-            },
-        )
-        .collect();
-
     SetTables {
         views,
         samplers,
         roots,
         visibility: layout.visibility,
-        storage,
     }
 }
 
@@ -1680,14 +1642,6 @@ mod tests {
         );
         assert_eq!(views[0].NumDescriptors, 1);
         assert!(tables.roots.is_empty(), "no binding here is dynamic");
-        assert!(
-            tables
-                .storage
-                .iter()
-                .all(|storage| storage.set == 1 && storage.register == storage.binding),
-            "a stride is held to the container at the same register and space: {:?}",
-            tables.storage
-        );
     }
 
     /// **An array that would run into a later binding's register is refused

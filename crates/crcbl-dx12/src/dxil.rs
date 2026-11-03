@@ -50,7 +50,7 @@
 //! the bindings its own SPIR-V declares, so the rule is measured rather than
 //! asserted.
 
-use crcbl_hal::{HalError, ShaderModuleDesc, ShaderSources, ShaderStages};
+use crcbl_hal::{BindingKind, HalError, ShaderModuleDesc, ShaderSources, ShaderStages};
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Direct3D12::D3D12_SHADER_BYTECODE;
 
@@ -236,16 +236,18 @@ impl Dxil {
     /// refuses a stride that disagrees.
     ///
     /// This is `crcbl-vk`'s `require_storage_strides`, read from DXIL: the
-    /// layout's [`BindingKind::StorageBuffer`](crcbl_hal::BindingKind::StorageBuffer)
-    /// stride becomes the view's `StructureByteStride`, and a view whose stride
-    /// is not the shader's element addresses the wrong bytes on hardware. A
-    /// declared buffer this stage does not use is not compared — one layout
-    /// serves every stage, and each container declares only what it reads.
+    /// layout's [`BindingKind::StorageBuffer`] stride becomes the view's
+    /// `StructureByteStride`, and a view whose stride is not the shader's
+    /// element addresses the wrong bytes on hardware. A declared buffer this
+    /// stage does not use is not compared — one layout serves every stage, and
+    /// each container declares only what it reads.
     ///
-    /// The register and space a binding is compared at are the ones
-    /// `crate::binding` assigned it — its binding number and its set; a layout
-    /// whose registers do not line up with the container fails here naming both,
-    /// rather than at a draw.
+    /// The storage buffers are read from `layout` — the same placed bindings
+    /// [`require_registers`](Self::require_registers) checks, each kind carrying
+    /// its stride — so the register and space a stride is compared at are the
+    /// ones the root signature declares: its binding number and its set. A
+    /// layout whose registers do not line up with the container fails here
+    /// naming both, rather than at a draw.
     ///
     /// # Errors
     ///
@@ -253,10 +255,20 @@ impl Dxil {
     /// both strides — or why the container's bitcode could not be read.
     pub(crate) fn require_storage_strides(
         &self,
-        declared: &[StorageRegister],
+        layout: &crate::registers::LayoutRegisters,
         entry_point: &str,
     ) -> Result<(), HalError> {
-        if declared.is_empty() {
+        let mut declared = layout
+            .bindings
+            .iter()
+            .filter_map(|placed| match placed.kind {
+                BindingKind::StorageBuffer { stride, .. } => Some((placed, stride)),
+                _ => None,
+            })
+            .peekable();
+        // A layout with no storage buffer needs no bitcode, so a container
+        // whose bitcode cannot be read must not refuse it.
+        if declared.peek().is_none() {
             return Ok(());
         }
         let structured = self.structured.as_ref().map_err(|reason| {
@@ -265,31 +277,26 @@ impl Dxil {
                  buffers: {reason}"
             ))
         })?;
-        for layout in declared {
-            let class = match layout.class {
+        for (placed, stride) in declared {
+            let class = match placed.class {
                 RegisterClass::Srv => crate::bitcode::BufferClass::ShaderResource,
                 RegisterClass::Uav => crate::bitcode::BufferClass::UnorderedAccess,
                 RegisterClass::Cbv | RegisterClass::Sampler => continue,
             };
             let Some(shader) = structured.iter().find(|buffer| {
                 buffer.class == class
-                    && buffer.space == layout.set
-                    && buffer.register == layout.register
+                    && buffer.space == placed.space
+                    && buffer.register == placed.register
             }) else {
                 continue;
             };
-            if shader.stride != layout.stride {
+            if shader.stride != stride {
                 return Err(HalError::ShaderCompilation(format!(
                     "`{entry_point}`: the storage buffer at set {} binding {} is declared with a \
-                     stride of {} bytes, and the container's structured buffer at {:?} register {} \
-                     has {}-byte elements. BindingKind::StorageBuffer's stride is the size of one \
-                     element of the array the shader declares",
-                    layout.set,
-                    layout.binding,
-                    layout.stride,
-                    layout.class,
-                    layout.register,
-                    shader.stride
+                     stride of {stride} bytes, and the container's structured buffer at {:?} \
+                     register {} has {}-byte elements. BindingKind::StorageBuffer's stride is the \
+                     size of one element of the array the shader declares",
+                    placed.space, placed.binding, placed.class, placed.register, shader.stride
                 )));
             }
         }
@@ -557,23 +564,6 @@ pub(crate) enum RegisterClass {
     Uav,
     /// `sN` — a sampler.
     Sampler,
-}
-
-/// One storage buffer a pipeline layout declares, at the register
-/// `crate::binding` assigned it — what [`Dxil::require_storage_strides`] holds
-/// each container to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct StorageRegister {
-    /// The set, which is also the register space.
-    pub(crate) set: u32,
-    /// The seam's binding number, for the message.
-    pub(crate) binding: u32,
-    /// `t` for a read-only storage buffer, `u` for a writable one.
-    pub(crate) class: RegisterClass,
-    pub(crate) register: u32,
-    /// [`BindingKind::StorageBuffer`](crcbl_hal::BindingKind::StorageBuffer)'s
-    /// stride.
-    pub(crate) stride: u32,
 }
 
 /// One record of a container's `PSV0` resource table.
@@ -1236,23 +1226,16 @@ mod tests {
             .map(|(_, bytes)| bytes)
             .expect("triangle commits a vertex container");
         let vertex = Dxil::parse(bytes, "triangle").expect("a committed container");
-        let at = |register, stride| StorageRegister {
-            set: 0,
-            binding: 0,
-            class: RegisterClass::Srv,
-            register,
-            stride,
-        };
 
         vertex
-            .require_storage_strides(&[at(0, 32)], "vertexMain")
+            .require_storage_strides(&storage_at(0, 32), "vertexMain")
             .expect("32 is the element's size");
         vertex
-            .require_storage_strides(&[at(9, 4)], "vertexMain")
+            .require_storage_strides(&storage_at(9, 4), "vertexMain")
             .expect("a register this container does not declare is not compared");
 
         let error = vertex
-            .require_storage_strides(&[at(0, 4)], "vertexMain")
+            .require_storage_strides(&storage_at(0, 4), "vertexMain")
             .expect_err("4 is not 32");
         let HalError::ShaderCompilation(text) = &error else {
             panic!("{error:?}");
@@ -1267,18 +1250,52 @@ mod tests {
     #[test]
     fn a_container_without_readable_bitcode_refuses_a_stride_check() {
         let fake = Dxil::parse(&container(KIND_VERTEX), "fake").expect("a header-only container");
-        let declared = [StorageRegister {
-            set: 0,
-            binding: 0,
-            class: RegisterClass::Srv,
-            register: 0,
-            stride: 4,
-        }];
         let error = fake
-            .require_storage_strides(&declared, "vertexMain")
+            .require_storage_strides(&storage_at(0, 4), "vertexMain")
             .expect_err("nothing to check against");
         assert!(matches!(error, HalError::ShaderCompilation(_)), "{error:?}");
-        fake.require_storage_strides(&[], "vertexMain")
+        fake.require_storage_strides(&crate::registers::LayoutRegisters::default(), "vertexMain")
+            .expect("a layout with no bindings needs no bitcode");
+        let uniform = crate::registers::LayoutRegisters {
+            bindings: crate::registers::place_set(
+                &[crcbl_hal::BindGroupLayoutEntry {
+                    kind: BindingKind::UniformBuffer { dynamic: false },
+                    ..storage_entry(0, 4)
+                }],
+                0,
+                &crcbl_hal::Limits::desktop(),
+            ),
+            push_constants: None,
+        };
+        fake.require_storage_strides(&uniform, "vertexMain")
             .expect("a layout with no storage buffers needs no bitcode");
+    }
+
+    /// A read-only storage buffer at `binding`, `stride` bytes an element.
+    fn storage_entry(binding: u32, stride: u32) -> crcbl_hal::BindGroupLayoutEntry {
+        crcbl_hal::BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::VERTEX,
+            kind: BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+                stride,
+            },
+            count: 1,
+            flags: crcbl_hal::BindingFlags::empty(),
+        }
+    }
+
+    /// A layout of [`storage_entry`] alone in set 0, placed as
+    /// `create_pipeline_layout` places it — so its register is `t<binding>`.
+    fn storage_at(binding: u32, stride: u32) -> crate::registers::LayoutRegisters {
+        crate::registers::LayoutRegisters {
+            bindings: crate::registers::place_set(
+                &[storage_entry(binding, stride)],
+                0,
+                &crcbl_hal::Limits::desktop(),
+            ),
+            push_constants: None,
+        }
     }
 }

@@ -192,13 +192,11 @@ pub(crate) struct PipelineLayoutEntry {
     /// [`push_constants`](crcbl_hal::CommandEncoder::push_constants) is checked
     /// against — see [`root::write`].
     pub(crate) push_constants: Option<root::Declared>,
-    /// Every storage buffer the sets declare, at its assigned register and with
-    /// its declared stride — what every stage's container is held to by
-    /// [`Dxil::require_storage_strides`](crate::dxil::Dxil::require_storage_strides).
-    pub(crate) storage: Vec<crate::dxil::StorageRegister>,
     /// Every register the root signature declares, and the binding behind it —
     /// what every stage's container is held to by
-    /// [`Dxil::require_registers`] before D3D12 sees the pipeline.
+    /// [`Dxil::require_registers`] before D3D12 sees the pipeline, and, through
+    /// each storage buffer's kind, by
+    /// [`Dxil::require_storage_strides`](crate::dxil::Dxil::require_storage_strides).
     pub(crate) registers: crate::registers::LayoutRegisters,
 }
 
@@ -364,10 +362,6 @@ pub(crate) fn layout(
         sets: plan.sets,
         layouts: sets.iter().map(|(handle, _)| *handle).collect(),
         push_constants: plan.push_constants,
-        storage: sets
-            .iter()
-            .flat_map(|(_, tables)| tables.storage.iter().copied())
-            .collect(),
         registers,
     })
 }
@@ -535,13 +529,13 @@ pub(crate) fn graphics(
     // container whose registers moved would fail that check with the wrong
     // sentence.
     vertex_dxil.require_registers(&layout.registers, label, desc.vertex.entry_point)?;
-    vertex_dxil.require_storage_strides(&layout.storage, desc.vertex.entry_point)?;
+    vertex_dxil.require_storage_strides(&layout.registers, desc.vertex.entry_point)?;
     let fragment_dxil = match (fragment, desc.fragment) {
         (Some(module), Some(entry)) => {
             let dxil = module.container(entry.entry_point)?;
             dxil.expect(ShaderStages::FRAGMENT, entry.entry_point)?;
             dxil.require_registers(&layout.registers, label, entry.entry_point)?;
-            dxil.require_storage_strides(&layout.storage, entry.entry_point)?;
+            dxil.require_storage_strides(&layout.registers, entry.entry_point)?;
             Some(dxil)
         }
         _ => None,
@@ -870,13 +864,13 @@ pub(crate) fn mesh(
     mesh_dxil.expect(ShaderStages::MESH, desc.mesh.entry_point)?;
     // Registers before strides, as in `graphics`.
     mesh_dxil.require_registers(&layout.registers, label, desc.mesh.entry_point)?;
-    mesh_dxil.require_storage_strides(&layout.storage, desc.mesh.entry_point)?;
+    mesh_dxil.require_storage_strides(&layout.registers, desc.mesh.entry_point)?;
     let task_dxil = match (task, desc.task) {
         (Some(module), Some(entry)) => {
             let dxil = module.container(entry.entry_point)?;
             dxil.expect(ShaderStages::TASK, entry.entry_point)?;
             dxil.require_registers(&layout.registers, label, entry.entry_point)?;
-            dxil.require_storage_strides(&layout.storage, entry.entry_point)?;
+            dxil.require_storage_strides(&layout.registers, entry.entry_point)?;
             Some(dxil)
         }
         _ => None,
@@ -886,7 +880,7 @@ pub(crate) fn mesh(
             let dxil = module.container(entry.entry_point)?;
             dxil.expect(ShaderStages::FRAGMENT, entry.entry_point)?;
             dxil.require_registers(&layout.registers, label, entry.entry_point)?;
-            dxil.require_storage_strides(&layout.storage, entry.entry_point)?;
+            dxil.require_storage_strides(&layout.registers, entry.entry_point)?;
             Some(dxil)
         }
         // **On WARP, a pixel shader that does nothing rather than none.** WARP
@@ -1031,7 +1025,7 @@ pub(crate) fn compute(
     dxil.expect(ShaderStages::COMPUTE, desc.compute.entry_point)?;
     // Registers before strides, as in `graphics`.
     dxil.require_registers(&layout.registers, label, desc.compute.entry_point)?;
-    dxil.require_storage_strides(&layout.storage, desc.compute.entry_point)?;
+    dxil.require_storage_strides(&layout.registers, desc.compute.entry_point)?;
     if let Some(declared) = dxil.numthreads()
         && declared != desc.workgroup_size
     {

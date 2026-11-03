@@ -11391,14 +11391,6 @@ layout's registers before `Create*PipelineState` (`crate::registers`,
 `Dxil::require_registers`), so EW-style game DXIL numbered per class is refused
 by name instead of with `E_INVALIDARG`. Open:
 
-- **`PipelineLayoutEntry::storage` is a second derivation of a layout's
-  registers.** It could be derived from `LayoutRegisters` (a storage binding's
-  kind carries its stride); a refactor with no outward effect, not done. The
-  root signature's placement (`binding::register_bindings`) and the one checked
-  at pipeline creation (`registers::place_set`) are held equal, class and
-  declared count, by
-  `the_root_signature_and_the_checked_registers_place_every_binding_alike`; the
-  register itself is the binding number in both (`root::assign_registers`).
 - **A container with no `PSV0` part is now refused at pipeline creation.** Every
   `dxc`-signed container carries one; a hand-built or stripped container that
   D3D12 might have accepted is not. Not seen in practice.
