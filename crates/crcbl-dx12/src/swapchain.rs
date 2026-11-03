@@ -82,12 +82,12 @@ use core::time::Duration;
 use std::sync::Arc;
 
 use crcbl_hal::{
-    CompositeAlpha, Format, HalError, ImageHandle, ImageViewHandle, PresentMode, SurfaceError,
-    SwapchainDesc,
+    CommandBufferHandle, CompositeAlpha, Format, HalError, ImageHandle, ImageViewHandle,
+    PresentMode, SurfaceError, SwapchainDesc,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Graphics::Direct3D12::{
-    D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, ID3D12CommandQueue, ID3D12Device,
+    D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, ID3D12CommandQueue, ID3D12Device, ID3D12Resource,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE, DXGI_ALPHA_MODE_IGNORE, DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT,
@@ -531,12 +531,52 @@ pub(crate) fn create(
     ))
 }
 
+/// Refuses a resize while a live command buffer still holds a back buffer.
+///
+/// `crate::command`'s encoder keeps a reference to every resource it records
+/// against until the command buffer is destroyed, and `ResizeBuffers` refuses
+/// while *any* reference to a back buffer is alive — with `E_INVALIDARG` and no
+/// word about which. `reconfigure_swapchain` releases everything it owns, so a
+/// command buffer the caller has not destroyed is the one holder left, and this
+/// names it before anything is torn down.
+///
+/// Identity is the COM interface pointer, the same key the encoder dedupes its
+/// list on: two `ID3D12Resource`s describing equal textures are still two
+/// textures.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`], naming the first command buffer found
+/// holding one.
+pub(crate) fn check_back_buffers_released<'a>(
+    back_buffers: &[ID3D12Resource],
+    command_buffers: impl IntoIterator<Item = (CommandBufferHandle, &'a [ID3D12Resource])>,
+) -> Result<(), HalError> {
+    let holds_back_buffer = |resource: &ID3D12Resource| {
+        back_buffers
+            .iter()
+            .any(|back_buffer| back_buffer.as_raw() == resource.as_raw())
+    };
+    for (handle, retained) in command_buffers {
+        if retained.iter().any(holds_back_buffer) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "reconfigure_swapchain cannot resize while command buffer {:#x} still holds one \
+                 of this swapchain's back buffers, which ResizeBuffers refuses; destroy finished \
+                 command buffers with destroy_command_buffer before reconfiguring",
+                handle.to_bits()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `ResizeBuffers` for a reconfigure, with the same flags the swapchain was
 /// created with.
 ///
 /// Every reference to the old back buffers must already be gone — the caller's
-/// job, and `crate::device`'s `reconfigure_swapchain` does it by destroying the
-/// views and images first and waiting for the queue.
+/// job, and `crate::device`'s `reconfigure_swapchain` does it by refusing while
+/// a command buffer still holds one ([`check_back_buffers_released`]), then
+/// destroying the views and images and waiting for the queue.
 ///
 /// # Errors
 ///
@@ -1096,6 +1136,47 @@ mod tests {
         // `PresentInfo::present_id` documents and what would otherwise leave a
         // pacing loop blocking for a frame that no longer exists.
         let resized = configure(surface, &caps, RESIZED);
+
+        // **First, a command buffer still holding a back buffer is refused by
+        // name**, instead of reaching `ResizeBuffers` and its anonymous
+        // `E_INVALIDARG`. One barrier is enough, and it is never submitted: the
+        // encoder takes its reference while recording. Destroying it is
+        // what lets the reconfigure below through, which is also the proof the
+        // refusal destroyed nothing of the swapchain's on its way out.
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let frame = device
+            .acquire_next_frame(swapchain)
+            .expect("a back buffer to record against");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-dx12 e2e command buffer kept across a resize"),
+            queue,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                frame.image,
+                ImageSubresourceRange::all(format),
+                ResourceState::Undefined,
+                ResourceState::ColorAttachment,
+            )],
+            ..Barriers::default()
+        });
+        let kept = encoder
+            .finish()
+            .unwrap_or_else(|error| panic!("stage=finish kept: {error:?}"));
+        let error = device
+            .reconfigure_swapchain(swapchain, &resized)
+            .expect_err("a live command buffer holds a back buffer");
+        let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = &error else {
+            panic!("a held back buffer is refused as a descriptor problem: {error:?}");
+        };
+        assert!(
+            message.contains(&format!("{:#x}", kept.to_bits())),
+            "the refusal does not name the command buffer holding the back buffer: {message}"
+        );
+        device.destroy_command_buffer(kept);
+
         device
             .reconfigure_swapchain(swapchain, &resized)
             .expect("ResizeBuffers after the views and images were released");

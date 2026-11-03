@@ -32761,17 +32761,6 @@ arithmetic (host-testable, and its tests run on any `cargo test`);
   outstanding; it was **considered and declined** for this slice as machinery
   ahead of a caller that needs it.
 
-- **A command buffer the caller has not destroyed blocks a resize.** The encoder
-  retains every resource it records against, so a `CommandBufferHandle` still in
-  the caller's hand holds a reference to a back buffer and `ResizeBuffers`
-  refuses. `reconfigure_swapchain` waits for the queue and destroys the
-  swapchain's own views and images, which is everything it can reach; the rest
-  is the caller obeying the seam's existing rule about destroying finished
-  command buffers. Nothing tests it — the test helper destroys its command
-  buffer every frame — and the failure is a DXGI refusal with no field named,
-  which is the class of thing `crcbl_dx12::swapchain`'s `check` otherwise turns
-  into something readable.
-
 - **`reconfigure_swapchain` refuses a format change**, by name. `ResizeBuffers`
   does take a new format, but the entry's `format` is what the views are built
   from and what a _later_ reconfigure resizes with, so changing it means

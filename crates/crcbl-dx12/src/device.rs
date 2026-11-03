@@ -4700,15 +4700,16 @@ impl Device for Dx12Device {
     /// `E_INVALIDARG` from `ResizeBuffers` at best and a use-after-free at
     /// worst.
     ///
-    /// **One reference this cannot reach is a command buffer the caller has not
-    /// destroyed.** `crcbl_dx12::command`'s encoder takes its own reference to
-    /// every resource it records against, and a
-    /// [`CommandBufferHandle`] still in the
-    /// caller's hand still holds it — so a caller that renders into a swapchain
-    /// image and keeps the command buffer across a resize gets DXGI's refusal
-    /// rather than a resized swapchain. Destroying finished command buffers is
-    /// something the seam already asks for; this is the first call where
-    /// forgetting is visible.
+    /// **One reference this cannot release is a command buffer the caller has
+    /// not destroyed.** `crcbl_dx12::command`'s encoder takes its own reference
+    /// to every resource it records against, and a [`CommandBufferHandle`]
+    /// still in the caller's hand still holds it — so a windowed swapchain
+    /// whose back buffer such a command buffer recorded against is refused with
+    /// [`HalError::InvalidDescriptor`] naming that handle, before anything is
+    /// destroyed, rather than reaching DXGI's anonymous `E_INVALIDARG` half-way
+    /// through. Destroying finished command buffers is something the seam
+    /// already asks for; this is the first call where forgetting is visible.
+    /// See `crcbl_dx12::swapchain`'s `check_back_buffers_released`.
     ///
     /// The handle survives, which is the seam's promise across a resize storm —
     /// but the image and view handles do **not**: they are reissued, and a
@@ -4770,6 +4771,30 @@ impl Device for Dx12Device {
                      destroy it and create another",
                     entry.composite_alpha, desc.composite_alpha
                 ))));
+            }
+            if entry.raw.is_some() {
+                // Before anything is destroyed, so a refusal leaves the
+                // swapchain exactly as it was. Only a windowed swapchain has
+                // back buffers DXGI counts references to; an offscreen ring
+                // recreates plain images, and a command buffer still holding an
+                // old one only keeps that image alive a little longer.
+                let back_buffers = entry
+                    .images
+                    .iter()
+                    .map(|&image| {
+                        handle::lookup(&state.images, "image", image, self.inner.owner)
+                            .map(|image| image.raw.clone())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                swapchain::check_back_buffers_released(
+                    &back_buffers,
+                    state.command_buffers.iter().map(|(buffer, recorded)| {
+                        (
+                            handle::stamp(self.inner.owner, buffer),
+                            recorded.retained.as_slice(),
+                        )
+                    }),
+                )?;
             }
             (entry.images.clone(), entry.views.clone())
         };
@@ -10764,6 +10789,90 @@ pub(crate) mod tests {
 
         device.destroy_pipeline_layout(pipeline_layout);
         device.destroy_bind_group_layout(set_layout);
+    }
+
+    /// **A command buffer still holding a back buffer is named; one holding
+    /// only other resources is not.**
+    ///
+    /// The resources are real, because the property is about COM identity:
+    /// all four buffers share one description, so a check that compared what
+    /// the resources *are* rather than which object they are would refuse
+    /// every list here. The refused case puts its back buffer second in the
+    /// second list, behind a list and an entry that must both be passed over,
+    /// and has a later list holding the other back buffer — so the handle the
+    /// message names is the first holder, not the last or the only one.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_resize_is_refused_naming_the_command_buffer_that_holds_a_back_buffer() {
+        let (_instance, device) = open_device();
+        let buffer = |label| {
+            device
+                .create_buffer(&BufferDesc {
+                    label: Some(label),
+                    size: 256,
+                    usage: BufferUsage::TRANSFER_DST,
+                    memory: MemoryLocation::DeviceLocal,
+                })
+                .expect("a buffer")
+        };
+        let handles = [
+            buffer("crcbl-dx12 stand-in back buffer 0"),
+            buffer("crcbl-dx12 stand-in back buffer 1"),
+            buffer("crcbl-dx12 unrelated buffer 0"),
+            buffer("crcbl-dx12 unrelated buffer 1"),
+        ];
+        let [back_0, back_1, other_0, other_1] =
+            handles.map(|handle| device.inner.buffer(handle).expect("a live buffer").raw);
+        let back_buffers = [back_0.clone(), back_1.clone()];
+        let command_buffer = |bits| -> CommandBufferHandle {
+            Handle::from_bits(bits).expect("a non-zero generation")
+        };
+        let (first, holder, later) = (
+            command_buffer(0x1_0000_0001),
+            command_buffer(0x1_0000_0002),
+            command_buffer(0x1_0000_0003),
+        );
+
+        swapchain::check_back_buffers_released(&back_buffers, [])
+            .expect("no command buffers hold nothing");
+        swapchain::check_back_buffers_released(
+            &back_buffers,
+            [
+                (first, &[][..]),
+                (holder, &[other_0.clone()][..]),
+                (later, &[other_1.clone(), other_0.clone()][..]),
+            ],
+        )
+        .expect("lists holding only other resources leave the back buffers free");
+
+        let error = swapchain::check_back_buffers_released(
+            &back_buffers,
+            [
+                (first, &[other_0.clone()][..]),
+                (holder, &[other_1.clone(), back_1.clone()][..]),
+                (later, &[back_0.clone()][..]),
+            ],
+        )
+        .expect_err("a list holding a back buffer must refuse the resize");
+        let HalError::InvalidDescriptor(message) = &error else {
+            panic!("a held back buffer is a caller's descriptor problem: {error:?}");
+        };
+        let named =
+            |handle: CommandBufferHandle| message.contains(&format!("{:#x}", handle.to_bits()));
+        assert!(named(holder), "the first holder is not named: {message}");
+        assert!(
+            !named(first) && !named(later),
+            "a handle other than the first holder is named: {message}"
+        );
+        assert!(
+            message.contains("destroy_command_buffer"),
+            "the message does not say what to do: {message}"
+        );
+
+        drop((back_buffers, back_0, back_1, other_0, other_1));
+        for handle in handles {
+            device.destroy_buffer(handle);
+        }
     }
 
     /// A destroyed command buffer stops resolving, so a second submission of it

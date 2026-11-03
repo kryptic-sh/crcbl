@@ -13,6 +13,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Changed
+
+- **The D3D12 backend's `reconfigure_swapchain` names the command buffer that
+  blocks a resize.** A command buffer keeps a reference to every resource it
+  recorded against until it is destroyed, and `ResizeBuffers` refuses while any
+  reference to a back buffer is alive — previously as a bare DXGI
+  `E_INVALIDARG`, after the swapchain's views and images had already been
+  destroyed. A windowed swapchain is now refused with
+  `HalError::InvalidDescriptor` naming the live command buffer's handle and
+  asking for `destroy_command_buffer` first, before anything is changed, so the
+  swapchain stays usable. Offscreen rings are unaffected.
+
 ## [0.17.1] - 2026-11-03
 
 ### Fixed
