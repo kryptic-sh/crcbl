@@ -30700,6 +30700,20 @@ headless and says so. Work: the flag, the clock selection, and the per-machine
 perf baseline (_Profiling: five of the eight gaps are still open_) as its second
 consumer.
 
+**On Windows, `crcbl-dx12 --run-ignored all` also reaches the display
+(2026-11-04).** Four `swapchain::tests` give DXGI a real window (`TestWindow`: a
+320×200 `WS_POPUP` shown with `SW_SHOWNOACTIVATE`, so it takes no focus but is
+visible): `a_descriptor_flip_discard_rejects_is_refused_before_dxgi_sees_it`,
+`a_dxgi_swapchain_keeps_working_after_its_surface_handle_is_destroyed`,
+`a_transparent_window_presents_premultiplied_through_directcomposition` and
+`a_windowed_swapchain_presents_paces_and_resizes_on_a_real_hwnd`. Their
+`#[ignore]` reason reads "needs a real D3D12 device", the same as the offscreen
+device tests beside them, so a local hardware run of the crate's ignored tests
+showed the popup several times before anyone noticed. Local runs now exclude the
+four by name. Not done: an `#[ignore]` reason (or a nextest group) that
+separates the window tests from the offscreen ones, so the filter is not
+something each run has to remember.
+
 ## `--pacing` and `--fps` reach the engine; three quarters of what they can ask for is unexercised
 
 `crcbl::args::Common::pacing` and `::limit` carry the two values,
