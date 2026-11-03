@@ -28898,79 +28898,11 @@ the downloaded site's SHA-256 equals the expected digest (`8f5e793d…`, checked
 hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
 43/43); unverified anywhere else.
 
-### dx12's remaining blockers, ordered — and two reasons that were wrong
-
-dx12's remaining rows are none of them API absences — its own `supports` comment
-says so. Planned 2026-08-18 against the `windows` 0.62.2 bindings and
-`wgpu-hal`'s dx12 backend on disk. **Two of the divergence list's own stated
-reasons did not survive reading the code**, and both change what the work is:
-
-- **The shader-visible descriptor heap already exists.** The three `Declined`
-  fill rows say the obstacle is a heap `crcbl_dx12::descriptor` does not create.
-  True of `descriptor.rs`, whose docs say the flag is "deliberately never set" —
-  but `binding.rs` creates shader-visible CBV/SRV/UAV and sampler heaps lazily
-  and hands them to `SetDescriptorHeaps`, and has since the bind-group slice.
-  There is no descriptor-heap prerequisite to schedule.
-- **No committed DXIL had a push-constant block.** The `PushConstants` row said
-  nothing knew which root slot the committed DXIL puts one at. No `.slang` in
-  the repo declared one — `ui.slang`'s was replaced by a bound uniform buffer in
-  2026-08 — and every `push_constants:` field in `crcbl-render` is still `None`.
-  The obstacle was a missing test artifact, not a missing fact about a shader,
-  and `push_constant_probe.slang` has since supplied it.
-
-**The one real shared prerequisite is about five lines:** adapter caps are
-computed before any device or queue exists, and `Features::TIMESTAMP_QUERY` is
-withheld because the timestamp period needs `GetTimestampFrequency`, which needs
-a queue. Let `Dx12Device::open` amend caps after the queue it already creates,
-and move the queue-free flags into `features_of`. Both the sync and query slices
-need it.
-
-**The order, and why:**
-
-1. ~~Depth copy~~ — **landed.** It also found a real defect nothing else would
-   have: the row pitch came from the format's block size rather than the plane's
-   texel size, so every copy of a multi-plane depth format read the buffer at
-   the wrong stride.
-2. ~~Sync~~ — **landed**, four rows in one slice. It also implemented
-   `ReadbackDesc::after`, whose refusal reason ("`create_semaphore` refuses")
-   the same change made false.
-3. ~~Queries~~ — **landed.** The hidden-resolve-buffer shape it needed is in the
-   commit; a statistics set still refuses `query_results`, which is the seam
-   defect below rather than a backend gap.
-4. ~~MSAA resolve~~ — **landed.** The trap was this backend's own: a `D2`
-   render-target view addresses layer zero alone, so reading the layer count
-   would have planned a resolve per layer for a descriptor covering one.
-5. ~~Push constants~~ — **landed.** The artifact it was waiting on is
-   `push_constant_probe.slang` and its committed `dxil`, and dx12 now carries no
-   `PushConstants` row in `DIVERGENCES` at all. WGSL cannot carry the block, so
-   the artifact's target list excludes wgsl and `crcbl-webgpu` stays refused.
-6. **Mesh, and only after a measurement.** Largest and riskiest. The measurement
-   it was gated on has since been taken: `crcbl-dx12/src/adapter.rs`'s mesh
-   probe calls `CheckFeatureSupport` for `D3D12_FEATURE_DATA_D3D12_OPTIONS7` and
-   prints the verdict, and WARP answers `MeshShaderTier = TIER_1` at shader
-   model 6.8. What is still true is that `features_of` never asks, so the
-   _reported_ support is still no mesh support **by construction rather than by
-   measurement**. It would also be _silently_ unprovable — `MeshShading` is
-   feature-gated — though a retirement now requires the backend to answer
-   `Support::Yes`, so the row cannot be deleted on nobody's evidence any more.
-   And reporting the flag flips `GeometryPath` to `MeshShader` for every D3D12
-   adapter, which turns
-   `the_cube_scene_draws_the_same_frame_on_every_geometry_path` into a real
-   cross-path comparison rather than re-keying any golden — see "There is no
-   golden re-bless, and this entry said there was" above. Split it:
-   probe-and-log first (done), then the PSO stream with the flag still withheld,
-   then the flag only once a mesh frame has actually been drawn.
-
-**Every slice must delete its rows from both `DIVERGENCES` and
-`REVIEWED_BLOCKERS`** or the snapshot test fails — that is the mechanism working
-— and must shrink the dx12-local test asserting every remaining refusal names
-itself.
-
 ### Five Metal divergence reasons that are wrong
 
-Same exercise as the dx12 pass, and it found more. Two of these mislead about
-_who owns the work_, which is what makes them expensive rather than merely
-untidy.
+Same exercise as the dx12 pass (whose blockers have all shipped), and it found
+more. Two of these mislead about _who owns the work_, which is what makes them
+expensive rather than merely untidy.
 
 1. ~~`PushConstants`~~ — **closed.** The obstacle never existed, and it was
    written down three times. The record of what the wrong reason cost, and the
