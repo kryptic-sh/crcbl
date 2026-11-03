@@ -28487,7 +28487,14 @@ and it is spent only on the path that would otherwise have failed. **Whether
 that is enough is not yet known** — the next occurrence is the measurement, and
 it will say a longer time rather than the same one.
 
-### The viewer's suite has segfaulted four times on lavapipe (2026-08-19, 08-28, 09-05, 11-01)
+### The viewer's suite has segfaulted five times on lavapipe (2026-08-19, 08-28, 09-05, 11-01, 11-03)
+
+**2026-11-03**, run 41681307895 on `5a80cc31`: the same step and the same
+`signal: 11, SIGSEGV` from `crcbl_viewer-… --quiet`, with every other job green.
+It came just after a device opened with validation on, now on a newer driver
+(llvmpipe, Mesa 26.0.8, LLVM 21.1.8), so the CI side is no longer the Mesa
+25.2.8 build the 09-05 note blamed. The push changed only `crcbl-dx12`, which no
+Linux build compiles. The failed job was re-run.
 
 **2026-11-01**, run 41280519963 on `189b122a`: the same step, the same
 `signal: 11, SIGSEGV` from `crcbl_viewer-… --quiet`, right after the suite
