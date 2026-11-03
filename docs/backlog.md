@@ -22473,8 +22473,6 @@ layout and MAC by hand and flip every byte and bound input. The discovery
   would rotate by accepting the previous key for one `TOKEN_LIFETIME` after
   minting under a new one; not built, since a LAN session's run is the key's
   natural life.
-- **`spent_full` has no test.** Reaching `MAX_SPENT_TOKENS` takes that many
-  valid handshakes within one lifetime; the branch is unexercised.
 - **A dual-stack listener** would see one client as either an IPv4 or an
   IPv4-mapped IPv6 address, and the token binds the form it was minted for. The
   listener binds one family today, so it cannot arise; a dual-stack bind would

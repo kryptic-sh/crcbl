@@ -314,3 +314,39 @@ fn an_old_versions_reply_is_not_taken() {
     });
     assert_eq!(client.stats().stray, 1);
 }
+
+/// **A valid token is turned away while [`MAX_SPENT_TOKENS`] spent tokens are
+/// remembered**, with nothing sent and the refusal counted, and the table
+/// frees as the spent tokens expire: a token minted after that buys its
+/// handshake again. The table is filled through
+/// [`UdpListener::spend_serials`] rather than by that many handshakes.
+#[test]
+fn a_full_spent_table_turns_a_valid_token_away_until_it_expires() {
+    let clock = ManualClock::new();
+    let mut listener = listener(ListenerConfig::new(PROTOCOL), clock.clone());
+    listener.spend_serials(MAX_SPENT_TOKENS, clock.now() + TOKEN_LIFETIME);
+
+    let refused = bind_loopback();
+    present_token(&mut listener, &refused, hello_from(1));
+    wait_until("the refusal", || {
+        assert!(listener.accept().is_none(), "nothing confirmed");
+        listener.stats().spent_full == 1
+    });
+    assert!(
+        settled(&mut listener, &refused).is_empty(),
+        "nothing answers"
+    );
+    let stats = listener.stats();
+    assert_eq!(
+        (stats.challenges, stats.hellos_answered, stats.pending),
+        (1, 0, 0)
+    );
+
+    clock.advance(TOKEN_LIFETIME);
+    let admitted = bind_loopback();
+    present_token(&mut listener, &admitted, hello_from(2));
+    let peer = confirm(&mut listener, &admitted, 2);
+    assert_eq!(peer.state(), UdpState::Connected);
+    let stats = listener.stats();
+    assert_eq!((stats.spent_full, stats.hellos_answered), (1, 1));
+}

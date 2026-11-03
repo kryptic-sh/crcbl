@@ -229,6 +229,17 @@ impl<C: Clock + Clone> UdpListener<C> {
             ..demux.stats
         }
     }
+
+    /// Marks `count` serials as spent until `expires`, counted down from
+    /// `u64::MAX` so none is one this run mints: what reaching
+    /// [`MAX_SPENT_TOKENS`] would otherwise take as many valid handshakes.
+    #[cfg(test)]
+    pub(super) fn spend_serials(&self, count: usize, expires: Duration) {
+        let mut demux = self.shared.lock();
+        for serial in (0..count as u64).map(|offset| u64::MAX - offset) {
+            demux.spent.insert(serial, expires);
+        }
+    }
 }
 
 impl<C: Clock + Clone> Drop for UdpListener<C> {
