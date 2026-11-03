@@ -552,24 +552,30 @@ have to build them first.
   `GrassScene::new` (two 1×1 calm wind textures, no pipeline) stays in the build
   on purpose.
 
-### A failed lazy content build is not tested through a frame
+### A failed lazy build still ends the game in the engine loop
 
-`partial_builds.rs`'s
-`a_lazy_build_failing_inside_a_frame_is_finished_by_the_next` fails a create
-part-way through `View::build_passes` inside `begin_frame` (in `Bloom::new`,
-after the contact march was built) and checks the error, the live count and the
-retry on the next frames. `View::build_content` has no such test: its
-constructors are checked directly
-(`the_content_passes_release_on_every_failure`) but nothing yet fails one inside
-a frame with water or grass set and retries. Also unchanged: in the engine loop
-such a failure still ends the game where it used to fail at start-up.
+`partial_builds.rs` fails a lazy build inside `begin_frame` for both kinds and
+retries it: `a_lazy_build_failing_inside_a_frame_is_finished_by_the_next`
+(`View::build_passes`, in `Bloom::new` after the contact march was built) and
+`a_content_build_failing_inside_a_frame_is_finished_by_the_next`
+(`View::build_content`, in `Grass::new` after the water pass was built). Still
+unchanged: in the engine loop such a failure ends the game where it used to fail
+at start-up.
 
-Noticed while writing it, not a defect: a frame that fails in a view's build has
-already requested the culling counters' readback (`CullStatsRing`), so the live
-count after the failure is one readback higher; the next frame resolves it. And
-the retried frame lands in a different ring slot from a clean run's, so the live
-counts only match a clean run's after a full lap of `FRAMES_IN_FLIGHT` frames
-(each slot caches its own bind groups).
+Noticed while writing them, not defects:
+
+- A frame that fails in a view's build has already requested the culling
+  counters' readback (`CullStatsRing`), so the live count after the failure is
+  one readback higher; the next frame resolves it.
+- The retried frame lands in a different ring slot from a clean run's, so the
+  live counts only match a clean run's after a full lap of `FRAMES_IN_FLIGHT`
+  frames (each slot caches its own bind groups).
+- A failed content build keeps neither pass, not even the water pass finished
+  before the grass one failed: `ContentPasses::new` builds both or nothing.
+- What a failed content frame does keep is its slot's water mesh
+  (`water vertices`, `water indices`, `water media`), which
+  `WaterBodies::begin_frame` uploads before any view begins and that slot
+  reuses.
 
 ### Start-up: what `ForwardRenderer`'s build still submits on its own
 
