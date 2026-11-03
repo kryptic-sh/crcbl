@@ -622,7 +622,8 @@ The rules, each with its _why_:
   as an emitter moves clicks, and delay modulation _is_ pitch shift, which
   corrupts rules 3 and 4. The named machinery is interpolated fractional delay,
   per-block parameter smoothing, and crossfaded dual delay lines for large jumps
-  and ear swaps; only the first is built.
+  and ear swaps; all three are built for the ITD since 2026-11-04
+  (`crcbl_audio::itd`), and level, pan and pitch still step.
 - **A golden pins a waveform, never bytes.** The one golden began as a digest of
   every sample's `f32::to_bits` and failed on macOS and Windows at its first CI
   run; Windows being `x86_64` like the Linux runner pins that on libm, not the

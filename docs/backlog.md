@@ -21493,21 +21493,33 @@ slots must keep that, which means the id and the slot cannot be the same thing.
 
 ### ITD parameter smoothing and crossfaded delay lines (2026-08-27)
 
-**Partly built, and the missing part is what the 2026-07-27 correction was
-about.** The fractional delay line is there: per channel, linearly interpolated,
-capacity one past the longest ITD served so both taps stay in-buffer. There is
-**no per-block parameter smoothing and no crossfaded dual delay line**.
-`Mixer::set_mix` — whose own doc comment names the moving-emitter case, "a
-looping engine on a ship that crosses the field" — reaches `Voice::apply_mix`,
-which assigns `itd_samples` straight in with a clamp. A re-aimed voice therefore
-steps its delay length in one block, which is the click and the pitch glide the
-correction exists to prevent.
+**The ITD half is built (2026-11-04); level, pan and pitch still step.** The
+2026-07-27 correction named three pieces: interpolated fractional delay,
+per-block parameter smoothing, and crossfaded dual delay lines for large jumps
+and ear swaps. `crcbl_audio::itd` now owns the delay lines and `VoiceItd`, and
+`Mixer::set_mix` no longer steps a voice's delay: it moves over
+`ITD_RAMP_FRAMES` output frames, a fixed length rather than a block, so where a
+move is does not depend on how the device cuts blocks. A change of at most
+`ITD_SWEEP_LIMIT` samples per ear sweeps the delay (a test holds that pair under
+five cents of pitch bend). A larger change, or one that swaps which ear leads,
+crossfades two taps of the same line, the old delay frozen and the new one
+fading in, so it is never swept. A re-aim during a sweep starts from where the
+sweep had got to; one during a crossfade waits for it to finish.
+`Voice::with_mix` starts at its ITD with no move, and a constant ITD renders the
+bits it did before (pinned by digests captured from the old mixer in
+`itd::tests`).
 
-**What it would take:** smooth the mix parameters across a block, and crossfade
-two delay lines for a large jump or an ear swap.
+**What is left:** `Voice::apply_mix` still assigns `volume`, `gains` and `pitch`
+straight in, so a re-aimed voice steps its level and pan at the block boundary
+(a gain step is a smaller click than a delay step, but it is one), and a pitch
+change takes effect in one frame. Smoothing them is the occlusion ramp's pattern
+again: a target, a ramp from where the voice is, and each frame worked out from
+the ramp's two ends.
 
-**What it blocks:** the cue grammar's own promise. This is the failure mode that
-corrupts the pitch cues rules 3 and 4 depend on, so it is not cosmetic.
+**Unblocked:** the grammar-continuity property test under _Audio unit and
+property tests the plan specifies_ (an orbiting emitter shows no pitch glide
+beyond a stated cents bound) no longer waits on this for the ITD. It still waits
+on the pitch half above.
 
 ### Audio's transcendentals and deny (2026-08-27, re-decided 2026-09-17)
 

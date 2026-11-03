@@ -45,6 +45,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   images in it. The format must still be one `Instance::surface_caps` offers,
   and a changed composite alpha is still refused.
 
+### Fixed
+
+- **`crcbl_audio::mixer::Mixer::set_mix` no longer steps a playing voice's
+  interaural delay.** A new `itd_samples` used to replace the old one between
+  blocks, which clicked: a held sound re-aimed across the field jumped its
+  delayed ear by most of a waveform. The delay now moves over
+  `crcbl_audio::itd::ITD_RAMP_FRAMES`: a change of up to `ITD_SWEEP_LIMIT`
+  samples per ear sweeps it, which bends the pitch by under five cents, and a
+  larger change or one that swaps the leading ear crossfades from the old delay
+  to the new one, so it is never swept and never pitched. A voice built with
+  `Voice::with_mix` still starts at its ITD, and a voice whose ITD does not
+  change renders the same samples as before.
+
 ## [0.17.1] - 2026-11-03
 
 ### Fixed

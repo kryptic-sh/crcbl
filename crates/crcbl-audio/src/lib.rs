@@ -40,6 +40,7 @@
 //!   resamples between the two rather than passing it down.
 
 pub mod event;
+pub mod itd;
 pub mod mixer;
 pub mod occlusion;
 pub mod qoa;
