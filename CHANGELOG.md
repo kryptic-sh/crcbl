@@ -60,6 +60,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk`'s `wait_idle` no longer races a `submit` on another thread.**
+  `vkDeviceWaitIdle` waits on every queue, and the specification makes each of
+  them externally synchronised for the call, but `Device::wait_idle` and the
+  wait before a swapchain is retired made it outside the lock that guards the
+  queues. A thread submitting meanwhile used one `VkQueue` from two threads at
+  once, which the validation layer reports as
+  `UNASSIGNED-Threading-MultipleThreads-Write`. Both now hold the lock.
 - **A dropped or pasted `file:` URI on Linux and macOS ends its path at a raw
   `?` or `#`.** `parse_uri_list` and the AppKit pasteboard's file URL read
   `file:///tmp/a#b` as `/tmp/a#b`; RFC 3986 makes both characters query and

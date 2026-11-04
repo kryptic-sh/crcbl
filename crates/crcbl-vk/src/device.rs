@@ -1540,8 +1540,14 @@ impl DeviceInner {
     /// records which slots are outstanding; this waits on those.
     fn retire_swapchain(&self, entry: SwapchainEntry) {
         self.drain_pending_acquires(entry.sync.as_ref());
-        // SAFETY: `raw` is a live device; waiting is always legal.
-        let _ = unsafe { self.raw.device_wait_idle() };
+        {
+            // Under the state lock for `Device::wait_idle`'s reason: the wait
+            // is on every queue, which another thread may be submitting to.
+            let _queues = self.state();
+            // SAFETY: `raw` is a live device, and the lock held above
+            // externally synchronises every queue for the call.
+            let _ = unsafe { self.raw.device_wait_idle() };
+        }
         let trash = Trash::Swapchain(Box::new(TrashSwapchain {
             swapchain: entry.raw,
             surface: entry.surface_raw,
@@ -3037,11 +3043,16 @@ impl Device for VkDevice {
     }
 
     fn wait_idle(&self) -> Result<(), HalError> {
-        // SAFETY: `raw` is a live device; every queue is externally
-        // synchronised by the state lock, which is taken immediately after.
+        // **Taken before the wait, not after it.** `vkDeviceWaitIdle` waits on
+        // every queue of the device and the specification makes each of them
+        // externally synchronised for the call, so a `submit` or `present` on
+        // another thread meanwhile is one `VkQueue` used by two threads. The
+        // state lock is what synchronises the queues everywhere else.
+        let mut state = self.inner.state();
+        // SAFETY: `raw` is a live device, and the state lock held above
+        // externally synchronises every queue for the call.
         unsafe { self.inner.raw.device_wait_idle() }
             .map_err(|error| conv::hal_error("vkDeviceWaitIdle", error))?;
-        let mut state = self.inner.state();
         // `vkDeviceWaitIdle` has answered `VK_SUCCESS` on a lost device; the
         // timeline is what can still say so.
         self.inner.retired(&state)?;

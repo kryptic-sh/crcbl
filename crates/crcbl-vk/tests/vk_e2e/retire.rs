@@ -313,3 +313,49 @@ fn a_recorded_but_unsubmitted_command_buffer_keeps_its_buffer_alive() {
     device.destroy_buffer(dst_b);
     headless.finish();
 }
+
+/// Rounds each thread runs in
+/// [`a_wait_for_idle_and_a_submit_on_two_threads_share_the_queue_safely`]: enough
+/// that the two loops overlap on any machine, and few enough to stay quick on
+/// lavapipe.
+const QUEUE_RACE_ROUNDS: usize = 200;
+
+/// **`wait_idle` on one thread and `submit` on another never use the queue at
+/// once.**
+///
+/// `vkDeviceWaitIdle` is a wait on every queue of the device, and the
+/// specification makes each of those queues externally synchronised for the
+/// call — so it has to hold the same lock `vkQueueSubmit2` does. It once
+/// waited before taking it, and the viewer's background open found it: a
+/// worker's upload waited for idle while the loop thread submitted a frame,
+/// and the validation layer reported `UNASSIGNED-Threading-MultipleThreads-
+/// Write` on the `VkQueue`. The layer is the witness here too: the race
+/// returns no error on any driver, so `finish`'s clean report is the
+/// assertion.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_wait_for_idle_and_a_submit_on_two_threads_share_the_queue_safely() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let queue = headless.queue;
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for _ in 0..QUEUE_RACE_ROUNDS {
+                device.wait_idle().expect("idle");
+            }
+        });
+        for _ in 0..QUEUE_RACE_ROUNDS {
+            let encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("submitted beside a wait for idle"),
+                queue,
+            });
+            let commands = encoder.finish().expect("an empty recording");
+            device
+                .submit(queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.destroy_command_buffer(commands);
+        }
+    });
+    headless.finish();
+}
