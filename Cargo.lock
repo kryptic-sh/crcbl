@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "alcove"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "asteroids"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -321,7 +321,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bare"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
 ]
@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "bracket"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -435,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "breach"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "breakout"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-anim",
  "crcbl-app",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-anim"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "crcbl-rand",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-app"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "crcbl-dx12",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-assets"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "crcbl-shaders",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-audio"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "cpal",
  "crcbl-core",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-cli"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-assets",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-client"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "crcbl-ecs",
@@ -765,11 +765,11 @@ dependencies = [
 
 [[package]]
 name = "crcbl-console"
-version = "0.17.1"
+version = "0.17.2"
 
 [[package]]
 name = "crcbl-core"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "bitflags",
  "crcbl-console",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-dcomp"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "crcbl-hal",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-dx12"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-console",
  "crcbl-core",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-ecs"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "crcbl-jobs",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-font"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-spawn",
  "skrifa",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-frame"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "bytemuck",
  "crcbl-core",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-golden"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-store",
  "png",
@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-greybox"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-render",
  "crcbl-shaders",
@@ -851,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-hal"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "bitflags",
  "crcbl-core",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-image"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-font",
  "harfrust",
@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-input"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "ron",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-inventory"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "crcbl-rand",
@@ -895,14 +895,14 @@ dependencies = [
 
 [[package]]
 name = "crcbl-jobs"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "crcbl-mixer"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-spawn",
  "windows",
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-mtl"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "block2",
  "crcbl-core",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-nav"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-phys",
  "glam",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-net"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "chacha20poly1305",
  "crcbl-core",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-notify"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "bitflags",
  "thiserror 2.0.21",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-phys"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "crcbl-ecs",
@@ -966,14 +966,14 @@ dependencies = [
 
 [[package]]
 name = "crcbl-profile"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "crcbl-ragdoll"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-anim",
  "crcbl-core",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-rand"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "getrandom",
  "rand_chacha",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-reflect"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-reflect-derive",
  "glam",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-reflect-derive"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-render"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-sample-test"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-scene"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-assets",
  "crcbl-core",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-server"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-client",
  "crcbl-console",
@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-shaders"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-scene",
  "crcbl-spawn",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-shell"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -1107,11 +1107,11 @@ dependencies = [
 
 [[package]]
 name = "crcbl-spawn"
-version = "0.17.1"
+version = "0.17.2"
 
 [[package]]
 name = "crcbl-sprite"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-store",
  "png",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-steam"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-input",
  "crcbl-net",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-store"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "crcbl-net",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-ui"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "accesskit",
  "bytemuck",
@@ -1166,7 +1166,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-vfx"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "glam",
  "proptest",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-vk"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "ash",
  "crcbl-core",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-water"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "proptest",
  "thiserror 2.0.21",
@@ -1200,11 +1200,11 @@ dependencies = [
 
 [[package]]
 name = "crcbl-wayland"
-version = "0.17.1"
+version = "0.17.2"
 
 [[package]]
 name = "crcbl-wayland-probe"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-wayland",
  "crcbl-wl-scanner",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-webgpu"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-core",
  "crcbl-hal",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-wind"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl-assets",
  "crcbl-phys",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-wl-scanner"
-version = "0.17.1"
+version = "0.17.2"
 
 [[package]]
 name = "crossbeam-utils"
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "editor"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "breakout",
  "crcbl",
@@ -1465,7 +1465,7 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "flappy"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "horde"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -1680,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "hud"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -1798,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "lantern"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2134,7 +2134,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "options"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "orbit"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2318,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "puppet"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "quarry"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2425,7 +2425,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "render-harness"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2502,7 +2502,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2592,7 +2592,7 @@ dependencies = [
 
 [[package]]
 name = "shard"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2670,7 +2670,7 @@ checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
 name = "sparks"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2696,7 +2696,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sundial"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "tide"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2862,7 +2862,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "towers"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2903,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "tumble"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2997,7 +2997,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "viewer"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "crcbl",
  "crcbl-golden",
