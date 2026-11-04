@@ -210,19 +210,24 @@ mod tests {
         [0x66, 0x44, 0x22, 0x88],
     );
 
+    /// How long Vulkan waits for D3D11's `done` before the test calls it lost.
+    const DONE_DEADLINE_NS: u64 = 10_000_000_000;
+
     /// **A texture D3D11 shares is drawn into by Vulkan and read back by D3D11
-    /// with exactly what Vulkan wrote, ordered by the shared fence alone.**
+    /// with exactly what Vulkan wrote, ordered by the shared fences alone, both
+    /// ways.**
     ///
     /// No window: this is the half of presenting to a transparent window that
     /// a headless run can check. Vulkan imports the texture and the `ready`
     /// fence, clears the image, releases it to the external queue family and
-    /// signals `ready` with 1; D3D11 waits for 1 on its own queue and copies
-    /// the texture out.
+    /// signals `ready` with 1; D3D11 waits for 1 on its own queue, copies the
+    /// texture out and signals `done` with 1, which Vulkan then waits for — the
+    /// wait the composed ring makes before it draws into an image again.
     ///
     /// Red if the import binds anything but the shared memory (D3D11 then
-    /// reads a texture nothing wrote), or if the fence import does not reach
-    /// D3D11's fence (its wait never ends, and the read hangs rather than
-    /// passing).
+    /// reads a texture nothing wrote), or if either fence import does not
+    /// reach D3D11's fence (D3D11's wait never ends and the read hangs, or
+    /// Vulkan's wait times out).
     #[test]
     #[ignore = "needs a Windows Vulkan driver with VK_KHR_external_memory_win32"]
     fn a_shared_texture_cleared_by_vulkan_reads_back_in_d3d11() {
@@ -359,7 +364,19 @@ mod tests {
                 CLEAR.1
             );
 
+            let done = inner
+                .import_d3d_fence(interop.done_handle(), Some("shared done"))
+                .expect("the done fence imports");
+            raw.wait_semaphores(
+                &vk::SemaphoreWaitInfo::default()
+                    .semaphores(&[done])
+                    .values(&[1]),
+                DONE_DEADLINE_NS,
+            )
+            .expect("Vulkan sees the done value D3D11 signalled behind its copy");
+
             raw.device_wait_idle().expect("idle");
+            raw.destroy_semaphore(done, None);
             raw.destroy_command_pool(pool, None);
             raw.destroy_semaphore(ready, None);
             raw.destroy_image(image, None);

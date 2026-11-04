@@ -1529,6 +1529,22 @@ jobs:
         shell: bash
         run: crates/crcbl-dx12/tests/run-dx12-e2e.sh
 
+      # **The D3D11 half of `crcbl-vk`'s transparent Win32 windows, on a real
+      # window.** `crcbl-dcomp`'s `SharedPresenter` copies the frames another
+      # API renders into shared textures onto a composition swapchain. No
+      # Vulkan driver a runner can install lists the Win32 interop extensions
+      # with Vulkan 1.3 (lavapipe lists neither; Mesa's dozen lists both but
+      # is Vulkan 1.2 without `maintenance4`), so the test stands a second
+      # D3D11 device on WARP in for Vulkan. It is `#[ignore]`d because it shows
+      # a window, and runs here because this job has a desktop and WARP; the
+      # headless tests beside it run in `build + test (windows-latest)`.
+      # `--no-tests fail` turns a filter that selects nothing red.
+      - name: Present a shared image ring to a transparent window on WARP
+        shell: bash
+        run:
+          cargo nextest run --locked -p crcbl-dcomp --run-ignored only
+          --no-tests fail
+
       # **A presenter resized after presenting, on a real window.** lyr hit
       # `DXGI_ERROR_INVALID_CALL` from `ResizeBuffers` when it called
       # `Presenter::resize` with a frame still in flight, and every other D3D12

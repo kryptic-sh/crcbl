@@ -62,6 +62,9 @@ use windows::core::{Interface, PCWSTR};
 use crate::composition::{Binding, Composition, failed};
 use crate::desc::swap_chain_desc;
 
+#[cfg(test)]
+mod tests;
+
 /// The formats a shared image can be, in the order a surface offers them:
 /// sRGB first, because the engine presents an sRGB swapchain.
 ///
