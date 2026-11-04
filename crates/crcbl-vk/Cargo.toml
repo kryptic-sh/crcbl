@@ -20,6 +20,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+# A transparent Win32 window's DirectComposition tree, and the D3D11 device that
+# copies this backend's frames into a composition swapchain on it — see
+# `crate::win32_interop`. Workspace-internal, and Windows-only because off
+# Windows it is empty.
+[target.'cfg(target_os = "windows")'.dependencies.crcbl-dcomp]
+workspace = true
+
 # Test-only. `crcbl-shaders` supplies the SPIR-V and the geometry the triangle
 # and golden-image suites render; `crcbl-golden` is the comparator. Neither
 # reaches a shipped binary — a backend must not depend on the engine's shaders,

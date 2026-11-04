@@ -33,14 +33,11 @@
 //! target is not a surface this backend can make, and the error has to say
 //! which backend can.
 
-use core::ptr::NonNull;
-
 use crate::harness::{CLEAR, Headless, instance};
-use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
-    BackendKind, Barriers, BufferDesc, BufferUsage, ClearValue, ColorAttachment,
-    CommandEncoderDesc, DeviceDesc, Features, HalError, ImageSubresourceRange, Instance, LoadOp,
-    MemoryLocation, PresentInfo, Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo,
+    Barriers, BufferDesc, BufferUsage, ClearValue, ColorAttachment, CommandEncoderDesc, DeviceDesc,
+    Features, ImageSubresourceRange, Instance, LoadOp, MemoryLocation, PresentInfo, Rect2d,
+    RenderPassDesc, ResourceState, StoreOp, SubmitInfo,
 };
 
 /// Obligation 1: a `Device` may outlive its `Instance`. Getting this wrong is a
@@ -182,9 +179,19 @@ fn a_vulkan_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
 /// Red if the refusal is dropped (the call then reaches the extension check or
 /// `vkCreateWin32SurfaceKHR` with dangling handles and answers something else),
 /// or if its text stops naming the D3D12 backend.
+///
+/// Off Windows only: on Windows a transparent window presents through
+/// DirectComposition (`crcbl_vk`'s `composed` module), and these dangling
+/// handles would reach it.
+#[cfg(not(target_os = "windows"))]
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn a_transparent_win32_window_is_refused_and_names_the_d3d12_backend() {
+    use core::ptr::NonNull;
+
+    use crcbl_core::SurfaceTarget;
+    use crcbl_hal::{BackendKind, HalError};
+
     let instance = instance();
     let target = SurfaceTarget::Win32 {
         hinstance: NonNull::dangling(),

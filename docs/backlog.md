@@ -32741,35 +32741,38 @@ layers per window (video planes, a UI layer composited apart from the 3D,
 Wayland subsurfaces, `CALayer` trees) — has no user in the tree or in lyr's,
 pikr's or EW's requests. Revisit when one of those arrives.
 
-### Vulkan on a transparent Win32 window: being built, kept only if it pays
+### Vulkan on a transparent Win32 window: what was measured, and what is left
 
-`crcbl-vk`'s `create_surface` refuses a transparent Win32 window by name
-(`win32_refusal`). The cause is Windows': DWM blends a flip-model swapchain by
-its alpha only as content of a DirectComposition visual, and a `VkSwapchainKHR`
-on Win32 is the driver's and presents to the `HWND`. On 2026-11-04 the owner
-asked for the workaround built the long-term way, then measured against D3D12,
-and kept only if it is worth it.
+`crcbl-vk` presents to a transparent Win32 window since 2026-11-04
+(`crate::composed`): frames render into textures a D3D11 device shares through
+NT handles (`crcbl_dcomp::SharedPresenter`), and D3D11 copies each into a
+composition swapchain on the window's visual. It was built to be kept only if it
+beat D3D12, and it did.
 
-**The design.** The DirectComposition tree is `crcbl-dcomp`'s, shared by both
-Win32 backends (moved out of `crcbl-dx12`). Vulkan renders into textures a small
-D3D11 device creates and shares through NT handles (Vulkan imports them with
-`VK_KHR_external_memory_win32`), with a shared fence both ways
-(`VK_KHR_external_semaphore_win32`); D3D11 copies each presented image into a
-composition swapchain on the window's visual — one GPU copy a frame. Both
-extensions are on the RX 7900 XTX's drivers (`vulkaninfo`, 2026-11-04).
+**Measured by pikr on 2026-11-04**, RX 7900 XTX at 2560x1440, release build, 5
+interleaved rounds each of dmenu and drun, total CPU 1.8% before the run with
+the other sessions paused. Vulkan against D3D12, medians: `Presenter::open`
+125.5 / 130.2 ms against 328.1 / 334.4 ms; first paint 167.6 / 174.3 ms against
+370.4 / 382.2 ms; present 1.79 / 1.83 ms against 2.46 / 2.54 ms (worst case
+2.10–2.85 against 2.84–4.45). Frame build was the same on both. Every Win32
+check pikr runs on D3D12 passed on Vulkan too: see-through rounded corners with
+the window-region clip and hit test, a `SetWindowPos` resize, a live 100% → 125%
+→ 100% DPI change, the Microsoft Japanese IME's candidate list, and Alt-Tab.
 
-**The bar it has to clear**, from pikr's 2026-10-29 measurements on this
-machine: D3D12's first paint was 326–410 ms (device creation 293–308 ms), and
-Vulkan's opaque first paint 406–435 ms (instance 68–122 ms, swapchain creation
-about 290 ms). The bridge pays the Vulkan instance and device plus a D3D11
-device and a composition swapchain, and skips the Vulkan swapchain. Per frame,
-Vulkan's opaque present was 1.66–1.77 ms against D3D12's 2.29–2.53 ms.
+**Left:**
 
-**Measuring:** first present and per-frame cost, dx12 against vk, both on a
-transparent window, run through pikr's session under a desktop hold (windowed
-runs do not happen on this desktop otherwise). If it pays on Windows,
-office-crcbl measures Linux start-up and frame time to show it costs Linux
-nothing. If it does not pay, the code is removed and this entry says why.
+- **No automated windowed test.** The composed path has run only by hand, in
+  pikr. The headless `a_shared_texture_cleared_by_vulkan_reads_back_in_d3d11`
+  covers the image and fence round trip; nothing in CI creates a composed
+  swapchain, and whether CI's Windows lavapipe lists the two extensions has not
+  been checked.
+- **One driver.** AMD's only; NVIDIA and Intel are unverified.
+- **A one-frame flash during a resize is not ruled out**: pikr's screenshot came
+  800 ms after it.
+- **Not measured:** what the composed path's 125 ms is made of, and Linux
+  start-up and frame time across this change (office-crcbl was asked).
+- The first-ever Vulkan launch took 1254 ms in `Presenter::open`, the next 156
+  ms: driver and shader caches warming, not this path.
 
 ### The viewer's suite still crashes on Vulkan, now reproduced on Windows
 

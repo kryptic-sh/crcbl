@@ -59,6 +59,12 @@ struct SurfaceEntry {
     /// swapchain is undefined behaviour in the driver, so the object outlives
     /// the handle by exactly this count.
     swapchains: usize,
+    /// A transparent Win32 window's DirectComposition tree, which its
+    /// swapchain presents through instead of a `VkSurfaceKHR` (`raw` is null);
+    /// see `crate::composed`. Shared with each swapchain's presenter, so a
+    /// swapchain outlives its surface handle as obligation 2 permits.
+    #[cfg(target_os = "windows")]
+    composition: Option<Arc<crcbl_dcomp::Composition>>,
 }
 
 /// The surface table, plus the surfaces whose handle is dead but whose driver
@@ -285,6 +291,21 @@ impl InstanceInner {
         self.surfaces().retain(surface, self.id)
     }
 
+    /// A transparent Win32 surface's composition and window, or `None` for
+    /// every other surface.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn surface_composition(
+        &self,
+        surface: SurfaceHandle,
+    ) -> Result<Option<crate::composed::ComposedSurface>, HalError> {
+        let surfaces = self.surfaces();
+        let entry = surfaces.entry(surface, self.id)?;
+        Ok(entry.composition.as_ref().and_then(|composition| {
+            core::ptr::NonNull::new(entry.hwnd as *mut core::ffi::c_void)
+                .map(|hwnd| (Arc::clone(composition), hwnd))
+        }))
+    }
+
     /// Notes that a swapchain no longer references `raw`, destroying the driver
     /// object if that was the last one and the caller has already let the
     /// handle go.
@@ -369,6 +390,14 @@ impl Drop for InstanceInner {
 #[derive(Clone, Debug)]
 pub struct VkInstance {
     inner: Arc<InstanceInner>,
+}
+
+impl VkInstance {
+    /// The shared state, for this crate's tests that open a device by hand.
+    #[cfg(all(test, target_os = "windows"))]
+    pub(crate) const fn inner(&self) -> &Arc<InstanceInner> {
+        &self.inner
+    }
 }
 
 /// Why the Vulkan backend could not start.
@@ -983,6 +1012,8 @@ impl Instance for VkInstance {
         };
         let mut hwnd = 0;
         let mut main_device = None;
+        #[cfg(target_os = "windows")]
+        let mut composition = None;
         let raw = match *target {
             // Transparency changes nothing about the surface on Wayland or X11:
             // the swapchain's composite alpha is the whole of it, chosen from
@@ -1037,24 +1068,41 @@ impl Instance for VkInstance {
                 hwnd: window,
                 transparent,
             } => {
-                // Before the extension check, so the answer is the same on a
-                // loader without `VK_KHR_win32_surface`: the refusal is about
-                // what the window needs, not about this machine.
+                hwnd = window.as_ptr() as usize;
+                // A transparent window shows only a DirectComposition visual,
+                // so its swapchain presents through one rather than through a
+                // `VkSurfaceKHR`: see `crate::composed`. Before the extension
+                // check, because `VK_KHR_win32_surface` plays no part in it.
+                #[cfg(target_os = "windows")]
+                if transparent {
+                    composition = Some(Arc::new(crcbl_dcomp::Composition::for_raw_window(window)?));
+                }
+                // Off Windows there is no DirectComposition, so the refusal
+                // stands, and before the extension check, so the answer is the
+                // same on a loader without `VK_KHR_win32_surface`.
+                #[cfg(not(target_os = "windows"))]
                 if let Some(what) = win32_refusal(transparent) {
                     return unsupported(what);
                 }
-                let Some(ext) = self.inner.win32_ext.as_ref() else {
-                    return unsupported("VK_KHR_win32_surface is not available");
-                };
-                let info = vk::Win32SurfaceCreateInfoKHR::default()
-                    .hinstance(hinstance.as_ptr() as vk::HINSTANCE)
-                    .hwnd(window.as_ptr() as vk::HWND);
-                hwnd = window.as_ptr() as usize;
-                // SAFETY: as for Wayland — the caller promises `hinstance` is
-                // the module that registered `hwnd`'s class and `hwnd` a live
-                // window, and that both outlive the surface.
-                unsafe { ext.create_win32_surface(&info, None) }
-                    .map_err(|error| conv::hal_error("vkCreateWin32SurfaceKHR", error))?
+                #[cfg(target_os = "windows")]
+                let composed = composition.is_some();
+                #[cfg(not(target_os = "windows"))]
+                let composed = false;
+                if composed {
+                    vk::SurfaceKHR::null()
+                } else {
+                    let Some(ext) = self.inner.win32_ext.as_ref() else {
+                        return unsupported("VK_KHR_win32_surface is not available");
+                    };
+                    let info = vk::Win32SurfaceCreateInfoKHR::default()
+                        .hinstance(hinstance.as_ptr() as vk::HINSTANCE)
+                        .hwnd(window.as_ptr() as vk::HWND);
+                    // SAFETY: as for Wayland — the caller promises `hinstance`
+                    // is the module that registered `hwnd`'s class and `hwnd`
+                    // a live window, and that both outlive the surface.
+                    unsafe { ext.create_win32_surface(&info, None) }
+                        .map_err(|error| conv::hal_error("vkCreateWin32SurfaceKHR", error))?
+                }
             }
             SurfaceTarget::AppKit { .. } => return unsupported("AppKit surfaces land at P14"),
             SurfaceTarget::Web { .. } => {
@@ -1069,6 +1117,8 @@ impl Instance for VkInstance {
             hwnd,
             main_device,
             swapchains: 0,
+            #[cfg(target_os = "windows")]
+            composition,
         });
         crcbl_core::log::debug!(
             "crcbl-vk: created a {} surface {:?}",
@@ -1092,6 +1142,21 @@ impl Instance for VkInstance {
     ) -> Result<SurfaceCaps, HalError> {
         let record = self.record(adapter)?;
         let raw = self.inner.surface_raw(surface)?;
+        #[cfg(target_os = "windows")]
+        if let Some((_, hwnd)) = self.inner.surface_composition(surface)? {
+            // Refused here rather than at `create_swapchain`, so adapter
+            // selection moves on to one that can: `Presenter::start_device`
+            // treats an `Err` from this call as "try the next one".
+            if !record.win32_interop {
+                return Err(HalError::Unsupported {
+                    backend: BackendKind::Vulkan,
+                    what: "a transparent Win32 window needs VK_KHR_external_memory_win32 and \
+                           VK_KHR_external_semaphore_win32, which this adapter lacks; the \
+                           D3D12 backend presents to one directly",
+                });
+            }
+            return Ok(crate::composed::surface_caps(hwnd));
+        }
         if raw == vk::SurfaceKHR::null() {
             return Ok(crate::swapchain::offscreen_surface_caps());
         }
@@ -1377,6 +1442,11 @@ pub(crate) fn build_surface_caps(
 /// made anyway would be a swapchain whose frames nothing shows. So it is
 /// refused by name, saying which backend can do it, and a caller that asked for
 /// transparency learns at `create_surface` rather than from an empty window.
+///
+/// Off Windows only: on Windows such a window presents through
+/// DirectComposition instead (`crate::composed`). A Win32 target off Windows is
+/// a test's, which is the only way to reach this.
+#[cfg(not(target_os = "windows"))]
 fn win32_refusal(transparent: bool) -> Option<&'static str> {
     transparent.then_some(
         "a transparent Win32 window: Vulkan presents to the HWND itself and has no \
@@ -1389,6 +1459,7 @@ fn win32_refusal(transparent: bool) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn a_transparent_win32_window_is_refused_and_names_the_d3d12_backend() {
         let refusal = win32_refusal(true).expect("a transparent window is refused");
@@ -1596,6 +1667,8 @@ mod tests {
             hwnd: 0,
             main_device: None,
             swapchains: 0,
+            #[cfg(target_os = "windows")]
+            composition: None,
         })
     }
 

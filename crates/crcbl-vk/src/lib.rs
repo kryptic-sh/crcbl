@@ -213,6 +213,8 @@ pub mod drivers;
 pub(crate) mod adapter;
 pub(crate) mod command;
 pub(crate) mod command_pools;
+#[cfg(target_os = "windows")]
+pub(crate) mod composed;
 pub(crate) mod conv;
 pub(crate) mod deletion;
 pub(crate) mod device;
@@ -227,6 +229,8 @@ pub(crate) mod shader_stats;
 pub(crate) mod spirv;
 pub(crate) mod statistics;
 pub(crate) mod swapchain;
+#[cfg(target_os = "windows")]
+pub(crate) mod win32_interop;
 
 pub use debug::{Severity, ValidationMessage, ValidationReport, ValidationSink};
 pub use device::VkDevice;

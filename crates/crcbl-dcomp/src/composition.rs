@@ -152,6 +152,17 @@ impl Composition {
         })
     }
 
+    /// [`Composition::for_window`] for a backend that holds the window as a
+    /// raw pointer, the way `crcbl_core::SurfaceTarget::Win32` carries it, and
+    /// does not name `HWND` itself.
+    ///
+    /// # Errors
+    ///
+    /// As [`Composition::for_window`].
+    pub fn for_raw_window(hwnd: core::ptr::NonNull<core::ffi::c_void>) -> Result<Self, HalError> {
+        Self::for_window(HWND(hwnd.as_ptr()))
+    }
+
     /// Makes `swapchain` the visual's content and commits it, which is what
     /// puts its frames on the window.
     ///
@@ -238,7 +249,7 @@ impl Drop for Binding {
     }
 }
 
-/// A DirectComposition failure, with the call named.
-fn failed(what: &str, error: &windows::core::Error) -> HalError {
+/// A Win32 failure, with the call named.
+pub(crate) fn failed(what: &str, error: &windows::core::Error) -> HalError {
     HalError::Backend(format!("{what} failed: {error}"))
 }

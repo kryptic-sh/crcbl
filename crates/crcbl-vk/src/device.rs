@@ -376,7 +376,7 @@ pub(crate) struct DeviceState {
     query_sets: Pool<QuerySetEntry>,
     command_buffers: Pool<CommandBufferEntry>,
     readbacks: Pool<ReadbackEntry>,
-    swapchains: Pool<SwapchainEntry>,
+    pub(crate) swapchains: Pool<SwapchainEntry>,
     // Milestone 2's tables. `pub(crate)` because `pipeline.rs` owns their
     // creation logic; the older fields stay private because everything that
     // touches them lives in this file.
@@ -448,6 +448,11 @@ pub(crate) struct DeviceInner {
     /// reaching a dispatch with `None` here means a pipeline was bound that
     /// this device never created.
     pub(crate) mesh_shader_ext: Option<ext::mesh_shader::Device>,
+    /// `crate::win32_interop`'s tables, `Some` when the device enabled both
+    /// extensions — the record that a transparent Win32 window can be
+    /// presented to.
+    #[cfg(target_os = "windows")]
+    pub(crate) win32_interop: Option<crate::win32_interop::Win32Interop>,
     /// `VK_KHR_pipeline_executable_properties`, loaded only when
     /// `CRCBL_VK_SHADER_STATS=1` asked for it and the driver offers it; every
     /// pipeline is then created capturing its statistics and logs them. See
@@ -505,6 +510,10 @@ pub(crate) struct DeviceInner {
     /// section above; never zero.
     tag: u32,
     memory_properties: vk::PhysicalDeviceMemoryProperties,
+    /// The adapter's LUID, which a D3D11 device sharing this device's memory
+    /// is opened on; `None` where the driver reports none (off Windows).
+    #[cfg(target_os = "windows")]
+    pub(crate) luid: Option<u64>,
     queues: [Option<QueueSlot>; 3],
     pub(crate) state: Mutex<DeviceState>,
     /// Signalled by every submission with a strictly increasing value. The
@@ -945,6 +954,13 @@ impl VkDevice {
         if shader_stats {
             device_extensions.push(khr::pipeline_executable_properties::NAME.as_ptr());
         }
+        // Enabled wherever the driver lists them, not only for a transparent
+        // window: the device is created before any swapchain says what it
+        // presents to. Only Windows drivers list them.
+        #[cfg(target_os = "windows")]
+        if record.win32_interop {
+            device_extensions.extend(crate::win32_interop::EXTENSIONS.map(core::ffi::CStr::as_ptr));
+        }
         // The extension names alone enable nothing: chaining a `VkPresentIdKHR`
         // onto a present without `presentId` granted here is a validation
         // error, and `vkWaitForPresentKHR` without `presentWait` is undefined.
@@ -1038,6 +1054,10 @@ impl VkDevice {
         // re-reading `caps`.
         let mesh_shader_ext =
             mesh_shader.then(|| ext::mesh_shader::Device::new(&instance.raw, &raw));
+        #[cfg(target_os = "windows")]
+        let win32_interop = record
+            .win32_interop
+            .then(|| crate::win32_interop::Win32Interop::load(&instance.raw, &raw));
         let shader_stats_ext = shader_stats
             .then(|| khr::pipeline_executable_properties::Device::new(&instance.raw, &raw));
         // Same idiom again: `Some` is the record that `gpu_clock` can read.
@@ -1095,6 +1115,8 @@ impl VkDevice {
             present_wait_ext,
             present_timing_ext,
             mesh_shader_ext,
+            #[cfg(target_os = "windows")]
+            win32_interop,
             shader_stats_ext,
             mesh_queries,
             first_display_timing: Once::new(),
@@ -1125,6 +1147,8 @@ impl VkDevice {
             id,
             tag: owner_tag(id),
             memory_properties,
+            #[cfg(target_os = "windows")]
+            luid: record.info.luid,
             queues,
             state: Mutex::new(DeviceState::default()),
             retire_timeline,
@@ -1218,6 +1242,24 @@ impl DeviceInner {
     /// the first triangle onward". Wiring it at every creation site now costs
     /// one line each and is invisible to add later only in the sense that
     /// nobody ever does.
+    /// `vkDeviceWaitIdle` under the state lock, for `Device::wait_idle`'s
+    /// reason: the wait is on every queue, which another thread may be
+    /// submitting to. The caller must not hold the lock.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn wait_idle_raw(&self) -> Result<(), HalError> {
+        let _queues = self.state();
+        // SAFETY: `raw` is a live device, and the lock held above externally
+        // synchronises every queue for the call.
+        unsafe { self.raw.device_wait_idle() }
+            .map_err(|error| conv::hal_error("vkDeviceWaitIdle", error))
+    }
+
+    /// The physical device's memory heaps and types.
+    #[cfg(target_os = "windows")]
+    pub(crate) const fn memory_properties(&self) -> &vk::PhysicalDeviceMemoryProperties {
+        &self.memory_properties
+    }
+
     pub(crate) fn set_object_name<T: vk::Handle>(&self, handle: T, label: Option<&str>) {
         let (Some(debug_ext), Some(label)) = (self.debug_ext.as_ref(), label) else {
             return;
@@ -1538,8 +1580,16 @@ impl DeviceInner {
     /// `VUID-vkDestroySemaphore-semaphore-05149`, and on a real driver it is a
     /// use-after-free in the WSI layer. [`FrameSync::acquire_armed`] already
     /// records which slots are outstanding; this waits on those.
-    fn retire_swapchain(&self, entry: SwapchainEntry) {
+    fn retire_swapchain(&self, #[allow(unused_mut)] mut entry: SwapchainEntry) {
         self.drain_pending_acquires(entry.sync.as_ref());
+        // D3D11 may still be copying out of the ring's images; those copies
+        // finish before the images can go.
+        #[cfg(target_os = "windows")]
+        let composed = entry.composed.take();
+        #[cfg(target_os = "windows")]
+        if let Some(ring) = composed.as_ref() {
+            ring.drain(&self.raw);
+        }
         {
             // Under the state lock for `Device::wait_idle`'s reason: the wait
             // is on every queue, which another thread may be submitting to.
@@ -1547,6 +1597,12 @@ impl DeviceInner {
             // SAFETY: `raw` is a live device, and the lock held above
             // externally synchronises every queue for the call.
             let _ = unsafe { self.raw.device_wait_idle() };
+        }
+        // Idle on both sides now, so the ring's own objects go here; its
+        // presenter goes with it, which takes the swapchain off the visual.
+        #[cfg(target_os = "windows")]
+        if let Some(ring) = composed {
+            ring.destroy(&self.raw);
         }
         let trash = Trash::Swapchain(Box::new(TrashSwapchain {
             swapchain: entry.raw,
@@ -1793,7 +1849,11 @@ unsafe fn destroy_trash(
 /// tables — `destroy_image`, `destroy_image_view` and `destroy_semaphore` all
 /// deliberately refuse them. Every path that lets go of a `SwapchainEntry` must
 /// call this, or the rows outlive the objects they name.
-fn forget_swapchain_rows(inner: &DeviceInner, state: &mut DeviceState, entry: &SwapchainEntry) {
+pub(crate) fn forget_swapchain_rows(
+    inner: &DeviceInner,
+    state: &mut DeviceState,
+    entry: &SwapchainEntry,
+) {
     for handle in &entry.image_handles {
         take_owned(&mut state.images, *handle, inner);
     }
@@ -1853,7 +1913,7 @@ pub(crate) fn lookup<'p, E: Owned, M>(
     }
 }
 
-fn lookup_mut<'p, E: Owned, M>(
+pub(crate) fn lookup_mut<'p, E: Owned, M>(
     pool: &'p mut Pool<E>,
     kind: &'static str,
     handle: Handle<M>,
@@ -3249,8 +3309,17 @@ impl Device for VkDevice {
 
     fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
         let surface_raw = self.inner.instance.surface_raw(desc.surface)?;
+        #[cfg(target_os = "windows")]
+        let composition = self.inner.instance.surface_composition(desc.surface)?;
         self.inner.instance.retain_surface(desc.surface)?;
-        let built = match self.build_swapchain(desc, surface_raw, vk::SwapchainKHR::null()) {
+        #[cfg(target_os = "windows")]
+        let built = match composition {
+            Some((composition, hwnd)) => self.build_composed_ring(desc, &composition, hwnd),
+            None => self.build_swapchain(desc, surface_raw, vk::SwapchainKHR::null()),
+        };
+        #[cfg(not(target_os = "windows"))]
+        let built = self.build_swapchain(desc, surface_raw, vk::SwapchainKHR::null());
+        let built = match built {
             Ok(built) => built,
             Err(error) => {
                 self.inner.instance.release_surface(surface_raw);
@@ -3278,6 +3347,11 @@ impl Device for VkDevice {
             return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
                 "reconfigure_swapchain cannot move a swapchain to a different surface".to_string(),
             )));
+        }
+        #[cfg(target_os = "windows")]
+        if let Some((_, hwnd)) = self.inner.instance.surface_composition(desc.surface)? {
+            let _ = old_raw;
+            return self.reconfigure_composed(swapchain, desc, hwnd);
         }
         // The new swapchain takes its own reference on the surface, because the
         // old one gives *its* back when it is retired below. Without this the
@@ -3345,6 +3419,10 @@ impl Device for VkDevice {
         let inner = Arc::clone(&self.inner);
         let entry = lookup_mut(&mut state.swapchains, "swapchain", swapchain, &inner)?;
 
+        #[cfg(target_os = "windows")]
+        if entry.composed.is_some() {
+            return self.inner.acquire_composed(entry);
+        }
         if entry.is_offscreen() {
             // The implicit-acquire shape, which is also `crcbl-webgpu`'s: no
             // semaphores, and the caller's `Option::as_slice()` splices nothing.
@@ -3436,6 +3514,10 @@ impl Device for VkDevice {
                 "present without a matching acquire_next_frame".to_string(),
             )));
         };
+        #[cfg(target_os = "windows")]
+        if entry.composed.is_some() {
+            return self.inner.present_composed(entry, slot.raw, index, &waits);
+        }
         if entry.is_offscreen() {
             // "Presenting" a ring image is advancing the ring. The image stays
             // valid and is reused when the cursor comes back round, exactly as
@@ -4041,26 +4123,12 @@ impl VkDevice {
         }
 
         let mut state = self.inner.state();
-        let image_handles: Vec<ImageHandle> = images
-            .iter()
-            .map(|image| {
-                // `ring_reuse: true` — these come back round with no
-                // semaphore to order the reuse.
-                self.inner.stamp(state.images.insert(ImageEntry::ring(
-                    self.inner.id,
-                    *image,
-                    desc.format,
-                    true,
-                )))
-            })
-            .collect();
+        let image_handles = self.register_ring_images(&mut state, &images, desc.format);
         let (views, view_handles) =
             match self.build_views(&mut state, &images, desc.format, desc.label) {
                 Ok(views) => views,
                 Err(error) => {
-                    for handle in &image_handles {
-                        take_owned(&mut state.images, *handle, &self.inner);
-                    }
+                    self.forget_ring_images(&mut state, &image_handles);
                     drop(state);
                     // SAFETY: every image and allocation was created moments
                     // ago by this device and has never been used.
@@ -4096,6 +4164,38 @@ impl VkDevice {
         })
     }
 
+    /// Registers a ring's images, owned by this device rather than a driver
+    /// swapchain: the offscreen ring's and a composed ring's.
+    ///
+    /// `ring_reuse: true` — they come back round with no semaphore to order
+    /// the reuse.
+    pub(crate) fn register_ring_images(
+        &self,
+        state: &mut DeviceState,
+        images: &[vk::Image],
+        format: Format,
+    ) -> Vec<ImageHandle> {
+        images
+            .iter()
+            .map(|image| {
+                self.inner.stamp(state.images.insert(ImageEntry::ring(
+                    self.inner.id,
+                    *image,
+                    format,
+                    true,
+                )))
+            })
+            .collect()
+    }
+
+    /// Takes [`VkDevice::register_ring_images`]' rows out again, for a ring
+    /// whose build failed after them.
+    pub(crate) fn forget_ring_images(&self, state: &mut DeviceState, handles: &[ImageHandle]) {
+        for handle in handles {
+            take_owned(&mut state.images, *handle, &self.inner);
+        }
+    }
+
     /// Creates one whole-image view per ring image, and registers them.
     ///
     /// The swapchain owns its images, so it owns their views —
@@ -4104,7 +4204,7 @@ impl VkDevice {
     /// [`build_sync`](Self::build_sync), every driver object is created before
     /// anything reaches the pools, so a failure part-way through has one thing
     /// to undo.
-    fn build_views(
+    pub(crate) fn build_views(
         &self,
         state: &mut DeviceState,
         images: &[vk::Image],

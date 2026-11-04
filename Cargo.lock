@@ -1177,6 +1177,7 @@ version = "0.17.1"
 dependencies = [
  "ash",
  "crcbl-core",
+ "crcbl-dcomp",
  "crcbl-golden",
  "crcbl-hal",
  "crcbl-render",

@@ -15,6 +15,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The Vulkan backend presents to transparent Win32 windows.** `crcbl-vk` used
+  to refuse a transparent window on Windows and point at D3D12. It now offers
+  `CompositeAlpha::PreMultiplied` beside `Opaque` there, on adapters whose
+  driver lists `VK_KHR_external_memory_win32` and
+  `VK_KHR_external_semaphore_win32`; on others `surface_caps` refuses by name,
+  so adapter selection moves on. Frames render into textures shared with a small
+  D3D11 device, which copies each into a DirectComposition swapchain (one GPU
+  copy a frame; `crcbl_dcomp::SharedPresenter`). Measured on an RX 7900 XTX
+  against D3D12 on the same transparent window: first paint about 2.2x sooner
+  and presents about 27% cheaper. Linux and macOS are unchanged.
 - **`crcbl-dcomp`**, a Windows-only crate holding the DirectComposition tree a
   transparent Win32 window shows its swapchain through, moved out of
   `crcbl-dx12` so more than one backend can present to such a window. Empty off

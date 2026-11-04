@@ -66,6 +66,12 @@ pub(crate) struct AdapterRecord {
     /// Two records with the same pair are one driver enumerated twice — see
     /// [`first_of_each`].
     pub(crate) identity: ([u8; vk::UUID_SIZE], [u8; vk::UUID_SIZE]),
+    /// Whether the driver lists `crate::win32_interop`'s extensions, which
+    /// import a D3D11 texture and a D3D fence. No seam flag: it is how this
+    /// backend presents to a transparent Win32 window, not a capability a
+    /// caller asks for.
+    #[cfg(target_os = "windows")]
+    pub(crate) win32_interop: bool,
 }
 
 /// A physical device's DRM primary and render nodes, as `dev_t`s.
@@ -1054,6 +1060,8 @@ fn describe(
         drm,
         mesh_shader_queries,
         identity: (id_props.driver_uuid, id_props.device_uuid),
+        #[cfg(target_os = "windows")]
+        win32_interop: crate::win32_interop::listed(&device_extensions),
     }
 }
 

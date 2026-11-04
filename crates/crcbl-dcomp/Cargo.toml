@@ -30,14 +30,29 @@ workspace = true
 #   to, and the `DXGI_SWAP_CHAIN_DESC1` `swap_chain_desc` fills in.
 # * `Win32_Graphics_Dxgi_Common` is the `DXGI_FORMAT`, `DXGI_ALPHA_MODE` and
 #   `DXGI_SAMPLE_DESC` that descriptor carries.
-# * `Win32_Foundation` is `HWND` and `DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED`.
+# * `Win32_Foundation` is `HWND` and `DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED`,
+#   and for the shared images the `HANDLE`, `CloseHandle`, `LUID` and
+#   `GENERIC_ALL` they are shared through.
+# * `Win32_Graphics_Direct3D11` is `SharedPresenter`'s device: `D3D11CreateDevice`,
+#   `ID3D11Device5::CreateFence`, `CreateTexture2D`, and the context's `Wait`,
+#   `Signal`, `CopyResource` and `Map`.
+# * `Win32_Graphics_Direct3D` is `D3D_DRIVER_TYPE` and `D3D_FEATURE_LEVEL`,
+#   which `D3D11CreateDevice` takes.
+# * `Win32_UI_WindowsAndMessaging` is `GetClientRect`, a transparent window's
+#   current extent: DXGI has no query for a window's size.
+# * `Win32_Security` is `SECURITY_ATTRIBUTES`, which `CreateSharedHandle` takes
+#   (as `None`); the binding gates the method on the feature.
 #
 # `std` because `windows_core::Error` carries a `String` message.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", default-features = false, features = [
   "std",
   "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
   "Win32_Graphics_DirectComposition",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
+  "Win32_Security",
+  "Win32_UI_WindowsAndMessaging",
 ] }

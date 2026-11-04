@@ -309,6 +309,10 @@ pub(crate) struct SwapchainEntry {
     /// `reconfigure_swapchain` replaces the whole entry with the one
     /// `build_swapchain` returns, and that one starts at 0.
     pub(crate) presented_id: u64,
+    /// A transparent Win32 window's D3D11 side — see `crate::composed`. `None`
+    /// for every other swapchain, and for a composed one mid-reconfigure.
+    #[cfg(target_os = "windows")]
+    pub(crate) composed: Option<Box<crate::composed::ComposedRing>>,
 }
 
 impl SwapchainEntry {
@@ -346,6 +350,8 @@ impl SwapchainEntry {
             next_offscreen: 0,
             pending_suboptimal: false,
             presented_id: 0,
+            #[cfg(target_os = "windows")]
+            composed: None,
         }
     }
 
