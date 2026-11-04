@@ -27,6 +27,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   knobs from the `[engine.video]` section of whichever home directory it runs
   in. Its console already read nothing. `--set` still reaches it, through the
   launch layers.
+- **A live `[engine.video]` write no longer undoes a sample's process-global
+  override.** `apply_process_video` now moves only the convars whose value
+  differs from its previous call, so `sundial --filter box` keeps its box filter
+  when a console `render_scale 0.5` or an options row hands `GpuStage` the whole
+  section; a write of `shadow_filter` itself still moves it.
 
 ## [0.17.2] - 2026-11-04
 

@@ -12320,9 +12320,9 @@ mod tests {
     /// holds a real renderer, so the body every sample forwards to is the one
     /// under test, and the renderer half is asserted to have arrived beside it.
     ///
-    /// **Start-up only.** The first live write of any `[engine.video]` key
-    /// moves the whole process-global half through `GpuStage` and puts the
-    /// file's filter back; `docs/backlog.md` records that.
+    /// A later live write keeps it too, which
+    /// `a_process_knob_set_after_opening_survives_an_unrelated_live_write`
+    /// asserts.
     #[test]
     fn a_process_knob_set_before_the_loop_survives_its_start_up_application() {
         use crcbl_render::shadow::{Filter, filter, r_shadow_filter};
@@ -12405,6 +12405,59 @@ mod tests {
             "a bundle with no renderer still says so"
         );
         assert_eq!(crcbl_render::r_ssao_slices.get_i64(), 2);
+    }
+
+    /// **A live write of one `[engine.video]` key does not put the file's
+    /// value back over a process knob a sample overrode** — and a write of
+    /// that knob's own key still moves it.
+    ///
+    /// `sundial --filter box` writes `r_shadow_filter` after its context
+    /// applied the file's filter. A console `render_scale 0.5` then hands
+    /// `GpuStage` the whole section, the file's filter included, and the
+    /// sample's box has to survive it.
+    #[test]
+    fn a_process_knob_set_after_opening_survives_an_unrelated_live_write() {
+        use crate::settings::Stage as _;
+        use crcbl_render::shadow::{Filter, filter, r_shadow_filter};
+
+        let _process_video = crate::settings::process_video_test_guard();
+        let file = crate::settings::VideoSettings::unrestricted();
+        assert!(
+            ![Filter::Box, Filter::Disc].contains(&file.shadow_filter),
+            "the file has to disagree with both filters below"
+        );
+        crate::settings::apply_process_video(&file);
+        r_shadow_filter
+            .set(&crcbl_console::Value::Enum(Filter::Box.label()))
+            .expect("a filter's label is in its own domain");
+
+        let mut gpu = BareGpu(FakeGpu::at((64, 64)));
+        let scaled = crate::settings::VideoSettings {
+            render_scale: 0.5,
+            ssao_slices: 2,
+            ..file
+        };
+        let _ = crate::settings::GpuStage(&mut gpu).apply_video(&scaled);
+        assert_eq!(
+            filter(),
+            Filter::Box,
+            "a render-scale write put the file's shadow filter back"
+        );
+        assert_eq!(
+            crcbl_render::r_ssao_slices.get_i64(),
+            2,
+            "the key that did change still moved"
+        );
+
+        let _ = crate::settings::GpuStage(&mut gpu).apply_video(&crate::settings::VideoSettings {
+            shadow_filter: Filter::Disc,
+            ..scaled
+        });
+        assert_eq!(
+            filter(),
+            Filter::Disc,
+            "a shadow-filter write did not move it"
+        );
     }
 
     /// A loop hosting [`FakeGame`] on a headless shell.

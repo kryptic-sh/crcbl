@@ -98,22 +98,6 @@ kernel): 1.876 → 1.057 ms on the iGPU. Ranked fixes left:
 - Harness with each variant, timed on HAL timestamps: outside the repo, in the
   2026-10-31 session scratchpad (`gpu-pass`).
 
-## A sample's process-global video override lasts until the first live write (2026-11-01)
-
-`sundial --filter box` writes `r_shadow_filter` after its context opened, and
-`Loop::new`'s start-up application now leaves it alone (it sets the renderer
-half only;
-`a_process_knob_set_before_the_loop_survives_its_start_up_application` in
-`crcbl::engine` guards that). The first live write of **any** `[engine.video]`
-key — `--exec "render_scale 0.5"`, a console line, an options row — goes through
-`GpuStage::apply_video`, which runs `apply_process_video` over the whole section
-and puts the settings file's filter back. This is how it behaved before the
-start-up fix too. Seen on 2026-11-01: `sundial --headless --filter box` ends
-with `filter box (console)`, and adding `--exec "render_scale 0.5"` ends with
-`filter pcss (console)`. Closing it needs either a programmatic layer for the
-process-global convars (the way `EffectRequest` has one for effects) or a write
-that moves only the key that changed.
-
 ## Joint limits layer 1: what the elliptical swing and soft zones left (2026-11-01)
 
 `crcbl-phys` has elliptical swing limits and progressive soft zones

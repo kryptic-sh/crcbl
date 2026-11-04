@@ -25,6 +25,7 @@ static PROCESS_VIDEO_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(())
 #[cfg(test)]
 pub(crate) struct ProcessVideoTestGuard {
     prior: [Value; 5],
+    applied: Option<ProcessVideo>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -41,6 +42,12 @@ pub(crate) fn process_video_test_guard() -> ProcessVideoTestGuard {
             r_ssao_bent_normals.get(),
             r_ssr_resolution.get(),
         ],
+        // Forgotten for the test's length, so its first application moves
+        // every knob whatever an earlier test in this process applied.
+        applied: APPLIED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take(),
         _lock: lock,
     }
 }
@@ -59,6 +66,9 @@ impl Drop for ProcessVideoTestGuard {
                 .set(value)
                 .expect("restore the test's process-global video convar");
         }
+        *APPLIED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.applied;
     }
 }
 
@@ -75,6 +85,54 @@ fn applicable_ssao_integer(key: &str, kind: Kind, value: i64, default: i64) -> i
     }
 }
 
+/// The process-global half of a [`VideoSettings`], each value as it is put
+/// into force: the SSAO counts and the SSR share already brought into their
+/// convars' domains.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ProcessVideo {
+    shadow_filter: crcbl_render::shadow::Filter,
+    ssao_slices: i64,
+    ssao_blur_passes: i64,
+    ssao_bent_normals: bool,
+    ssr_resolution: f32,
+}
+
+impl ProcessVideo {
+    fn of(video: &VideoSettings) -> Self {
+        Self {
+            shadow_filter: video.shadow_filter,
+            ssao_slices: applicable_ssao_integer(
+                SSAO_SLICES_KEY,
+                SSAO_SLICES_KIND,
+                video.ssao_slices,
+                ssao_slices_default(),
+            ),
+            ssao_blur_passes: applicable_ssao_integer(
+                SSAO_BLUR_PASSES_KEY,
+                SSAO_BLUR_PASSES_KIND,
+                video.ssao_blur_passes,
+                ssao_blur_passes_default(),
+            ),
+            ssao_bent_normals: video.ssao_bent_normals,
+            // Clamped here as well as by the reader, for
+            // `applicable_ssao_integer`'s reason: a hand-built `VideoSettings`
+            // never went through the reader, and a NaN is answered with full
+            // resolution, which is what a file holding one reads as.
+            ssr_resolution: if video.ssr_resolution.is_finite() {
+                video.ssr_resolution.clamp(MIN_SSR_RESOLUTION, 1.0)
+            } else {
+                1.0
+            },
+        }
+    }
+}
+
+/// What [`apply_process_video`] last put into force, or `None` before its
+/// first call.
+///
+/// Process-global because the convars it mirrors are.
+static APPLIED: std::sync::Mutex<Option<ProcessVideo>> = std::sync::Mutex::new(None);
+
 /// Put the process-global video knobs into force: `r_shadow_filter`, the SSAO
 /// convars and `r_ssr_resolution`.
 ///
@@ -86,49 +144,53 @@ fn applicable_ssao_integer(key: &str, kind: Kind, value: i64, default: i64) -> i
 /// [`GameGpu`](crate::engine::GameGpu): it calls this beside
 /// [`apply_video_to`] on a live write.
 ///
-/// **Not from [`apply_video_to`]**, which the loop also calls at start-up: by
-/// then the context has applied these once and a sample may have overridden
-/// one from its own command line (`sundial --filter box`), and a second
-/// application would put the settings file's value back over it. That
-/// protects the override at start-up only: the next live write of any
-/// `[engine.video]` key runs this and puts the file's value back.
+/// **It moves only the knobs whose value differs from its own previous call**;
+/// the first call moves them all. A sample may override one of these convars
+/// after its context opened (`sundial --filter box`), and a later write of an
+/// unrelated `[engine.video]` key — a render scale typed into the console —
+/// hands this the whole section, the file's filter included. Writing every
+/// knob would put that filter back over the sample's; a write of
+/// `shadow_filter` itself still moves it.
+///
+/// **Not from [`apply_video_to`]**, which the loop also calls at start-up: the
+/// process-global half is the process's, and the renderer half is applied per
+/// renderer.
 pub fn apply_process_video(video: &VideoSettings) {
-    r_shadow_filter
-        .set(&Value::Enum(video.shadow_filter.label()))
-        .expect("`VideoSettings` holds a `Filter`, so its label is in `r_shadow_filter`'s domain");
-    let slices = applicable_ssao_integer(
-        SSAO_SLICES_KEY,
-        SSAO_SLICES_KIND,
-        video.ssao_slices,
-        ssao_slices_default(),
-    );
-    r_ssao_slices
-        .set(&Value::Int(slices))
-        .expect("the settings and `r_ssao_slices` domains match");
-    let blur_passes = applicable_ssao_integer(
-        SSAO_BLUR_PASSES_KEY,
-        SSAO_BLUR_PASSES_KIND,
-        video.ssao_blur_passes,
-        ssao_blur_passes_default(),
-    );
-    r_ssao_blur_passes
-        .set(&Value::Int(blur_passes))
-        .expect("the settings and `r_ssao_blur_passes` domains match");
-    r_ssao_bent_normals
-        .set(&Value::Bool(video.ssao_bent_normals))
-        .expect("a bool is in `r_ssao_bent_normals`' domain");
-    // Clamped here as well as by the reader, for `applicable_ssao_integer`'s
-    // reason: a hand-built `VideoSettings` never went through the reader, and a
-    // NaN is answered with full resolution, which is what a file holding one
-    // reads as.
-    let ssr_resolution = if video.ssr_resolution.is_finite() {
-        video.ssr_resolution.clamp(MIN_SSR_RESOLUTION, 1.0)
-    } else {
-        1.0
+    let next = ProcessVideo::of(video);
+    let prior = APPLIED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace(next);
+    let moved = |same: fn(&ProcessVideo, &ProcessVideo) -> bool| {
+        prior.as_ref().is_none_or(|prior| !same(prior, &next))
     };
-    r_ssr_resolution
-        .set(&Value::Float(ssr_resolution))
-        .expect("the clamped share is in `r_ssr_resolution`'s domain");
+    if moved(|a, b| a.shadow_filter == b.shadow_filter) {
+        r_shadow_filter
+            .set(&Value::Enum(next.shadow_filter.label()))
+            .expect(
+                "`VideoSettings` holds a `Filter`, so its label is in `r_shadow_filter`'s domain",
+            );
+    }
+    if moved(|a, b| a.ssao_slices == b.ssao_slices) {
+        r_ssao_slices
+            .set(&Value::Int(next.ssao_slices))
+            .expect("the settings and `r_ssao_slices` domains match");
+    }
+    if moved(|a, b| a.ssao_blur_passes == b.ssao_blur_passes) {
+        r_ssao_blur_passes
+            .set(&Value::Int(next.ssao_blur_passes))
+            .expect("the settings and `r_ssao_blur_passes` domains match");
+    }
+    if moved(|a, b| a.ssao_bent_normals == b.ssao_bent_normals) {
+        r_ssao_bent_normals
+            .set(&Value::Bool(next.ssao_bent_normals))
+            .expect("a bool is in `r_ssao_bent_normals`' domain");
+    }
+    if moved(|a, b| a.ssr_resolution.to_bits() == b.ssr_resolution.to_bits()) {
+        r_ssr_resolution
+            .set(&Value::Float(next.ssr_resolution))
+            .expect("the clamped share is in `r_ssr_resolution`'s domain");
+    }
 }
 
 /// Put `video` into force on `renderer`, through the `device` that built it.
