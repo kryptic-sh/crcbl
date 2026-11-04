@@ -3,6 +3,30 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## dsplr needs crcbl's Wayland binding from outside crcbl (2026-11-04)
+
+dsplr, the display-settings editor on crcbl, opens its own Wayland connection
+beside its GUI to bind `zwlr_output_manager_v1` (v4) and, later, KDE's
+`kde_output_device_v2`, `kde_output_management_v2` and `kde_output_order_v1`.
+The owner chose crcbl's own `crcbl-wl-scanner` for those bindings, not
+`wayland-client`. Generated code calls through `Options::ffi_path`, and the only
+implementation is `crcbl_shell::wayland::ffi`, which is `pub(crate)`. Needed by
+dsplr's M2 (applying display changes on Hyprland).
+
+Taken by the Linux session. The plan agreed with dsplr:
+
+- A workspace crate, `crcbl-wayland`, holding `wayland::ffi` as it is, with
+  crcbl-shell depending on it, so there is one binding.
+- A raw connection API on it: connect, the display and its registry, roundtrip,
+  dispatch and dispatch-pending, flush, the prepare-read cycle and the fd to
+  poll, so a tokio `AsyncFd` can drive it.
+- An outside caller emits `wayland.xml` beside its own XML: the scanner resolves
+  cross-protocol references only within one emit set, so the caller carries its
+  own copy of the core interface tables. Teaching the scanner external interface
+  paths was considered and left until someone needs it.
+- Proven from outside the shell by a test crate that generates
+  wlr-output-management v4 and reads the heads and modes on Hyprland.
+
 ## The mesh-shader path hangs RDNA2 iGPUs (2026-10-30)
 
 Reported by EW (its raid, range and armor-dummy scenes on crcbl 0.13.0) and
