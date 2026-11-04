@@ -32804,24 +32804,28 @@ the window-region clip and hit test, a `SetWindowPos` resize, a live 100% → 12
 - The first-ever Vulkan launch took 1254 ms in `Presenter::open`, the next 156
   ms: driver and shader caches warming, not this path.
 
-### The viewer's suite still crashes on Vulkan, now reproduced on Windows
+### The validation layer crashes the viewer's suite on Windows (SDK 1.4.357)
 
-The lavapipe entry was closed on 2026-11-04 after 40 clean CI passes with
-`crcbl-vk`'s `loader` lock in place. The same day, `apps/viewer`'s lib tests
-crashed locally on the RX 7900 XTX (AMD proprietary driver 25.10.36, Vulkan SDK
-1.4.357 layers) with `CRCBL_GPU=vk`, `CRCBL_VK_VALIDATION=1`,
-`CRCBL_VK_SYNC_VALIDATION=1` and `CRCBL_VK_VALIDATION_FATAL=1`:
-`STATUS_ACCESS_VIOLATION` (`0xc0000005`), with the last log lines a device
-opened and an offscreen ring created. **It predates the viewer's background
-open:** at `e0ed583d`, before it, 6 of 12 runs crashed; at the background open
-plus the queue-lock fix, 1 of 5. So the loader lock removed one race and at
-least one other remains. The old entry's next suspects still stand —
-`vkCreateDevice` and `vkDestroyDevice` on parallel test threads, which the lock
-does not cover. **A local repro is the new fact:** loop
-`cargo test --locked --quiet --package viewer --lib` with those variables until
-it crashes, under a debugger (`cdb -g -G`, or WinDbg attached to the test
-binary) for the faulting stack. Not yet tried: whether it crashes with
-validation off, and with `--test-threads=1`.
+`apps/viewer`'s lib tests on Vulkan crash about half the time on the RX 7900 XTX
+desktop with the Vulkan SDK 1.4.357 validation layer loaded:
+`STATUS_ACCESS_VIOLATION`. **Caught under cdb on 2026-11-04**: the fault is
+inside `VkLayer_khronos_validation`'s bundled mimalloc, `_mi_subproc`
+dereferencing null at `+0x18`, from `mi_thread_init` →
+`threadsafety::RegisterCurrentThread` → `GetWin32ThreadDescription` — the first
+call a `crcbl_jobs` pool worker makes into the layer (`create_shader_module`,
+from `crcbl_render::pipeline_batch::in_parallel`). **It is the layer's, not
+crcbl's:** the same binary crashed in 7 of 12 runs with validation on (a debug
+build turns it on when `CRCBL_VK_VALIDATION` is unset) and in 0 of 12 with
+`CRCBL_VK_VALIDATION=0`. The guess, not checked: those worker threads exist
+before the layer's DLL loads, so mimalloc never set up its per-thread state for
+them.
+
+This is a different crash from the one the lavapipe CI job hit, which was the
+Vulkan loader race that `crcbl-vk`'s `loader` lock fixed (40 clean CI passes).
+**Left:** reporting it to KhronosGroup/Vulkan-ValidationLayers with this stack
+(an outward-facing step for the owner to decide), and trying another SDK's
+layer. Locally, run the viewer's Vulkan suite with `CRCBL_VK_VALIDATION=0`, or
+accept the flake, until then.
 
 ### Vulkan on Windows: the loader ignores its environment when elevated
 
