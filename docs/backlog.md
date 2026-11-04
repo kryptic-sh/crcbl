@@ -10,6 +10,10 @@ the engine runs `crcbl-wl-scanner`'s output on its own connection; dsplr uses it
 for wlr-output-management. `crcbl-wayland-probe` proves the path on headless
 sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
 
+- **Needs the owner's call: a release carrying it.** Nothing published has
+  `crcbl-wayland` yet. dsplr starts its apply/test path on the release, or on a
+  git dependency if the release is more than a day or two out. The Windows
+  session cuts 0.17.2 on the owner's go.
 - **Considered and declined: external interface paths in the scanner.** It
   resolves a cross-protocol reference (`wl_output` in wlr-output-management)
   only within one emit set, so an outside program generates `wayland.xml` beside
