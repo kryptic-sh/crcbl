@@ -383,10 +383,6 @@ prefix-code groups its entropy image names and reads past the rest. Left open:
   only the synthetic `only_the_groups_in_use_are_built`, never the fixture test.
   A real multi-group lossless fixture (an encoder at a high effort setting)
   would pin the remap on real data.
-- `Prefix::from_lengths` is still O(code lengths × alphabet) per built code; an
-  image whose entropy image names many distinct groups pays it for each. Bounded
-  by image area through `Limits`, but a counting-sort build would make it
-  O(alphabet).
 - Possibly stricter than libwebp, unverified: a simple-form code naming a symbol
   past a 40-symbol distance alphabet is refused here as "a symbol past its
   alphabet", where libwebp may set it in a buffer sized for the largest alphabet
@@ -32761,6 +32757,12 @@ the other sessions paused. Vulkan against D3D12, medians: `Presenter::open`
 check pikr runs on D3D12 passed on Vulkan too: see-through rounded corners with
 the window-region clip and hit test, a `SetWindowPos` resize, a live 100% → 125%
 → 100% DPI change, the Microsoft Japanese IME's candidate list, and Alt-Tab.
+
+**pikr stays on D3D12 regardless (2026-11-05, the owner's call, pikr 9a61227):**
+D3D12 falls back to WARP on a machine with no usable GPU, where Vulkan needs the
+vendor's driver, and hardware reach outweighed the start-up gain. So no shipping
+app exercises the composed path today; it is kept, tested headless, for a Vulkan
+app that wants a transparent Win32 window.
 
 **Left:**
 
