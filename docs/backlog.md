@@ -32741,6 +32741,29 @@ layers per window (video planes, a UI layer composited apart from the 3D,
 Wayland subsurfaces, `CALayer` trees) — has no user in the tree or in lyr's,
 pikr's or EW's requests. Revisit when one of those arrives.
 
+### Vulkan on a transparent Win32 window: declined, D3D12 only (2026-11-04)
+
+`crcbl-vk`'s `create_surface` refuses a transparent Win32 window by name
+(`win32_refusal`), and the owner decided on 2026-11-04 to keep that limitation:
+a transparent window on Windows presents through `crcbl-dx12`. The cause is
+Windows', not the backend's. DWM blends a flip-model swapchain by its alpha only
+as content of a DirectComposition visual, and a `VkSwapchainKHR` on Win32 is the
+driver's and presents to the `HWND`; no Vulkan extension makes it a visual's
+content.
+
+**The workaround that was planned, for whoever reopens this:** Vulkan renders
+into images shared through Win32 handles (`VK_KHR_external_memory_win32`, plus a
+fence through `VK_KHR_external_semaphore_win32`), and a D3D composition
+swapchain on the window's visual copies each one in and presents — one GPU copy
+a frame. Both extensions are on the RX 7900 XTX's drivers here (`vulkaninfo`,
+2026-11-04). The DirectComposition tree would have moved from
+`crates/crcbl-dx12/src/composition.rs` into a Windows-only crate both backends
+share. **Why it was not worth it:** pikr, the one transparent-window user, gains
+nothing measurable: its 2026-10-29 measurements put Vulkan's first paint at
+406–435 ms against D3D12's 326–410 ms (swapchain creation costs about 300 ms on
+both), and only per-frame present was faster (1.66–1.77 ms against 2.29–2.53).
+pikr keeps choosing D3D12 on Windows in its `platform_backend`.
+
 ### The viewer's suite still crashes on Vulkan, now reproduced on Windows
 
 The lavapipe entry was closed on 2026-11-04 after 40 clean CI passes with
