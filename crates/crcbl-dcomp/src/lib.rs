@@ -4,7 +4,7 @@
 //! A transparent Win32 window shows only a DirectComposition visual tree, so a
 //! backend that presents to one needs that tree, with its ownership and
 //! teardown rules. This crate holds it once, for every backend that presents
-//! to such a window. See [`Composition`] for the shape and the rules.
+//! to such a window. See `Composition` for the shape and the rules.
 //!
 //! macOS and Linux need nothing like it: there the swapchain's composite alpha
 //! is the whole of transparency. `docs/backlog.md` records why a
