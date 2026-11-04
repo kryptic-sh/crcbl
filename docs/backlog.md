@@ -131,6 +131,29 @@ description) and 3 (anatomical profile) are built. Left from layer 1:
   awake ragdoll bodies at the p95 ticks, to tell more work per body from more
   bodies awake. Nobody has profiled 6632d416's cost directly.
 
+## Open at the end of the 2026-11-05 session
+
+- **Branch `test/dcomp-shared-presenter` waits to merge.** It holds the
+  composed-path tests (`crcbl-dcomp`'s `shared::tests`, the reverse-fence half
+  of `crcbl-vk`'s `a_shared_texture_cleared_by_vulkan_reads_back_in_d3d11`), the
+  `dx12 e2e` step that runs the windowed one, and the entry under _Vulkan on a
+  transparent Win32 window_. Verified locally: the two headless `crcbl-dcomp`
+  tests pass on WARP and the Vulkan test on the RX 7900 XTX, each with a
+  mutation turning it red; workspace clippy was clean. **Not verified:** the
+  workspace nextest, doctest and rustdoc passes (the run was stopped for low
+  memory), and
+  `a_shared_presenter_presents_a_renderer_s_frames_to_a_transparent_window`,
+  which has never run: it shows a window, so only CI runs it. To finish: run the
+  gate, read the branch's `dx12 e2e` dispatch, fix whatever it finds,
+  fast-forward main.
+- **CI for main at `0770b9d5`** (run 41884016144) was still queued when the
+  session ended. The run before it, on `e8715bb7`, passed everything but three
+  macOS jobs that GitHub cancelled for runner capacity ("not acquired by Runner
+  … capacity constraints") on both attempts: `build + test (macos-latest)`,
+  `mtl hardware e2e (macos-26)` and `build x86_64-apple-darwin`. Its `mtl e2e`
+  jobs on macos-15 passed. Read 41884016144's macOS jobs before calling those
+  commits verified on Apple.
+
 ## Open at the end of the 2026-11-02 session
 
 - **Decisions still with the owner**, each recorded in its own entry: the ECS
@@ -32761,19 +32784,36 @@ the window-region clip and hit test, a `SetWindowPos` resize, a live 100% → 12
 **pikr stays on D3D12 regardless (2026-11-05, the owner's call, pikr 9a61227):**
 D3D12 falls back to WARP on a machine with no usable GPU, where Vulkan needs the
 vendor's driver, and hardware reach outweighed the start-up gain. So no shipping
-app exercises the composed path today; it is kept, tested headless, for a Vulkan
-app that wants a transparent Win32 window.
+app exercises the composed path today. **It stays, as a supported feature (the
+owner, 2026-11-05):** other crcbl consumers may want a Vulkan transparent
+window, so it is to be covered by automated tests like any other path.
 
 **Left:**
 
-- **No automated windowed test, and CI cannot host one.** The composed path has
-  run only by hand, in pikr. The headless
-  `a_shared_texture_cleared_by_vulkan_reads_back_in_d3d11` covers the image and
-  fence round trip, and a throwaway CI probe on 2026-11-04 ran it on the
-  `vk-e2e-windows` runner: its lavapipe (Mesa 26.1.5,
-  `llvmpipe (LLVM 22.1.8, 256 bits)`) lists neither extension, so the test
-  refuses to pass there. A CI test needs a hardware Vulkan driver on a Windows
-  runner.
+- **CI covers the D3D11 half only; `crcbl-vk`'s composed ring runs nowhere
+  automated.** On WARP, CI now runs `crcbl-dcomp`'s `shared::tests`: the
+  headless image and fence round trip in `build + test (windows-latest)`, and
+  `a_shared_presenter_presents_a_renderer_s_frames_to_a_transparent_window` (a
+  `SharedPresenter` on a real transparent window: bind, present, reconfigure,
+  refusals, rebind) in `dx12 e2e`. A second D3D11 device stands in for Vulkan.
+  The Vulkan side — `crcbl-vk`'s `composed` module: `build_composed_ring`,
+  `acquire_composed`, `present_composed`, `reconfigure_composed` — has run only
+  by hand in pikr, and `a_shared_texture_cleared_by_vulkan_reads_back_in_d3d11`
+  (both fences, both ways) only on a developer's GPU with `--run-ignored`. No CI
+  driver can run them, both probed: lavapipe (Mesa 26.1.5, the `vk-e2e-windows`
+  runner, 2026-11-04) lists neither Win32 interop extension; Mesa's dozen
+  (`dzn-x64-26.1.5.zip` from the same `jakoch/rasterizers` release, run here on
+  WARP with `DZN_DEBUG=warp` and the Windows SDK's `dxil.dll` beside it,
+  2026-11-05) lists both, but reports Vulkan 1.2.354 and no `maintenance4`, so
+  `VkDevice::open` refuses it. Options: a self-hosted Windows runner with a GPU
+  (the owner's call: cost and upkeep), or a windowed `crcbl-vk` test kept
+  `#[ignore]`d for developer machines, which would still need someone to run it.
+- **On WARP, a D3D11 read queued ahead of its `ready` signal stalls the other
+  device too** (seen 2026-11-05 writing the test above: the read blocked in
+  `Map`, the renderer's draw on a second device never landed, and the test hung
+  until nextest's timeout). So the WARP tests draw before they read, and whether
+  the copy waits for `ready` is checked only by the Vulkan test on real
+  hardware. Not a defect in the path: Vulkan never runs on WARP here.
 - **One driver.** AMD's only; NVIDIA and Intel are unverified.
 - **A one-frame flash during a resize is not ruled out**: pikr's screenshot came
   800 ms after it.
