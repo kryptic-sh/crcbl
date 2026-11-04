@@ -25605,10 +25605,11 @@ adapter, local SwiftShader and CI's SwiftShader alike.
   `mark_dirty` and the `image.rs` tests.
 - **Not verified: the threaded build** (`web/build.sh --threads`), whose
   `memory.buffer` is a `SharedArrayBuffer`; `byteLength` is defined on both.
-- **Not verified: `crcbl_render::upload_cleared_texture` on D3D12 and Metal.**
-  The clear leaves the zero buffer a copy destination and an explicit barrier
-  moves it to a copy source, because D3D12 promotes a buffer implicitly only out
-  of `COMMON`; CI's WARP and Metal jobs are its first run.
+- **`crcbl_render::upload_cleared_texture` is verified on D3D12 and Metal**
+  through the sprite atlas page it creates: `render_e2e`'s
+  `the_sprite_scene_draws_through_the_sprite_renderer_and_matches_its_golden`
+  passed on WARP, on Metal (macos-15) and on lavapipe in run 41819907077, and on
+  the RX 7900 XTX's D3D12 driver locally, on 2026-11-04.
 
 ### shard's goldens are drawn with anisotropic filtering off (2026-09-07)
 
