@@ -1050,6 +1050,7 @@ dependencies = [
  "crcbl-assets",
  "crcbl-core",
  "crcbl-ecs",
+ "crcbl-image",
  "crcbl-reflect",
  "crcbl-render",
  "crcbl-shaders",

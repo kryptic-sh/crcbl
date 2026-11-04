@@ -764,21 +764,23 @@ fn decode_scene_image(
 ///
 /// # Errors
 ///
-/// A sentence naming what is wrong — not a PNG, no texels, or what the
-/// decoder said — written to stand beside the image in a list of losses.
+/// A sentence naming what is wrong — neither PNG nor JPEG, no texels, or what
+/// the decoder said — written to stand beside the image in a list of losses.
 pub fn decode_image(bytes: &[u8], mime: Option<&str>) -> Result<crcbl_sprite::load::Rgba8, String> {
+    if bytes.starts_with(&JPEG_MAGIC) {
+        return crcbl_image::jpeg::decode(bytes, &crcbl_image::Limits::DEFAULT)
+            .map(|image| crcbl_sprite::load::Rgba8 {
+                width: image.width(),
+                height: image.height(),
+                pixels: image.into_pixels(),
+            })
+            .map_err(|error| format!("the JPEG decoder refused it: {error}"));
+    }
     if !bytes.starts_with(&PNG_MAGIC) {
-        let found = if bytes.starts_with(&JPEG_MAGIC) {
-            "JPEG".to_owned()
-        } else {
-            format!(
-                "neither PNG nor JPEG (mimeType {})",
-                mime.unwrap_or("undeclared")
-            )
-        };
         return Err(format!(
-            "its bytes are {found}, and this build decodes PNG only; every material naming it \
-             shades without it, through its factors alone"
+            "its bytes are neither PNG nor JPEG (mimeType {}); every material naming it shades \
+             without it, through its factors alone",
+            mime.unwrap_or("undeclared")
         ));
     }
 
@@ -2037,10 +2039,29 @@ mod tests {
         );
     }
 
+    /// A baseline greyscale JPEG, the one `crcbl-image`'s `grey` fixture is,
+    /// copied here so this crate's tests read only its own package.
+    const GREY_JPEG: &[u8] = include_bytes!("../fixtures/grey.jpg");
+
+    /// **A JPEG image reaches the page**, decoded by `crcbl-image`, and a
+    /// document claiming PNG for it changes nothing: the bytes decide.
     #[test]
-    fn a_jpeg_image_is_skipped_by_name_and_its_material_falls_back_to_white() {
-        // Real JPEG magic in a document that claims PNG: the bytes decide, and
-        // the message has to name what was actually there.
+    fn a_jpeg_image_reaches_the_page() {
+        let converted = convert(&textured_glb(GREY_JPEG, "image/png", 0));
+
+        assert_eq!(converted.skipped, []);
+        assert_eq!(converted.scene.page.layers(PageKind::BaseColor).len(), 1);
+        assert_ne!(
+            converted.scene.materials[1].base_color_texture,
+            mesh::GpuMaterial::NO_PAGE,
+            "the material names the layer its JPEG became"
+        );
+    }
+
+    #[test]
+    fn a_broken_jpeg_image_is_skipped_by_name_and_its_material_falls_back_to_white() {
+        // Real JPEG magic and nothing after it: the decoder refuses it, and
+        // the message has to say which decoder.
         let converted = convert(&textured_glb(
             &[0xFF, 0xD8, 0xFF, 0xE0, 0x00],
             "image/png",
@@ -2055,8 +2076,8 @@ mod tests {
             "the message names the image the file named"
         );
         assert!(
-            skip.why.contains("JPEG") && skip.why.contains("PNG only"),
-            "the reason has to say what the bytes were and what this build takes: {}",
+            skip.why.starts_with("the JPEG decoder refused it"),
+            "the reason has to say what the bytes were: {}",
             skip.why
         );
 
@@ -2657,13 +2678,27 @@ mod tests {
     /// **The decoder a reload asks first says why it refuses**, in the words
     /// the first build's skip list uses.
     #[test]
-    fn decoding_a_reloaded_image_refuses_half_a_png_and_a_jpeg_by_name() {
+    fn decoding_a_reloaded_image_refuses_half_a_png_or_jpeg_and_other_bytes_by_name() {
         let png = image_png();
         assert!(decode_image(&png, Some("image/png")).is_ok());
         let half = decode_image(&png[..png.len() / 2], Some("image/png"))
             .expect_err("half a PNG does not decode");
         assert!(half.starts_with("the PNG decoder refused it"), "{half}");
-        let jpeg = decode_image(&[0xFF, 0xD8, 0xFF, 0xE0], None).expect_err("not a PNG");
-        assert!(jpeg.contains("JPEG"), "{jpeg}");
+
+        let jpeg = decode_image(GREY_JPEG, Some("image/jpeg")).expect("a whole JPEG decodes");
+        assert!(jpeg.width > 0 && jpeg.height > 0);
+        assert_eq!(
+            jpeg.pixels.len(),
+            jpeg.width as usize * jpeg.height as usize * 4
+        );
+        let half = decode_image(&GREY_JPEG[..GREY_JPEG.len() / 2], None)
+            .expect_err("half a JPEG does not decode");
+        assert!(half.starts_with("the JPEG decoder refused it"), "{half}");
+
+        let other = decode_image(b"GIF89a", Some("image/gif")).expect_err("not an image we take");
+        assert!(
+            other.contains("neither PNG nor JPEG (mimeType image/gif)"),
+            "{other}"
+        );
     }
 }

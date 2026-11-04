@@ -3563,7 +3563,7 @@ mod tests {
                 .game()
                 .textures
                 .last_refusal()
-                .is_some_and(|why| why.contains("decodes PNG only")),
+                .is_some_and(|why| why.contains("neither PNG nor JPEG")),
             "the refusal is the decoder's: {:?}",
             engine.game().textures.last_refusal()
         );

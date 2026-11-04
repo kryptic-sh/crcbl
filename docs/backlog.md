@@ -789,18 +789,6 @@ small each.
   machine); decisions are hand-written per sample (`apps/breach/src/bots.rs`).
   Recorded only in `docs/notes/samples.md`. Medium, P3.
 
-### glTF still decodes PNG only, though the workspace has a JPEG decoder
-
-Re-verified 2026-11-04: `crcbl_image::jpeg::decode` exists (behind
-`crcbl-image`'s `jpeg` feature), but `crcbl_scene::gltf_render::decode_image`
-still decodes through `crcbl_sprite::load::decode_png` and refuses a JPEG with
-"this build decodes PNG only", so a glTF's JPEG textures shade through their
-factors alone. (The old line "no JPEG decoder exists in the workspace" is gone
-from the docs.) Wiring it in needs a layering call: `crcbl-scene` depends on
-`crcbl-sprite` for images today, not on `crcbl-image`, so either `crcbl-scene`
-takes `crcbl-image` (optional, behind `render`) or `crcbl-sprite`'s loader
-routes JPEG to it.
-
 ### Coverage
 
 Reviewed (lib.rs or public API plus targeted greps): `crcbl-audio`,
@@ -19293,7 +19281,7 @@ panel's `a_changed_chunk_is_asked_about_with_two_buttons`, and
 - **Only glTF images beside a document reload.** An image inside a `.glb`, a
   sprite sheet (`crcbl-sprite`), the UI's glyph and image atlases and grass's
   cover and card textures have no reload path; each would need its own rebuild
-  and the same slot rule. The engine decodes PNG only, so a JPEG or KTX texture
+  and the same slot rule. The engine decodes PNG and JPEG only, so a KTX texture
   is refused at the decode as it is at the first build.
 - **The editor watching its scene.** `Document::reload_chunk` and the rule are
   built and tested; `apps/editor` does not poll its origin yet. What it would
@@ -27661,9 +27649,7 @@ one and asserting a colour per quadrant. What a real file can still hit:
 - **`data:` URI buffers and images** — Blender's "glTF Embedded" export is
   exactly this, so the most common way an artist hands over a single file is one
   we skip. Probably the highest-value gap for the viewer.
-- **Sparse accessors**, **`KHR_texture_transform`**, and **JPEG images** — no
-  JPEG decoder exists in the workspace, so that one is a dependency decision
-  rather than work (`crcbl-sprite` decodes PNG only).
+- **Sparse accessors** and **`KHR_texture_transform`**.
 - **The single-page limit.** Every base-colour image is resampled onto one
   square page, so a model with many large textures costs `layers x extent^2 x 4`
   on the device — a 20-texture 2048² document is roughly 335 MB. A real

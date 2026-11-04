@@ -13,6 +13,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **glTF JPEG textures.** `crcbl_scene::gltf_render::decode_image` decodes a
+  JPEG through `crcbl-image`'s own decoder, so a document's `image/jpeg`
+  textures reach the page instead of being skipped with their materials shading
+  through factors alone. As with PNG, the bytes decide the format, not the
+  declared `mimeType`. The `render` feature now pulls in `crcbl-image` with its
+  `jpeg` feature.
+
 ### Breaking
 
 - **`GpuOptions` gains `headless: bool`.** Code building it field by field must

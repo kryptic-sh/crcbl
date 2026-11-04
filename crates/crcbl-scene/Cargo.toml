@@ -48,7 +48,7 @@ rust-version.workspace = true
 default = ["gltf"]
 gltf = ["dep:gltf"]
 
-render = ["gltf", "dep:crcbl-render", "dep:crcbl-sprite"]
+render = ["gltf", "dep:crcbl-image", "dep:crcbl-render", "dep:crcbl-sprite"]
 
 # `crcbl_scene::gltf_fixture` — the triangle document and the `.glb` container
 # this crate's own tests are built out of, compiled outside `cfg(test)` so that
@@ -106,12 +106,15 @@ gltf = { workspace = true, features = ["extensions"], optional = true }
 # The scene vocabulary `gltf_render` converts *into* — `SceneDesc`, `MeshDesc`,
 # `PageDesc`, `InstanceDesc` — behind the `render` feature above.
 crcbl-render = { workspace = true, optional = true }
-# `load::decode_png`, which is the only image decoder in the workspace and is
-# exactly what a glTF `image/png` needs. `crcbl-render` already links this crate
+# `load::decode_png`, which is exactly what a glTF `image/png` needs, and
+# `load::Rgba8`, the image a page is built from. `crcbl-render` already links this crate
 # with the same feature, so a build that has the renderer gains nothing new; a
 # second PNG decoder beside it is what `[workspace.dependencies]`'s note about
 # `gltf`'s `image` dependency exists to avoid.
 crcbl-sprite = { workspace = true, features = ["load"], optional = true }
+# `jpeg::decode`, for a glTF `image/jpeg`: the workspace's own JPEG decoder,
+# with only that format's feature on.
+crcbl-image = { workspace = true, features = ["jpeg"], optional = true }
 # `MeshletError`, which is not a `StorageError`: the meshlet builder reads no
 # bytes, so every storage variant but `Other` is unreachable from it and
 # `Other(String)` would erase which caller bug it hit.
