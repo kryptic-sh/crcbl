@@ -32821,7 +32821,10 @@ crcbl's:** the same binary crashed in 7 of 12 runs with validation on (a debug
 build turns it on when `CRCBL_VK_VALIDATION` is unset) and in 0 of 12 with
 `CRCBL_VK_VALIDATION=0`. The guess, not checked: those worker threads exist
 before the layer's DLL loads, so mimalloc never set up its per-thread state for
-them.
+them. Turning the layer's thread-safety checker off
+(`VK_KHRONOS_VALIDATION_THREAD_SAFETY=false`) did not help: 6 of 12 runs still
+crashed, so the checker is only where the first allocation happened to be
+(whether the layer honoured the setting was not checked).
 
 This is a different crash from the one the lavapipe CI job hit, which was the
 Vulkan loader race that `crcbl-vk`'s `loader` lock fixed (40 clean CI passes).
