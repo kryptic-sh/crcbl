@@ -385,7 +385,10 @@ pub fn skinned_of(scene: &GltfScene, render: &RenderScene, skips: &mut Vec<Skip>
                         "it wears a skin and the primitive it draws (mesh {} primitive {}) \
                          carries no joint bindings, so there is nothing to deform and it is \
                          drawn in its bind pose",
-                        render.origins[row].mesh, render.origins[row].primitive,
+                        render.origins[row].mesh,
+                        scene.meshes()[render.origins[row].mesh].primitives()
+                            [render.origins[row].primitive]
+                            .index(),
                     ),
                 });
                 continue;

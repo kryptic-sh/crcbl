@@ -21,6 +21,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   through factors alone. As with PNG, the bytes decide the format, not the
   declared `mimeType`. The `render` feature now pulls in `crcbl-image` with its
   `jpeg` feature.
+- **`GltfPrimitive::index`**, the primitive's index in its mesh as the file
+  numbers it, which can differ from its position in `GltfMesh::primitives`
+  because the importer drops non-triangle primitives.
 
 ### Breaking
 
@@ -36,6 +39,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   knobs from the `[engine.video]` section of whichever home directory it runs
   in. Its console already read nothing. `--set` still reaches it, through the
   launch layers.
+- **glTF messages name a primitive by the file's index.** A mesh row's label and
+  the skinning skip that quotes a primitive used its position after the importer
+  dropped non-triangle primitives, so in a mesh of `[POINTS, TRIANGLES]` the
+  drawn primitive was reported as 0 though the file calls it 1.
+  `MeshOrigin::primitive` is still the position.
 - **A live `[engine.video]` write no longer undoes a sample's process-global
   override.** `apply_process_video` now moves only the convars whose value
   differs from its previous call, so `sundial --filter box` keeps its box filter

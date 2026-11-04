@@ -778,9 +778,23 @@ pub struct GltfPrimitive {
     weights: Vec<[f32; 4]>,
     indices: Vec<u32>,
     material: Option<usize>,
+    index: usize,
 }
 
 impl GltfPrimitive {
+    /// The primitive's index in its mesh's `primitives` array **in the file**.
+    ///
+    /// Not its position in [`GltfMesh::primitives`]: the importer drops every
+    /// primitive that is not a triangle list, so in a mesh of
+    /// `[POINTS, TRIANGLES]` the one kept is at position 0 and is the file's
+    /// primitive 1. A message naming a primitive to someone reading the file
+    /// uses this.
+    #[inline]
+    #[must_use]
+    pub const fn index(&self) -> usize {
+        self.index
+    }
+
     /// Vertex positions, in the document's own coordinate system.
     #[inline]
     #[must_use]
@@ -1819,6 +1833,7 @@ fn read_primitive(
         weights,
         indices,
         material: primitive.material().index(),
+        index: primitive.index(),
     })
 }
 

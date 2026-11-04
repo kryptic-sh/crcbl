@@ -392,17 +392,6 @@ prefix-code groups its entropy image names and reads past the rest. Left open:
   alphabet", where libwebp may set it in a buffer sized for the largest alphabet
   and ignore it. Check libwebp's `ReadHuffmanCode` before changing.
 
-### crcbl-scene: a primitive's label counts only the triangle primitives
-
-The importer skips every non-`TRIANGLES` primitive with a warning and keeps no
-placeholder, so `primitive_label` in `crates/crcbl-scene/src/gltf_render.rs`,
-and the primitive index on each mesh's origin record, give the position in the
-importer's filtered list rather than the glTF document's index: in a mesh of
-`[POINTS, TRIANGLES]` the triangle primitive is reported as primitive 0 though
-the file calls it 1. Found by reading while fixing the whole-triangles check; no
-test covers it. Fix: carry the document's primitive index through
-`read_primitive` into the record.
-
 ### Coverage
 
 Reviewed thoroughly: crcbl-net `codec.rs` decoders, `reliable/fragment.rs`,

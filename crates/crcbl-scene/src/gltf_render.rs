@@ -247,7 +247,10 @@ pub struct RenderScene {
 pub struct MeshOrigin {
     /// Which of [`GltfScene::meshes`] the row's primitive belongs to.
     pub mesh: usize,
-    /// Which of that mesh's [`GltfPrimitive`]s it is.
+    /// Which of that mesh's [`GltfPrimitive`]s it is: a position in
+    /// [`GltfMesh::primitives`](crate::gltf_import::GltfMesh::primitives),
+    /// which skips the file's non-triangle primitives, so the file's own index
+    /// is that primitive's [`index`](GltfPrimitive::index).
     pub primitive: usize,
     /// One [`SkinBinding`] per emitted vertex of the row, in the same order —
     /// the slice
@@ -364,8 +367,11 @@ fn material_label(material: usize) -> String {
     format!("material {material}")
 }
 
-/// How the document names a primitive, for a message.
+/// How the document names a primitive, for a message: `primitive` is its
+/// position in [`GltfMesh::primitives`](crate::gltf_import::GltfMesh::primitives),
+/// and the label carries the file's own index for it.
 fn primitive_label(scene: &GltfScene, mesh: usize, primitive: usize) -> String {
+    let primitive = scene.meshes()[mesh].primitives()[primitive].index();
     match scene.meshes()[mesh].name() {
         Some(name) => format!("mesh {mesh} {name:?} primitive {primitive}"),
         None => format!("mesh {mesh} primitive {primitive}"),
@@ -2159,6 +2165,37 @@ mod tests {
             1,
             "a scaled node draws and shades correctly and may lose clusters to the cone \
              cull; dropping the node would lose all of it"
+        );
+    }
+
+    /// **A primitive is named by the file's index, not by where it landed
+    /// after the importer dropped the non-triangle ones** — in a mesh of
+    /// `[POINTS, TRIANGLES]` the drawn one is the file's primitive 1.
+    #[test]
+    fn a_primitive_after_a_skipped_one_is_named_by_the_file_s_index() {
+        let json = replacing(
+            &triangle_json(BIN_CHUNK_BUFFER),
+            r#""primitives": [{"#,
+            r#""primitives": [{ "attributes": { "POSITION": 0 }, "mode": 0 }, {"#,
+        );
+        let scene = import_glb(&json).expect("the fixture imports");
+        let converted = build_render_scene(&scene, Path::new(KEY));
+
+        assert_eq!(converted.scene.meshes.len(), 1);
+        assert_eq!(
+            converted.scene.meshes[0].label,
+            "mesh 0 \"triangle\" primitive 1"
+        );
+        let origin = &converted.origins[0];
+        assert_eq!(
+            (origin.mesh, origin.primitive),
+            (0, 0),
+            "the origin is a position in the imported list"
+        );
+        assert_eq!(
+            scene.meshes()[origin.mesh].primitives()[origin.primitive].index(),
+            1,
+            "and that primitive knows the file's index"
         );
     }
 
