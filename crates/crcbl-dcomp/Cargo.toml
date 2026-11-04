@@ -27,7 +27,9 @@ workspace = true
 #   `CreateVisual` and `Commit`, the target's `SetRoot` and the visual's
 #   `SetContent`.
 # * `Win32_Graphics_Dxgi` is `IDXGISwapChain1`, the content a visual is bound
-#   to.
+#   to, and the `DXGI_SWAP_CHAIN_DESC1` `swap_chain_desc` fills in.
+# * `Win32_Graphics_Dxgi_Common` is the `DXGI_FORMAT`, `DXGI_ALPHA_MODE` and
+#   `DXGI_SAMPLE_DESC` that descriptor carries.
 # * `Win32_Foundation` is `HWND` and `DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED`.
 #
 # `std` because `windows_core::Error` carries a `String` message.
@@ -37,4 +39,5 @@ windows = { version = "0.62.2", default-features = false, features = [
   "Win32_Foundation",
   "Win32_Graphics_DirectComposition",
   "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
 ] }

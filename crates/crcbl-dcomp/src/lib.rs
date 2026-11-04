@@ -15,6 +15,10 @@
 
 #[cfg(target_os = "windows")]
 mod composition;
+#[cfg(target_os = "windows")]
+mod desc;
 
 #[cfg(target_os = "windows")]
 pub use composition::{Binding, Composition};
+#[cfg(target_os = "windows")]
+pub use desc::swap_chain_desc;
