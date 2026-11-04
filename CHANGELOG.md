@@ -25,6 +25,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   numbers it, which can differ from its position in `GltfMesh::primitives`
   because the importer drops non-triangle primitives.
 
+### Changed
+
+- **Lossless WebP builds each prefix code in one pass over its alphabet.** It
+  used to rescan the alphabet once per code length, so an image whose entropy
+  image names many prefix-code groups paid that for every code it built.
+
 ### Breaking
 
 - **`GpuOptions` gains `headless: bool`.** Code building it field by field must

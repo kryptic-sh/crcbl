@@ -120,12 +120,19 @@ impl Prefix {
         }
         counts[0] = 0;
         let used = check_counts(&counts)?;
-        let mut symbols = Vec::with_capacity(used);
-        for length in 1..=MAX_CODE_LENGTH {
-            for (symbol, &l) in lengths.iter().enumerate() {
-                if usize::from(l) == length {
-                    symbols.push(symbol as u16);
-                }
+        // Where each length's symbols start in code order, as `puff` builds
+        // its `offs`: one pass over the alphabet then places every symbol,
+        // ascending within its length.
+        let mut next = [0usize; MAX_CODE_LENGTH + 1];
+        for length in 1..MAX_CODE_LENGTH {
+            next[length + 1] = next[length] + usize::from(counts[length]);
+        }
+        let mut symbols = vec![0u16; used];
+        for (symbol, &length) in lengths.iter().enumerate() {
+            if length != 0 {
+                let slot = &mut next[usize::from(length)];
+                symbols[*slot] = symbol as u16;
+                *slot += 1;
             }
         }
         Ok(Self { counts, symbols })
