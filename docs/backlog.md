@@ -32786,11 +32786,14 @@ the window-region clip and hit test, a `SetWindowPos` resize, a live 100% → 12
 
 **Left:**
 
-- **No automated windowed test.** The composed path has run only by hand, in
-  pikr. The headless `a_shared_texture_cleared_by_vulkan_reads_back_in_d3d11`
-  covers the image and fence round trip; nothing in CI creates a composed
-  swapchain, and whether CI's Windows lavapipe lists the two extensions has not
-  been checked.
+- **No automated windowed test, and CI cannot host one.** The composed path has
+  run only by hand, in pikr. The headless
+  `a_shared_texture_cleared_by_vulkan_reads_back_in_d3d11` covers the image and
+  fence round trip, and a throwaway CI probe on 2026-11-04 ran it on the
+  `vk-e2e-windows` runner: its lavapipe (Mesa 26.1.5,
+  `llvmpipe (LLVM 22.1.8, 256 bits)`) lists neither extension, so the test
+  refuses to pass there. A CI test needs a hardware Vulkan driver on a Windows
+  runner.
 - **One driver.** AMD's only; NVIDIA and Intel are unverified.
 - **A one-frame flash during a resize is not ruled out**: pikr's screenshot came
   800 ms after it.
