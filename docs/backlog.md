@@ -31316,9 +31316,12 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
     (no thread there can reach the device). Not done: an engine helper or a
     sample other games can copy, and EW's loader has not moved. Verified by
     `a_document_opened_in_the_background_is_built_off_the_calling_thread` on the
-    null device, which goes red when the build runs inline. Not measured:
-    whether frames stall while the worker compiles pipelines on a driver that
-    serialises compiles internally.
+    null device, which goes red when the build runs inline. **Measured on
+    Linux** by office-crcbl, 2026-11-04 (NVIDIA MX550, Vulkan): a re-export's
+    worst frame was 163–173 ms at v0.17.1 and 16.9–17.5 ms at `ce452ab5`.
+    Whether the 17 ms left is the install on the loop thread is a guess, not
+    checked. Not measured: Windows, and a driver that serialises pipeline
+    compiles.
   - **Only the Win32 half is verified.** The Wayland, X11 and AppKit versions
     are the steps each backend's `pump` already ran, split out. They were
     checked with cross-target clippy only. The Wayland `pong` it relies on is in
@@ -32793,8 +32796,13 @@ the window-region clip and hit test, a `SetWindowPos` resize, a live 100% → 12
 - **One driver.** AMD's only; NVIDIA and Intel are unverified.
 - **A one-frame flash during a resize is not ruled out**: pikr's screenshot came
   800 ms after it.
-- **Not measured:** what the composed path's 125 ms is made of, and Linux
-  start-up and frame time across this change (office-crcbl was asked).
+- **Not measured:** what the composed path's 125 ms is made of.
+- **Linux is unaffected, measured 2026-11-04** by office-crcbl (Arch, Hyprland,
+  NVIDIA MX550 on Vulkan, load 0.54–1.11, interleaved): the viewer's launch to
+  first present had a median of 0.397 s at v0.17.1 against 0.407 s at
+  `ce452ab5`, inside a 0.09 s run-to-run spread, and steady frame and present
+  times stayed within noise. Every composed-path item is behind
+  `cfg(target_os = "windows")`; the Intel iGPU was not measured.
 - The first-ever Vulkan launch took 1254 ms in `Presenter::open`, the next 156
   ms: driver and shader caches warming, not this path.
 
