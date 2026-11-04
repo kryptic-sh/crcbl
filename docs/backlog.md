@@ -905,7 +905,12 @@ the three Metal CI jobs passed with both in (run 40758600597). What is left:
   which is the wasm-heap argument in its docs. A render-pass clear of the image
   would need no buffer but adds `ImageUsage` the page does not otherwise have.
   The 1024² image page measured 2.3–2.6 ms warm on the iGPU, under the same
-  load. Not measured: how much of that is the zero buffer.
+  load. Bounded on 2026-11-04 by the first-submit probe above: clearing a 4 MiB
+  device-local buffer, a 1024² RGBA8 layer, waited about 1 ms a round, against
+  0.26–0.49 ms for an empty submit. So the zeroing is well under a millisecond
+  of GPU time on the iGPU. The UI and forward renderers now submit with
+  `submit_deferred`, so that time is off their CPU path. Not measured: the
+  buffer's allocation, or a render-pass clear to compare against.
 - **Open the instance and device before the window's first configure.** pikr's
   timeline: shell open at 1.9 ms, sized at 5.4 ms, Vulkan backend opened at 13.0
   ms, adapter at 13.8 ms, swapchain at 17.7 ms. Loading the driver and creating
