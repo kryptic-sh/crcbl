@@ -1203,6 +1203,14 @@ name = "crcbl-wayland"
 version = "0.17.1"
 
 [[package]]
+name = "crcbl-wayland-probe"
+version = "0.17.1"
+dependencies = [
+ "crcbl-wayland",
+ "crcbl-wl-scanner",
+]
+
+[[package]]
 name = "crcbl-webgpu"
 version = "0.17.1"
 dependencies = [

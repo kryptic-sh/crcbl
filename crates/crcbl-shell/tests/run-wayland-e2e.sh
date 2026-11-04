@@ -115,6 +115,29 @@ if [ "$STATUS" -ne 0 ] || ! crcbl_nextest_summary "$ACCESS_PLAIN" "crcbl e2e" \
     exit 1
 fi
 
+# The Wayland binding from outside the engine: `crcbl-wayland-probe` generates
+# wlr-output-management in its own build script against `crcbl_wayland::ffi`,
+# as dsplr does, and reads sway's outputs over it. Exactly one test, or a
+# renamed one would pass this step by matching nothing.
+echo "crcbl e2e: the Wayland binding from outside the engine"
+PROBE_LOG="${SWAY_RUNTIME_DIR}/probe.log"
+set +e
+cargo nextest run \
+    --locked \
+    --package crcbl-wayland-probe \
+    --test wayland_e2e \
+    --run-ignored all 2>&1 | tee "$PROBE_LOG"
+STATUS=${PIPESTATUS[0]}
+set -e
+PROBE_PLAIN="${SWAY_RUNTIME_DIR}/probe.plain.log"
+crcbl_nextest_plain "$PROBE_LOG" "$PROBE_PLAIN"
+if [ "$STATUS" -ne 0 ] || ! crcbl_nextest_summary "$PROBE_PLAIN" "crcbl e2e" \
+    || [ "$CRCBL_NEXTEST_TESTS_RUN" != 1 ]; then
+    echo "crcbl e2e: the outside-the-engine probe failed or did not run exactly one test" >&2
+    sway_log_tail
+    exit 1
+fi
+
 # S16 through the compositor: a transparent Vulkan window over an opaque bar,
 # read back off the screen with `grim`, which is the only check that the
 # compositor blends what the swapchain asked for (premultiplied) rather than

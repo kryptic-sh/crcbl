@@ -281,6 +281,8 @@ mod prototype {
 
     /// `struct wl_display *wl_display_connect(const char *name)`
     pub type DisplayConnect = unsafe extern "C" fn(*const c_char) -> *mut WlDisplay;
+    /// `struct wl_display *wl_display_connect_to_fd(int fd)`
+    pub type DisplayConnectToFd = unsafe extern "C" fn(c_int) -> *mut WlDisplay;
     /// `void wl_display_disconnect(struct wl_display *)`
     pub type DisplayVoid = unsafe extern "C" fn(*mut WlDisplay);
     /// `int wl_display_get_fd(struct wl_display *)`, and every other
@@ -314,6 +316,7 @@ mod prototype {
 /// means in the windowing rules (`docs/notes/backends.md`).
 pub struct Lib {
     pub display_connect: prototype::DisplayConnect,
+    pub display_connect_to_fd: prototype::DisplayConnectToFd,
     pub display_disconnect: prototype::DisplayVoid,
     pub display_get_fd: prototype::DisplayInt,
     pub display_roundtrip: prototype::DisplayInt,
@@ -419,6 +422,7 @@ fn load_uncached() -> Result<Lib, String> {
 
     Ok(Lib {
         display_connect: symbol!("wl_display_connect", prototype::DisplayConnect),
+        display_connect_to_fd: symbol!("wl_display_connect_to_fd", prototype::DisplayConnectToFd),
         display_disconnect: symbol!("wl_display_disconnect", prototype::DisplayVoid),
         display_get_fd: symbol!("wl_display_get_fd", prototype::DisplayInt),
         display_roundtrip: symbol!("wl_display_roundtrip", prototype::DisplayInt),

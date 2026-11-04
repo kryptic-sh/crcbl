@@ -3,29 +3,27 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## dsplr needs crcbl's Wayland binding from outside crcbl (2026-11-04)
+## `crcbl-wayland`: what the dsplr slice left (2026-11-04)
 
-dsplr, the display-settings editor on crcbl, opens its own Wayland connection
-beside its GUI to bind `zwlr_output_manager_v1` (v4) and, later, KDE's
-`kde_output_device_v2`, `kde_output_management_v2` and `kde_output_order_v1`.
-The owner chose crcbl's own `crcbl-wl-scanner` for those bindings, not
-`wayland-client`. Generated code calls through `Options::ffi_path`, and the only
-implementation is `crcbl_shell::wayland::ffi`, which is `pub(crate)`. Needed by
-dsplr's M2 (applying display changes on Hyprland).
+`crcbl-wayland` holds the libwayland binding and `Display`, so a program outside
+the engine runs `crcbl-wl-scanner`'s output on its own connection; dsplr uses it
+for wlr-output-management. `crcbl-wayland-probe` proves the path on headless
+sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
 
-Taken by the Linux session. The plan agreed with dsplr:
-
-- A workspace crate, `crcbl-wayland`, holding `wayland::ffi` as it is, with
-  crcbl-shell depending on it, so there is one binding.
-- A raw connection API on it: connect, the display and its registry, roundtrip,
-  dispatch and dispatch-pending, flush, the prepare-read cycle and the fd to
-  poll, so a tokio `AsyncFd` can drive it.
-- An outside caller emits `wayland.xml` beside its own XML: the scanner resolves
-  cross-protocol references only within one emit set, so the caller carries its
-  own copy of the core interface tables. Teaching the scanner external interface
-  paths was considered and left until someone needs it.
-- Proven from outside the shell by a test crate that generates
-  wlr-output-management v4 and reads the heads and modes on Hyprland.
+- **Considered and declined: external interface paths in the scanner.** It
+  resolves a cross-protocol reference (`wl_output` in wlr-output-management)
+  only within one emit set, so an outside program generates `wayland.xml` beside
+  its own XML and carries its own copy of the core tables. Harmless on a
+  separate connection, since libwayland matches interfaces by name. Revisit if
+  two crates must share proxies on one connection.
+- **Not exercised from outside: applying a configuration.** The probe reads
+  heads and modes; `zwlr_output_configuration_v1`'s `apply`/`test` and their
+  `succeeded`/`failed`/`cancelled` replies are generated but run by nothing
+  here. dsplr's M2 is their first user.
+- **`crcbl-shell`'s docs fail without features.** `wayland`'s module docs link
+  to `e2e`, which exists only under `wayland-e2e`, so `cargo doc -p crcbl-shell`
+  with default features errors on Linux and FreeBSD. CI documents with
+  `--all-features` and does not see it. Older than this slice; not fixed.
 
 ## The mesh-shader path hangs RDNA2 iGPUs (2026-10-30)
 

@@ -205,6 +205,7 @@ use core::ptr::{self, NonNull};
 use core::time::Duration;
 use std::collections::VecDeque;
 use std::ffi::CString;
+use std::os::fd::AsRawFd as _;
 
 use crcbl_core::input::{DeviceId, Keysym, Modifiers, ScrollDelta};
 use crcbl_core::{EventTime, KeyCode, Pool, SurfaceTarget};
@@ -216,8 +217,9 @@ use crate::{
     TextPurpose, WindowConfiguration, WindowDesc, WindowId, WindowRole, WindowState,
 };
 
+use crcbl_wayland::{Disconnected, Display};
 use data::{Delivery, HeldRead, Resolution, Transfer};
-use ffi::{Lib, WlArgument, WlDisplay, WlMessage, WlProxy};
+use ffi::{Lib, WlArgument, WlMessage, WlProxy};
 use protocol::cursor_shape::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1};
 use protocol::fractional_scale::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
 use protocol::layer_shell::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
@@ -1375,8 +1377,10 @@ fn decode_state_array(bytes: &[u8]) -> Vec<u32> {
 /// The connection and the globals bound on it.
 struct Conn {
     lib: &'static Lib,
-    display: NonNull<WlDisplay>,
-    fd: c_int,
+    /// The connection. Declared before nothing it outlives: `Drop` destroys
+    /// every proxy and frees [`sink`](Self::sink) before the fields drop, and
+    /// dropping this closes the display.
+    display: Display,
     registry: *mut WlProxy,
     compositor: *mut WlProxy,
     wm_base: *mut WlProxy,
@@ -1555,13 +1559,18 @@ impl Conn {
     }
 
     fn display_proxy(&self) -> *mut WlProxy {
-        ffi::display_as_proxy(self.display.as_ptr())
+        self.display.as_proxy()
     }
 
     /// Sends everything queued.
+    ///
+    /// Best effort: a socket too full to take it all keeps the rest for the
+    /// next flush, and a connection that has failed says so on the next
+    /// [`drain`](Self::drain), which is where the shell can report it.
     fn flush(&self) {
-        // SAFETY: the display is live for the connection's lifetime.
-        unsafe { (self.lib.display_flush)(self.display.as_ptr()) };
+        if let Err(error) = self.display.flush() {
+            crcbl_core::log::trace!("wayland: flush left requests queued: {error}");
+        }
     }
 
     /// A blocking round trip: send everything, then wait for the server to
@@ -1573,11 +1582,7 @@ impl Conn {
     /// [`activation_token`](WaylandShell::activation_token), whose answer
     /// comes only as an event.
     fn roundtrip(&self) -> Result<(), ShellError> {
-        // SAFETY: the display is live.
-        if unsafe { (self.lib.display_roundtrip)(self.display.as_ptr()) } < 0 {
-            return Err(self.disconnected());
-        }
-        Ok(())
+        self.display.roundtrip().map(drop).map_err(disconnected)
     }
 
     /// Non-blocking read + dispatch. See [`WaylandShell::pump`].
@@ -1585,60 +1590,48 @@ impl Conn {
     /// `aux` are clipboard-transfer pipes: they never drive the protocol, and
     /// they are in the wait so that a blocked editor wakes when a paste's bytes
     /// arrive rather than sleeping on them.
+    ///
+    /// libwayland's documented non-blocking read sequence, written out rather
+    /// than replaced by `wl_display_dispatch`, which blocks.
     fn drain(&self, timeout_ms: c_int, aux: &[c_int]) -> Result<(), ShellError> {
-        let display = self.display.as_ptr();
-        // SAFETY (whole block): `display` is live, and this is libwayland's
-        // documented non-blocking read sequence. Every `prepare_read` is paired
-        // with exactly one `read_events` or `cancel_read`, which is the
-        // invariant that keeps other threads from deadlocking on the read
-        // barrier — and the reason the sequence is written out rather than
-        // replaced by `wl_display_dispatch`, which blocks.
-        unsafe {
-            let mut dispatched = (self.lib.display_dispatch_pending)(display);
-            if dispatched < 0 {
-                return Err(self.disconnected());
+        let display = &self.display;
+        let mut dispatched = display.dispatch_pending().map_err(disconnected)?;
+        // `prepare_read` fails while this thread still has queued events;
+        // dispatch them and try again. Bounded by the queue, not by time.
+        let read = loop {
+            if let Some(read) = display.prepare_read() {
+                break read;
             }
-            // `prepare_read` fails while this thread still has queued events;
-            // dispatch them and try again. Bounded by the queue, not by time.
-            while (self.lib.display_prepare_read)(display) != 0 {
-                let more = (self.lib.display_dispatch_pending)(display);
-                if more < 0 {
-                    return Err(self.disconnected());
-                }
-                dispatched += more;
-            }
-            // **Events already in hand end the wait.** Another reader of this
-            // display — Mesa's Vulkan WSI, during a present — moves our events
-            // off the socket into the queue without dispatching them, so they
-            // are only dispatched here, and the socket they came from is quiet.
-            // Sleeping on it held a pointer press until the next unrelated
-            // event, up to a whole timeout late.
-            let timeout_ms = if dispatched > 0 { 0 } else { timeout_ms };
-            if (self.lib.display_flush)(display) < 0 && timeout_ms != 0 {
-                // A full socket with nothing to read would otherwise block for
-                // the whole timeout waiting for a peer that is waiting for us.
-                (self.lib.display_cancel_read)(display);
-                return Ok(());
-            }
-            if !ffi::poll_readable_with(self.fd, aux, timeout_ms) {
-                (self.lib.display_cancel_read)(display);
-            } else if (self.lib.display_read_events)(display) < 0 {
-                return Err(self.disconnected());
-            }
-            if (self.lib.display_dispatch_pending)(display) < 0 {
-                return Err(self.disconnected());
-            }
+            dispatched += display.dispatch_pending().map_err(disconnected)?;
+        };
+        // **Events already in hand end the wait.** Another reader of this
+        // display — Mesa's Vulkan WSI, during a present — moves our events off
+        // the socket into the queue without dispatching them, so they are only
+        // dispatched here, and the socket they came from is quiet. Sleeping on
+        // it held a pointer press until the next unrelated event, up to a whole
+        // timeout late.
+        let timeout_ms = if dispatched > 0 { 0 } else { timeout_ms };
+        if display.flush().is_err() && timeout_ms != 0 {
+            // A full socket with nothing to read would otherwise block for the
+            // whole timeout waiting for a peer that is waiting for us. Dropping
+            // the guard cancels the read.
+            return Ok(());
         }
+        if ffi::poll_readable_with(display.as_raw_fd(), aux, timeout_ms) {
+            read.read().map_err(disconnected)?;
+        } else {
+            drop(read);
+        }
+        display.dispatch_pending().map_err(disconnected)?;
         Ok(())
     }
+}
 
-    fn disconnected(&self) -> ShellError {
-        // SAFETY: the display is live; `wl_display_get_error` is pure.
-        let code = unsafe { (self.lib.display_get_error)(self.display.as_ptr()) };
-        ShellError::Disconnected {
-            backend: ShellBackend::Wayland,
-            detail: format!("errno {code}"),
-        }
+/// The shell's error for a connection libwayland has marked dead.
+fn disconnected(error: Disconnected) -> ShellError {
+    ShellError::Disconnected {
+        backend: ShellBackend::Wayland,
+        detail: error.to_string(),
     }
 }
 
@@ -2247,30 +2240,14 @@ impl WaylandShell {
     /// pretending otherwise produces a process with an invisible window and no
     /// error.
     pub fn open() -> Result<Self, ShellError> {
-        let lib = ffi::load().map_err(|detail| ShellError::Connect {
+        let display = Display::connect().map_err(|error| ShellError::Connect {
             backend: ShellBackend::Wayland,
-            detail: detail.to_string(),
+            detail: error.to_string(),
         })?;
-
-        // SAFETY: a null name means "read WAYLAND_DISPLAY", which is
-        // `wl_display_connect`'s documented behaviour.
-        let display = unsafe { (lib.display_connect)(ptr::null()) };
-        let Some(display) = NonNull::new(display) else {
-            return Err(ShellError::Connect {
-                backend: ShellBackend::Wayland,
-                detail: match std::env::var("WAYLAND_DISPLAY") {
-                    Ok(name) => format!("no compositor at WAYLAND_DISPLAY={name}"),
-                    Err(_) => "WAYLAND_DISPLAY is not set".to_string(),
-                },
-            });
-        };
-
-        // SAFETY: the display was just returned live by `wl_display_connect`.
-        let fd = unsafe { (lib.display_get_fd)(display.as_ptr()) };
+        let lib = ffi::lib();
         let conn = Conn {
             lib,
             display,
-            fd,
             registry: ptr::null_mut(),
             compositor: ptr::null_mut(),
             wm_base: ptr::null_mut(),
@@ -3898,10 +3875,9 @@ impl Drop for WaylandShell {
             self.conn.destroy(global);
         }
         self.conn.flush();
-        // SAFETY: the display was returned live by `wl_display_connect` and no
-        // proxy on it survives — every window, seat and output was destroyed
-        // above, and the globals with them.
-        unsafe { (self.conn.lib.display_disconnect)(self.conn.display.as_ptr()) };
+        // The display itself closes when `conn` drops, after this: no proxy
+        // on it survives — every window, seat and output was destroyed above,
+        // and the globals with them.
         // SAFETY: `sink` came from `Box::into_raw` in `open`, is freed exactly
         // once here, and no proxy that could dispatch into it is alive.
         drop(unsafe { Box::from_raw(self.conn.sink) });
@@ -4446,7 +4422,7 @@ impl Shell for WaylandShell {
         let surface = NonNull::new(state.surface.cast::<c_void>())
             .ok_or_else(|| ShellError::invalid_window(window))?;
         Ok(SurfaceTarget::Wayland {
-            display: self.conn.display.cast::<c_void>(),
+            display: self.conn.display.as_ptr().cast::<c_void>(),
             surface,
             transparent: state.transparent,
             main_device: self.main_device,

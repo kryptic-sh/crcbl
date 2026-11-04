@@ -1,0 +1,23 @@
+[package]
+name = "crcbl-wayland-probe"
+description = "Proof that crcbl-wl-scanner's output runs on crcbl-wayland from outside the engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# A program that is not the engine, using the Wayland binding the way one
+# would: its own protocols generated in its own build script, marshalled
+# through `crcbl-wayland`, on its own connection. dsplr is the first such
+# program; this crate keeps the path it depends on from breaking unseen.
+
+[lints]
+workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.crcbl-wayland]
+workspace = true
+
+[build-dependencies]
+crcbl-wl-scanner = { workspace = true }
