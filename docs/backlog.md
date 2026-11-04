@@ -32726,6 +32726,40 @@ declares no thread count, which is why the field exists). Safe only while every
 compute shader is also run under Vulkan, which is true today and will not always
 be.
 
+### A cross-backend composition seam: considered and declined (2026-11-04)
+
+Asked while planning Vulkan transparency on Win32 for pikr: would a composition
+layer be useful on macOS and Linux too, as a seam every backend implements?
+**Not for transparency.** On Wayland and X11 the swapchain's composite alpha is
+the whole mechanism (`crcbl-vk`'s `create_surface` ignores `transparent` there),
+and on macOS a non-opaque `CAMetalLayer` is (`crcbl-mtl/src/alpha.rs`). Windows
+alone needs a DirectComposition visual for per-pixel alpha with a flip-model
+swapchain, and that stays inside the backend, behind the seam that already
+exists: `SurfaceTarget`'s `transparent` in, `CompositeAlpha::PreMultiplied`
+offered in `SurfaceCaps` and chosen in `SwapchainDesc`. A wider seam — several
+layers per window (video planes, a UI layer composited apart from the 3D,
+Wayland subsurfaces, `CALayer` trees) — has no user in the tree or in lyr's,
+pikr's or EW's requests. Revisit when one of those arrives.
+
+### The viewer's suite still crashes on Vulkan, now reproduced on Windows
+
+The lavapipe entry was closed on 2026-11-04 after 40 clean CI passes with
+`crcbl-vk`'s `loader` lock in place. The same day, `apps/viewer`'s lib tests
+crashed locally on the RX 7900 XTX (AMD proprietary driver 25.10.36, Vulkan SDK
+1.4.357 layers) with `CRCBL_GPU=vk`, `CRCBL_VK_VALIDATION=1`,
+`CRCBL_VK_SYNC_VALIDATION=1` and `CRCBL_VK_VALIDATION_FATAL=1`:
+`STATUS_ACCESS_VIOLATION` (`0xc0000005`), with the last log lines a device
+opened and an offscreen ring created. **It predates the viewer's background
+open:** at `e0ed583d`, before it, 6 of 12 runs crashed; at the background open
+plus the queue-lock fix, 1 of 5. So the loader lock removed one race and at
+least one other remains. The old entry's next suspects still stand —
+`vkCreateDevice` and `vkDestroyDevice` on parallel test threads, which the lock
+does not cover. **A local repro is the new fact:** loop
+`cargo test --locked --quiet --package viewer --lib` with those variables until
+it crashes, under a debugger (`cdb -g -G`, or WinDbg attached to the test
+binary) for the faulting stack. Not yet tried: whether it crashes with
+validation off, and with `--test-threads=1`.
+
 ### Vulkan on Windows: the loader ignores its environment when elevated
 
 The loader's own diagnosis, the registry fix and the retraction are in
