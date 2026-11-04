@@ -13,6 +13,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`GpuOptions` gains `headless: bool`.** Code building it field by field must
+  set it; `Common::gpu` fills it from `--headless`.
+
+### Fixed
+
+- **A headless run no longer reads the player's settings file for its GPU
+  context.** `GpuContextDesc::from(GpuOptions)` now opens on
+  `SettingsSource::for_run(headless)`, so a golden run or test takes no render
+  scale, anisotropy, effects ceiling, antialiasing tier or shadow, SSAO and SSR
+  knobs from the `[engine.video]` section of whichever home directory it runs
+  in. Its console already read nothing. `--set` still reaches it, through the
+  launch layers.
+
 ## [0.17.2] - 2026-11-04
 
 ### Added

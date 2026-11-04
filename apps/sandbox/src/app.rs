@@ -266,6 +266,7 @@ impl Options {
         GpuOptions {
             backend: self.backend,
             pacing: self.pacing,
+            headless: self.headless,
         }
     }
 

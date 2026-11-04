@@ -98,27 +98,6 @@ kernel): 1.876 → 1.057 ms on the iGPU. Ranked fixes left:
 - Harness with each variant, timed on HAL timestamps: outside the repo, in the
   2026-10-31 session scratchpad (`gpu-pass`).
 
-## A headless run's GPU context reads the player's settings file (2026-11-01)
-
-`SettingsSource::for_run` states the rule: a headless run is a golden run or a
-test and reads no settings file, so it is `SettingsSource::None` when headless.
-`Loop::new` follows it for the console. The GPU context does not:
-`GpuContextDesc::settings` defaults to `SettingsSource::Platform`, and
-`crate::args::Common::gpu` never sets it, so every sample's headless run reads
-`[engine.video]` from the user's platform settings file (for example
-`~/.config/<app>/settings.toml`) while its console reads nothing.
-
-It predates the start-up fix that made `Loop::new` hand that section to
-`GameGpu::apply_video`, but that fix widens it: a file's render scale and
-anisotropy now reach a headless run too, beside the effects ceiling, the
-antialiasing tier and the process-global knobs (shadow filter, SSAO, SSR
-resolution) that already did. Known from reading the code
-(`GpuContext::request_open` reads `desc.settings.video(desc.label)`), not from a
-run with a settings file in place. Fixing it means threading `headless` into
-`GpuOptions` so the context opens on `SettingsSource::for_run(headless)`. Check
-first whether `--set` still reaches a headless run, since `SettingsSource::None`
-reads no launch layers.
-
 ## A sample's process-global video override lasts until the first live write (2026-11-01)
 
 `sundial --filter box` writes `r_shadow_filter` after its context opened, and

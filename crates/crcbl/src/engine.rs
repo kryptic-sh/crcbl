@@ -451,6 +451,9 @@ pub struct GpuOptions {
     pub backend: Option<GpuBackend>,
     /// How presented frames should be paced against the display.
     pub pacing: Pacing,
+    /// Whether the run is headless, which decides where its `[engine.video]`
+    /// settings come from: see [`SettingsSource::for_run`].
+    pub headless: bool,
 }
 
 /// A frame the run has been asked to write out as a PNG — `--screenshot`'s
@@ -820,15 +823,18 @@ impl SettingsSource<'_> {
 }
 
 impl From<GpuOptions> for GpuContextDesc<'_> {
-    /// The defaults, with the run's own two fields filled in.
+    /// The defaults, with the run's own fields filled in.
     ///
     /// Written for `..GpuContextDesc::from(gpu)` at the end of a game's struct
     /// literal: the label and the feature set above it are the game's, and
-    /// everything the command line had a say in comes from here.
+    /// everything the command line had a say in comes from here — including
+    /// whether the player's settings file is read at all, which a headless run
+    /// must not do.
     fn from(gpu: GpuOptions) -> Self {
         Self {
             backend: gpu.backend,
             pacing: gpu.pacing,
+            settings: SettingsSource::for_run(gpu.headless),
             ..Self::default()
         }
     }
@@ -8431,7 +8437,7 @@ mod tests {
         static REQUESTS_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         /// What the last [`FakeGpu`] request was asked to open.
         static REQUESTED: std::cell::Cell<GpuOptions> =
-            const { std::cell::Cell::new(GpuOptions { backend: None, pacing: Pacing::Auto }) };
+            const { std::cell::Cell::new(GpuOptions { backend: None, pacing: Pacing::Auto, headless: false }) };
     }
 
     /// A [`PolledGpu`] that arrives after a set number of polls.
@@ -8863,6 +8869,7 @@ mod tests {
         let asked_for = GpuOptions {
             backend: Some(GpuBackend::Null),
             pacing: Pacing::Off,
+            headless: true,
         };
         let mut boot: PolledBoot<crcbl_shell::HeadlessShell, FakeGpu> =
             PolledBoot::request(Box::new(shell), window, Clock::new(true), asked_for, ());
@@ -11111,6 +11118,7 @@ mod tests {
         let gpu = GpuOptions {
             backend: Some(GpuBackend::Null),
             pacing: Pacing::Off,
+            headless: false,
         };
         let desc = GpuContextDesc {
             label: "a game",
@@ -11128,6 +11136,19 @@ mod tests {
         let defaults = GpuContextDesc::from(GpuOptions::default());
         assert_eq!(defaults.backend, None, "None is 'you pick', and is default");
         assert_eq!(defaults.pacing, Pacing::Auto);
+        assert!(
+            matches!(defaults.settings, SettingsSource::Platform),
+            "a windowed run reads the player's file",
+        );
+
+        let headless = GpuContextDesc::from(GpuOptions {
+            headless: true,
+            ..GpuOptions::default()
+        });
+        assert!(
+            matches!(headless.settings, SettingsSource::None),
+            "a headless run reads no settings file",
+        );
     }
 
     /// `open` itself is this loop with a `yield_now` in it, so a break in the

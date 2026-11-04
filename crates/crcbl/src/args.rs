@@ -562,6 +562,7 @@ impl Common {
         GpuOptions {
             backend: self.backend,
             pacing: self.pacing,
+            headless: self.headless,
         }
     }
 
@@ -1073,6 +1074,20 @@ mod tests {
         assert_eq!(config.frames, Some(9));
         assert!(!config.windowed, "a headless run must not idle");
         assert_eq!(config.limit, FrameLimit::default());
+    }
+
+    /// `--headless` reaches the GPU context as "read no settings file", the way
+    /// it reaches the console: a golden run or a test must not take its render
+    /// scale or effects ceiling from whichever home directory it runs in.
+    #[test]
+    fn a_headless_run_s_gpu_reads_no_settings_file() {
+        use crate::engine::{GpuContextDesc, SettingsSource};
+
+        let headless = GpuContextDesc::from(parsed(&["--headless"]).gpu());
+        assert!(matches!(headless.settings, SettingsSource::None));
+
+        let windowed = GpuContextDesc::from(parsed(&[]).gpu());
+        assert!(matches!(windowed.settings, SettingsSource::Platform));
     }
 
     /// Every pacing the engine has is reachable by name, and the word a player
