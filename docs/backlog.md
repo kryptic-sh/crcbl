@@ -33411,7 +33411,12 @@ Metal and D3D12.
 
 So the remaining gap is structural rather than owed: a Metal-versus-D3D12
 comparison has nowhere to run. The golden path is the substitute and is already
-in place.
+in place. **A Windows machine does have two native backends**, D3D12 and Vulkan:
+the `windows-latest` runner has WARP and lavapipe, and the RX 7900 XTX desktop
+has both on hardware. A direct D3D12-versus-Vulkan comparison could run there;
+not built, because D3D12 already matches the lavapipe-blessed references in
+`render_e2e`, which is the same comparison spread across jobs, and a direct one
+would add only scenes that have no golden.
 
 ### Coverage the testing plan asks for and nothing provides
 
