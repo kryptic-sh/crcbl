@@ -26,6 +26,11 @@ bitflags = { workspace = true }
 crcbl-core = { workspace = true }
 thiserror = { workspace = true }
 
+# libwayland-client, which the Wayland backend and its generated protocol code
+# run on. Target-gated because off Linux and FreeBSD the crate is empty.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.crcbl-wayland]
+workspace = true
+
 # Build-time only: turns `wayland-protocols/*.xml` into `wl_interface` tables,
 # request wrappers and event decoders. A workspace crate rather than a module in
 # `build.rs` so its output can be unit-tested against `wayland-scanner`'s — see

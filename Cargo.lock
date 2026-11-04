@@ -1099,6 +1099,7 @@ dependencies = [
  "bitflags",
  "crcbl-core",
  "crcbl-spawn",
+ "crcbl-wayland",
  "crcbl-wl-scanner",
  "thiserror 2.0.21",
  "windows",
@@ -1196,6 +1197,10 @@ dependencies = [
  "proptest",
  "thiserror 2.0.21",
 ]
+
+[[package]]
+name = "crcbl-wayland"
+version = "0.17.1"
 
 [[package]]
 name = "crcbl-webgpu"

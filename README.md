@@ -298,6 +298,7 @@ crates/crcbl-console    the debug console's registry: variables, commands, the l
 crates/crcbl-core       ids, handles, arenas, time, logging
 crates/crcbl-shaders    Slang sources, the SPIR-V, WGSL, MSL and DXIL built from them, and the cooked cluster blobs
 crates/crcbl-wl-scanner the Wayland protocol code generator, run at build time
+crates/crcbl-wayland    the libwayland-client binding the generated protocol code runs on
 crates/crcbl-vfx        particle simulation: pooled effects, a fixed modifier menu
 crates/crcbl-inventory  the grid-inventory kit: one container, footprints, stacking
 crates/crcbl-nav        ground-grid routing and bounded reach; the navmesh is still a plan

@@ -193,6 +193,7 @@ crcbl-webgpu = { path = "crates/crcbl-webgpu", version = "0.17.1" }
 crcbl-input = { path = "crates/crcbl-input", version = "0.17.1" }
 crcbl-jobs = { path = "crates/crcbl-jobs", version = "0.17.1" }
 crcbl-wl-scanner = { path = "crates/crcbl-wl-scanner", version = "0.17.1" }
+crcbl-wayland = { path = "crates/crcbl-wayland", version = "0.17.1" }
 crcbl-store = { path = "crates/crcbl-store", version = "0.17.1" }
 crcbl-profile = { path = "crates/crcbl-profile", version = "0.17.1" }
 crcbl-audio = { path = "crates/crcbl-audio", version = "0.17.1" }

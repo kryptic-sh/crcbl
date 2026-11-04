@@ -44,6 +44,7 @@ crcbl-store
 crcbl-audio
 crcbl-mixer
 crcbl-notify
+crcbl-wayland
 crcbl-hal
 crcbl-dcomp
 crcbl-shell

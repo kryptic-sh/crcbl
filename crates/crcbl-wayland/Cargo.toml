@@ -1,0 +1,15 @@
+[package]
+name = "crcbl-wayland"
+description = "Crucible's libwayland-client binding: the runtime crcbl-wl-scanner's generated code marshals through"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# No dependencies, on purpose. libwayland-client is reached with `dlopen`
+# through hand-written declarations in `src/ffi.rs`; see that module for why
+# not `#[link]`, and `crcbl-shell`'s manifest for why not `wayland-client`.
+
+[lints]
+workspace = true

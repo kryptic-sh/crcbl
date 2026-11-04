@@ -15,6 +15,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-wayland`: the libwayland-client binding, usable outside the engine.**
+  A new crate holding what was `crcbl-shell`'s private `wayland::ffi`:
+  libwayland-client loaded with `dlopen`, the `wl_*` descriptor types, and the
+  facade `crcbl-wl-scanner`'s generated code marshals through. A program that
+  generates its own protocols points `Options::ffi_path` at
+  `crcbl_wayland::ffi`. Linux and FreeBSD only; empty elsewhere.
+
 - **The Vulkan backend presents to transparent Win32 windows.** `crcbl-vk` used
   to refuse a transparent window on Windows and point at D3D12. It now offers
   `CompositeAlpha::PreMultiplied` beside `Opaque` there, on adapters whose
