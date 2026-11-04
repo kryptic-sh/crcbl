@@ -130,7 +130,7 @@ skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
 # OpenType shaping, HarfBuzz's Rust port: `crcbl-ui` shapes its parsed text
 # with it. Default features are `std` alone, kept explicit beside `skrifa`'s so
 # the two agree on the float backend; `icu` and `libm` stay off.
-harfrust = { version = "0.14.0", default-features = false, features = ["std"] }
+harfrust = { version = "0.15.0", default-features = false, features = ["std"] }
 # Unicode text segmentation for `crcbl-ui`'s text, approved by the owner on
 # 2026-10-19: line break opportunities (UAX #14), extended grapheme clusters
 # and word boundaries (UAX #29), and the bidirectional algorithm (UAX #9).
