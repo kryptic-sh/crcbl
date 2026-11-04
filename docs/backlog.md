@@ -32870,15 +32870,6 @@ Mesa** is outward-facing and needs the owner's say-so.
 `Tolerance::RASTERISER` was calibrated radv-versus-one-lavapipe and this is a
 second, Windows Mesa build — unmeasured between two lavapipes.
 
-### What WARP has actually proven
-
-What it has proven, the three times the "still unimplemented" test rotted, and
-the lesson that came out of it are in docs/notes/backends.md under the same
-heading. What is left:
-
-Not proven on any device: dynamic offsets, offscreen surfaces, and a recorded
-frame.
-
 ### Owed by GPU-driven draw generation
 
 §3.3 is wired end to end — `cull` → `draw-args` → `forward` — and every golden
