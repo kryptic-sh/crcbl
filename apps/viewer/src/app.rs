@@ -63,10 +63,15 @@ use crcbl::ui::{DebugModule, DebugSection, draw_list::DrawList};
 
 use crate::args::Options;
 use crate::controls::Controls;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::gpu::Background;
 use crate::gpu::Gpu;
 use crate::listing::Listing;
 use crate::menu::{MenuKind, Menus};
 use crate::model::{self, LoadError, Model};
+use crate::opening::Door;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::opening::Opening;
 use crate::shelf;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::textures::Textures;
@@ -406,6 +411,18 @@ pub struct Viewer {
     /// the same shape the browser's drop takes through `crate::web`: the
     /// event records, the frame acts.
     dropped: Vec<PathBuf>,
+    /// The document a worker is opening, until it lands — see
+    /// [`Viewer::poll_for_opened`]. Native only, with the worker.
+    #[cfg(not(target_arch = "wasm32"))]
+    opening: Option<Opening>,
+    /// A re-export the watch offered while another document was opening,
+    /// picked up once that one lands.
+    #[cfg(not(target_arch = "wasm32"))]
+    re_export_waiting: bool,
+    /// Where a document is opened in the background — see
+    /// [`Gpu::build_in_background`].
+    #[cfg(not(target_arch = "wasm32"))]
+    spawner: Box<dyn crcbl::jobs::Spawn>,
     /// How many times the document has been read again since the window opened.
     ///
     /// The debug panel's observable for the reload path, and the only one there
@@ -608,6 +625,12 @@ fn assemble<S: Shell + ?Sized>(
             #[cfg(not(target_arch = "wasm32"))]
             textures: Textures::new(&document_path(options), model),
             dropped: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            opening: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            re_export_waiting: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            spawner: crcbl::jobs::default_spawner(),
             reloads: 0,
             turned: 0.0,
             handed_over: false,
@@ -766,59 +789,177 @@ impl Viewer {
     /// person who just re-exported is the one who needs to read them.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_for_re_export(&mut self, gpu: &mut Gpu, dt: f64) {
-        if !self.watch.poll(dt) {
+        // Polled while another document is opening too, so the watch keeps its
+        // own clock; a change it offers then waits for that open to land.
+        if self.watch.poll(dt) {
+            self.re_export_waiting = true;
+        }
+        if !self.re_export_waiting || gpu.is_building() {
             return;
         }
-        let path = self.watch.path();
-        let model = match model::load(path) {
-            Ok(model) => model,
-            Err(error) => {
-                crcbl::log::warn!(
-                    "viewer: {} was written again and could not be read, so the document already \
-                     on screen was kept: {error}",
+        self.re_export_waiting = false;
+        let path = self.watch.path().to_path_buf();
+        let name = file_name(&path);
+        self.open_in_background(
+            gpu,
+            Door::ReExport,
+            name,
+            Box::new(move || match model::load(&path) {
+                Ok(model) => Ok((model, path)),
+                Err(error) => Err(format!(
+                    "{} was written again and could not be read, so the document already on \
+                     screen was kept: {error}",
                     path.display(),
-                );
-                return;
-            }
+                )),
+            }),
+        );
+    }
+
+    /// Starts opening a document on a worker, through
+    /// [`Gpu::build_in_background`], and remembers which door it came through
+    /// for [`Viewer::poll_for_opened`].
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_in_background(
+        &mut self,
+        gpu: &mut Gpu,
+        door: Door,
+        name: String,
+        load: crate::gpu::Load,
+    ) {
+        if gpu.build_in_background(self.spawner.as_ref(), load) {
+            self.opening = Some(Opening::new(door, name));
+        }
+    }
+
+    /// **The document opening in the background, once it lands**: on screen
+    /// with its door's bookkeeping, or a sentence saying why the one already
+    /// there was kept.
+    ///
+    /// First in [`Viewer::draw`], for the reason the re-export poll used to
+    /// be: a document that lands is framed and listed by the rest of that
+    /// frame. `dt` moves the bar the frames in between draw.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_for_opened(&mut self, gpu: &mut Gpu, dt: f64) {
+        let Some(opening) = self.opening.as_mut() else {
+            return;
         };
+        opening.secs += dt;
+        let Some(ended) = gpu.poll_background() else {
+            return;
+        };
+        let door = opening.door;
+        self.opening = None;
+        match ended {
+            Background::Opened { model, path } => {
+                report_skips(&model.key.display().to_string(), &model);
+                self.record(&model);
+                self.opened(door, &model, &path);
+            }
+            Background::Refused { model, error } => {
+                let key = model.key.display().to_string();
+                report_skips(&key, &model);
+                self.refused(door, &key, &error);
+            }
+            Background::Unreadable(sentence) => crcbl::log::warn!("viewer: {sentence}"),
+            Background::Lost => crcbl::log::warn!(
+                "viewer: the document being opened was lost before it arrived, so the document \
+                 already on screen was kept",
+            ),
+        }
+    }
+
+    /// What landing means for a document that came through `door` and is now
+    /// on screen, read from `path`.
+    ///
+    /// A re-export is the same document again, so the pose an artist has aimed
+    /// survives it and only the texture watch starts over. A drop and a shelf
+    /// row are documents nobody has aimed at, so they are framed as start-up
+    /// frames the one the application opened with, the turntable starts again,
+    /// and **the re-export loop follows the document** — without that the
+    /// watch would still be on the file the command line named, so
+    /// re-exporting the new one would do nothing and re-exporting the *old*
+    /// one would replace the document on screen. `Watch::new` treats what is
+    /// on disk now as already loaded, which is exactly true: it was just read.
+    fn opened(&mut self, door: Door, model: &Model, path: &Path) {
         let key = model.key.display().to_string();
-        // `drew_nothing` is false by construction: `model::load` computes the
-        // bounds from the primitives the conversion would draw, so a document
-        // with nothing to draw has no bounds and was refused above as a
-        // `LoadError::NoGeometry`. Reported anyway rather than skipped, so that
-        // a `world_bounds` which one day counts something the conversion skips
-        // reports it here instead of printing a skip list with no verdict under
-        // it.
-        report_skips(&key, &model);
-        if let Err(error) = self.adopt(gpu, &model) {
-            crcbl::log::warn!(
-                "viewer: {key} was re-read but the renderer refused it, so the document already \
-                 on screen was kept: {error}",
+        if door == Door::ReExport {
+            // The re-export may name other images, and its pages were just
+            // built from the files as they are, so the texture watch starts
+            // again on them.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.textures = Textures::new(self.watch.path(), model);
+            }
+            crcbl::log::info!(
+                "viewer: {key} reloaded — {} instance(s), {} skipped",
+                self.instances,
+                self.skipped,
             );
             return;
         }
-        // The re-export may name other images, and its pages were just built
-        // from the files as they are, so the texture watch starts again on
-        // them.
-        self.textures = Textures::new(self.watch.path(), &model);
-        crcbl::log::info!(
-            "viewer: {key} reloaded — {} instance(s), {} skipped",
-            self.instances,
-            self.skipped,
+        self.reframe = true;
+        self.handed_over = false;
+        // In a browser the path is a key and there is no filesystem to watch,
+        // so there is no watch to repoint and the path is let go.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.watch = Watch::new(path);
+            self.textures = Textures::new(path, model);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = path;
+        let from = if door == Door::Shelf {
+            " from the shelf"
+        } else {
+            ""
+        };
+        let verdict = format!(
+            "{key} opened{from} — {} instance(s), {} skipped",
+            self.instances, self.skipped,
         );
+        crcbl::log::info!("viewer: {verdict}");
+        #[cfg(target_arch = "wasm32")]
+        if door == Door::Shelf {
+            crate::web::report_dropped_document(verdict);
+        }
+    }
+
+    /// Says why the renderer refused a document that came through `door`, and
+    /// that the one already on screen was kept.
+    fn refused(&self, door: Door, key: &str, error: &crcbl::hal::HalError) {
+        let verdict = match door {
+            Door::ReExport => format!(
+                "{key} was re-read but the renderer refused it, so the document already on \
+                 screen was kept: {error}"
+            ),
+            Door::Dropped => format!(
+                "{key} was dropped but the renderer refused it, so the document already on \
+                 screen was kept: {error}"
+            ),
+            Door::Shelf => format!(
+                "{key}: the renderer refused it, so the document already on screen was kept: \
+                 {error}"
+            ),
+        };
+        crcbl::log::warn!("viewer: {verdict}");
+        #[cfg(target_arch = "wasm32")]
+        if door == Door::Shelf {
+            crate::web::report_dropped_document(verdict);
+        }
     }
 
     /// Puts `model` on screen in place of the document already there: the
     /// renderer is rebuilt around it, and the bounds, the counts and the
     /// listing follow.
     ///
-    /// The tail of `Viewer::poll_for_re_export` (native), and the whole of what a
-    /// dropped document does with the frame — see
-    /// [`Viewer::poll_for_dropped_files`] for one dropped on the window and
-    /// `Viewer::poll_for_dropped_document` for one dropped on a page. One
-    /// function because it is one event: a different document arriving at a
-    /// viewer that is already running. A copy per door is where the browser
-    /// would quietly stop rebuilding the listing.
+    /// The browser's open, on the frame: every door a page has —
+    /// `Viewer::poll_for_dropped_document`, the shelf and the window's drop
+    /// list — comes through here. Natively the same two halves run apart: the
+    /// renderer is built on a worker and installed by `Gpu::poll_background`,
+    /// and `Viewer::poll_for_opened` then calls [`Viewer::record`]. One
+    /// [`Viewer::record`] for both because it is one event: a different
+    /// document arriving at a viewer that is already running. A copy per door
+    /// is where one of them would quietly stop rebuilding the listing.
     ///
     /// **The camera is not touched here**, and its callers differ on
     /// exactly that. A re-export is the same document again, so the pose an
@@ -831,6 +972,7 @@ impl Viewer {
     /// with. Nothing here has run at that point and the frame already on screen
     /// is untouched — `reload` unwinds its own half-built renderer — so a
     /// caller's whole obligation is to say so.
+    #[cfg(target_arch = "wasm32")]
     fn adopt(&mut self, gpu: &mut Gpu, model: &Model) -> Result<(), crcbl::hal::HalError> {
         gpu.reload(
             &model.render.scene,
@@ -842,6 +984,16 @@ impl Viewer {
             // same reason — see `crate::gpu`.
             crate::gpu::grid_extent_for(model),
         )?;
+        self.record(model);
+        Ok(())
+    }
+
+    /// `Viewer::adopt`'s second half, for a document whose renderer is
+    /// already on screen: the bounds, the counts, the player and the listing
+    /// follow it. `Viewer::poll_for_opened` calls it on its own, because a
+    /// renderer built in the background was installed by the poll that
+    /// delivered it.
+    fn record(&mut self, model: &Model) {
         self.bounds = model.bounds;
         self.instances = model.render.instances.len();
         self.skipped = model.skipped().len();
@@ -857,7 +1009,6 @@ impl Viewer {
         self.listing = Listing::of(model);
         self.listing.set_visible(showing);
         self.reloads += 1;
-        Ok(())
     }
 
     /// **The drop target on the window**: opens the documents dropped on it
@@ -897,14 +1048,40 @@ impl Viewer {
     /// carries as a standing gap — so no path ever reaches
     /// [`HostedGame::dropped_file`] on either. Wayland, Win32 and AppKit all
     /// send one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_for_dropped_files(&mut self, gpu: &mut Gpu) {
+        if gpu.is_building() || self.dropped.is_empty() {
+            return;
+        }
+        let path = self.dropped.remove(0);
+        let name = file_name(&path);
+        self.open_in_background(
+            gpu,
+            Door::Dropped,
+            name,
+            Box::new(move || match model::load(&path) {
+                Ok(model) => Ok((model, path)),
+                // `LoadError` already names the file and what to do about it,
+                // which is the sentence the command-line path prints and exits
+                // on.
+                Err(error) => Err(format!(
+                    "a dropped document could not be read, so the document already on screen \
+                     was kept: {error}"
+                )),
+            }),
+        );
+    }
+
+    /// [`Viewer::poll_for_dropped_files`] on the frame, for a build with no
+    /// thread that can reach the device. Nothing fills the list in a browser —
+    /// see the native version — so this is a drain of an empty list kept in
+    /// step with it rather than an arm that does not exist.
+    #[cfg(target_arch = "wasm32")]
     fn poll_for_dropped_files(&mut self, gpu: &mut Gpu) {
         for path in std::mem::take(&mut self.dropped) {
             let model = match model::load(&path) {
                 Ok(model) => model,
                 Err(error) => {
-                    // `LoadError` already names the file and what to do about
-                    // it, which is the sentence the command-line path prints
-                    // and exits on.
                     crcbl::log::warn!(
                         "viewer: a dropped document could not be read, so the document already \
                          on screen was kept: {error}",
@@ -913,42 +1090,12 @@ impl Viewer {
                 }
             };
             let key = model.key.display().to_string();
-            // Printed rather than logged, as the re-export loop's are and for
-            // the same reason: the person who just dropped the file is the one
-            // who needs to read what the conversion could not bring in.
             report_skips(&key, &model);
             if let Err(error) = self.adopt(gpu, &model) {
-                crcbl::log::warn!(
-                    "viewer: {key} was dropped but the renderer refused it, so the document \
-                     already on screen was kept: {error}",
-                );
+                self.refused(Door::Dropped, &key, &error);
                 continue;
             }
-            // `adopt` leaves the camera alone, deliberately; the browser's drop
-            // sets both of these for the reasons it gives, and they are the
-            // same reasons here. Nobody has aimed at this document yet, so it
-            // is framed as start-up frames the one that was opened with, and
-            // the turntable starts again rather than leaving a new file still
-            // at an angle chosen for the old one.
-            self.reframe = true;
-            self.handed_over = false;
-            // **And the re-export loop follows the document**, which is the
-            // half a drop would otherwise quietly lose: without this the watch
-            // would still be on the file the command line named, so re-exporting
-            // the dropped file would do nothing and re-exporting the *old* one
-            // would replace the document on screen. `Watch::new` treats what is
-            // on disk now as already loaded, which is exactly true — it was just
-            // read.
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                self.watch = Watch::new(&path);
-                self.textures = Textures::new(&path, &model);
-            }
-            crcbl::log::info!(
-                "viewer: {key} opened — {} instance(s), {} skipped",
-                self.instances,
-                self.skipped,
-            );
+            self.opened(Door::Dropped, &model, &path);
         }
     }
 
@@ -957,8 +1104,9 @@ impl Viewer {
     /// The viewer's milestone 4, second item, and the
     /// fourth door onto a document — the command line names a path, a window
     /// hands over a path, a page hands over bytes, and this one is a row on a
-    /// panel. Everything past the loading is [`Viewer::adopt`], as it is for
-    /// the other three: one open path, four doors.
+    /// panel. Everything past the loading is [`Viewer::record`] and
+    /// [`Viewer::opened`], as it is for the other three: one open path, four
+    /// doors. Natively the loading and the renderer build run on a worker.
     ///
     /// **It retries while the load is pending, and only then.** Natively the
     /// shelf is a directory and [`crate::shelf::load`] either finds the files
@@ -977,66 +1125,65 @@ impl Viewer {
         let Some(index) = self.shelf_pending else {
             return;
         };
-        let Some(entry) = shelf::model(index) else {
-            self.shelf_pending = None;
-            return;
-        };
-        let (model, path) = match shelf::load(index) {
-            Ok(opened) => opened,
-            // Not cleared: the browser's fetch is still in flight, and the next
-            // frame asks again. See this method's docs.
-            Err(error) if shelf::is_pending(&error) => return,
-            Err(error) => {
-                self.shelf_pending = None;
-                let verdict = format!(
-                    "{} could not be opened from the shelf, so the document already on screen \
-                     was kept: {error}",
-                    entry.name,
-                );
-                crcbl::log::warn!("viewer: {verdict}");
-                #[cfg(target_arch = "wasm32")]
-                crate::web::report_dropped_document(verdict);
-                return;
-            }
-        };
-        self.shelf_pending = None;
-        let key = model.key.display().to_string();
-        report_skips(&key, &model);
-        if let Err(error) = self.adopt(gpu, &model) {
-            let verdict = format!(
-                "{key}: the renderer refused it, so the document already on screen was kept: \
-                 {error}"
-            );
-            crcbl::log::warn!("viewer: {verdict}");
-            #[cfg(target_arch = "wasm32")]
-            crate::web::report_dropped_document(verdict);
-            return;
-        }
-        // The drop paths' two lines, for the drop paths' reason: nobody has
-        // aimed at this document, so it is framed as start-up frames the one
-        // the application opened with and the turntable starts again.
-        self.reframe = true;
-        self.handed_over = false;
-        // **And the re-export watch follows it**, as it follows a dropped file:
-        // the shelf is a directory of real files, so re-exporting one of them
-        // over the top reloads exactly as re-exporting the file on the command
-        // line does. In a browser the path is a key and there is no
-        // filesystem to watch, so there is no watch to repoint and the path
-        // is let go.
+        // Natively the shelf is a directory, so the load cannot be pending and
+        // the request is spent on the first try — once no other document is
+        // opening.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.watch = Watch::new(&path);
-            self.textures = Textures::new(&path, &model);
+            if gpu.is_building() {
+                return;
+            }
+            self.shelf_pending = None;
+            let Some(entry) = shelf::model(index) else {
+                return;
+            };
+            let name = entry.name;
+            self.open_in_background(
+                gpu,
+                Door::Shelf,
+                name.to_owned(),
+                Box::new(move || {
+                    shelf::load(index).map_err(|error| {
+                        format!(
+                            "{name} could not be opened from the shelf, so the document already \
+                             on screen was kept: {error}"
+                        )
+                    })
+                }),
+            );
         }
         #[cfg(target_arch = "wasm32")]
-        drop(path);
-        let verdict = format!(
-            "{key} opened from the shelf — {} instance(s), {} skipped",
-            self.instances, self.skipped,
-        );
-        crcbl::log::info!("viewer: {verdict}");
-        #[cfg(target_arch = "wasm32")]
-        crate::web::report_dropped_document(verdict);
+        {
+            let Some(entry) = shelf::model(index) else {
+                self.shelf_pending = None;
+                return;
+            };
+            let (model, path) = match shelf::load(index) {
+                Ok(opened) => opened,
+                // Not cleared: the browser's fetch is still in flight, and the
+                // next frame asks again. See this method's docs.
+                Err(error) if shelf::is_pending(&error) => return,
+                Err(error) => {
+                    self.shelf_pending = None;
+                    let verdict = format!(
+                        "{} could not be opened from the shelf, so the document already on \
+                         screen was kept: {error}",
+                        entry.name,
+                    );
+                    crcbl::log::warn!("viewer: {verdict}");
+                    crate::web::report_dropped_document(verdict);
+                    return;
+                }
+            };
+            self.shelf_pending = None;
+            let key = model.key.display().to_string();
+            report_skips(&key, &model);
+            if let Err(error) = self.adopt(gpu, &model) {
+                self.refused(Door::Shelf, &key, &error);
+                return;
+            }
+            self.opened(Door::Shelf, &model, &path);
+        }
     }
 
     /// **The drop target**: opens the document a visitor dropped on the canvas,
@@ -1414,6 +1561,11 @@ impl HostedGame for Viewer {
         // used to give it: the tick ran immediately before this, so a document
         // that lands is framed and listed by the rest of this call rather than
         // by the next one.
+        // A document opened in the background lands first, for the same
+        // reason; see [`Viewer::poll_for_opened`]. Native only, with the
+        // worker.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.poll_for_opened(gpu, frame.render_dt.as_secs_f64());
         // Native only, with the watch: a page has no file to re-export over.
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_for_re_export(gpu, frame.render_dt.as_secs_f64());
@@ -1523,6 +1675,16 @@ impl HostedGame for Viewer {
             crcbl::math::Vec2::new(self.extent.0 as f32, self.extent.1 as f32),
             gpu.atlas(),
         );
+        // Over the frame the old document is still drawing, so whoever asked
+        // for the new one can see it is coming.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(opening) = &self.opening {
+            opening.render(
+                draw_list,
+                crcbl::math::Vec2::new(self.extent.0 as f32, self.extent.1 as f32),
+                gpu.atlas(),
+            );
+        }
     }
 
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
@@ -1739,6 +1901,16 @@ fn open_the_default() -> Result<Model, ViewerError> {
 /// no file of its own to name.
 fn document_path(options: &Options) -> std::path::PathBuf {
     options.model.clone().unwrap_or_else(shelf::default_path)
+}
+
+/// What the opening line calls a file: its name, or the whole path when it
+/// has none.
+#[cfg(not(target_arch = "wasm32"))]
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// Puts a document's [`skip_report`] where the person who opened it is looking.
@@ -3617,6 +3789,30 @@ mod tests {
             .expect("the viewer's window asks for drops");
     }
 
+    /// How long [`until_opened`] waits for a background open before calling it
+    /// lost. Far past the null device's build, which is milliseconds: a wait
+    /// that ever reaches this is an open that never lands, not a slow one.
+    const OPEN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Frames `engine` until the document it is opening in the background has
+    /// landed — on screen, or refused with a sentence.
+    ///
+    /// The worker is why a test needs this: the frame that starts an open is
+    /// not the one it lands on, and how many frames apart they are is the
+    /// worker's timing. Fails if nothing was opening, so a test that meant to
+    /// start an open cannot pass without having started one.
+    fn until_opened(engine: &mut Loop<HeadlessShell>) {
+        assert!(
+            engine.game().opening.is_some(),
+            "nothing is opening, so there is nothing to wait for"
+        );
+        let started = std::time::Instant::now();
+        while engine.game().opening.is_some() {
+            assert!(started.elapsed() < OPEN_DEADLINE, "the open never landed");
+            engine.frame().expect("a frame");
+        }
+    }
+
     /// **A document dropped on the window becomes the document on screen.**
     ///
     /// The viewer's milestone 4, first item, end to end: the
@@ -3649,9 +3845,10 @@ mod tests {
         // on disk from the document the run opened with.
         let (_elsewhere, dropped) = document_beside(&fixture::two_quads_glb(), "dropped.glb");
         drop_on_window(&mut engine, &dropped);
-        // One frame: the pump at the top of it delivers the drop and the draw
-        // at the bottom opens it.
+        // The pump at the top of a frame delivers the drop and the draw at the
+        // bottom starts opening it; a later frame puts it on screen.
         engine.frame().expect("a frame");
+        until_opened(&mut engine);
 
         assert_eq!(
             engine.game().instances,
@@ -3790,6 +3987,7 @@ mod tests {
         engine.frame().expect("a frame");
         tap(&mut engine, window, MENU_LEFT_KEY);
         engine.frame().expect("a frame");
+        until_opened(&mut engine);
 
         let (suzanne, path) = shelf::load(shelf::DEFAULT).expect("Suzanne is committed");
         assert_eq!(
@@ -3856,6 +4054,7 @@ mod tests {
         let logs = crcbl::log::capture();
         drop_on_window(&mut engine, &missing);
         engine.frame().expect("a frame");
+        until_opened(&mut engine);
 
         let records = logs.records();
         let said: Vec<_> = records
@@ -3909,6 +4108,7 @@ mod tests {
         let (_elsewhere, dropped) = document_beside(&fixture::quad_glb(Vec3::ZERO), "dropped.glb");
         drop_on_window(&mut engine, &dropped);
         engine.frame().expect("a frame");
+        until_opened(&mut engine);
         assert_eq!(engine.game().reloads, 1, "the drop never landed");
         assert_eq!(
             engine.game().watch.path(),

@@ -1870,6 +1870,19 @@ impl Presenter {
         self.device.as_ref()
     }
 
+    /// The device, shared, for work that outlives a borrow of this presenter:
+    /// a renderer built on a worker thread while frames keep presenting.
+    ///
+    /// Sound because every [`Device`] method takes `&self` and each backend
+    /// synchronises itself — see [`crcbl_hal::device`]. What the clone does not
+    /// extend is the presenter's teardown: [`Presenter::destroy`] still drains
+    /// and destroys the swapchain, so work holding a clone must be finished, and
+    /// what it built destroyed, before then.
+    #[must_use]
+    pub fn shared_device(&self) -> Arc<dyn Device> {
+        Arc::clone(&self.device)
+    }
+
     /// The choice of the adapter this presenter opened on, for the program to
     /// save and give back as [`PresenterDesc::gpu_choice`] next time; see
     /// [`crate::gpu_choice`]. On Vulkan it carries the driver's manifest when

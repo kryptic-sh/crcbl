@@ -31262,8 +31262,9 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
     dx12 cold. Still open:
     - `with_scene_on_path` has no serviced variant (lantern, alcove, quarry,
       sundial and tide call it); add one when a caller needs it.
-    - `ForwardRenderer::add_view`, the viewer's reload path and the browser
-      start path pass a no-op, so they are not serviced.
+    - `ForwardRenderer::add_view` and the browser start path pass a no-op, so
+      they are not serviced. The viewer's reloads no longer need it: they build
+      on a worker (below).
     - `DrawGen::new` builds its compute pipelines in one gap (167 ms cold);
       splitting it changes a public signature nobody needs yet.
     - The floor is one pipeline compile. Lower needs asynchronous or cached
@@ -31280,12 +31281,20 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
     the first frame, so the window stays open until the load finishes. A loader
     that wants to abort has to pump and handle events itself. No helper offers
     that yet.
-  - **No engine pattern for loading on a worker.** A game can already do it: put
-    the game in a loading state, spawn through `crcbl_jobs::Spawn`, and poll the
-    result from `HostedGame::tick`/`draw` while the loop presents a loading
-    frame. It is not written down as a sample. Declined for this slice:
-    `keep_alive` covers every native load, and one that needs the device the
-    loop owns cannot move to a worker at all.
+  - **Loading on a worker: the viewer does it, the engine has no helper.**
+    `apps/viewer`'s `Gpu::build_in_background` reads and converts a document and
+    builds its renderer on a worker through `crcbl_jobs::Spawn`, on a clone of
+    the device from `GpuContext::shared_device`, and installs it from `draw`
+    while the old document keeps drawing under an "Opening …" panel
+    (`apps/viewer/src/opening.rs`). That covers the viewer's re-export,
+    window-drop and shelf opens. Not covered: the viewer's start-up (`Gpu::open`
+    still builds on the loop thread, serviced by `keep_alive`) and the browser
+    (no thread there can reach the device). Not done: an engine helper or a
+    sample other games can copy, and EW's loader has not moved. Verified by
+    `a_document_opened_in_the_background_is_built_off_the_calling_thread` on the
+    null device, which goes red when the build runs inline. Not measured:
+    whether frames stall while the worker compiles pipelines on a driver that
+    serialises compiles internally.
   - **Only the Win32 half is verified.** The Wayland, X11 and AppKit versions
     are the steps each backend's `pump` already ran, split out. They were
     checked with cross-target clippy only. The Wayland `pong` it relies on is in

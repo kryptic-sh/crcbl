@@ -15,6 +15,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`GpuContext::shared_device` and `Presenter::shared_device`** hand out the
+  device as an `Arc<dyn Device>`, for work that outlives a borrow of the
+  context: a renderer built on a worker thread while frames keep presenting.
+  Every `Device` method already takes `&self` and each backend synchronises
+  itself, so the clone needs no lock; what it built must still be destroyed
+  before the context is.
 - **`crcbl_phys::orbit::eccentricity_vector`:** the vector `Orbit::from_state`
   keeps only the length of — it points at periapsis and is as long as the
   eccentricity — for a map that draws the apsides. `from_state` now computes
@@ -27,6 +33,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The viewer opens a document in the background.** A re-export, a file dropped
+  on the window and a shelf row are now read, converted and given their renderer
+  on a worker thread, while the document already on screen keeps drawing and an
+  "Opening …" panel with a moving bar sits in the bottom-left corner. The
+  renderer build used to run inside a frame, seconds of pipeline creation on a
+  cold shader cache, and Win32 marked the window as not responding meanwhile.
+  The browser viewer still opens on the frame.
 - **The D3D12 backend's `reconfigure_swapchain` names the command buffer that
   blocks a resize.** A command buffer keeps a reference to every resource it
   recorded against until it is destroyed, and `ResizeBuffers` refuses while any

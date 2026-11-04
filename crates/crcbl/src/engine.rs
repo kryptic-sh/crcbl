@@ -1219,6 +1219,14 @@ impl GpuContext {
         self.presenter.device()
     }
 
+    /// The device, shared, for a renderer built on a worker thread while this
+    /// context keeps presenting; see [`Presenter::shared_device`] for what the
+    /// clone does and does not keep alive.
+    #[must_use]
+    pub fn shared_device(&self) -> std::sync::Arc<dyn Device> {
+        self.presenter.shared_device()
+    }
+
     /// The choice of the adapter this context opened on, to save and give
     /// back as [`GpuContextDesc::gpu_choice`]; see
     /// [`Presenter::gpu_choice`].

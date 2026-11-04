@@ -83,6 +83,87 @@ const KEY_INTENSITY: f32 = 2.0;
 /// looking at that side on purpose.
 const AMBIENT: f32 = 0.25;
 
+/// What a renderer is built for: one converted document's scene, its
+/// instances, which of those a skin deforms, and the grid scaled to it — four
+/// things that have to come from the same document.
+#[derive(Clone, Copy)]
+struct Document<'scene, 'data> {
+    scene: &'scene crcbl::render::scene::SceneDesc<'data>,
+    instances: &'scene [InstanceDesc],
+    skinned: &'scene crcbl::scene_rig::Skinned,
+    grid_extent: f32,
+}
+
+/// A renderer built for a document and not yet drawing, with the skinning
+/// pass built against it — what [`Gpu::install`] puts on screen.
+#[derive(Debug)]
+struct NextScene {
+    renderer: ForwardRenderer,
+    skinning: Option<Skinning>,
+    draws: Vec<SkinnedDraw>,
+}
+
+impl NextScene {
+    /// Releases a build that will never be installed, the skinning pass first
+    /// for [`Gpu::destroy`]'s reason. Native only, with the worker whose
+    /// builds are the ones that can go uninstalled.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn destroy(self, device: &dyn Device) {
+        if let Some(skinning) = self.skinning {
+            skinning.destroy(device);
+        }
+        self.renderer.destroy(device);
+    }
+}
+
+/// What a worker opening a document sends back — see
+/// [`Gpu::build_in_background`].
+#[cfg(not(target_arch = "wasm32"))]
+enum Built {
+    /// The document loaded and a renderer was built for it.
+    Ready {
+        model: Box<crate::model::Model>,
+        path: std::path::PathBuf,
+        next: Box<NextScene>,
+    },
+    /// The document loaded and the renderer refused it.
+    Refused {
+        model: Box<crate::model::Model>,
+        error: HalError,
+    },
+    /// The document did not load; the sentence is the caller's own.
+    Unreadable(String),
+}
+
+/// How a document opened in the background ended, once
+/// [`Gpu::poll_background`] has it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub enum Background {
+    /// The document is on screen now, read from `path`.
+    Opened {
+        model: Box<crate::model::Model>,
+        path: std::path::PathBuf,
+    },
+    /// The document loaded and the renderer refused it, so the one already on
+    /// screen stays.
+    Refused {
+        model: Box<crate::model::Model>,
+        error: HalError,
+    },
+    /// The document did not load, in the sentence the caller's loader wrote.
+    Unreadable(String),
+    /// The worker ended without an answer: it panicked, or its thread never
+    /// started.
+    Lost,
+}
+
+/// A document read and converted on a worker thread: the model and the file
+/// it came from, or the sentence to log when it will not load.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Load =
+    Box<dyn FnOnce() -> Result<(crate::model::Model, std::path::PathBuf), String> + Send>;
+
 /// This application's device, its swapchain and its one renderer.
 #[derive(Debug)]
 pub struct Gpu {
@@ -147,6 +228,10 @@ pub struct Gpu {
     /// presence in this string *is* "the overlay reached the GPU".
     #[cfg(test)]
     last_dump: String,
+    /// The document being opened on a worker thread, until it arrives — see
+    /// [`Gpu::build_in_background`].
+    #[cfg(not(target_arch = "wasm32"))]
+    building: Option<std::sync::mpsc::Receiver<Built>>,
 }
 
 /// What both this application's bring-up and any future polled one ask for.
@@ -425,6 +510,8 @@ impl Gpu {
             dumped: false,
             #[cfg(test)]
             last_dump: String::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            building: None,
         })
     }
 
@@ -568,9 +655,149 @@ impl Gpu {
         skinned: &crcbl::scene_rig::Skinned,
         grid_extent: f32,
     ) -> Result<(), HalError> {
-        let device = self.ctx.device();
-        let mut next =
-            ForwardRenderer::with_scene(device, self.ctx.queue(), self.ctx.format(), scene)?;
+        let next = Self::build_next(
+            self.ctx.device(),
+            self.ctx.queue(),
+            self.ctx.format(),
+            &Document {
+                scene,
+                instances,
+                skinned,
+                grid_extent,
+            },
+            self.renderer.anisotropy(),
+        )?;
+        self.install(next);
+        Ok(())
+    }
+
+    /// Opens a document on a worker thread while this bundle keeps presenting
+    /// the one on screen: `load` reads and converts it there, and the renderer
+    /// for it is built there too, on a clone of the device.
+    ///
+    /// **The build is where a long load spends its time** — pipeline creation
+    /// on a cold shader cache, seconds for a glTF of any size — and on the loop
+    /// thread it starved the window system, which Win32 shows as a window that
+    /// is not responding. Every [`Device`] method takes `&self` and each
+    /// backend synchronises itself, so building on one thread while another
+    /// submits frames is within the seam's contract.
+    ///
+    /// [`Gpu::poll_background`] installs the result. One build at a time: a
+    /// call while one is running is refused and returns `false`. A runtime with
+    /// no threads runs `load` and the build inline, so the result is waiting
+    /// at the next poll.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn build_in_background(&mut self, spawner: &dyn crcbl::jobs::Spawn, load: Load) -> bool {
+        if self.building.is_some() {
+            return false;
+        }
+        let device = self.ctx.shared_device();
+        let queue = self.ctx.queue();
+        let format = self.ctx.format();
+        let anisotropy = self.renderer.anisotropy();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let work = move || {
+            let built = match load() {
+                Err(sentence) => Built::Unreadable(sentence),
+                Ok((model, path)) => {
+                    let document = Document {
+                        scene: &model.render.scene,
+                        instances: &model.render.instances,
+                        skinned: &model.skinned,
+                        grid_extent: grid_extent_for(&model),
+                    };
+                    match Self::build_next(device.as_ref(), queue, format, &document, anisotropy) {
+                        Ok(next) => Built::Ready {
+                            model: Box::new(model),
+                            path,
+                            next: Box::new(next),
+                        },
+                        Err(error) => Built::Refused {
+                            model: Box::new(model),
+                            error,
+                        },
+                    }
+                }
+            };
+            // A receiver that is gone was dropped with its bundle unpolled, so
+            // nothing will ever install this build; it is released here rather
+            // than left in a device that outlives it.
+            if let Err(std::sync::mpsc::SendError(Built::Ready { next, .. })) = sender.send(built) {
+                next.destroy(device.as_ref());
+            }
+        };
+        if spawner.threaded() {
+            // A refused thread drops `work` unrun, and the sender with it, so
+            // the poll reports the build lost instead of waiting forever.
+            if let Err(error) = spawner.spawn("viewer-open", Box::new(work)) {
+                crcbl::log::warn!(
+                    "viewer: the document could not be opened in the background: {error}"
+                );
+            }
+        } else {
+            work();
+        }
+        self.building = Some(receiver);
+        true
+    }
+
+    /// Whether a document is being opened in the background.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub const fn is_building(&self) -> bool {
+        self.building.is_some()
+    }
+
+    /// The background open's ending, once there is one, with the renderer
+    /// already installed when it is [`Background::Opened`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_background(&mut self) -> Option<Background> {
+        let receiver = self.building.as_ref()?;
+        let built = match receiver.try_recv() {
+            Ok(built) => built,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.building = None;
+                return Some(Background::Lost);
+            }
+        };
+        self.building = None;
+        Some(match built {
+            Built::Ready { model, path, next } => {
+                self.install(*next);
+                Background::Opened { model, path }
+            }
+            Built::Refused { model, error } => Background::Refused { model, error },
+            Built::Unreadable(sentence) => Background::Unreadable(sentence),
+        })
+    }
+
+    /// [`Gpu::reload`]'s first half: a renderer built and filled for
+    /// `document`, not yet drawing.
+    ///
+    /// An associated function over the device rather than a method, so it can
+    /// run on a worker thread while this bundle keeps presenting the scene it
+    /// replaces — see `Gpu::build_in_background`. `anisotropy` is the one
+    /// setting that has to reach the build itself, because applying it can
+    /// fail; the rest are carried across by [`Gpu::install`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Gpu::reload`]. Nothing is left allocated when it fails.
+    fn build_next(
+        device: &dyn Device,
+        queue: crcbl::hal::QueueHandle,
+        format: crcbl::hal::Format,
+        document: &Document<'_, '_>,
+        anisotropy: f32,
+    ) -> Result<NextScene, HalError> {
+        let Document {
+            scene,
+            instances,
+            skinned,
+            grid_extent,
+        } = *document;
+        let mut next = ForwardRenderer::with_scene(device, queue, format, scene)?;
 
         // Unwound by hand from here down, for `Gpu::open`'s reason: a `?` would
         // drop the half-built renderer without releasing a pipeline of it.
@@ -582,7 +809,7 @@ impl Gpu {
         // quietly sample at the engine's default again for a player who asked
         // for less — or for more. Here rather than beside it because this one
         // can fail, and here the unwind is still one call.
-        if let Err(error) = next.set_anisotropy(device, self.renderer.anisotropy()) {
+        if let Err(error) = next.set_anisotropy(device, anisotropy) {
             next.destroy(device);
             return Err(error);
         }
@@ -606,47 +833,59 @@ impl Gpu {
                 return Err(error);
             }
         };
+        Ok(NextScene {
+            renderer: next,
+            skinning,
+            draws,
+        })
+    }
 
-        next.set_exposure(self.renderer.exposure());
+    /// [`Gpu::reload`]'s second half: `next` replaces the scene on screen, with
+    /// the settings the player chose carried across, and the old renderer is
+    /// released.
+    fn install(&mut self, next: NextScene) {
+        let device = self.ctx.device();
+        let mut renderer = next.renderer;
+
+        renderer.set_exposure(self.renderer.exposure());
         // The three requested layers, not the resolved set: a reload must not
         // quietly restore an effect the player's settings took away, and the
         // renderer being replaced is the only thing that knows what they were.
-        next.set_effect_request(self.renderer.effect_request());
+        renderer.set_effect_request(self.renderer.effect_request());
         // Carried for the same reason the request above is: a reload must not
         // quietly draw at full size again for a player who asked for less.
-        next.set_render_scale(self.renderer.render_scale());
+        renderer.set_render_scale(self.renderer.render_scale());
         // Carried for the same reason again, and it is **not** the caller's
         // state: `crcbl::engine::Loop` hands the debug view to
         // `GameGpu::set_debug_view` only where the value *moved*, so a reload
         // under `debug_view normals` would put a shaded frame back and leave the
         // console, the HUD row and the picture disagreeing until the next press.
-        crcbl::settings::set_debug_view_on(&mut next, crcbl::debug_view::current());
+        crcbl::settings::set_debug_view_on(&mut renderer, crcbl::debug_view::current());
         // Through the renderer rather than through `Gpu::set_wireframe`, which
         // logs: a device that refused the view once has already said so, and a
         // line per re-export is a log nobody reads. The answer is what the
         // caller was already holding, so nothing here can disagree with it.
         if self.renderer.wireframe()
-            && let Err(error) = next.set_wireframe(device, true)
+            && let Err(error) = renderer.set_wireframe(device, true)
         {
             crcbl::log::warn!("viewer: the wireframe view did not survive the reload: {error}");
         }
 
-        let previous = core::mem::replace(&mut self.renderer, next);
+        let previous = core::mem::replace(&mut self.renderer, renderer);
         previous.destroy(device);
         // **The pass goes with the renderer it was built against**, because it
         // holds that renderer's vertex-pool handle: a `Skinning` kept across a
         // reload would write into a buffer the destroy above has released. The
         // regions go the same way — they are runs of the old pool — so they
         // are dropped rather than released, on `release_skinned`'s terms.
-        if let Some(previous) = core::mem::replace(&mut self.skinning, skinning) {
+        if let Some(previous) = core::mem::replace(&mut self.skinning, next.skinning) {
             previous.destroy(device);
         }
-        self.skinned = draws;
+        self.skinned = next.draws;
         self.palette.clear();
         // The graph's shape is a function of the scene, so the dump the log
         // already carries is about a document that is no longer on screen.
         self.dumped = false;
-        Ok(())
     }
 
     /// Replaces `kind`'s material page with `page`'s, in force from the next
@@ -1005,6 +1244,15 @@ impl Gpu {
     ///
     /// [`GpuError`] if waiting for outstanding work failed.
     pub fn destroy(mut self) -> Result<(), GpuError> {
+        // **A build still running is waited for**, and what it built released:
+        // it holds a clone of the device, and the swapchain and surface the
+        // context tears down below must not go while it is still recording.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(receiver) = self.building.take()
+            && let Ok(Built::Ready { next, .. }) = receiver.recv()
+        {
+            next.destroy(self.ctx.device());
+        }
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
@@ -1912,28 +2160,12 @@ mod tests {
         storage
     }
 
-    /// The effects one whole start-up resolves to, with `settings` standing in
-    /// for the player's file — and the effects the same [`Gpu`] resolves to
-    /// after a [`reload`](Gpu::reload) has replaced its renderer.
-    ///
-    /// The whole path, through [`Gpu::from_context`] rather than around it: a
-    /// helper that resolved an [`EffectRequest`](crcbl::render::EffectRequest)
-    /// by hand would prove the resolution order works and nothing at all about
-    /// whether this application hands the context's request to its renderer.
-    ///
-    /// Both answers out of one open, because there are two lines to guard and
-    /// the second only exists once the first has run: `open`'s
-    /// `set_effect_request(ctx.effect_request())` and `reload`'s
-    /// `set_effect_request(self.renderer.effect_request())`, which is what
-    /// carries the player's clamp onto the renderer built for the new document.
-    ///
-    /// `scene::demo()` rather than a converted document, because the subject is
-    /// the wiring and not the glTF: `Gpu::from_context` treats every scene the
-    /// same, and a document read off disk would put a temporary directory
-    /// between this test and what it is asking about.
-    fn effects_opened_with(
+    /// A headless window and this application's bundle on the null device,
+    /// opened the way start-up opens it, with `settings` standing in for the
+    /// player's file and `scene::demo()` as the document.
+    fn null_gpu(
         settings: crcbl::engine::SettingsSource<'_>,
-    ) -> (RenderEffects, RenderEffects) {
+    ) -> (crcbl::shell::HeadlessShell, WindowId, Gpu) {
         use crcbl::engine::{Clock, open_window, wait_for_configure};
         use crcbl::shell::{HeadlessShell, WindowDesc};
 
@@ -1969,18 +2201,43 @@ mod tests {
         .expect("the null backend opens everywhere");
 
         // `Skinned::default` is a document with no rig, which is what
-        // `scene::demo()` is: this test is about the effect request reaching a
-        // renderer, and the skinning seam is not on that path at all.
-        let nothing_skinned = crcbl::scene_rig::Skinned::default();
-        let mut gpu = Gpu::from_context(
+        // `scene::demo()` is.
+        let gpu = Gpu::from_context(
             ctx,
             &crcbl::render::scene::demo(),
             &[],
-            &nothing_skinned,
+            &crcbl::scene_rig::Skinned::default(),
             1.0,
             &mut || {},
         )
         .expect("the null device builds the viewer's renderer");
+        (shell, window, gpu)
+    }
+
+    /// The effects one whole start-up resolves to, with `settings` standing in
+    /// for the player's file — and the effects the same [`Gpu`] resolves to
+    /// after a [`reload`](Gpu::reload) has replaced its renderer.
+    ///
+    /// The whole path, through [`Gpu::from_context`] rather than around it: a
+    /// helper that resolved an [`EffectRequest`](crcbl::render::EffectRequest)
+    /// by hand would prove the resolution order works and nothing at all about
+    /// whether this application hands the context's request to its renderer.
+    ///
+    /// Both answers out of one open, because there are two lines to guard and
+    /// the second only exists once the first has run: `open`'s
+    /// `set_effect_request(ctx.effect_request())` and `reload`'s
+    /// `set_effect_request(self.renderer.effect_request())`, which is what
+    /// carries the player's clamp onto the renderer built for the new document.
+    ///
+    /// `scene::demo()` rather than a converted document, because the subject is
+    /// the wiring and not the glTF: `Gpu::from_context` treats every scene the
+    /// same, and a document read off disk would put a temporary directory
+    /// between this test and what it is asking about.
+    fn effects_opened_with(
+        settings: crcbl::engine::SettingsSource<'_>,
+    ) -> (RenderEffects, RenderEffects) {
+        let (mut shell, window, mut gpu) = null_gpu(settings);
+        let nothing_skinned = crcbl::scene_rig::Skinned::default();
         let opened = gpu.effects();
         gpu.reload(&crcbl::render::scene::demo(), &[], &nothing_skinned, 1.0)
             .expect("the null device builds the replacement renderer");
@@ -1988,6 +2245,94 @@ mod tests {
         gpu.destroy().expect("teardown");
         shell.destroy_window(window).expect("the window goes away");
         (opened, reloaded)
+    }
+
+    /// How long [`a_document_opened_in_the_background_is_built_off_the_calling_thread`]'s
+    /// loader waits at its gate before giving up. A build that ran inline
+    /// would hold the call for all of it, which is what the test times.
+    const GATE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// **A document opened in the background is read and built off the thread
+    /// that asked, and lands through the poll.**
+    ///
+    /// The loader waits at a gate the test holds, so a
+    /// [`Gpu::build_in_background`] that ran its work inline could not return
+    /// until the gate timed out — the elapsed check is what fails then, and the
+    /// thread-id check says the same thing from the other side. While the gate
+    /// is shut the bundle reports a build in flight, refuses a second one, and
+    /// the poll has nothing; once it opens, the poll installs the renderer and
+    /// hands the document back.
+    #[test]
+    fn a_document_opened_in_the_background_is_built_off_the_calling_thread() {
+        let (mut shell, window, mut gpu) = null_gpu(crcbl::engine::SettingsSource::None);
+        let spawner = crcbl::jobs::default_spawner();
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("two-quads.glb");
+        std::fs::write(&path, crate::fixture::two_quads_glb()).expect("the document");
+
+        let (open, gate) = std::sync::mpsc::channel::<()>();
+        let (seen, ran_on) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        let load_path = path.clone();
+        assert!(gpu.build_in_background(
+            spawner.as_ref(),
+            Box::new(move || {
+                seen.send(std::thread::current().id())
+                    .expect("the test is listening");
+                gate.recv_timeout(GATE)
+                    .map_err(|_| "the test never opened the gate".to_owned())?;
+                crate::model::load(&load_path)
+                    .map(|model| (model, load_path))
+                    .map_err(|error| error.to_string())
+            }),
+        ));
+        assert!(
+            started.elapsed() < GATE / 2,
+            "the call waited at the loader's gate, so the build ran on the calling thread"
+        );
+        assert_ne!(
+            ran_on.recv_timeout(GATE).expect("the loader ran"),
+            std::thread::current().id(),
+            "the loader ran on the thread that asked"
+        );
+        assert!(gpu.is_building());
+        assert!(gpu.poll_background().is_none(), "the gate is still shut");
+        assert!(
+            !gpu.build_in_background(spawner.as_ref(), Box::new(|| Err("a second".into()))),
+            "a second build was started beside the first"
+        );
+
+        open.send(()).expect("the loader is waiting");
+        let landed = loop {
+            if let Some(landed) = gpu.poll_background() {
+                break landed;
+            }
+            assert!(started.elapsed() < GATE, "the build never landed");
+            std::thread::yield_now();
+        };
+        match landed {
+            Background::Opened {
+                model,
+                path: opened,
+            } => {
+                assert_eq!(opened, path);
+                assert_eq!(model.render.instances.len(), 2, "the wrong document");
+            }
+            other => panic!("the document did not open: {other:?}"),
+        }
+        assert!(!gpu.is_building(), "a landed build is still in flight");
+
+        // And a build nobody polls is waited for at teardown, and released.
+        assert!(gpu.build_in_background(
+            spawner.as_ref(),
+            Box::new(move || {
+                crate::model::load(&path)
+                    .map(|model| (model, path))
+                    .map_err(|error| error.to_string())
+            }),
+        ));
+        gpu.destroy().expect("teardown with a build in flight");
+        shell.destroy_window(window).expect("the window goes away");
     }
 
     /// **A debug view survives a re-export.**

@@ -100,6 +100,7 @@ pub mod gpu;
 pub mod listing;
 pub mod menu;
 pub mod model;
+pub mod opening;
 pub mod shelf;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod textures;
