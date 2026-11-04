@@ -58,7 +58,7 @@
 //!
 //! A window the shell made transparent has no redirection surface, so an
 //! `HWND` swapchain on it would present frames nothing shows. Its surface
-//! carries a DirectComposition tree instead (`crate::composition`), and
+//! carries a DirectComposition tree instead (`crcbl_dcomp::Composition`), and
 //! [`create`] makes the swapchain with `CreateSwapChainForComposition` and
 //! binds it as the tree's visual content. Everything else is the same object:
 //! the same descriptor apart from the alpha mode ([`swap_chain_desc`]), the
@@ -102,12 +102,12 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
 use windows::core::{BOOL, Interface};
 
-use crate::composition::Binding;
 use crate::conv;
 use crate::debug;
 use crate::handle::Owned;
 use crate::instance::SurfaceWindow;
 use crate::present::{self, PresentLedger};
+use crcbl_dcomp::Binding;
 
 /// What a swapchain handle resolves to.
 #[derive(Debug)]
@@ -120,7 +120,7 @@ pub(crate) struct SwapchainEntry {
     /// **Declared before [`raw`](Self::raw), because fields drop in
     /// declaration order** and this one has to go first: dropping it takes the
     /// swapchain off the visual, which is DirectComposition's reference to it.
-    /// See `crate::composition` for the whole teardown order.
+    /// See `crcbl_dcomp::Composition` for the whole teardown order.
     #[expect(
         dead_code,
         reason = "held for its `Drop`, which is the whole of what it does"
@@ -345,7 +345,7 @@ pub(crate) fn swap_chain_desc(
         // between a window resize and the swapchain catching up still cover an
         // `HWND` window instead of leaving an unpainted border. A composition
         // swapchain accepts nothing else; its visual shows it unscaled anyway
-        // (see `crate::composition`).
+        // (see `crcbl_dcomp::Composition`).
         Scaling: DXGI_SCALING_STRETCH,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
         AlphaMode: alpha,

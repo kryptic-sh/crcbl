@@ -1,0 +1,40 @@
+[package]
+name = "crcbl-dcomp"
+description = "Crucible DirectComposition: how a transparent Win32 window shows a swapchain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# The error the tree's calls report through, as the backends that hold it do.
+[dependencies]
+crcbl-hal = { workspace = true }
+
+# The log a failed teardown commit goes to. Target-gated beside `windows`
+# because off Windows this crate has no code at all.
+[target.'cfg(target_os = "windows")'.dependencies.crcbl-core]
+workspace = true
+
+# At the version `crcbl-dx12`, `crcbl-mixer` and `crcbl-notify` already
+# resolve. Each feature is here because one call needs it:
+#
+# * `Win32_Graphics_DirectComposition` is the tree itself:
+#   `DCompositionCreateDevice2`, `IDCompositionDevice`'s `CreateTargetForHwnd`,
+#   `CreateVisual` and `Commit`, the target's `SetRoot` and the visual's
+#   `SetContent`.
+# * `Win32_Graphics_Dxgi` is `IDXGISwapChain1`, the content a visual is bound
+#   to.
+# * `Win32_Foundation` is `HWND` and `DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED`.
+#
+# `std` because `windows_core::Error` carries a `String` message.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", default-features = false, features = [
+  "std",
+  "Win32_Foundation",
+  "Win32_Graphics_DirectComposition",
+  "Win32_Graphics_Dxgi",
+] }

@@ -2252,7 +2252,7 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `Win32Shell::apply_transparent_chrome` at creation and after every mode
      change; `set_styles` carries the extended-style bit across a style
      rewrite). `crcbl-dx12` presents to it through DirectComposition
-     (`crates/crcbl-dx12/src/composition.rs`): the surface builds a
+     (`crates/crcbl-dcomp/src/composition.rs`): the surface builds a
      DirectComposition device, a target on the window and a root visual, offers
      `CompositeAlpha::PreMultiplied` beside `Opaque`
      (`present::window_composite_alpha`), and the swapchain is a composition one
@@ -32741,28 +32741,35 @@ layers per window (video planes, a UI layer composited apart from the 3D,
 Wayland subsurfaces, `CALayer` trees) — has no user in the tree or in lyr's,
 pikr's or EW's requests. Revisit when one of those arrives.
 
-### Vulkan on a transparent Win32 window: declined, D3D12 only (2026-11-04)
+### Vulkan on a transparent Win32 window: being built, kept only if it pays
 
 `crcbl-vk`'s `create_surface` refuses a transparent Win32 window by name
-(`win32_refusal`), and the owner decided on 2026-11-04 to keep that limitation:
-a transparent window on Windows presents through `crcbl-dx12`. The cause is
-Windows', not the backend's. DWM blends a flip-model swapchain by its alpha only
-as content of a DirectComposition visual, and a `VkSwapchainKHR` on Win32 is the
-driver's and presents to the `HWND`; no Vulkan extension makes it a visual's
-content.
+(`win32_refusal`). The cause is Windows': DWM blends a flip-model swapchain by
+its alpha only as content of a DirectComposition visual, and a `VkSwapchainKHR`
+on Win32 is the driver's and presents to the `HWND`. On 2026-11-04 the owner
+asked for the workaround built the long-term way, then measured against D3D12,
+and kept only if it is worth it.
 
-**The workaround that was planned, for whoever reopens this:** Vulkan renders
-into images shared through Win32 handles (`VK_KHR_external_memory_win32`, plus a
-fence through `VK_KHR_external_semaphore_win32`), and a D3D composition
-swapchain on the window's visual copies each one in and presents — one GPU copy
-a frame. Both extensions are on the RX 7900 XTX's drivers here (`vulkaninfo`,
-2026-11-04). The DirectComposition tree would have moved from
-`crates/crcbl-dx12/src/composition.rs` into a Windows-only crate both backends
-share. **Why it was not worth it:** pikr, the one transparent-window user, gains
-nothing measurable: its 2026-10-29 measurements put Vulkan's first paint at
-406–435 ms against D3D12's 326–410 ms (swapchain creation costs about 300 ms on
-both), and only per-frame present was faster (1.66–1.77 ms against 2.29–2.53).
-pikr keeps choosing D3D12 on Windows in its `platform_backend`.
+**The design.** The DirectComposition tree is `crcbl-dcomp`'s, shared by both
+Win32 backends (moved out of `crcbl-dx12`). Vulkan renders into textures a small
+D3D11 device creates and shares through NT handles (Vulkan imports them with
+`VK_KHR_external_memory_win32`), with a shared fence both ways
+(`VK_KHR_external_semaphore_win32`); D3D11 copies each presented image into a
+composition swapchain on the window's visual — one GPU copy a frame. Both
+extensions are on the RX 7900 XTX's drivers (`vulkaninfo`, 2026-11-04).
+
+**The bar it has to clear**, from pikr's 2026-10-29 measurements on this
+machine: D3D12's first paint was 326–410 ms (device creation 293–308 ms), and
+Vulkan's opaque first paint 406–435 ms (instance 68–122 ms, swapchain creation
+about 290 ms). The bridge pays the Vulkan instance and device plus a D3D11
+device and a composition swapchain, and skips the Vulkan swapchain. Per frame,
+Vulkan's opaque present was 1.66–1.77 ms against D3D12's 2.29–2.53 ms.
+
+**Measuring:** first present and per-frame cost, dx12 against vk, both on a
+transparent window, run through pikr's session under a desktop hold (windowed
+runs do not happen on this desktop otherwise). If it pays on Windows,
+office-crcbl measures Linux start-up and frame time to show it costs Linux
+nothing. If it does not pay, the code is removed and this entry says why.
 
 ### The viewer's suite still crashes on Vulkan, now reproduced on Windows
 

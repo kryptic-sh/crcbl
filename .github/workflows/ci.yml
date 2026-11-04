@@ -293,8 +293,8 @@ jobs:
           rustup target add aarch64-apple-darwin x86_64-pc-windows-msvc
           cargo clippy -p crcbl-mtl --all-targets --locked --no-default-features \
             --target aarch64-apple-darwin -- -D warnings
-          cargo clippy -p crcbl-dx12 --all-targets --locked --no-default-features \
-            --target x86_64-pc-windows-msvc -- -D warnings
+          cargo clippy -p crcbl-dx12 -p crcbl-dcomp --all-targets --locked \
+            --no-default-features --target x86_64-pc-windows-msvc -- -D warnings
 
       # **And their documentation, for the same reason and on the same targets.**
       # The `rustdoc` job runs `cargo doc` against `wasm32-unknown-unknown`,
@@ -321,7 +321,7 @@ jobs:
           cargo doc --locked --all-features --no-deps -p crcbl-mtl \
             --document-private-items --target aarch64-apple-darwin
           cargo doc --locked --all-features --no-deps -p crcbl-dx12 \
-            --document-private-items --target x86_64-pc-windows-msvc
+            -p crcbl-dcomp --document-private-items --target x86_64-pc-windows-msvc
           # `crcbl-shell` rides here for the same reason and needs
           # `--document-private-items` on top: its Win32 and AppKit halves are
           # almost entirely private, so the public pass above reads hardly any

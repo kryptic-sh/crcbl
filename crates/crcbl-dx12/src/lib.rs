@@ -296,7 +296,7 @@
 //!
 //! The exception is a transparent window's DirectComposition device, target
 //! and visual, which `windows-rs` leaves unmarked and which have to live in the
-//! surface and swapchain tables. `crate::composition` writes the impl for the
+//! surface and swapchain tables. `crcbl_dcomp::Composition` writes the impl for the
 //! one struct holding them, and quotes the documentation that makes it sound:
 //! DirectComposition objects are not bound to a thread.
 //!
@@ -337,8 +337,6 @@ mod binding;
 mod buffer;
 #[cfg(target_os = "windows")]
 mod command;
-#[cfg(target_os = "windows")]
-mod composition;
 #[cfg(target_os = "windows")]
 mod conv;
 // The debug layer, the info queue behind it, and `GetDeviceRemovedReason`.

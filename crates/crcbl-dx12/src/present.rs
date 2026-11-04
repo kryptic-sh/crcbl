@@ -115,7 +115,7 @@ pub(crate) fn buffer_count(requested: u32) -> u32 {
 /// An `HWND` swapchain composites opaquely: `CreateSwapChainForHwnd` takes
 /// `DXGI_ALPHA_MODE_IGNORE` or `UNSPECIFIED` and refuses
 /// `DXGI_ALPHA_MODE_PREMULTIPLIED`. A transparent window's swapchain is a
-/// composition one (see `crate::composition`), which takes `PREMULTIPLIED` as
+/// composition one (see `crcbl_dcomp::Composition`), which takes `PREMULTIPLIED` as
 /// well, so its surface offers [`CompositeAlpha::PreMultiplied`] beside
 /// [`CompositeAlpha::Opaque`]. `PostMultiplied` is `DXGI_ALPHA_MODE_STRAIGHT`,
 /// which no flip-model swapchain accepts, and `Inherit` has no DXGI spelling.

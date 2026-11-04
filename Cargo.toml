@@ -185,6 +185,7 @@ crcbl-net = { path = "crates/crcbl-net", version = "0.17.1" }
 crcbl-phys = { path = "crates/crcbl-phys", version = "0.17.1" }
 crcbl-rand = { path = "crates/crcbl-rand", version = "0.17.1" }
 crcbl-server = { path = "crates/crcbl-server", version = "0.17.1" }
+crcbl-dcomp = { path = "crates/crcbl-dcomp", version = "0.17.1" }
 crcbl-dx12 = { path = "crates/crcbl-dx12", version = "0.17.1" }
 crcbl-mtl = { path = "crates/crcbl-mtl", version = "0.17.1" }
 crcbl-vk = { path = "crates/crcbl-vk", version = "0.17.1" }

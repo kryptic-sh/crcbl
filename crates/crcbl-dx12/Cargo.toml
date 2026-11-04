@@ -24,11 +24,16 @@ workspace = true
 [target.'cfg(target_os = "windows")'.dependencies.crcbl-shaders]
 workspace = true
 
+# A transparent window's DirectComposition tree, shared with any other Win32
+# backend that presents to one. Workspace-internal, and target-gated because
+# off Windows it is empty.
+[target.'cfg(target_os = "windows")'.dependencies.crcbl-dcomp]
+workspace = true
+
 # The Win32 bindings, and only on the platform that has the ABI behind them.
 # `docs/plan/09-backends-metal-dx12.md`'s FFI correction is the rule this
 # satisfies: *bindings, not frameworks* — `windows-rs` is a thin binding to an
-# ABI the OS requires, in the same class as `ash` and `objc2`, and this is the
-# only crate in the workspace that may name it directly.
+# ABI the OS requires, in the same class as `ash` and `objc2`.
 #
 # Pinning it here rather than in the workspace table is what keeps the crate
 # building on Linux, macOS and wasm32 at all: off Windows the whole backend is
@@ -101,7 +106,9 @@ workspace = true
 #   `CreateTargetForHwnd`, `CreateVisual` and `Commit`, and the visual's
 #   `SetContent`. A window created with `WS_EX_NOREDIRECTIONBITMAP` has no
 #   surface for `CreateSwapChainForHwnd` to present into, so its swapchain is a
-#   composition one bound to a visual; see `crcbl_dx12::composition`.
+#   composition one bound to a visual; see `crcbl_dcomp::Composition`. The tree
+#   itself is `crcbl-dcomp`'s; this crate names the feature for its own
+#   `CreateSwapChainForComposition` and visual calls.
 # * `Win32_Graphics_Gdi` is `MonitorFromWindow` and the `HMONITOR` it answers,
 #   which `IDXGIOutput::GetDesc`'s `DXGI_OUTPUT_DESC` is gated on as well:
 #   `Instance::display_adapter` matches the monitor a window is on against

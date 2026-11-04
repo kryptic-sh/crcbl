@@ -780,11 +780,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-dcomp"
+version = "0.17.1"
+dependencies = [
+ "crcbl-core",
+ "crcbl-hal",
+ "windows",
+]
+
+[[package]]
 name = "crcbl-dx12"
 version = "0.17.1"
 dependencies = [
  "crcbl-console",
  "crcbl-core",
+ "crcbl-dcomp",
  "crcbl-hal",
  "crcbl-render",
  "crcbl-shaders",

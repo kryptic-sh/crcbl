@@ -13,7 +13,8 @@
 //!
 //! # Who owns what
 //!
-//! The [`Composition`] is made with the **surface** (`create_surface`), because
+//! The [`Composition`] is made with the backend's **surface**
+//! (`Instance::create_surface`), because
 //! `CreateTargetForHwnd` may bind one target per window: a swapchain destroyed
 //! and created again on the same surface reuses the target rather than racing
 //! the old one's release. Each swapchain takes a [`Binding`], which holds the
@@ -27,7 +28,7 @@
 //! anything is released:
 //!
 //! 1. A [`Binding`] drops first (it is declared before the swapchain in
-//!    `SwapchainEntry`): the visual's content is cleared and committed, which
+//!    backend's swapchain entry): the visual's content is cleared and committed, which
 //!    is DirectComposition's reference to the swapchain going away. Only then
 //!    is the swapchain's last reference ours to release.
 //! 2. The [`Composition`] drops when its last holder does: the target's root is
@@ -50,8 +51,8 @@
 //! and none is set. So between a window resize and the swapchain's
 //! `ResizeBuffers`, a grown window has a transparent band at its right and
 //! bottom, and a shrunk one clips its last frame. An `HWND` swapchain stretches
-//! instead (`DXGI_SCALING_STRETCH`, chosen in `crate::swapchain` for that
-//! reason); on a transparent window a stretched stale frame would be the worse
+//! instead (`DXGI_SCALING_STRETCH`, chosen in `crcbl-dx12`'s `swapchain` module
+//! for that reason); on a transparent window a stretched stale frame would be the worse
 //! of the two, because its alpha edges would move.
 
 use std::sync::Arc;
@@ -71,7 +72,7 @@ use windows::core::IUnknown;
 /// Field order is drop order, and the order is the one the module docs give:
 /// the visual and the target before the device that made them.
 #[derive(Debug)]
-pub(crate) struct Composition {
+pub struct Composition {
     visual: IDCompositionVisual,
     target: IDCompositionTarget,
     device: IDCompositionDevice,
@@ -110,7 +111,7 @@ impl Composition {
     /// [`HalError::Backend`] naming the call that failed. One case is named
     /// further: a window that already has a target, which on this backend is a
     /// second live transparent surface on one window.
-    pub(crate) fn for_window(hwnd: HWND) -> Result<Self, HalError> {
+    pub fn for_window(hwnd: HWND) -> Result<Self, HalError> {
         // SAFETY: a null rendering device is documented as allowed for
         // `DCompositionCreateDevice2` when no DirectComposition surface will be
         // drawn into, and none is: the visual's content is a swapchain. The
@@ -125,9 +126,8 @@ impl Composition {
             if error.code() == DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED {
                 HalError::Backend(format!(
                     "IDCompositionDevice::CreateTargetForHwnd failed: this window already has a \
-                     DirectComposition target, which on crcbl-dx12 means another live \
-                     transparent surface (or a swapchain made on one) is presenting to it: \
-                     {error}"
+                     DirectComposition target, which means another live transparent surface \
+                     (or a swapchain made on one) is presenting to it: {error}"
                 ))
             } else {
                 failed("IDCompositionDevice::CreateTargetForHwnd", &error)
@@ -163,7 +163,7 @@ impl Composition {
     /// [`HalError::InvalidDescriptor`] while another swapchain is bound, and
     /// [`HalError::Backend`] if DirectComposition refused the content or the
     /// commit.
-    pub(crate) fn bind(self: &Arc<Self>, swapchain: &IDXGISwapChain1) -> Result<Binding, HalError> {
+    pub fn bind(self: &Arc<Self>, swapchain: &IDXGISwapChain1) -> Result<Binding, HalError> {
         if self
             .bound
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -204,7 +204,7 @@ impl Drop for Composition {
             // Logged, not propagated: a drop has nowhere to send it, and the
             // device's release below takes the tree down with it anyway.
             crcbl_core::log::debug!(
-                "crcbl-dx12: clearing a DirectComposition root before release failed: {error}"
+                "crcbl-dcomp: clearing a DirectComposition root before release failed: {error}"
             );
         }
     }
@@ -216,7 +216,7 @@ impl Drop for Composition {
 /// Dropping it clears the content and commits, which is what lets the
 /// swapchain's last reference go, and keeps the composition alive until then.
 #[derive(Debug)]
-pub(crate) struct Binding {
+pub struct Binding {
     composition: Arc<Composition>,
 }
 
@@ -231,7 +231,7 @@ impl Drop for Binding {
         });
         if let Err(error) = cleared {
             crcbl_core::log::debug!(
-                "crcbl-dx12: clearing a DirectComposition visual's swapchain failed: {error}"
+                "crcbl-dcomp: clearing a DirectComposition visual's swapchain failed: {error}"
             );
         }
         composition.bound.store(false, Ordering::Release);

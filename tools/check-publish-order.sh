@@ -45,6 +45,7 @@ crcbl-audio
 crcbl-mixer
 crcbl-notify
 crcbl-hal
+crcbl-dcomp
 crcbl-shell
 crcbl-input
 crcbl-ui

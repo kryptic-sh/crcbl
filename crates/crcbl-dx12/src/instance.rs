@@ -20,12 +20,12 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{BOOL, Interface};
 
 use crate::adapter::{self, RawCaps};
-use crate::composition::Composition;
 use crate::debug;
 use crate::device::Dx12Device;
 use crate::dred;
 use crate::handle::{self, Owned, Owner};
 use crate::present;
+use crcbl_dcomp::Composition;
 
 /// Process-wide source of owner ids.
 ///
@@ -213,7 +213,7 @@ impl AdapterRecord {
 /// A transparent window's [`Composition`] **is** an object, and it is shared
 /// with every swapchain made on the surface rather than owned here alone, so
 /// destroying the handle still strands nothing: a swapchain keeps the tree it
-/// is shown through. `crate::composition` says why the tree is made with the
+/// is shown through. `crcbl_dcomp::Composition` says why the tree is made with the
 /// surface rather than with the swapchain.
 #[derive(Debug)]
 pub(crate) struct SurfaceEntry {
@@ -861,7 +861,7 @@ impl Instance for Dx12Instance {
     ///
     /// `transparent` names a window made with `WS_EX_NOREDIRECTIONBITMAP`,
     /// which shows only a DirectComposition tree, so for it this call **does**
-    /// touch the window: it builds that tree (`crate::composition`), and the
+    /// touch the window: it builds that tree (`crcbl_dcomp::Composition`), and the
     /// swapchain later made on the surface is a composition swapchain shown
     /// through it. A second live transparent surface on one window is refused
     /// here, because a window takes one target.

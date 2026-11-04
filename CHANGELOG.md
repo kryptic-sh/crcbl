@@ -15,6 +15,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-dcomp`**, a Windows-only crate holding the DirectComposition tree a
+  transparent Win32 window shows its swapchain through, moved out of
+  `crcbl-dx12` so more than one backend can present to such a window. Empty off
+  Windows.
 - **`GpuContext::shared_device` and `Presenter::shared_device`** hand out the
   device as an `Arc<dyn Device>`, for work that outlives a borrow of the
   context: a renderer built on a worker thread while frames keep presenting.
