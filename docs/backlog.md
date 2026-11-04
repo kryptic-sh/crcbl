@@ -20858,6 +20858,16 @@ desktop counts the task stage.
   and no test runs. The D3D12 runs here had the debug layer off (none
   installed); CI's WARP job is the first validated run of `BeginQuery` on a
   statistics heap.
+- **The budget trigger cannot catch a spike after start-up** (seen 2026-11-04,
+  measuring the viewer's reload on the office laptop). The first frame over
+  `CRCBL_PROFILE_BUDGET_MS`, of the CPU or the GPU, writes the capture, and
+  start-up frames are always over any budget a running frame meets. So the
+  capture ends at start-up, never at the reload. The `CRCBL_PROFILE_CAPTURE`
+  default keeps only the last `DEFAULT_FRAME_WINDOW` frames, which missed a
+  reload partway through a long run, too. What worked:
+  `--exec "profile_capture <frames> <path>"` with enough frames to span the
+  reload. A trigger that ignores the first frames, or one armed by a console
+  line, would fix it. Neither is designed.
 
 **Surprising, worked around:** AMD's D3D12 driver (RX 7900 XTX on 25.10.36,
 Raphael iGPU on 25.10.42) resolves every statistics query begun after a draw
