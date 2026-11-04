@@ -916,7 +916,19 @@ the three Metal CI jobs passed with both in (run 40758600597). What is left:
   interleaved pairs in a quiet window (about 1% CPU). `UiRenderer::new` medians
   went from 13.6 ms on 0.12.1 to 9.9 ms on 0.16.0 in dmenu mode, and from 13.1
   to 9.5 ms in drun mode. `Presenter::open` stayed about 320 ms on both, AMD's
-  `D3D12CreateDevice`. First paint on Vulkan/ANV has not been re-measured.
+  `D3D12CreateDevice`.
+- **pikr re-measured on Vulkan/ANV (2026-11-04):** office laptop (Raptor Lake-P
+  UHD, Mesa ANV, nested Hyprland), pikr release builds of one source (234486a)
+  pinned to 0.12.1 and to 0.17.1, saved GPU choice `Used`, quiet window (top
+  90.6% idle, load 2.62 before, 1.95 after), 13 interleaved rounds with the
+  first dropped, so n = 12 per build and mode. Medians, 0.12.1 → 0.17.1:
+  `UiRenderer::new` 11.02 → 7.98 ms (dmenu) and 11.00 → 7.83 ms (drun);
+  `Presenter::open` 10.57 → 11.26 ms and 11.15 → 10.63 ms, i.e. unchanged; first
+  paint 29.00 → 27.49 ms and 33.00 → 28.65 ms, inside the runs' spread (dmenu
+  25.00–37.05 against 21.80–36.99), so a small gain, not a proven one. Resident
+  size the same on both builds. What first paint is made of now is the open, the
+  renderer and the frame; the ANV first-submit warm-up above is the item left
+  that sits in the renderer's share.
 
 ## System audio control, asked by lyr for the owner (2026-10-22)
 
