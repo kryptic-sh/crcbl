@@ -886,12 +886,20 @@ the three Metal CI jobs passed with both in (run 40758600597). What is left:
   pending upload, not only its view's, as the list records no owners. The null
   backend signals timelines at submit, so only the Vulkan e2e validation runs
   check that the staging outlives a real GPU's copies.
-- **ANV's first submission is the bulk of what remains.** Measured with a
-  throwaway test on the iGPU (debug build, at a load average of about 8 to 9
-  from a parallel build, not in a quiet window): the first upload on a fresh
-  device took 7–10 ms, later identical ones about 0.5 ms. That is a per-device
-  driver warm-up, so batching cannot remove it, only an earlier or overlapped
-  first submit can.
+- **ANV's first submission costs about 3 ms, all of it on the CPU.** First
+  measured at 7–10 ms (a debug build at load 8–9). Re-measured 2026-11-04 with a
+  throwaway release test against `crcbl-vk` alone (Mesa 26.2.6, RPL-U, ANV
+  pinned through `VK_DRIVER_FILES`, no validation, load average about 2.3 to
+  2.5, not a quiet window, five interleaved pairs of fresh processes). The first
+  `vkQueueSubmit` on a fresh device took 1.8–3.3 ms whatever the buffer held,
+  even an empty one, and later submits took under 0.1 ms. The first
+  `clear_buffer` record took a further 0.3–1.2 ms, with later ones under 0.05
+  ms. The GPU wait carried no warm-up: a 4 MiB clear waited about 1 ms on every
+  round. So moving the first submit earlier on the same thread saves nothing.
+  Only a submit from another thread, overlapping the shell or swapchain work,
+  could hide the cost. That needs the device used from a second thread during
+  the open, which no design covers, for at most about 3 ms of pikr's 27–29 ms
+  first paint. It is low value until a caller asks.
 - **A cleared page is a fresh device-local zero buffer plus a copy.**
   `upload_cleared_texture` zeroes a buffer the size of a layer and copies it in,
   which is the wasm-heap argument in its docs. A render-pass clear of the image
