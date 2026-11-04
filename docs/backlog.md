@@ -133,19 +133,18 @@ description) and 3 (anatomical profile) are built. Left from layer 1:
 
 ## Open at the end of the 2026-11-05 session
 
-- **Branch `test/dcomp-shared-presenter` waits to merge.** It holds the
-  composed-path tests (`crcbl-dcomp`'s `shared::tests`, the reverse-fence half
-  of `crcbl-vk`'s `a_shared_texture_cleared_by_vulkan_reads_back_in_d3d11`), the
-  `dx12 e2e` step that runs the windowed one, and the entry under _Vulkan on a
-  transparent Win32 window_. Verified locally: the two headless `crcbl-dcomp`
-  tests pass on WARP and the Vulkan test on the RX 7900 XTX, each with a
-  mutation turning it red; workspace clippy was clean. **Not verified:** the
-  workspace nextest, doctest and rustdoc passes (the run was stopped for low
+- **The composed-path tests went to main unverified, on the owner's call.** They
+  are `crcbl-dcomp`'s `shared::tests`, the reverse-fence half of `crcbl-vk`'s
+  `a_shared_texture_cleared_by_vulkan_reads_back_in_d3d11`, and the `dx12 e2e`
+  step that runs the windowed one; the entry under _Vulkan on a transparent
+  Win32 window_ says what they cover. Verified locally: the two headless
+  `crcbl-dcomp` tests pass on WARP and the Vulkan test on the RX 7900 XTX, each
+  with a mutation turning it red; workspace clippy was clean. **Not verified:**
+  the workspace nextest, doctest and rustdoc passes (the run was stopped for low
   memory), and
   `a_shared_presenter_presents_a_renderer_s_frames_to_a_transparent_window`,
-  which has never run: it shows a window, so only CI runs it. To finish: run the
-  gate, read the branch's `dx12 e2e` dispatch, fix whatever it finds,
-  fast-forward main.
+  which has never run: it shows a window, so only CI runs it. Read main's
+  `dx12 e2e` job (or branch dispatch 41886481129) and fix what it finds.
 - **CI for main at `0770b9d5`** (run 41884016144) was still queued when the
   session ended. The run before it, on `e8715bb7`, passed everything but three
   macOS jobs that GitHub cancelled for runner capacity ("not acquired by Runner
