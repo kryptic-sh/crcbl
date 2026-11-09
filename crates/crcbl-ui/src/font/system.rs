@@ -296,7 +296,16 @@ mod tests {
         {
             let single = found.read().unwrap() == std::fs::read(&found.path).unwrap();
             if single && found.path.starts_with("/usr/share/fonts") {
-                assert!(found.map().unwrap().is_mapped(), "{found:?}");
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::metadata(&found.path).unwrap();
+                let mount = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+                assert!(
+                    found.map().unwrap().is_mapped(),
+                    "{found:?} is read, not mapped: uid {} mode {:o} dev {:#x}; mounts:\n{mount}",
+                    metadata.uid(),
+                    metadata.mode(),
+                    metadata.dev(),
+                );
             }
             if !found.map().unwrap().is_mapped() {
                 eprintln!(
