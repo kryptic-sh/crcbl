@@ -1361,6 +1361,13 @@ fn monitors_are_enumerated_in_one_coordinate_space() {
     for monitor in monitors {
         assert!(!monitor.size().is_empty(), "{}", monitor.name);
         assert!(monitor.scale_factor > 0.0);
+        // Xvfb has RandR and names its output, so the name is the connector
+        // RandR reported rather than a placeholder the backend made up.
+        assert_eq!(
+            monitor.connector.as_deref(),
+            Some(monitor.name.as_str()),
+            "RandR named this output"
+        );
         // The X11-specific fact: bounds are in the screen's own pixels, so they
         // fit inside it — which is *not* true of Wayland's at mixed scales.
         assert!(
@@ -1509,6 +1516,8 @@ fn xorg_two_heads_are_two_monitors_side_by_side() {
     assert_eq!(first.bounds, FIRST_HEAD.1);
     assert_eq!(second.bounds, SECOND_HEAD.1);
     assert!(first.is_primary && !second.is_primary);
+    assert_eq!(first.connector.as_deref(), Some(FIRST_HEAD.0));
+    assert_eq!(second.connector.as_deref(), Some(SECOND_HEAD.0));
     assert_ne!(first.id, second.id);
     // CVT's 1280x720 at 60: a 74.48 MHz dot clock over 1664 × 746.
     assert_eq!(second.refresh_millihertz, 59_999);

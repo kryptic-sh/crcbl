@@ -1077,6 +1077,9 @@ fn monitors_are_enumerated_from_wl_output() {
 
     let monitor = session.monitor_named(OUTPUT_NAME);
     assert_eq!(monitor.size(), OUTPUT_SIZE);
+    // The compositor sent `wl_output.name`, so the name is its connector and
+    // not a `wl-output-N` the backend made up.
+    assert_eq!(monitor.connector.as_deref(), Some(OUTPUT_NAME));
     assert_eq!(
         monitor.work_area, monitor.bounds,
         "Wayland has no work area"
@@ -1092,6 +1095,7 @@ fn monitors_are_enumerated_from_wl_output() {
     // assertion about "which monitor" below capable of failing.
     let second = session.monitor_named(SECOND_OUTPUT_NAME);
     assert_eq!(second.size(), SECOND_OUTPUT_SIZE);
+    assert_eq!(second.connector.as_deref(), Some(SECOND_OUTPUT_NAME));
     assert_ne!(second.id, monitor.id, "two outputs, two ids");
 
     // The ids round-trip through the lookup the seam provides.
@@ -1322,6 +1326,80 @@ fn a_withdrawn_global_is_bound_again_when_the_compositor_re_advertises_it() {
 
     hotplug.shell().destroy_window(after).expect("destroy");
     hotplug.shell().destroy_window(before).expect("destroy");
+}
+
+/// A `wl_output.name` that arrives after the output settled reaches the
+/// monitor list, under a `MonitorsChanged`, with no `wl_output.done` behind it.
+///
+/// See [`GlobalHotplug::announce_output_name`] for what is synthetic: the one
+/// event, for a real output proxy on a real connection.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_late_output_name_updates_the_connector_and_announces_it() {
+    /// Not a name the harness's compositor uses, so the update is visible.
+    const LATE: &str = "DP-LATE-1";
+    let mut hotplug =
+        GlobalHotplug::open().expect("the harness exported WAYLAND_DISPLAY for a live sway");
+    let mut events = Vec::new();
+    hotplug.shell().pump(&mut |event| events.push(event));
+    let monitor = hotplug
+        .shell()
+        .monitors()
+        .iter()
+        .find(|monitor| monitor.name == SECOND_OUTPUT_NAME)
+        .map(|monitor| monitor.id)
+        .expect("the config declares the second output");
+    events.clear();
+
+    assert!(hotplug.announce_output_name(monitor, LATE));
+    hotplug.shell().pump(&mut |event| events.push(event));
+
+    let updated = hotplug.shell().monitor(monitor).expect("still connected");
+    assert_eq!(updated.connector.as_deref(), Some(LATE));
+    assert_eq!(
+        updated.name, LATE,
+        "`name` follows `wl_output.name` as before"
+    );
+    assert!(
+        events.contains(&ShellEvent::MonitorsChanged),
+        "the new name is announced, not left for the next unrelated change: {:?}",
+        events.iter().map(ShellEvent::name).collect::<Vec<_>>()
+    );
+}
+
+/// A connector `wl_output.name` reported stands against the
+/// `zxdg_output_v1.name` fallback and against an empty `wl_output.name`, and
+/// neither announces a change.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_reported_connector_survives_an_xdg_name_and_an_empty_name() {
+    let mut hotplug =
+        GlobalHotplug::open().expect("the harness exported WAYLAND_DISPLAY for a live sway");
+    let mut events = Vec::new();
+    hotplug.shell().pump(&mut |event| events.push(event));
+    let monitor = hotplug
+        .shell()
+        .monitors()
+        .iter()
+        .find(|monitor| monitor.name == SECOND_OUTPUT_NAME)
+        .map(|monitor| monitor.id)
+        .expect("the config declares the second output");
+    events.clear();
+
+    // `zxdg_output_v1.name` is only the fallback for a `wl_output` without
+    // one; sway binds `wl_output` 4, so its name stands.
+    assert!(hotplug.announce_xdg_output_name(monitor, "XDG-NAME-1"));
+    assert!(hotplug.announce_output_name(monitor, ""));
+    hotplug.shell().pump(&mut |event| events.push(event));
+
+    let monitor = hotplug.shell().monitor(monitor).expect("still connected");
+    assert_eq!(monitor.connector.as_deref(), Some(SECOND_OUTPUT_NAME));
+    assert_eq!(monitor.name, SECOND_OUTPUT_NAME);
+    assert!(
+        !events.contains(&ShellEvent::MonitorsChanged),
+        "nothing changed, so nothing is announced: {:?}",
+        events.iter().map(ShellEvent::name).collect::<Vec<_>>()
+    );
 }
 
 // ---------------------------------------------------------------------------

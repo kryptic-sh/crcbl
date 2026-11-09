@@ -495,6 +495,10 @@ enum RawEvent {
         width: i32,
         height: i32,
     },
+    XdgOutputName {
+        xdg_output: usize,
+        name: String,
+    },
     SurfaceEnter {
         surface: usize,
         output: usize,
@@ -929,6 +933,13 @@ unsafe extern "C" fn dispatch(
                             height,
                         })
                     }
+                    // Deprecated from version 2 in favour of `wl_output.name`,
+                    // but a compositor whose `wl_output` stops short of
+                    // version 4 still reports the connector only here.
+                    zxdg_output_v1::Event::Name { name } => Some(RawEvent::XdgOutputName {
+                        xdg_output: proxy,
+                        name: name.to_string_lossy().into_owned(),
+                    }),
                     // `done` is deprecated from version 3: `wl_output.done` is
                     // the atomic signal, and this backend settles on that one
                     // for every version so the two paths cannot disagree.
@@ -1656,7 +1667,12 @@ struct Output {
     /// `zxdg_output_v1.logical_size`; zero until it arrives.
     logical_width: i32,
     logical_height: i32,
+    /// `wl_output.name` once it arrives, else a `wl-output-N` placeholder.
     name: String,
+    /// `wl_output.name` itself, which [`name`](Self::name) cannot tell apart
+    /// from its placeholder: `None` until the event arrives, and forever on a
+    /// compositor older than `wl_output` version 4.
+    connector: Option<String>,
     /// Whether a `wl_output.done` has been seen, i.e. whether the fields above
     /// are a consistent snapshot rather than a half-applied update.
     settled: bool,
@@ -1715,6 +1731,7 @@ impl Output {
         MonitorInfo {
             id: self.id,
             name: self.name.clone(),
+            connector: self.connector.clone(),
             bounds: PhysicalRect::new(x, y, width, height),
             // Wayland has no work-area protocol at all. `MonitorInfo` documents
             // that a backend which cannot find out reports the full area.
@@ -2617,6 +2634,7 @@ impl WaylandShell {
                     logical_width: 0,
                     logical_height: 0,
                     name: format!("wl-output-{}", id.0),
+                    connector: None,
                     settled: false,
                 });
             }
@@ -2963,8 +2981,16 @@ impl WaylandShell {
                     }
                 }
                 RawEvent::OutputName { output, name } => {
-                    if let Some(output) = self.output_mut(output) {
+                    // An empty name names no connector.
+                    if let Some(output) = self.output_mut(output).filter(|_| !name.is_empty()) {
+                        output.connector = Some(name.clone());
                         output.name = name;
+                        // The protocol sends the name once, before the first
+                        // `wl_output.done`, which republishes anyway. This only
+                        // matters for a compositor that sends it out of order,
+                        // after the output settled, so a consumer matching on
+                        // `connector` is not left with `None`.
+                        monitors_dirty = true;
                     }
                 }
                 RawEvent::OutputDone { output } => {
@@ -2998,6 +3024,19 @@ impl WaylandShell {
                     if let Some(output) = self.output_by_xdg(xdg_output) {
                         output.logical_width = width;
                         output.logical_height = height;
+                        monitors_dirty = true;
+                    }
+                }
+                // The fallback for a `wl_output` older than version 4: it fills
+                // only a connector that `wl_output.name` has not, and a later
+                // `wl_output.name` replaces it.
+                RawEvent::XdgOutputName { xdg_output, name } => {
+                    if let Some(output) = self
+                        .output_by_xdg(xdg_output)
+                        .filter(|output| output.connector.is_none() && !name.is_empty())
+                    {
+                        output.connector = Some(name.clone());
+                        output.name = name;
                         monitors_dirty = true;
                     }
                 }
@@ -5319,6 +5358,7 @@ mod tests {
             logical_width: 1280,
             logical_height: 720,
             name: "HEADLESS-1".to_string(),
+            connector: Some("HEADLESS-1".to_string()),
             settled: true,
         };
         assert!((output.scale_factor() - 1.5).abs() < 1e-9);
@@ -5356,11 +5396,41 @@ mod tests {
             logical_width: 1920,
             logical_height: 1080,
             name: "DP-2".to_string(),
+            connector: Some("DP-2".to_string()),
             settled: true,
         };
         assert_eq!(output.info(false).bounds.x, 2560);
         assert_eq!(output.info(false).bounds.y, 0);
         assert_eq!(output.info(false).work_area, output.info(false).bounds);
+    }
+
+    /// A compositor that never sent `wl_output.name` leaves the placeholder
+    /// as the name and no connector, so nothing matches `wl-output-N` against
+    /// another protocol's view of the output.
+    #[test]
+    fn an_output_without_wl_output_name_has_no_connector() {
+        let output = Output {
+            proxy: 3,
+            xdg: ptr::null_mut(),
+            global: 3,
+            id: MonitorId(3),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            refresh_millihertz: 60_000,
+            scale: 1,
+            logical_x: 0,
+            logical_y: 0,
+            logical_width: 0,
+            logical_height: 0,
+            name: "wl-output-3".to_string(),
+            connector: None,
+            settled: true,
+        };
+        let info = output.info(true);
+        assert_eq!(info.name, "wl-output-3");
+        assert_eq!(info.connector, None);
     }
 
     #[test]

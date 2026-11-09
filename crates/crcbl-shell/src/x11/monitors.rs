@@ -79,18 +79,19 @@ impl X11Shell {
                 u32::from(crtc.width),
                 u32::from(crtc.height),
             );
-            let (name, is_primary) = crtc.output.map_or_else(
-                || (format!("CRTC-{}", crtc.id), false),
-                |output| {
-                    (
-                        self.conn.read_output_name(output),
-                        primary_output == Some(output),
-                    )
-                },
+            let (name, connector) = monitor_name(
+                crtc.id,
+                crtc.output,
+                crtc.output
+                    .and_then(|output| self.conn.read_output_name(output)),
             );
+            let is_primary = crtc
+                .output
+                .is_some_and(|output| primary_output == Some(output));
             monitors.push(MonitorInfo {
                 id: self.monitor_id_for(crtc.id),
                 name,
+                connector,
                 bounds,
                 work_area: work_area.map_or(bounds, |area| intersect(bounds, area)),
                 scale_factor: scale,
@@ -128,6 +129,9 @@ impl X11Shell {
             // stable id across a RandR that appears mid-session.
             id: self.monitor_id_for(0),
             name: "screen".to_string(),
+            // Made up here, not reported: a server without RandR names no
+            // output.
+            connector: None,
             bounds,
             work_area: work_area.map_or(bounds, |area| intersect(bounds, area)),
             scale_factor: scale,
@@ -300,11 +304,10 @@ impl Conn {
         Some(crtcs)
     }
 
-    /// An output's name, e.g. `"DP-2"`, or a placeholder.
-    fn read_output_name(&self, output: u32) -> String {
-        let Some(randr) = self.ext.randr else {
-            return format!("output-{output}");
-        };
+    /// An output's RandR name, e.g. `"DP-2"`, or `None` when the server did
+    /// not give one.
+    fn read_output_name(&self, output: u32) -> Option<String> {
+        let randr = self.ext.randr?;
         // SAFETY: the connection is live; `0` is `CurrentTime`, which
         // `GetOutputInfo` accepts.
         let reply = unsafe {
@@ -312,7 +315,7 @@ impl Conn {
             (randr.get_output_info_reply)(self.raw(), cookie, core::ptr::null_mut())
         };
         if reply.is_null() {
-            return format!("output-{output}");
+            return None;
         }
         // SAFETY: `reply` is a live reply, and the name pointer names
         // `name_len` bytes inside the same allocation. The name is Latin-1 by
@@ -333,7 +336,7 @@ impl Conn {
         };
         // SAFETY: freed exactly once.
         unsafe { ffi::free_reply(reply) };
-        name.unwrap_or_else(|| format!("output-{output}"))
+        name
     }
 
     /// The primary output, or `None` when the server has no notion of one.
@@ -383,6 +386,25 @@ impl Conn {
     }
 }
 
+/// A CRTC's [`MonitorInfo::name`] and [`MonitorInfo::connector`], from the
+/// RandR name the server `reported` for its output.
+///
+/// The reported name is both. Without one the name is a placeholder naming
+/// the output, or the CRTC when it drives none, and the connector is `None`:
+/// a placeholder is not something another protocol could match.
+fn monitor_name(
+    crtc: u32,
+    output: Option<u32>,
+    reported: Option<String>,
+) -> (String, Option<String>) {
+    let name = match (&reported, output) {
+        (Some(reported), _) => reported.clone(),
+        (None, Some(output)) => format!("output-{output}"),
+        (None, None) => format!("CRTC-{crtc}"),
+    };
+    (name, reported)
+}
+
 /// The part of `bounds` inside `area`, or `bounds` when they do not overlap.
 ///
 /// A monitor entirely outside the work area — which happens for a moment during
@@ -425,6 +447,21 @@ mod tests {
         let right = PhysicalRect::new(1920, 0, 1280, 1024);
         let area = PhysicalRect::new(0, 32, 1920, 1048);
         assert_eq!(intersect(right, area), right);
+    }
+
+    #[test]
+    fn a_reported_output_name_is_the_connector_and_a_placeholder_is_not() {
+        assert_eq!(
+            monitor_name(63, Some(66), Some("DP-2".to_string())),
+            ("DP-2".to_string(), Some("DP-2".to_string()))
+        );
+        // An output whose info the server would not give, and a CRTC with no
+        // output at all: named for the logs, never offered as a connector.
+        assert_eq!(
+            monitor_name(63, Some(66), None),
+            ("output-66".to_string(), None)
+        );
+        assert_eq!(monitor_name(63, None, None), ("CRTC-63".to_string(), None));
     }
 
     #[test]

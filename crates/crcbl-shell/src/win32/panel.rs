@@ -585,6 +585,7 @@ mod tests {
         let monitor = MonitorInfo {
             id: MonitorId(7),
             name: "DISPLAY1".to_string(),
+            connector: None,
             bounds: PhysicalRect::new(0, 0, 1920, 1080),
             work_area: PhysicalRect::new(0, 0, 1920, 1040),
             scale_factor: 1.5,

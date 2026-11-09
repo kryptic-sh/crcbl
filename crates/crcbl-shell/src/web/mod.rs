@@ -1064,6 +1064,7 @@ impl WebShell {
         let monitors = vec![MonitorInfo {
             id: MonitorId(1),
             name: "canvas".to_string(),
+            connector: None,
             bounds: PhysicalRect::new(0, 0, 1280, 720),
             work_area: PhysicalRect::new(0, 0, 1280, 720),
             scale_factor: 1.0,

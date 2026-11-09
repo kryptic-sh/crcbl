@@ -72,7 +72,7 @@ use super::protocol::wayland::{
     wl_shm, wl_shm_pool, wl_surface,
 };
 use super::{RawEvent, WaylandShell};
-use crate::{PhysicalSize, Shell, ShellError, WindowId};
+use crate::{MonitorId, PhysicalSize, Shell, ShellError, WindowId};
 
 mod input_method;
 
@@ -1362,6 +1362,56 @@ impl GlobalHotplug {
             interface: interface.to_string(),
             version,
         });
+    }
+
+    /// Delivers a `wl_output.name` for `monitor`'s output, as a compositor that
+    /// sends it after the output first settled would — with no
+    /// `wl_output.done` behind it, which is the case the backend cannot lean
+    /// on the protocol for.
+    ///
+    /// Synthetic in the same way as [`withdraw`](Self::withdraw): the event is
+    /// queued as libwayland would have decoded it, for the real output proxy,
+    /// and the backend's own handler applies it in the next [`Shell::pump`].
+    /// `sway` sends the name once, before its first `done`, so there is no way
+    /// to make it arrive late from outside.
+    ///
+    /// Returns `false` when the backend has no output for `monitor`.
+    pub fn announce_output_name(&mut self, monitor: MonitorId, name: &str) -> bool {
+        let Some(output) = self
+            .shell
+            .outputs
+            .iter()
+            .find(|output| output.id == monitor)
+            .map(|output| output.proxy)
+        else {
+            return false;
+        };
+        self.shell.conn.sink().events.push(RawEvent::OutputName {
+            output,
+            name: name.to_string(),
+        });
+        true
+    }
+
+    /// Delivers a `zxdg_output_v1.name` for `monitor`'s output, synthetic in
+    /// the same way as [`announce_output_name`](Self::announce_output_name).
+    ///
+    /// Returns `false` when the backend has no `xdg_output` for `monitor`.
+    pub fn announce_xdg_output_name(&mut self, monitor: MonitorId, name: &str) -> bool {
+        let Some(xdg_output) = self
+            .shell
+            .outputs
+            .iter()
+            .find(|output| output.id == monitor && !output.xdg.is_null())
+            .map(|output| output.xdg as usize)
+        else {
+            return false;
+        };
+        self.shell.conn.sink().events.push(RawEvent::XdgOutputName {
+            xdg_output,
+            name: name.to_string(),
+        });
+        true
     }
 }
 

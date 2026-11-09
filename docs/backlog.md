@@ -16,18 +16,9 @@ sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
   its own XML and carries its own copy of the core tables. Harmless on a
   separate connection, since libwayland matches interfaces by name. Revisit if
   two crates must share proxies on one connection.
-- **dsplr's next asks (2026-11-09, not started).** M3 (its GUI) needs to match a
-  `MonitorInfo` to a compositor output by connector name, to put identify
-  overlays and confirm dialogs on the right monitor. `MonitorInfo::name` is
-  already the connector on X11 (RandR's output name) and Wayland
-  (`wl_output.name`), but falls back to a placeholder (`output-N`,
-  `wl-output-N`, `screen`) and is documented as unsafe to key on. Proposed: a
-  `connector: Option<String>`, `Some` only when the platform reported one,
-  `None` on Win32, AppKit, web, headless and every fallback. It breaks every
-  struct literal, `crcbl-shell`'s own backends and tests included. Separately,
-  dsplr M7 needs X11 output configuration; whether `crcbl-shell`'s RandR FFI
-  grows a set path or dsplr uses x11rb is the owner's call (see dsplr's
-  backlog).
+- **dsplr M7 needs X11 output configuration (2026-11-09, not started).** Whether
+  `crcbl-shell`'s RandR FFI grows a set path or dsplr uses x11rb is the owner's
+  call (see dsplr's backlog).
 - **`crcbl-shell`'s docs fail without features.** `wayland`'s module docs link
   to `e2e`, which exists only under `wayland-e2e`, so `cargo doc -p crcbl-shell`
   with default features errors on Linux and FreeBSD. CI documents with

@@ -15,6 +15,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_shell::MonitorInfo::connector`.** The connector name the window
+  system reported for a monitor — Wayland's `wl_output.name` (version 4 and
+  later, else `zxdg_output_v1.name`), X11's RandR output name — so a monitor can
+  be matched against another protocol's view of the same output, such as
+  wlr-output-management's `head.name`. `None` whenever the backend made `name`
+  up (`wl-output-N`, `output-N`, `CRTC-N`, or `screen` without RandR) and always
+  on Win32, AppKit, the web and the headless shell. A `wl_output.name` that
+  arrives after the output settled now republishes the monitor list with a
+  `MonitorsChanged`, for `name` too. A new public field, so every `MonitorInfo`
+  struct literal must add it.
 - **`crcbl_font::FontMatch::map` and `crcbl_font::FaceBytes`.** `map` gives the
   face `FontMatch::read` gives, but memory-maps a single font file read-only
   instead of copying it onto the heap when the file passes a per-platform rule.

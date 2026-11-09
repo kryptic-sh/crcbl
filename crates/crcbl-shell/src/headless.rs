@@ -422,6 +422,7 @@ impl HeadlessShell {
             monitors: vec![MonitorInfo {
                 id: MonitorId(1),
                 name: "HEADLESS-1".to_string(),
+                connector: None,
                 bounds: PhysicalRect::new(
                     0,
                     0,
@@ -2833,6 +2834,7 @@ mod tests {
         let hidpi = shell.plug_monitor(MonitorInfo {
             id: MonitorId(0),
             name: "HEADLESS-2".to_string(),
+            connector: None,
             bounds: PhysicalRect::new(1920, 0, 2560, 1440),
             work_area: PhysicalRect::new(1920, 0, 2560, 1440),
             scale_factor: 2.0,
@@ -2965,6 +2967,7 @@ mod tests {
         let hidpi = shell.plug_monitor(MonitorInfo {
             id: MonitorId(0),
             name: "HEADLESS-2".to_string(),
+            connector: None,
             bounds: PhysicalRect::new(1920, 0, 2560, 1440),
             work_area: PhysicalRect::new(1920, 0, 2560, 1440),
             scale_factor: 2.0,
@@ -3488,6 +3491,7 @@ mod tests {
         let extra = shell.plug_monitor(MonitorInfo {
             id: MonitorId(0),
             name: "HEADLESS-2".to_string(),
+            connector: None,
             bounds: PhysicalRect::new(1920, 0, 1920, 1080),
             work_area: PhysicalRect::new(1920, 0, 1920, 1080),
             scale_factor: 1.0,
@@ -3523,6 +3527,7 @@ mod tests {
         let second = shell.plug_monitor(MonitorInfo {
             id: MonitorId(0),
             name: "HEADLESS-2".to_string(),
+            connector: None,
             bounds: PhysicalRect::new(1920, 0, 1920, 1080),
             work_area: PhysicalRect::new(1920, 0, 1920, 1080),
             scale_factor: 1.0,

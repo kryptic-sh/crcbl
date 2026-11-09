@@ -149,6 +149,7 @@ pub(super) unsafe fn enumerate(shell: &mut AppKitShell) -> (Vec<Screen>, Vec<Mon
         monitors.push(MonitorInfo {
             id,
             name,
+            connector: None,
             bounds: geometry::physical_rect(flip.rect(frame), scale),
             // Already per screen and already in the same space as the frame,
             // unlike X11's single `_NET_WORKAREA`, so there is nothing to

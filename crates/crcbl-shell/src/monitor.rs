@@ -65,6 +65,30 @@ pub struct MonitorInfo {
     /// and it is not stable across drivers.
     pub name: String,
 
+    /// The connector the window system reported for this monitor, e.g.
+    /// `"DP-2"` or `"HDMI-A-1"` — the name to match against another protocol's
+    /// view of the same output, such as wlr-output-management's `head.name`.
+    ///
+    /// `Some` only when the platform reported one: on Wayland the
+    /// `wl_output.name` event (`wl_output` version 4 and later), else
+    /// `zxdg_output_v1.name`; on X11 the RandR output's name. A reported name
+    /// is passed through as is, so it can coincide with a placeholder's
+    /// spelling (Xvfb's one RandR output is named `screen`) or be one no other
+    /// protocol uses (RandR 1.0 emulation's `default`). On Wayland the name can
+    /// arrive after the output first appears; the monitor list is republished
+    /// with it, under a [`MonitorsChanged`](crate::ShellEvent::MonitorsChanged),
+    /// when it does.
+    ///
+    /// `None` whenever [`name`](Self::name) is a placeholder the backend made
+    /// up (`wl-output-N` on Wayland; `output-N`, `CRTC-N`, and `screen` without
+    /// RandR, on X11),
+    /// and always on Win32, AppKit, the web and the headless shell, which have
+    /// no connector name to report.
+    ///
+    /// Like `name`, it is not guaranteed unique and is not a substitute for
+    /// [`id`](Self::id) within this shell.
+    pub connector: Option<String>,
+
     /// Position and size in the desktop's device-pixel coordinate space.
     ///
     /// The origin is wherever the window system puts it, and coordinates are
@@ -185,6 +209,7 @@ mod tests {
         MonitorInfo {
             id: MonitorId(1),
             name: "DP-2".to_string(),
+            connector: Some("DP-2".to_string()),
             bounds: PhysicalRect::new(0, 0, 3840, 2160),
             work_area: PhysicalRect::new(0, 32, 3840, 2128),
             scale_factor: 1.5,

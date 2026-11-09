@@ -156,6 +156,7 @@ impl Win32Shell {
                 // to intersect.
                 work_area: geometry::desktop_rect(info.rc_work),
                 name: device,
+                connector: None,
             });
         }
 
