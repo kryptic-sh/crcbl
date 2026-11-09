@@ -4202,3 +4202,13 @@ driver that keeps one keyboard on the seat for the session
 (`wtype -s 3600000 -m shift &`, as pikr's e2e does) avoids it. A real layout
 switch was not tested; sway's `xkb_switch_layout` moves the group through
 `modifiers`, not a keymap event.
+
+A follow-up report looked like a key decoded against the previous call's keymap:
+in `wtype x q`, after a call that ended in `space`, the `x` acted as `space`. It
+was not. `wtype` types a real space key between its positional arguments (`x`,
+space, `q`; `-k` names get none), and each call's keys decoded against that
+call's own keymap in every run; when the race ate the unbound `x`, the inserted
+space was the first key the app acted on. `remove_keyboard` drops the seat's
+keymap with its keyboard, so no stale map can outlive a call. Likewise
+`wtype j j j` reached the shell as three `j` presses with spaces between,
+nothing merged.
