@@ -273,10 +273,12 @@ impl Ui {
         ) {
             node.set_selected(state.contains(PseudoClasses::CHECKED));
         }
-        // A list row is selected only in a list that has a selection,
+        // A list row is selected or not only in a list that has a selection,
         // [`Ui::selectable_list`]; a plain list's rows say nothing either way.
-        if kind == WidgetKind::ListRow && state.contains(PseudoClasses::CHECKED) {
-            node.set_selected(true);
+        // UIA offers its SelectionItem pattern, and AT-SPI says a row is
+        // selectable, only on a row that says one or the other.
+        if kind == (WidgetKind::ListRow { selectable: true }) {
+            node.set_selected(state.contains(PseudoClasses::CHECKED));
         }
 
         let label = self.accessible_labels.get(&frame.key);
@@ -478,8 +480,12 @@ const fn role_of(content: Content, kind: WidgetKind) -> Role {
         WidgetKind::TreeRow | WidgetKind::OutlinerRow => Role::TreeItem,
         WidgetKind::Outliner => Role::Tree,
         WidgetKind::OutlinerToggle => Role::DisclosureTriangle,
-        WidgetKind::List => Role::List,
-        WidgetKind::ListRow => Role::ListItem,
+        // A list that takes a selection is a list box, which both platforms
+        // give a container's selection; a plain list's rows are not options.
+        WidgetKind::List { selectable: false } => Role::List,
+        WidgetKind::List { selectable: true } => Role::ListBox,
+        WidgetKind::ListRow { selectable: false } => Role::ListItem,
+        WidgetKind::ListRow { selectable: true } => Role::ListBoxOption,
         WidgetKind::TabStrip => Role::TabList,
         WidgetKind::Tab => Role::Tab,
         WidgetKind::TabPanel => Role::TabPanel,

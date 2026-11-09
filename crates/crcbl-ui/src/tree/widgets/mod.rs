@@ -250,10 +250,18 @@ pub(crate) enum WidgetKind {
     OutlinerRow,
     /// A branch row's toggle in an outliner, which a click opens or closes.
     OutlinerToggle,
-    /// [`Ui::list`]'s block.
-    List,
+    /// [`Ui::list`]'s block, or [`Ui::selectable_list`]'s.
+    List {
+        /// Whether it is a [`Ui::selectable_list`]: a list box whose rows a
+        /// reader hears as selected or not.
+        selectable: bool,
+    },
     /// One row of a list, which holds what the caller built in it.
-    ListRow,
+    ListRow {
+        /// Whether its list is a [`Ui::selectable_list`]: an option, selected
+        /// while it is `:checked` and not selected otherwise.
+        selectable: bool,
+    },
     /// The strip of a [`Ui::tabs`].
     TabStrip,
     /// One tab, `:checked` while it is the one showing.

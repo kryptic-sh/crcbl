@@ -47,7 +47,7 @@ impl Ui {
         row_height: f32,
         row: impl FnMut(&mut Self, usize),
     ) -> Response {
-        self.selectable_list(selector, rows, row_height, None, row)
+        self.build_list(selector, rows, row_height, false, None, row)
     }
 
     /// [`Ui::list`] with one row selected: row `selected` is built
@@ -55,12 +55,34 @@ impl Ui {
     /// screen reader hears it as selected. For a list whose current row is the
     /// application's — a launcher's result Return accepts — rather than
     /// wherever focus is.
+    ///
+    /// A reader hears the list as a list box and each row as an option: every
+    /// row but `selected`, and every row while it is none, as one not
+    /// selected. A reader's Select, AddToSelection or RemoveFromSelection on a
+    /// row arrives as a click on it, and the application decides what a click
+    /// means, so a list whose click launches something launches on a screen
+    /// reader's Select.
     #[track_caller]
     pub fn selectable_list(
         &mut self,
         selector: &str,
         rows: usize,
         row_height: f32,
+        selected: Option<usize>,
+        row: impl FnMut(&mut Self, usize),
+    ) -> Response {
+        self.build_list(selector, rows, row_height, true, selected, row)
+    }
+
+    /// The list [`Ui::list`] and [`Ui::selectable_list`] build: `selectable`
+    /// says whether it is the latter, which a reader hears on every row.
+    #[track_caller]
+    fn build_list(
+        &mut self,
+        selector: &str,
+        rows: usize,
+        row_height: f32,
+        selectable: bool,
         selected: Option<usize>,
         mut row: impl FnMut(&mut Self, usize),
     ) -> Response {
@@ -71,10 +93,10 @@ impl Ui {
             &selector,
             &[Declaration::Overflow(Overflow::Scroll)],
             Behavior::NONE,
-            |ui| focused = ui.list_rows(rows, height, selected, &mut row),
+            |ui| focused = ui.list_rows(rows, height, selectable, selected, &mut row),
         );
         self.set_widget_state(response.key, WidgetState::Rows(focused));
-        self.mark(response.key, WidgetKind::List);
+        self.mark(response.key, WidgetKind::List { selectable });
         response
     }
 
@@ -84,6 +106,7 @@ impl Ui {
         &mut self,
         rows: usize,
         height: f32,
+        selectable: bool,
         selected: Option<usize>,
         row: &mut impl FnMut(&mut Self, usize),
     ) -> Option<usize> {
@@ -120,7 +143,7 @@ impl Ui {
                 let response = ui.open_block(key, parsed, &inline, Behavior::BUTTON, state, |ui| {
                     row(ui, index);
                 });
-                ui.mark(response.key, WidgetKind::ListRow);
+                ui.mark(response.key, WidgetKind::ListRow { selectable });
                 if response.focused {
                     focused = Some(index);
                 }

@@ -22,6 +22,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   does that work once per phrase. Surrogate pairs, lone surrogates and control
   characters are handled as before, and plain `WM_CHAR` typing still commits one
   character at a time.
+- **A `Ui::selectable_list` now reads to a screen reader as a list box of
+  options.** The list is `Role::ListBox` instead of `Role::List`, and each row
+  is `Role::ListBoxOption` instead of `Role::ListItem`. Every row other than the
+  selected one, and every row while nothing is selected, reports
+  `selected = false` instead of nothing. Windows UI Automation now offers the
+  list its `Selection` pattern and every row its `SelectionItem` pattern, and
+  AT-SPI gives the list its `Selection` interface and marks each row selectable,
+  as ARIA's listbox expects. A reader's Select arrives as a click on the row, in
+  place of the UIA `Invoke` pattern unselected rows offered before. A plain
+  `Ui::list` is unchanged: a list of items with no selection state.
 
 ## [0.18.0] - 2026-11-10
 

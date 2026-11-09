@@ -59,7 +59,10 @@ fn each_builder_records_what_it_built_whatever_type_the_selector_names() {
                 WidgetKind::Disclosure,
             ),
             (ui.tree_leaf("#leaf", "Leaf").key, WidgetKind::TreeRow),
-            (ui.list("#rows", 2, 10.0, |_, _| {}).key, WidgetKind::List),
+            (
+                ui.list("#rows", 2, 10.0, |_, _| {}).key,
+                WidgetKind::List { selectable: false },
+            ),
             (ui.block("#plain", &[], |_| {}).key, WidgetKind::None),
         ]
     });
@@ -78,7 +81,7 @@ fn each_builder_records_what_it_built_whatever_type_the_selector_names() {
     let content = children_of(&ui, list)[0];
     assert_eq!(
         kind_of(&ui, children_of(&ui, content)[0]),
-        WidgetKind::ListRow
+        WidgetKind::ListRow { selectable: false }
     );
 }
 

@@ -334,18 +334,29 @@ fn a_named_block_reads_as_its_name_not_its_pieces() {
     );
 }
 
-/// **The selected row of a selectable list is selected to a reader, and no
-/// other row says anything either way**, nor does any row of a plain list.
+/// **A selectable list is a list box of options, each selected or not to a
+/// reader**, with nothing selected yet too, since the list still takes a
+/// selection; a plain list is a list whose rows say nothing either way. Both
+/// platforms give a list box, and not a list, the container's selection: UIA's
+/// Selection pattern and AT-SPI's Selection interface.
 #[test]
-fn a_selectable_lists_selected_row_reads_as_selected() {
-    let selections = |ui: &mut Ui, selected: Option<usize>| {
+fn a_selectable_list_reads_as_a_list_box_of_options() {
+    // `selectable` is the selection a selectable list is built with, or none
+    // for a plain list. Returns the list's key and role, and each row's role
+    // and selection.
+    let read = |ui: &mut Ui, selectable: Option<Option<usize>>| {
         let list = frame(ui, idle(), NavInput::default(), |ui| {
-            ui.selectable_list("#rows", 3, 20.0, selected, |ui, index| {
+            let row = |ui: &mut Ui, index: usize| {
                 ui.span("", format!("row {index}").as_str(), &[]);
-            })
+            };
+            match selectable {
+                Some(selected) => ui.selectable_list("#rows", 3, 20.0, selected, row),
+                None => ui.list("#rows", 3, 20.0, row),
+            }
         });
         let update = ui.accessibility_update();
-        let content = node(&update, list.key).children()[0];
+        let list_node = node(&update, list.key);
+        let content = list_node.children()[0];
         let rows = update
             .nodes
             .iter()
@@ -353,25 +364,49 @@ fn a_selectable_lists_selected_row_reads_as_selected() {
             .expect("the list's content")
             .1
             .children()
-            .to_vec();
-        rows.iter()
+            .iter()
             .map(|row| {
                 let (_, row) = update
                     .nodes
                     .iter()
                     .find(|(id, _)| id == row)
                     .expect("a row");
-                assert_eq!(row.role(), Role::ListItem);
-                row.is_selected()
+                (row.role(), row.is_selected())
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (list.key, list_node.role(), rows)
     };
+    let option = |selected| (Role::ListBoxOption, Some(selected));
+    let plain = [(Role::ListItem, None); 3];
     let mut ui = Ui::new();
     // Tall enough for every row from the first frame, which builds only what
     // a list of unknown height would show.
     ui.add_stylesheet("rows.css", "#rows { height: 100px; }");
-    assert_eq!(selections(&mut ui, Some(1)), [None, Some(true), None]);
-    assert_eq!(selections(&mut ui, None), [None, None, None]);
+
+    // Every build is the same `#rows` list and the same rows, so what one
+    // kind of list left on them is what the next must replace.
+    let (key, role, rows) = read(&mut ui, None);
+    assert_eq!((role, rows.as_slice()), (Role::List, plain.as_slice()));
+    let builds = [
+        (
+            Some(Some(1)),
+            Role::ListBox,
+            vec![option(false), option(true), option(false)],
+            "plain, then selectable",
+        ),
+        (
+            Some(None),
+            Role::ListBox,
+            vec![option(false); 3],
+            "a selectable list with nothing selected yet",
+        ),
+        (None, Role::List, plain.to_vec(), "selectable, then plain"),
+    ];
+    for (selectable, want_role, want_rows, what) in builds {
+        let (again, role, rows) = read(&mut ui, selectable);
+        assert_eq!(again, key, "{what}: the same list");
+        assert_eq!((role, rows), (want_role, want_rows), "{what}");
+    }
 }
 
 /// The text run `field`'s node holds, and its id.

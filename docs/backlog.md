@@ -33,9 +33,9 @@ sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
   with default features errors on Linux and FreeBSD. CI documents with
   `--all-features` and does not see it. Older than this slice; not fixed.
 
-## Two gaps pikr reported against 0.17.2 (2026-11-10)
+## What pikr's two 0.17.2 gaps left (2026-11-10)
 
-Both confirmed by reading the code.
+Both gaps are fixed; these are the parts not done.
 
 - **An input method's commit on Wayland and X11: whole or per character?** Win32
   now commits an IME result as one `TextCommit` (the `RawEvent::Commit` path in
@@ -45,15 +45,16 @@ Both confirmed by reading the code.
   (`Win32Shell::translate`) has no in-crate test; only the weekly Japanese-IME
   e2e test (`an_input_method_composition_is_a_pre_edit_and_its_result_a_commit`)
   runs it.
-- **Unselected rows of a `selectable_list` have no selected state.**
-  `crcbl-ui`'s accessibility tree (`tree/accessibility.rs`) calls
-  `set_selected(true)` on the checked `ListRow` only, so every other row has
-  `is_selected() == None`. `accesskit_windows` offers UIA's
-  `SelectionItemPattern` on a list item only when that is `Some`, so a client
-  cannot read or change an unselected row; ARIA's listbox says the same
-  (`aria-selected="false"` on the rest). The fix is `set_selected(false)` on
-  every row of a list that has a selection, while a plain `Ui::list`'s rows stay
-  unset; that needs the row to know which kind of list built it.
+- **A selectable list's roles are proven by reading the adapters, not by running
+  one.** `Ui::selectable_list` is `Role::ListBox` with `Role::ListBoxOption`
+  rows, each reporting selected or not; crcbl-ui's test checks the roles and
+  states it emits. That the list then gets UIA's `Selection` pattern and
+  AT-SPI's `Selection` interface was read from `accesskit_consumer`'s
+  `is_container_with_selectable_children`, not observed: an end-to-end check
+  needs `accesskit_consumer` as a crcbl-ui dev-dependency (the owner's call) or
+  a Windows UIA test in
+  `crates/crcbl-shell/src/win32/shell/tests/accessibility.rs` reading
+  `SelectionItem` and `CurrentSelectionContainer` off a `ListBox`.
 
 ## System fonts are read, not mapped (pikr, 2026-11-10)
 
