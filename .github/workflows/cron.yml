@@ -176,6 +176,17 @@ jobs:
         run: >-
           cargo miri test --tests -p crcbl-core -p crcbl-hal -p crcbl-ecs -p
           crcbl-store -p crcbl-ui -p crcbl-jobs
+      # The Wayland binding can't be interpreted, since `display` dlopens
+      # libwayland-client. But a generated `decode_event` and the
+      # `dispatcher_args` slice it reads are pure pointer work, and they are
+      # what dsplr's report was about: a decoder that read slot 1 through a
+      # reference to slot 0, out of provenance. These tests build the argument
+      # array by hand, so miri sees the reads that a native run cannot tell
+      # apart from correct ones.
+      - name: Interpret the Wayland argument decoders
+        run: >-
+          cargo miri test --lib -p crcbl-wayland-probe && cargo miri test --lib
+          -p crcbl-wayland -- ffi::
 
   # A scheduled run nobody is watching went red and stayed red twice before
   # anyone typed `gh workflow run cron.yml`, so a failure here opens an issue,

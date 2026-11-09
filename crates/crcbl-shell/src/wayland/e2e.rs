@@ -60,6 +60,7 @@
 
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::ptr;
+use std::ffi::CString;
 
 use crcbl_core::SurfaceTarget;
 
@@ -104,7 +105,7 @@ unsafe extern "C" fn bind_shm(
     user_data: *const c_void,
     _target: *mut c_void,
     opcode: u32,
-    _message: *const WlMessage,
+    message: *const WlMessage,
     args: *mut WlArgument,
 ) -> c_int {
     // SAFETY: `user_data` is the `*mut ShmBinding` passed to
@@ -114,15 +115,11 @@ unsafe extern "C" fn bind_shm(
     // allocation. It used to point at `map_window`'s own stack frame, and an
     // output hotplug after that frame was gone re-entered here through it.
     let state = unsafe { &mut *user_data.cast::<ShmBinding>().cast_mut() };
-    // SAFETY: this dispatcher is attached only to a `wl_registry`, so `args`
-    // matches that interface's events for `opcode`.
-    let event = unsafe { wl_registry::decode_event(opcode, &*args.cast_const()) };
-    if let Some(wl_registry::Event::Global {
-        name,
-        interface,
-        version,
-    }) = event
-        && interface == wl_shm::NAME
+    // SAFETY: this dispatcher is attached only to a `wl_registry`, and these
+    // are the arguments libwayland passed it.
+    let global = unsafe { registry_global(opcode, message, args) };
+    if let Some((name, interface, version)) = global
+        && interface.as_c_str() == wl_shm::NAME
         && state.shm.is_null()
     {
         // SAFETY: the registry is live, and binding from inside a dispatch is
@@ -131,6 +128,35 @@ unsafe extern "C" fn bind_shm(
             unsafe { wl_registry::bind(state.registry, name, &wl_shm::INTERFACE, version.min(1)) };
     }
     0
+}
+
+/// A `wl_registry.global` event's name, interface and version, with the
+/// interface copied out of libwayland's closure storage.
+///
+/// # Safety
+///
+/// `opcode`, `message` and `args` must be what libwayland passed a dispatcher
+/// attached to a `wl_registry`.
+unsafe fn registry_global(
+    opcode: u32,
+    message: *const WlMessage,
+    args: *mut WlArgument,
+) -> Option<(u32, CString, u32)> {
+    // SAFETY: the caller passes a registry dispatcher's own arguments, so
+    // `args` is that interface's array for `opcode`, and the interface string
+    // is copied before the closure returns.
+    unsafe {
+        ffi::with_dispatcher_args(message, args, |args| {
+            match wl_registry::decode_event(opcode, args) {
+                Some(wl_registry::Event::Global {
+                    name,
+                    interface,
+                    version,
+                }) => Some((name, interface.to_owned(), version)),
+                _ => None,
+            }
+        })
+    }
 }
 
 /// Swallows the events of objects this module creates but does not read.
@@ -466,24 +492,20 @@ unsafe extern "C" fn bind_input(
     user_data: *const c_void,
     _target: *mut c_void,
     opcode: u32,
-    _message: *const WlMessage,
+    message: *const WlMessage,
     args: *mut WlArgument,
 ) -> c_int {
     // SAFETY: `user_data` is the `*mut InputGlobals` passed to
     // `wl_proxy_add_dispatcher` in `VirtualInput::attach`, which lives for
     // strictly longer than the roundtrip that can call this.
     let state = unsafe { &mut *user_data.cast::<InputGlobals>().cast_mut() };
-    // SAFETY: this dispatcher is attached only to a `wl_registry`, so `args`
-    // matches that interface's events for `opcode`.
-    let event = unsafe { wl_registry::decode_event(opcode, &*args.cast_const()) };
-    let Some(wl_registry::Event::Global {
-        name,
-        interface,
-        version,
-    }) = event
+    // SAFETY: this dispatcher is attached only to a `wl_registry`, and these
+    // are the arguments libwayland passed it.
+    let Some((name, interface, version)) = (unsafe { registry_global(opcode, message, args) })
     else {
         return 0;
     };
+    let interface = interface.as_c_str();
     // SAFETY: the registry is live, and binding from inside a dispatch is
     // ordinary libwayland usage — the request is queued, not reentrant.
     unsafe {
@@ -955,23 +977,20 @@ unsafe extern "C" fn bind_drag(
     user_data: *const c_void,
     _target: *mut c_void,
     opcode: u32,
-    _message: *const WlMessage,
+    message: *const WlMessage,
     args: *mut WlArgument,
 ) -> c_int {
     // SAFETY: `user_data` is the boxed `DragState` handed to
     // `wl_proxy_add_dispatcher` in `DragSource::attach`, which outlives every
     // dispatch that can reach it.
     let state = unsafe { &mut *user_data.cast::<DragState>().cast_mut() };
-    // SAFETY: attached only to a `wl_registry`.
-    let event = unsafe { wl_registry::decode_event(opcode, &*args.cast_const()) };
-    let Some(wl_registry::Event::Global {
-        name,
-        interface,
-        version,
-    }) = event
+    // SAFETY: attached only to a `wl_registry`; `message` and `args` are what
+    // libwayland passed.
+    let Some((name, interface, version)) = (unsafe { registry_global(opcode, message, args) })
     else {
         return 0;
     };
+    let interface = interface.as_c_str();
     // SAFETY: the registry is live, and binding from inside a dispatch is
     // ordinary libwayland usage.
     unsafe {
@@ -995,49 +1014,53 @@ unsafe extern "C" fn drag_dispatch(
     user_data: *const c_void,
     target: *mut c_void,
     opcode: u32,
-    _message: *const WlMessage,
+    message: *const WlMessage,
     args: *mut WlArgument,
 ) -> c_int {
     // SAFETY: as `bind_drag`.
     let state = unsafe { &mut *user_data.cast::<DragState>().cast_mut() };
-    // SAFETY: libwayland hands the dispatcher its closure argument array, which
-    // outlives this call; the borrow pins the decoders' lifetime to it.
-    let args = unsafe { &*args.cast_const() };
-    if target == state.pointer.cast() {
-        // SAFETY: this branch is only reached for the `wl_pointer` proxy.
-        if let Some(wl_pointer::Event::Button {
-            serial,
-            state: down,
-            ..
-        }) = unsafe { wl_pointer::decode_event(opcode, args) }
-            && down == wl_pointer::button_state::PRESSED
-        {
-            state.press_serial.set(serial);
-        }
-        return 0;
-    }
-    if target == state.source.cast() {
-        // SAFETY: this branch is only reached for the `wl_data_source` proxy.
-        match unsafe { wl_data_source::decode_event(opcode, args) } {
-            Some(wl_data_source::Event::Send { fd, .. }) => {
-                let payload = state.payload.borrow();
-                // A blocking write, deliberately: the harness's payload is a
-                // handful of bytes, far below the 64 KiB a pipe holds, so it
-                // cannot block — and the reader is the shell under test, on
-                // this very thread, which is precisely why a *large* payload
-                // would have to be written the way `fd::Writing` does.
-                // SAFETY: `fd` is the descriptor the compositor handed over,
-                // owned by this process and closed exactly once below.
-                unsafe {
-                    write(fd, payload.as_ptr().cast(), payload.len());
-                    close(fd);
-                }
-                state.sent.set(true);
+    // The decoders' borrowed fields cannot leave this closure, which is what
+    // keeps them inside the closure storage's life.
+    let decode = |args: &[WlArgument]| {
+        if target == state.pointer.cast() {
+            // SAFETY: this branch is only reached for the `wl_pointer` proxy.
+            if let Some(wl_pointer::Event::Button {
+                serial,
+                state: down,
+                ..
+            }) = unsafe { wl_pointer::decode_event(opcode, args) }
+                && down == wl_pointer::button_state::PRESSED
+            {
+                state.press_serial.set(serial);
             }
-            Some(wl_data_source::Event::Cancelled) => state.cancelled.set(true),
-            _ => {}
+            return;
         }
-    }
+        if target == state.source.cast() {
+            // SAFETY: this branch is only reached for the `wl_data_source` proxy.
+            match unsafe { wl_data_source::decode_event(opcode, args) } {
+                Some(wl_data_source::Event::Send { fd, .. }) => {
+                    let payload = state.payload.borrow();
+                    // A blocking write, deliberately: the harness's payload is a
+                    // handful of bytes, far below the 64 KiB a pipe holds, so it
+                    // cannot block — and the reader is the shell under test, on
+                    // this very thread, which is precisely why a *large* payload
+                    // would have to be written the way `fd::Writing` does.
+                    // SAFETY: `fd` is the descriptor the compositor handed over,
+                    // owned by this process and closed exactly once below.
+                    unsafe {
+                        write(fd, payload.as_ptr().cast(), payload.len());
+                        close(fd);
+                    }
+                    state.sent.set(true);
+                }
+                Some(wl_data_source::Event::Cancelled) => state.cancelled.set(true),
+                _ => {}
+            }
+        }
+    };
+    // SAFETY: `message` and `args` are the descriptor and closure argument
+    // array libwayland handed this dispatcher, unchanged while it runs.
+    unsafe { ffi::with_dispatcher_args(message, args, decode) };
     0
 }
 

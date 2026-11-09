@@ -825,7 +825,7 @@ unsafe extern "C" fn dispatch(
     user_data: *const c_void,
     target: *mut c_void,
     opcode: u32,
-    _message: *const WlMessage,
+    message: *const WlMessage,
     args: *mut WlArgument,
 ) -> c_int {
     // SAFETY: `user_data` is `Sink::root` — the pointer `Box::into_raw`
@@ -844,20 +844,13 @@ unsafe extern "C" fn dispatch(
         // the documented behaviour.
         return 0;
     };
-    // SAFETY: libwayland always hands the dispatcher its closure's argument
-    // array, which has one slot per signature character and lives for the
-    // duration of this call. Borrowing it here rather than passing the raw
-    // pointer is what pins the decoders' `'a` to this stack frame: with a raw
-    // pointer the lifetime is inferred, and a `&CStr` field could outlive the
-    // closure storage it points into.
-    let args: &WlArgument = unsafe { &*args.cast_const() };
-
     // SAFETY (all decoders): `kind` records which interface this proxy was
     // created as, so `args` is that interface's argument array for `opcode` —
-    // which is exactly the dispatcher contract — and every borrow is copied out
-    // before this function returns, which is the lifetime the decoders
-    // document.
-    match kind {
+    // which is exactly the dispatcher contract. The slice exists only inside
+    // this closure, and `with_dispatcher_args` lets nothing borrowed from it
+    // out, so every `&CStr`/`&[u8]` field is copied into `sink` before the
+    // closure storage it points into is freed.
+    let decode = |args: &[WlArgument]| match kind {
         ObjectKind::Ignored => {}
         ObjectKind::Registry => {
             if let Some(event) = unsafe { wl_registry::decode_event(opcode, args) } {
@@ -1180,7 +1173,10 @@ unsafe extern "C" fn dispatch(
                 });
             }
         }
-    }
+    };
+    // SAFETY: `message` and `args` are the descriptor and closure argument
+    // array libwayland handed this dispatcher, unchanged while it runs.
+    unsafe { ffi::with_dispatcher_args(message, args, decode) };
     0
 }
 

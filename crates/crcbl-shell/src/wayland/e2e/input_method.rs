@@ -15,7 +15,7 @@ use crcbl_core::SurfaceTarget;
 use super::super::ffi::{self, WlArgument, WlDisplay, WlMessage, WlProxy};
 use super::super::protocol::input_method::{zwp_input_method_manager_v2, zwp_input_method_v2};
 use super::super::protocol::wayland::{wl_display, wl_registry, wl_seat};
-use super::ignore;
+use super::{ignore, registry_global};
 use crate::{Shell, ShellError, WindowId};
 
 /// What the registry and the input method have said.
@@ -44,20 +44,18 @@ unsafe extern "C" fn bind(
     user_data: *const c_void,
     _target: *mut c_void,
     opcode: u32,
-    _message: *const WlMessage,
+    message: *const WlMessage,
     args: *mut WlArgument,
 ) -> c_int {
     // SAFETY: `user_data` is the boxed `State` of an `InputMethod`, which
     // outlives the round trip that can call this.
     let state = unsafe { &mut *user_data.cast::<State>().cast_mut() };
-    // SAFETY: attached only to a `wl_registry`, so `args` matches its events.
-    let event = unsafe { wl_registry::decode_event(opcode, &*args.cast_const()) };
-    let Some(wl_registry::Event::Global {
-        name, interface, ..
-    }) = event
-    else {
+    // SAFETY: attached only to a `wl_registry`; `message` and `args` are what
+    // libwayland passed.
+    let Some((name, interface, _)) = (unsafe { registry_global(opcode, message, args) }) else {
         return 0;
     };
+    let interface = interface.as_c_str();
     // SAFETY: the registry is live; binding from inside a dispatch only queues
     // the request.
     unsafe {
@@ -80,26 +78,32 @@ unsafe extern "C" fn follow(
     user_data: *const c_void,
     _target: *mut c_void,
     opcode: u32,
-    _message: *const WlMessage,
+    message: *const WlMessage,
     args: *mut WlArgument,
 ) -> c_int {
     // SAFETY: as in `bind`; the box lives as long as the proxy.
     let state = unsafe { &mut *user_data.cast::<State>().cast_mut() };
-    // SAFETY: attached only to a `zwp_input_method_v2`.
-    match unsafe { zwp_input_method_v2::decode_event(opcode, &*args.cast_const()) } {
-        Some(zwp_input_method_v2::Event::Activate) => state.pending_active = true,
-        Some(zwp_input_method_v2::Event::Deactivate) => state.pending_active = false,
-        Some(zwp_input_method_v2::Event::ContentType { hint, purpose }) => {
-            state.pending_content = (hint, purpose);
-        }
-        Some(zwp_input_method_v2::Event::Done) => {
-            state.done = state.done.wrapping_add(1);
-            state.active = state.pending_active;
-            state.content = state.pending_content;
-        }
-        Some(zwp_input_method_v2::Event::Unavailable) => state.unavailable = true,
-        _ => {}
-    }
+    // SAFETY (the decoder): attached only to a `zwp_input_method_v2`, so `args`
+    // is that interface's array for `opcode`; nothing borrowed leaves the
+    // closure.
+    let decode =
+        |args: &[WlArgument]| match unsafe { zwp_input_method_v2::decode_event(opcode, args) } {
+            Some(zwp_input_method_v2::Event::Activate) => state.pending_active = true,
+            Some(zwp_input_method_v2::Event::Deactivate) => state.pending_active = false,
+            Some(zwp_input_method_v2::Event::ContentType { hint, purpose }) => {
+                state.pending_content = (hint, purpose);
+            }
+            Some(zwp_input_method_v2::Event::Done) => {
+                state.done = state.done.wrapping_add(1);
+                state.active = state.pending_active;
+                state.content = state.pending_content;
+            }
+            Some(zwp_input_method_v2::Event::Unavailable) => state.unavailable = true,
+            _ => {}
+        };
+    // SAFETY: `message` and `args` are the descriptor and closure argument
+    // array libwayland handed this dispatcher, unchanged while it runs.
+    unsafe { ffi::with_dispatcher_args(message, args, decode) };
     0
 }
 

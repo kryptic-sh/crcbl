@@ -188,7 +188,7 @@ unsafe extern "C" fn dispatch(
     user_data: *const c_void,
     target: *mut c_void,
     opcode: u32,
-    _message: *const WlMessage,
+    message: *const WlMessage,
     args: *mut WlArgument,
 ) -> c_int {
     // SAFETY: `user_data` is `State::root`, live while any proxy is, and no
@@ -197,13 +197,10 @@ unsafe extern "C" fn dispatch(
     let Some(kind) = state.kind_of(target.cast()) else {
         return 0;
     };
-    // SAFETY: libwayland passes the closure's argument array, live for this
-    // call.
-    let args = unsafe { &*args.cast_const() };
     // SAFETY (each decoder): `kind` is the interface the proxy was created as,
     // so `args` is that interface's array for `opcode`, and every borrow is
-    // copied out before returning.
-    match kind {
+    // copied out inside the closure, which is as far as the slice can reach.
+    let decode = |args: &[WlArgument]| match kind {
         Kind::Registry => {
             if let Some(wl_registry::Event::Global {
                 name,
@@ -257,6 +254,9 @@ unsafe extern "C" fn dispatch(
                 _ => {}
             }
         }
-    }
+    };
+    // SAFETY: `message` and `args` are the descriptor and closure argument
+    // array libwayland passed this dispatcher, unchanged while it runs.
+    unsafe { ffi::with_dispatcher_args(message, args, decode) };
     0
 }

@@ -24,6 +24,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`GltfPrimitive::index`**, the primitive's index in its mesh as the file
   numbers it, which can differ from its position in `GltfMesh::primitives`
   because the importer drops non-triangle primitives.
+- **`crcbl_wayland::ffi::with_dispatcher_args`** runs a closure on the
+  `&[WlArgument]` a generated `decode_event` takes, built from the `wl_message`
+  and argument pointer libwayland hands a dispatcher and sized by counting the
+  signature's type characters the way libwayland's `arg_count_for_signature`
+  does. The closure must accept the slice at every lifetime, so neither the
+  slice nor an `Event` borrowing a string or array from libwayland's closure
+  storage can outlive the dispatcher call.
 
 ### Changed
 
@@ -35,6 +42,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 - **`GpuOptions` gains `headless: bool`.** Code building it field by field must
   set it; `Common::gpu` fills it from `--headless`.
+- **`crcbl-wl-scanner`'s generated `decode_event` takes a slice.** It is now
+  `decode_event<'a>(opcode: u32, args: &'a [WlArgument]) -> Option<Event<'a>>`
+  (`&[WlArgument]` for an interface whose events borrow nothing) instead of a
+  reference to the first slot. A dispatcher decodes inside
+  `crcbl_wayland::ffi::with_dispatcher_args(message, args, |args| …)` in place
+  of passing `&*args.cast_const()`. A slice shorter than the opcode's signature
+  decodes to `None`.
 
 ### Fixed
 
@@ -55,6 +69,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   differs from its previous call, so `sundial --filter box` keeps its box filter
   when a console `render_scale 0.5` or an options row hands `GpuStage` the whole
   section; a write of `shadow_filter` itself still moves it.
+- **Decoding a multi-argument Wayland event is no longer undefined behaviour.**
+  The generated `decode_event` read slots after the first through a pointer
+  derived from a reference to the first, which may reach that one slot only;
+  Miri reports the read as a Stacked Borrows violation. It now indexes a slice
+  that spans the whole argument array, so every event with more than one
+  argument, `wl_registry.global` among them, reads within its provenance.
 
 ## [0.17.2] - 2026-11-04
 

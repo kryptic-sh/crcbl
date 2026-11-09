@@ -22,3 +22,64 @@ mod protocol {
 
 #[cfg(desktop_unix)]
 pub use outputs::{Head, Mode, read_heads};
+
+/// The generated decoders against argument arrays built by hand, with no
+/// libwayland: what lets Miri check how they read the slots.
+#[cfg(all(test, desktop_unix))]
+mod tests {
+    use crcbl_wayland::ffi::{self, WlArgument, WlMessage};
+
+    use crate::protocol::wayland::wl_registry;
+
+    /// `wl_registry.global`'s descriptor, as libwayland hands it to a
+    /// dispatcher: read out of the generated interface's event table.
+    fn global_message() -> *const WlMessage {
+        // SAFETY: `events` points at the interface's static event table, and
+        // `EVT_GLOBAL` is an opcode in it.
+        unsafe {
+            wl_registry::INTERFACE
+                .events
+                .add(wl_registry::EVT_GLOBAL as usize)
+        }
+    }
+
+    #[test]
+    fn a_multi_argument_event_reads_every_slot_of_its_array() {
+        let mut slots = [
+            WlArgument { u: 7 },
+            WlArgument {
+                s: c"wl_seat".as_ptr(),
+            },
+            WlArgument { u: 9 },
+        ];
+        // SAFETY: the generated descriptor's signature names three slots,
+        // `slots` holds them as that signature says, and nothing mutates it
+        // during the call. The string is a static.
+        let decoded = unsafe {
+            ffi::with_dispatcher_args(global_message(), slots.as_mut_ptr(), |args| {
+                match wl_registry::decode_event(wl_registry::EVT_GLOBAL, args) {
+                    Some(wl_registry::Event::Global {
+                        name,
+                        interface,
+                        version,
+                    }) => Some((name, interface.to_owned(), version)),
+                    _ => None,
+                }
+            })
+        };
+        assert_eq!(decoded, Some((7, c"wl_seat".to_owned(), 9)));
+    }
+
+    #[test]
+    fn a_slice_shorter_than_the_signature_is_declined_rather_than_read_past() {
+        let slots = [
+            WlArgument { u: 7 },
+            WlArgument {
+                s: c"wl_seat".as_ptr(),
+            },
+        ];
+        // SAFETY: the slots that exist hold what the signature names for them.
+        let event = unsafe { wl_registry::decode_event(wl_registry::EVT_GLOBAL, &slots) };
+        assert!(event.is_none(), "decoded {event:?}");
+    }
+}

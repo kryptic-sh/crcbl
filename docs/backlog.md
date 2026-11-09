@@ -16,10 +16,6 @@ sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
   its own XML and carries its own copy of the core tables. Harmless on a
   separate connection, since libwayland matches interfaces by name. Revisit if
   two crates must share proxies on one connection.
-- **Not exercised from outside: applying a configuration.** The probe reads
-  heads and modes; `zwlr_output_configuration_v1`'s `apply`/`test` and their
-  `succeeded`/`failed`/`cancelled` replies are generated but run by nothing
-  here. dsplr's M2 is their first user.
 - **dsplr's next asks (2026-11-09, not started).** M3 (its GUI) needs to match a
   `MonitorInfo` to a compositor output by connector name, to put identify
   overlays and confirm dialogs on the right monitor. `MonitorInfo::name` is

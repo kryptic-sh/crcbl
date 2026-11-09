@@ -525,7 +525,15 @@ fn wire_slots(message: &Message) -> Vec<(usize, &Arg)> {
 }
 
 fn event_field_expression(arg: &Arg, slot: usize, ffi: &str) -> String {
-    let read = format!("(*args.add({slot}))");
+    // `?` rather than `args[slot]`: a slice shorter than the signature is the
+    // caller's mistake, and the decoder runs inside an `extern "C"` dispatcher,
+    // where a panic aborts the process. Declining it reads like an opcode this
+    // build does not know.
+    let read = if slot == 0 {
+        "args.first()?".to_string()
+    } else {
+        format!("args.get({slot})?")
+    };
     match arg.ty {
         ArgType::Int | ArgType::Fixed => format!("unsafe {{ {read}.i }}"),
         ArgType::Uint => format!("unsafe {{ {read}.u }}"),
@@ -569,34 +577,45 @@ fn emit_events(out: &mut String, interface: &Interface, ffi: &str) {
     }
     out.push_str("        }\n");
 
-    // `args` is a *reference* to the first slot of libwayland's argument array,
-    // not a raw pointer, purely so that `'a` is tied to something. With
-    // `*const WlArgument` the caller chooses `'a` freely — `'static` included —
-    // while the `&CStr` and `&[u8]` fields point into the closure storage
-    // libwayland frees when the dispatcher returns.
+    // `args` is a *slice* of libwayland's argument array rather than a raw
+    // pointer for two reasons. A borrow makes the `Event`'s `'a` the slice's:
+    // with `*const WlArgument` the caller chooses `'a` freely — `'static`
+    // included — while the `&CStr` and `&[u8]` fields point into the closure
+    // storage libwayland frees when the dispatcher returns. Bounding the
+    // slice's own lifetime is the caller's part; `with_dispatcher_args` does
+    // it by handing the slice only to a closure. And a slice carries
+    // provenance over every slot, where a reference to the first slot covers
+    // that one element only, so reading the second through it was undefined
+    // behaviour.
     let (generics, args_ty, ret) = if borrows {
         (
             "<'a>",
-            format!("&'a {ffi}::WlArgument"),
+            format!("&'a [{ffi}::WlArgument]"),
             "Option<Event<'a>>",
         )
     } else {
-        ("", format!("&{ffi}::WlArgument"), "Option<Event>")
+        ("", format!("&[{ffi}::WlArgument]"), "Option<Event>")
     };
     let _ = writeln!(
         out,
         "\n        /// Decodes one event from libwayland's argument array.\n\
          \x20       ///\n\
          \x20       /// `None` for an opcode this build does not know, which is what a compositor\n\
-         \x20       /// implementing a newer version of the interface sends.\n\
+         \x20       /// implementing a newer version of the interface sends, and also when\n\
+         \x20       /// `args` is shorter than the opcode's signature: every slot is read\n\
+         \x20       /// through a bounds check, so a short slice is declined rather than read\n\
+         \x20       /// past or panicked on. `with_dispatcher_args` in the FFI module builds\n\
+         \x20       /// the slice from what libwayland hands a dispatcher.\n\
          \x20       ///\n\
          \x20       /// # Safety\n\
          \x20       ///\n\
-         \x20       /// `args` must borrow the first slot of the argument array libwayland passed\n\
-         \x20       /// for `opcode` on a `{}` proxy, and that array must have as many slots as\n\
-         \x20       /// this opcode's signature declares. Borrowed strings and arrays point into\n\
-         \x20       /// libwayland's closure storage, so the borrow must not outlive the\n\
-         \x20       /// dispatcher call — which is what the returned lifetime records.\n\
+         \x20       /// `args` must be the argument array libwayland passed for `opcode` on a\n\
+         \x20       /// `{}` proxy: each slot must hold the union field this opcode's signature\n\
+         \x20       /// names for it, since that is the field read. String and array slots are\n\
+         \x20       /// dereferenced, so each must be null or valid for `'a` — borrowed strings\n\
+         \x20       /// and arrays point into libwayland's closure storage, so `'a` must not\n\
+         \x20       /// outlive the dispatcher call; the returned `Event` borrows for `'a`.\n\
+         \x20       /// Object slots are returned as raw pointers and not dereferenced here.\n\
          \x20       #[must_use]\n\
          \x20       pub unsafe fn decode_event{generics}(opcode: u32, args: {args_ty}) -> {ret} {{",
         interface.name
@@ -607,8 +626,7 @@ fn emit_events(out: &mut String, interface: &Interface, ffi: &str) {
     }
     let _ = writeln!(
         out,
-        "            let args: *const {ffi}::WlArgument = core::ptr::from_ref(args);\n\
-         \x20           let _ = args;\n\
+        "            let _ = args;\n\
          \x20           match opcode {{"
     );
     for (opcode, message) in interface.events.iter().enumerate() {
@@ -831,11 +849,11 @@ mod tests {
         )
         .expect("emits");
         assert!(
-            generated.contains("id: unsafe { (*args.add(2)).o },"),
+            generated.contains("id: unsafe { args.get(2)?.o },"),
             "{generated}"
         );
         assert!(
-            generated.contains("after: unsafe { (*args.add(3)).u },"),
+            generated.contains("after: unsafe { args.get(3)?.u },"),
             "{generated}"
         );
     }

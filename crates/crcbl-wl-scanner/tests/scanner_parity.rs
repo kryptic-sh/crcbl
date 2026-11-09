@@ -410,13 +410,20 @@ fn request_wrappers_and_event_decoders_are_generated_for_the_slice_we_need() {
         "pub unsafe fn set_title(proxy: *mut crate::wayland::ffi::WlProxy, title: &core::ffi::CStr)",
         // A nullable object argument stays a raw pointer the caller may null.
         "pub unsafe fn set_fullscreen(proxy: *mut crate::wayland::ffi::WlProxy, output: *mut crate::wayland::ffi::WlProxy)",
-        // `args` is a borrow rather than a raw pointer so that `'a` is tied to
-        // something: with `*const WlArgument` the caller picks `'a` freely, and
-        // the `&CStr`/`&[u8]` fields dangle the moment the dispatcher returns.
-        "pub unsafe fn decode_event<'a>(opcode: u32, args: &'a crate::wayland::ffi::WlArgument) -> Option<Event<'a>>",
+        // `args` is a borrow rather than a raw pointer so that the `Event`'s `'a`
+        // is the slice's: with `*const WlArgument` the caller picks `'a`
+        // freely, and the `&CStr`/`&[u8]` fields dangle the moment the
+        // dispatcher returns. A slice rather than a reference to the first
+        // slot, because a pointer derived from that reference may not read the
+        // slots after it.
+        "pub unsafe fn decode_event<'a>(opcode: u32, args: &'a [crate::wayland::ffi::WlArgument]) -> Option<Event<'a>>",
         // An interface whose events borrow nothing still takes the borrow, so
         // every call site passes the same thing.
-        "pub unsafe fn decode_event(opcode: u32, args: &crate::wayland::ffi::WlArgument) -> Option<Event>",
+        "pub unsafe fn decode_event(opcode: u32, args: &[crate::wayland::ffi::WlArgument]) -> Option<Event>",
+        // Every slot is read through a bounds check, so a slice shorter than
+        // the signature declines the event instead of reading past its end.
+        "name: unsafe { args.first()?.u },",
+        "interface: unsafe { crate::wayland::ffi::cstr_arg(args.get(1)?.s) },",
     ] {
         assert!(generated.contains(needle), "missing: {needle}");
     }

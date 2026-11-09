@@ -95,7 +95,7 @@ pub(super) enum Event {
 ///
 /// `args` must be the arguments of `zwp_text_input_v3` event `opcode`, as
 /// libwayland hands them to a dispatcher.
-pub(super) unsafe fn decode(opcode: u32, args: &WlArgument) -> Option<Event> {
+pub(super) unsafe fn decode(opcode: u32, args: &[WlArgument]) -> Option<Event> {
     // SAFETY: the caller guarantees `args` matches `opcode` on this interface.
     Some(
         match unsafe { zwp_text_input_v3::decode_event(opcode, args) }? {

@@ -542,6 +542,89 @@ pub unsafe fn array_arg<'a>(ptr: *const WlArray) -> &'a [u8] {
     }
 }
 
+/// Runs `f` on the argument array libwayland hands a dispatcher, as the slice a
+/// generated `decode_event` takes.
+///
+/// The length comes from `message`'s signature, which is what decides how
+/// many slots libwayland filled. A reference to `args`'s first slot would not
+/// do: a pointer derived from it may reach that one element only, so a decoder
+/// reading the second slot through it reads outside its provenance.
+///
+/// A closure rather than a returned slice so the borrow cannot leave the call.
+/// `f` must accept the slice at *every* lifetime, so `R` cannot name it, and an
+/// `Event` borrowing a string or array from libwayland's closure storage —
+/// freed when the dispatcher returns — cannot be handed out:
+///
+/// ```
+/// use crcbl_wayland::ffi::{WlArgument, WlMessage, with_dispatcher_args};
+///
+/// let message = WlMessage::new(c"global", c"usu", core::ptr::null());
+/// let mut slots = [WlArgument { u: 7 }, WlArgument { s: c"wl_seat".as_ptr() }, WlArgument { u: 9 }];
+/// // SAFETY: `message`'s signature names three slots, and `slots` holds them.
+/// let name = unsafe { with_dispatcher_args(&raw const message, slots.as_mut_ptr(), |args| args[0].u) };
+/// assert_eq!(name, 7);
+/// ```
+///
+/// ```compile_fail
+/// use crcbl_wayland::ffi::{WlArgument, WlMessage, with_dispatcher_args};
+///
+/// let message = WlMessage::new(c"global", c"usu", core::ptr::null());
+/// let mut slots = [WlArgument { u: 7 }, WlArgument { s: c"wl_seat".as_ptr() }, WlArgument { u: 9 }];
+/// // SAFETY: as above.
+/// let escaped: &'static [WlArgument] =
+///     unsafe { with_dispatcher_args(&raw const message, slots.as_mut_ptr(), |args| args) };
+/// ```
+///
+/// # Safety
+///
+/// `message` must point at a `WlMessage` whose `signature` is a valid
+/// NUL-terminated string, and `args` at least as many initialised slots as
+/// that signature names, which nothing mutates while `f` runs. A dispatcher's
+/// own `message` and `args` are exactly that. A null `message`, or a null
+/// `args` for a signature with slots, is a bug the debug assertions report; a
+/// release build hands `f` an empty slice, which every decoder declines for an
+/// event with arguments.
+pub unsafe fn with_dispatcher_args<R>(
+    message: *const WlMessage,
+    args: *mut WlArgument,
+    f: impl for<'a> FnOnce(&'a [WlArgument]) -> R,
+) -> R {
+    debug_assert!(
+        !message.is_null(),
+        "libwayland passes every dispatcher the message it is dispatching"
+    );
+    let count = if message.is_null() {
+        0
+    } else {
+        // SAFETY: the caller guarantees `message` points at a `WlMessage`
+        // whose `signature` is a valid NUL-terminated string.
+        arg_count_for_signature(unsafe { CStr::from_ptr((*message).signature) })
+    };
+    debug_assert!(
+        count == 0 || !args.is_null(),
+        "libwayland passes an argument array for a message with arguments"
+    );
+    if count == 0 || args.is_null() {
+        return f(&[]);
+    }
+    // SAFETY: the caller guarantees `args` points at `count` initialised slots
+    // that nothing mutates while `f` runs, and the slice lives no longer.
+    f(unsafe { core::slice::from_raw_parts(args.cast_const(), count) })
+}
+
+/// The number of argument slots a `wl_message` signature describes.
+///
+/// A transcription of libwayland's `arg_count_for_signature` (`connection.c`):
+/// one slot per type character. The leading version digits and the `?` that
+/// marks an argument nullable are not arguments and are skipped.
+fn arg_count_for_signature(signature: &CStr) -> usize {
+    signature
+        .to_bytes()
+        .iter()
+        .filter(|&&c| matches!(c, b'i' | b'u' | b'f' | b's' | b'o' | b'n' | b'a' | b'h'))
+        .count()
+}
+
 /// Reinterprets a `wl_display*` as the `wl_proxy*` it also is.
 ///
 /// libwayland's own headers do this cast in every `wl_display_*` inline
@@ -601,6 +684,59 @@ mod tests {
         };
         // SAFETY: `array` describes `bytes`, which outlives the borrow.
         assert_eq!(unsafe { array_arg(&raw const array) }, &bytes);
+    }
+
+    #[test]
+    fn a_signature_counts_one_slot_per_type_character() {
+        // Real signatures from wayland.xml, and the shapes that are not one
+        // character per argument.
+        assert_eq!(arg_count_for_signature(c"usu"), 3, "wl_registry.global");
+        assert_eq!(arg_count_for_signature(c"ous"), 3, "wl_display.error");
+        assert_eq!(arg_count_for_signature(c"2?s"), 1, "versioned, nullable");
+        assert_eq!(
+            arg_count_for_signature(c"sun"),
+            3,
+            "wl_registry.bind's untyped new_id"
+        );
+        assert_eq!(arg_count_for_signature(c"3?oiifh"), 5, "every other type");
+        assert_eq!(arg_count_for_signature(c"a"), 1, "array");
+        assert_eq!(arg_count_for_signature(c""), 0, "no arguments");
+    }
+
+    #[test]
+    fn the_dispatcher_slice_spans_the_signatures_slots() {
+        let message = WlMessage::new(c"global", c"usu", ptr::null());
+        let mut slots = [
+            WlArgument { u: 7 },
+            WlArgument {
+                s: c"wl_seat".as_ptr(),
+            },
+            WlArgument { u: 9 },
+            WlArgument { u: 0 },
+        ];
+        // SAFETY: `message`'s signature names three slots, `slots` holds them,
+        // and nothing mutates it during the call. Slot 2 was written as `u`.
+        let (len, version) = unsafe {
+            with_dispatcher_args(&raw const message, slots.as_mut_ptr(), |args| {
+                (args.len(), args[2].u)
+            })
+        };
+        assert_eq!(len, 3, "the fourth slot is not the message's");
+        assert_eq!(version, 9);
+
+        let none = WlMessage::new(c"done", c"", ptr::null());
+        // SAFETY: an empty signature names no slots, so `args` is not read.
+        let len =
+            unsafe { with_dispatcher_args(&raw const none, ptr::null_mut(), <[WlArgument]>::len) };
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "libwayland passes every dispatcher the message")]
+    fn a_null_message_is_reported_rather_than_dropping_the_event() {
+        // SAFETY: a null `message` reads nothing; the assertion fires first.
+        unsafe { with_dispatcher_args(ptr::null(), ptr::null_mut(), <[WlArgument]>::len) };
     }
 
     #[test]
