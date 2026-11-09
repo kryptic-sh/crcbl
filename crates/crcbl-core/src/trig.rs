@@ -540,6 +540,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "an exhaustive arithmetic sweep with no unsafe; minutes under miri"
+    )]
     fn every_product_the_domain_admits_is_exact() {
         let largest = (MAX_ARGUMENT * FRAC_2_PI).round() as i32;
         assert!(
@@ -802,6 +806,10 @@ mod tests {
     /// aarch64 macOS and x86-64 Windows too, so a target whose arithmetic
     /// differs in one bit of one output fails here rather than in a replay.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "an exhaustive arithmetic sweep with no unsafe; minutes under miri"
+    )]
     fn the_outputs_hash_to_the_pinned_digest() {
         /// The digest on x86-64 Linux, 2026-09-17.
         const PINNED: u64 = 0x20be_321e_0066_f5de;

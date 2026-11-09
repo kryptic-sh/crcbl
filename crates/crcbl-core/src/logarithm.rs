@@ -338,6 +338,10 @@ bfe052da205cf5e7 bfe6d5aa2708e569";
     /// Windows and on aarch64 macOS, so a target whose arithmetic differs in
     /// one bit of one output fails here rather than in a replay.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "an exhaustive arithmetic sweep with no unsafe; minutes under miri"
+    )]
     fn the_outputs_hash_to_the_pinned_digest() {
         /// The digest on x86-64 Windows, 2026-10-12.
         const PINNED: u64 = 0x824e_b588_1746_9c25;

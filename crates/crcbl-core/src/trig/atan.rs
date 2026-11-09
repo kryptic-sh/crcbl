@@ -681,6 +681,10 @@ bff0000000000000 bd719799812dea11 -1.570796326795896619231321691619638089395e+0
     /// platform's is itself only within an ulp of the truth, so the two may sit
     /// one further apart than [`MAX_ATAN2_ULP`].
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "an exhaustive arithmetic sweep with no unsafe; minutes under miri"
+    )]
     fn atan2_tracks_the_platform() {
         let mut worst = 0;
         let mut worst_at = (0.0, 0.0);
@@ -713,6 +717,10 @@ bff0000000000000 bd719799812dea11 -1.570796326795896619231321691619638089395e+0
     /// taken on x86-64 Linux; CI runs this test on aarch64 macOS and x86-64
     /// Windows too, where the platform's `atan2` differs from glibc's.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "an exhaustive arithmetic sweep with no unsafe; minutes under miri"
+    )]
     fn the_outputs_hash_to_the_pinned_digest() {
         /// The digest on x86-64 Linux, 2026-11-01.
         const PINNED: u64 = 0x4097_5875_d070_fe67;

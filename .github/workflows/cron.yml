@@ -159,6 +159,18 @@ jobs:
       # The test step keeps `deny`, which is also this job's only warning gate
       # now that v2 no longer defaults `RUSTFLAGS` to `-D warnings`.
       - run: CARGO_BUILD_WARNINGS=warn cargo miri setup
+      # The Wayland binding can't be interpreted, since `display` dlopens
+      # libwayland-client. But a generated `decode_event` and the
+      # `with_dispatcher_args` slice it reads are pure pointer work, and they are
+      # what dsplr's report was about: a decoder that read slot 1 through a
+      # reference to slot 0, out of provenance. These tests build the argument
+      # array by hand, so miri sees the reads that a native run cannot tell
+      # apart from correct ones. It runs first because it takes seconds, so a
+      # slow step after it cannot time it out.
+      - name: Interpret the Wayland argument decoders
+        run: >-
+          cargo miri test --lib -p crcbl-wayland-probe && cargo miri test --lib
+          -p crcbl-wayland -- ffi::
       # **`--tests`, and it is load-bearing rather than tidy.** Without it cargo
       # also *builds* every example of every crate named here, and
       # `crcbl-jobs`' `web_worker_gate` is a `cdylib` — which miri's target does
@@ -176,27 +188,20 @@ jobs:
         run: >-
           cargo miri test --tests -p crcbl-core -p crcbl-hal -p crcbl-ecs -p
           crcbl-store -p crcbl-ui -p crcbl-jobs
-      # The Wayland binding can't be interpreted, since `display` dlopens
-      # libwayland-client. But a generated `decode_event` and the
-      # `dispatcher_args` slice it reads are pure pointer work, and they are
-      # what dsplr's report was about: a decoder that read slot 1 through a
-      # reference to slot 0, out of provenance. These tests build the argument
-      # array by hand, so miri sees the reads that a native run cannot tell
-      # apart from correct ones.
-      - name: Interpret the Wayland argument decoders
-        run: >-
-          cargo miri test --lib -p crcbl-wayland-probe && cargo miri test --lib
-          -p crcbl-wayland -- ffi::
 
   # A scheduled run nobody is watching went red and stayed red twice before
   # anyone typed `gh workflow run cron.yml`, so a failure here opens an issue,
   # which is the notification a weekly job otherwise lacks. One issue at a
   # time: a later failure comments on the open one. Not for a run dispatched by
   # hand, whose author is already watching it.
+  #
+  # Cancelled counts as well: a job that runs past its `timeout-minutes` ends
+  # cancelled, not failed. That is how the miri job timed out every week after
+  # 2026-09-15 without an issue, until a hand dispatch on 2026-11-09 showed it.
   report:
     name: open an issue when a weekly check fails
     needs: [deny, miri]
-    if: failure() && github.event_name == 'schedule'
+    if: (failure() || cancelled()) && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

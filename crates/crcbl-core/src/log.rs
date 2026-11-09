@@ -1664,6 +1664,10 @@ mod tests {
     /// calendar repeats on — so a rule that is wrong for any day is wrong for
     /// one of these.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "an exhaustive arithmetic sweep with no unsafe; minutes under miri"
+    )]
     fn days_from_civil_round_trips_every_day_for_four_centuries() {
         let mut previous = civil_from_days(0);
         for day in 1..=146_097_i64 {
