@@ -97,6 +97,7 @@
 use std::io;
 use std::path::PathBuf;
 
+mod bytes;
 mod face;
 mod matching;
 #[cfg(any(windows, test))]
@@ -123,6 +124,7 @@ mod platform;
 #[path = "none.rs"]
 mod platform;
 
+pub use bytes::FaceBytes;
 use face::{Face, same_family};
 
 /// `font-weight: normal`.
@@ -205,7 +207,46 @@ impl FontMatch {
     /// The file cannot be read, or holds no such face: it changed since it
     /// was found, or [`FontMatch::index`] was edited.
     pub fn read(&self) -> io::Result<Vec<u8>> {
-        sfnt::standalone(std::fs::read(&self.path)?, self.index)
+        let file = std::fs::read(&self.path)?;
+        Ok(sfnt::collection_face(&file, self.index)?.unwrap_or(file))
+    }
+
+    /// [`FontMatch::read`]'s bytes, without copying a single font: **the
+    /// file mapped into memory**, so its pages are the page cache's — clean,
+    /// shared with every process that has the font open, and resident only
+    /// where something reads them — rather than this process's for as long
+    /// as the face lives.
+    ///
+    /// Which files are mapped:
+    ///
+    /// * **Unix:** one root owns and neither its group nor others may write,
+    ///   wherever it is — as the system's font directories hold, and not a
+    ///   user's own fonts.
+    /// * **Windows:** one in the Windows directory's `Fonts`, judged by the
+    ///   path the open file resolves to — not a per-user font, and not one on
+    ///   a share.
+    /// * **Every other target**, `wasm32` included: none.
+    ///
+    /// Any other file, and one the filesystem refuses to map, is read as
+    /// `read` reads it; [`FaceBytes::is_mapped`] says which. A face of a
+    /// collection is cut out of the mapped file into a copy of its own, as
+    /// `read` cuts it out of the file read.
+    ///
+    /// **A mapped file that is truncated in place while mapped** — `sudo cp`
+    /// over a system font, say — can kill the process with SIGBUS on the next
+    /// read of a page past its new end, as it can any program that maps
+    /// fonts through fontconfig or FreeType. A package manager's upgrade,
+    /// which unlinks or renames over the file, does not.
+    ///
+    /// # Errors
+    ///
+    /// As [`FontMatch::read`].
+    pub fn map(&self) -> io::Result<FaceBytes> {
+        let file = bytes::whole_file(&self.path)?;
+        Ok(match sfnt::collection_face(&file, self.index)? {
+            Some(face) => FaceBytes::from(face),
+            None => file,
+        })
     }
 
     /// The face's `cmap` alone, as a font file holding only that table: what
@@ -574,6 +615,27 @@ mod tests {
         let bytes = face.read().unwrap();
         let font = skrifa::FontRef::new(&bytes).expect("a standalone face");
         assert_eq!(face::describe(&font).unwrap().1, "Atkinson Hyperlegible");
+        // Mapped, a collection's face is the same copy.
+        let mapped = face.map().unwrap();
+        assert!(!mapped.is_mapped());
+        assert_eq!(*mapped, *bytes);
+        // A single font is the file, whichever way it comes.
+        let single = dir.join("single.ttf");
+        std::fs::write(&single, SANS).unwrap();
+        let single = FontMatch {
+            path: single,
+            index: 0,
+            ..face.clone()
+        };
+        assert_eq!(single.read().unwrap(), SANS);
+        assert_eq!(*single.map().unwrap(), *SANS);
+        let empty = dir.join("empty.ttf");
+        std::fs::write(&empty, b"").unwrap();
+        let empty = FontMatch {
+            path: empty,
+            ..single.clone()
+        };
+        assert_eq!(empty.map().unwrap_err().kind(), io::ErrorKind::InvalidData);
         assert!(
             FontMatch {
                 index: 2,
@@ -584,11 +646,17 @@ mod tests {
         );
         assert!(
             FontMatch {
-                path: dir.join("gone.ttf"),
-                ..face
+                index: 2,
+                ..face.clone()
             }
-            .read()
+            .map()
             .is_err()
         );
+        let gone = FontMatch {
+            path: dir.join("gone.ttf"),
+            ..face
+        };
+        assert!(gone.read().is_err());
+        assert!(gone.map().is_err());
     }
 }

@@ -6,9 +6,10 @@
 //! the few tables a face is matched by, seeking to each rather than reading
 //! the file: a CJK collection is tens of megabytes, and its name table a few
 //! kilobytes of that. [`face_cmap`] reads one face's `cmap` the same way,
-//! which is all that answers whether the face maps a char. [`standalone`] cuts one face out of a collection as a
-//! font file of its own, which is what a parser that reads one font per file
-//! — `crcbl-ui`'s `Font::parse` — takes.
+//! which is all that answers whether the face maps a char. [`collection_face`]
+//! cuts one face out of a collection as a font file of its own, which is what
+//! a parser that reads one font per file — `crcbl-ui`'s `Font::parse` —
+//! takes.
 //!
 //! Both write the tables they keep into a new file through [`build`], as the
 //! OpenType specification's "Organization of an OpenType Font" lays one out:
@@ -149,16 +150,16 @@ fn face_tables<R: Read + Seek>(
 }
 
 /// The face at `index` of the font file `data`, as a font file of its own: a
-/// collection's face rebuilt with every table it names, a single font
-/// returned as it is.
+/// collection's face rebuilt with every table it names, or `None` for a
+/// single font's face, which is `data` itself.
 ///
 /// # Errors
 ///
 /// [`io::ErrorKind::InvalidData`] when `data` is not a font file, has no face
 /// at `index` (a single font has only index 0), or names a table outside it.
-pub(crate) fn standalone(data: Vec<u8>, index: u32) -> io::Result<Vec<u8>> {
-    let font = match FileRef::new(&data).map_err(invalid)? {
-        FileRef::Font(_) if index == 0 => return Ok(data),
+pub(crate) fn collection_face(data: &[u8], index: u32) -> io::Result<Option<Vec<u8>>> {
+    let font = match FileRef::new(data).map_err(invalid)? {
+        FileRef::Font(_) if index == 0 => return Ok(None),
         FileRef::Font(_) => {
             return Err(invalid(format!(
                 "face {index} asked of a font file that is not a collection"
@@ -178,7 +179,7 @@ pub(crate) fn standalone(data: Vec<u8>, index: u32) -> io::Result<Vec<u8>> {
             Ok((tag.to_be_bytes(), record.checksum(), bytes.as_bytes()))
         })
         .collect::<io::Result<Vec<_>>>()?;
-    build(directory.sfnt_version(), tables)
+    build(directory.sfnt_version(), tables).map(Some)
 }
 
 /// A font file of `version` holding `tables`, each `(tag, checksum, bytes)`.
@@ -295,7 +296,7 @@ pub(crate) mod tests {
         include_bytes!("../../crcbl-ui/tests/fixtures/emoji/text.ttf");
 
     /// A collection of `fonts`, each face's tables copied after the header
-    /// and its directory pointing at them: the inverse of [`standalone`].
+    /// and its directory pointing at them: the inverse of [`collection_face`].
     pub(crate) fn collection(fonts: &[&[u8]]) -> Vec<u8> {
         let header_len = 12 + 4 * fonts.len();
         let mut out = Vec::new();
@@ -338,9 +339,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_single_font_is_its_own_standalone_face() {
-        assert_eq!(standalone(SANS.to_vec(), 0).unwrap(), SANS);
-        let error = standalone(SANS.to_vec(), 1).unwrap_err();
+    fn a_single_font_is_its_own_face() {
+        assert_eq!(collection_face(SANS, 0).unwrap(), None);
+        let error = collection_face(SANS, 1).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -348,12 +349,12 @@ pub(crate) mod tests {
     fn a_collection_face_comes_out_with_every_table_it_had() {
         let ttc = collection(&[SANS, EMOJI_TEXT]);
         for (index, original) in [SANS, EMOJI_TEXT].into_iter().enumerate() {
-            let face = standalone(ttc.clone(), index as u32).unwrap();
+            let face = collection_face(&ttc, index as u32).unwrap().unwrap();
             let face = FontRef::new(&face).expect("a standalone face parses alone");
             assert_eq!(tables(&face), tables(&FontRef::new(original).unwrap()));
         }
-        assert!(standalone(ttc, 2).is_err());
-        assert!(standalone(b"not a font".to_vec(), 0).is_err());
+        assert!(collection_face(&ttc, 2).is_err());
+        assert!(collection_face(b"not a font", 0).is_err());
     }
 
     #[test]

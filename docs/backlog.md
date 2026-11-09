@@ -56,27 +56,31 @@ Both gaps are fixed; these are the parts not done.
   `crates/crcbl-shell/src/win32/shell/tests/accessibility.rs` reading
   `SelectionItem` and `CurrentSelectionContainer` off a `ListBox`.
 
-## System fonts are read, not mapped (pikr, 2026-11-10)
+## A collection face is still copied, not parsed in place (2026-11-10)
 
-pikr's memory profile (massif plus `/proc/*/smaps`, crcbl 0.17.2) found its
-theme face to be about a quarter of its private dirty memory: 2.7 MB of Hack
-Nerd Font Mono against 11.8–13.8 MB in all. `crcbl_ui::Font::from_system` gets
-its bytes from `crcbl_font::FontMatch::read`, which is `std::fs::read` followed
-by `sfnt::standalone` (a copied face, for a collection), so every face, every
-lazily loaded fallback included, is a private allocation for the whole run.
-Mapped, it would be clean pages shared with the page cache, resident only where
-read. `crcbl-font` reads files on every platform; pikr's note that Windows and
-macOS already map their faces does not match this tree.
+`FontMatch::map` maps a single system font file, but a face of a collection is
+cut out of the mapping into a heap copy by `sfnt::collection_face`, because
+`crcbl_ui::Font::data()` is a standalone font file that every `FontRef::new` in
+`crcbl-ui` (atlas, colour, cmap, `glyph_id`) and outside callers parse. Measured
+2026-11-10: Noto Sans CJK SC (`NotoSansCJK-Regular.ttc` face 2) is a 16437340-
+byte copy, about 16.8 MB of private dirty whether read or mapped. Parsing in
+place needs `FontData` to carry a face index, `FontRef::from_index` at every
+site, `harfrust::Font::new(.., index)`, and a decision on what the public
+`Font::data()` returns (breaking, pre-1.0).
 
-- **Needs the owner's call: a dependency.** The standard answer is `memmap2`,
-  which the workspace does not have; the alternative is the platform calls by
-  hand (`mmap`, `MapViewOfFile`), which is the unsafe the ecosystem crate exists
-  to own.
-- **What a mapping has to answer:** a file replaced or truncated while mapped
-  raises `SIGBUS` on the next read (fontconfig-managed fonts change under a
-  package upgrade); a collection face would be parsed at an offset into the
-  mapping instead of copied out, so the parser must take a face index or a
-  slice; and `Font` would hold the mapping, not a `Vec<u8>`.
+- **Not mapped by design:** on Unix a file not root-owned or group/other-
+  writable (user fonts; Flatpak/Snap hosts' fonts appear owned by `nobody`); on
+  Windows anything outside `%WINDIR%\Fonts` (per-user fonts, shares); and
+  wasm32. `crcbl-image`'s SVG text (`svg/text/faces.rs`) still calls
+  `FontMatch::read`; it could call `map`.
+- **Accepted risk, documented in `bytes::map`'s SAFETY comment:** a mapped file
+  changed or truncated in place (`sudo cp` over a system font, NFS/FUSE, a
+  rootless container's "root", an I/O error paging it in) is UB, and a
+  truncation is SIGBUS: fontconfig's and FreeType's risk too.
+- **Coverage gap:** no sanitizer exercises the `unsafe` in `bytes::map` or
+  `windows::final_path` (Miri cannot run `mmap` or FFI); the Windows and macOS
+  mapping asserts run only on CI; `from_system_lazy`'s mapping is not observed
+  by a test, since its tests use the committed, user-owned font, which is read.
 - **Seen in the same profile, not acted on:** `accesskit_unix` starts its
   async-io and blocking threads at start-up with no screen reader running (three
   threads, about 0.09 MB). `ImageAtlas::new`'s zeroed 4 MiB page costs only what

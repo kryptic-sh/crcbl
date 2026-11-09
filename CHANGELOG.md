@@ -13,6 +13,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`crcbl_font::FontMatch::map` and `crcbl_font::FaceBytes`.** `map` gives the
+  face `FontMatch::read` gives, but memory-maps a single font file read-only
+  instead of copying it onto the heap when the file passes a per-platform rule.
+  On Unix, the file must be owned by root and not writable by its group or by
+  others, wherever it is. On Windows, the path the open file resolves to must be
+  in the Windows directory's `Fonts`, so per-user fonts and fonts on a share are
+  read. Other targets, `wasm32` included, never map. Any other file, and a
+  mapping the filesystem refuses, is read as before; `FaceBytes::is_mapped` says
+  which. A face of a collection is still copied out of the file. `crcbl-ui`
+  converts a `FaceBytes` into `FontData` without copying it. A mapped font file
+  truncated in place while mapped (`sudo cp` over a system font) can kill the
+  process with SIGBUS, the risk every fontconfig/FreeType program takes; a
+  package manager's upgrade, which unlinks or renames, cannot.
+
+### Changed
+
+- **`crcbl_ui::Font::from_system` and `Font::from_system_lazy` map a system face
+  instead of reading it** wherever `FontMatch::map`'s rules allow, so its bytes
+  are the page cache's clean, shared pages, resident only where read, rather
+  than private memory for as long as the font lives. Loading Hack Nerd Font Mono
+  and drawing ASCII grew a process's private dirty memory by 3288 kB read and by
+  472 kB mapped. Faces of a collection (`.ttc`, such as Noto Sans CJK) are
+  copied as before.
+
 ### Fixed
 
 - **Win32: a phrase committed by an input method arrives as one commit.** A

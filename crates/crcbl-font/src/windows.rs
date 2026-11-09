@@ -26,8 +26,8 @@
 //!
 //! # FFI
 //!
-//! `advapi32`'s registry functions and `kernel32`'s `GetWindowsDirectoryW`,
-//! declared here with `#[link]` as `crcbl-shell`'s `win32::ffi` declares its
+//! `advapi32`'s registry functions and `kernel32`'s `GetWindowsDirectoryW`
+//! and `GetFinalPathNameByHandleW`, declared here with `#[link]` as `crcbl-shell`'s `win32::ffi` declares its
 //! own: they are part of every Windows, so there is no absence for a runtime
 //! probe to find.
 
@@ -111,7 +111,12 @@ unsafe extern "system" {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetWindowsDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    fn GetFinalPathNameByHandleW(file: *mut c_void, path: *mut u16, len: u32, flags: u32) -> u32;
 }
+
+/// `FILE_NAME_NORMALIZED | VOLUME_NAME_DOS`: the `\\?\C:\…` form, which is
+/// what `std::fs::canonicalize` gives on Windows too.
+const FINAL_PATH_DOS: u32 = 0;
 
 const DEFAULTS: Defaults = Defaults {
     sans_serif: &["Segoe UI", "Arial"],
@@ -264,7 +269,7 @@ fn wide_nul(text: &str) -> Vec<u16> {
 
 /// The Windows directory's `Fonts`, where `HKEY_LOCAL_MACHINE`'s bare file
 /// names are.
-fn system_fonts_dir() -> Option<PathBuf> {
+pub(crate) fn system_fonts_dir() -> Option<PathBuf> {
     let mut buffer = [0u16; MAX_PATH];
     // SAFETY: `buffer` holds the `MAX_PATH` units the length says, and the
     // call writes no further; it returns the length written, or the length
@@ -272,6 +277,40 @@ fn system_fonts_dir() -> Option<PathBuf> {
     let len = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), MAX_PATH as u32) } as usize;
     (len > 0 && len < MAX_PATH)
         .then(|| PathBuf::from(String::from_utf16_lossy(&buffer[..len])).join("Fonts"))
+}
+
+/// The path the file `file` is open at, as the file system resolves it now
+/// (`GetFinalPathNameByHandleW`): asked of the open handle, so a link or a
+/// rename between opening the file and asking cannot change the answer.
+/// `None` when Windows cannot say.
+pub(crate) fn final_path(file: &std::fs::File) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+
+    let mut buffer = vec![0u16; MAX_PATH];
+    loop {
+        let capacity = u32::try_from(buffer.len()).ok()?;
+        // SAFETY: the handle is `file`'s, open for as long as `file` is
+        // borrowed; `buffer` holds the `capacity` units the call is told of,
+        // and it writes no further. It returns the length written without
+        // the NUL, the length needed with it when that is more, or 0 on
+        // failure.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                capacity,
+                FINAL_PATH_DOS,
+            )
+        } as usize;
+        match len {
+            0 => return None,
+            len if len < buffer.len() => {
+                return Some(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])));
+            }
+            needed => buffer.resize(needed, 0),
+        }
+    }
 }
 
 /// The per-user font directory, where `HKEY_CURRENT_USER`'s bare file names

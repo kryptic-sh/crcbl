@@ -30,6 +30,8 @@ fn reads_as(found: &crcbl_font::FontMatch, family: &str) {
     use skrifa::string::StringId;
 
     let bytes = found.read().expect("the face reads");
+    let mapped = found.map().expect("the face maps");
+    assert_eq!(*mapped, *bytes, "mapped and read, the face is one font");
     let font = skrifa::FontRef::new(&bytes).expect("the face parses on its own");
     let names: Vec<String> = [StringId::TYPOGRAPHIC_FAMILY_NAME, StringId::FAMILY_NAME]
         .into_iter()
@@ -82,6 +84,24 @@ mod windows {
             (700, FontStyle::Italic)
         );
         reads_as(&regular, "Arial");
+        // A single font of the Windows `Fonts` directory is mapped; the same
+        // file anywhere else — as a per-user font would be — is read, and a
+        // collection's face (below) is copied.
+        assert!(regular.map().unwrap().is_mapped());
+        let elsewhere = std::env::temp_dir().join(format!(
+            "crcbl-font-arial-elsewhere-{}.ttf",
+            std::process::id()
+        ));
+        std::fs::copy(&regular.path, &elsewhere).unwrap();
+        let copied = crcbl_font::FontMatch {
+            path: elsewhere.clone(),
+            ..regular.clone()
+        }
+        .map();
+        std::fs::remove_file(&elsewhere).unwrap();
+        let copied = copied.expect("the copy reads");
+        assert!(!copied.is_mapped());
+        assert_eq!(*copied, *regular.read().unwrap());
     }
 
     #[test]
@@ -106,6 +126,7 @@ mod windows {
         assert_eq!(file_name(&math), "cambria.ttc");
         assert_eq!(math.index, 1);
         reads_as(&math, "Cambria Math");
+        assert!(!math.map().unwrap().is_mapped());
     }
 
     #[test]
@@ -192,6 +213,22 @@ mod fontconfig {
             "{regular:?}"
         );
         reads_as(&regular, &family);
+        // A single font root alone may write is mapped, not read. Where the
+        // default face is not one, say so rather than pass in silence.
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(&regular.path).unwrap();
+        let single = regular.read().unwrap() == std::fs::read(&regular.path).unwrap();
+        if single && metadata.uid() == 0 && metadata.mode() & 0o022 == 0 {
+            assert!(regular.map().unwrap().is_mapped(), "{regular:?}");
+        } else {
+            eprintln!(
+                "skipped: {} is not a single font root alone may write \
+                 (single {single}, uid {}, mode {:o}), so its mapping is not checked",
+                regular.path.display(),
+                metadata.uid(),
+                metadata.mode()
+            );
+        }
         // Family names match without regard to case, as fontconfig's do.
         let bold = fonts
             .find(&FontQuery::new(family.to_lowercase()).weight(BOLD_WEIGHT))
@@ -261,6 +298,29 @@ mod macos {
         assert!(bold.weight >= 600, "{bold:?}");
         reads_as(&bold, "Helvetica");
         assert_eq!(fonts.find(&FontQuery::new("sans-serif")), Some(regular));
+    }
+
+    /// **A single font of `/System/Library/Fonts` is mapped**, not read: the
+    /// first of a few families macOS ships as single files, each checked
+    /// where it is one.
+    #[test]
+    fn a_single_system_font_is_mapped() {
+        let fonts = SystemFonts::new();
+        let singles: Vec<_> = ["Geneva", "Monaco", "Apple Symbols", "Symbol"]
+            .into_iter()
+            .filter_map(|family| fonts.find(&FontQuery::new(family)))
+            .filter(|found| {
+                found.path.starts_with("/System/Library/Fonts")
+                    && found.read().unwrap() == std::fs::read(&found.path).unwrap()
+            })
+            .collect();
+        assert!(
+            !singles.is_empty(),
+            "no single font of /System/Library/Fonts among the families tried"
+        );
+        for found in singles {
+            assert!(found.map().unwrap().is_mapped(), "{found:?}");
+        }
     }
 
     #[test]

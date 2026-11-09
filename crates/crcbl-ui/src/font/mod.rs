@@ -319,6 +319,9 @@ const LATIN1_END: u32 = 0x100;
 /// Bytes that are not on the heap — a font file mapped into memory — come in
 /// as an `Arc<dyn AsRef<[u8]> + Send + Sync>` over whatever holds them, and are
 /// read in place: the font and its shaper share that `Arc` and copy nothing.
+/// With the `system-fonts` feature, `crcbl_font::FaceBytes` — what
+/// `FontMatch::map` gives, mapped or read — converts with `From` the same way,
+/// which is how `Font::from_system` parses a system face in place.
 #[derive(Clone)]
 pub struct FontData(Bytes);
 

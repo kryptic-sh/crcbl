@@ -21,9 +21,11 @@ use core::fmt;
 use std::io;
 
 pub use crcbl_font;
-use crcbl_font::{FontMatch, FontQuery, SystemFonts};
+use std::sync::Arc;
 
-use super::{Font, FontError, ReservedFamilyName, is_reserved_family};
+use crcbl_font::{FaceBytes, FontMatch, FontQuery, SystemFonts};
+
+use super::{Bytes, Font, FontData, FontError, ReservedFamilyName, is_reserved_family};
 use crate::tree::Ui;
 
 /// Why [`Font::from_system`] or [`Ui::register_system_font`] gave no font.
@@ -63,21 +65,31 @@ impl std::error::Error for SystemFontError {
     }
 }
 
+/// A face `crcbl-font` mapped or read, parsed in place: the font and its
+/// shaper share it, and a mapping stays mapped for as long as either lives.
+impl From<FaceBytes> for FontData {
+    fn from(bytes: FaceBytes) -> Self {
+        Self(Bytes::Shared(Arc::new(bytes)))
+    }
+}
+
 impl Font {
-    /// The face `face` names, read from its file and parsed: a face of a
-    /// collection is cut out of it first, by [`FontMatch::read`].
+    /// The face `face` names, mapped from its file by [`FontMatch::map`] and
+    /// parsed in place: a single font of the system's own is the page
+    /// cache's pages, not a copy, and a face of a collection is cut out of
+    /// it first.
     ///
     /// # Errors
     ///
     /// [`SystemFontError::Read`] when the file cannot be read or holds no
     /// such face, [`SystemFontError::Parse`] when the face does not parse.
     pub fn from_system(face: &FontMatch) -> Result<Self, SystemFontError> {
-        let bytes = face.read().map_err(SystemFontError::Read)?;
+        let bytes = face.map().map_err(SystemFontError::Read)?;
         Self::parse(bytes).map_err(SystemFontError::Parse)
     }
 
-    /// The face `face` names, read and parsed the first time it is asked a
-    /// question rather than now: [`Font::lazy`] over [`FontMatch::read`].
+    /// The face `face` names, mapped and parsed the first time it is asked a
+    /// question rather than now: [`Font::lazy`] over [`FontMatch::map`].
     /// What a list of system fallback faces is for, which a launcher would
     /// otherwise read whole before its first frame; see [`Font::lazy`] for
     /// what a face that fails to read answers. Its warning names the file.
@@ -90,7 +102,11 @@ impl Font {
     pub fn from_system_lazy(face: FontMatch) -> Self {
         let what = format!("the font face {} (#{})", face.path.display(), face.index);
         let cmap = face.clone();
-        Self::lazy_with_cmap(what, move || face.read(), move || cmap.read_cmap())
+        Self::lazy_with_cmap(
+            what,
+            move || face.map(),
+            move || cmap.read_cmap().map(FaceBytes::from),
+        )
     }
 }
 
@@ -231,6 +247,80 @@ mod tests {
             ui.register_system_font("body", &fonts, &missing),
             Err(SystemFontError::NotFound(family)) if family == "No Such Family Zq7"
         ));
+    }
+
+    /// **A system face mapped by [`Font::from_system`] draws as the face
+    /// read whole**: the same bytes, metrics, glyphs, advances and masks.
+    /// On Linux a mapped face's bytes are shown to be the file's own pages,
+    /// by the process's memory map, and a single font of the system's font
+    /// directory is shown to be mapped rather than read.
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_mapped_system_face_draws_as_the_face_read_whole() {
+        use crate::font::atlas::GlyphAtlas;
+
+        /// What `font` rasterises `c` to at 32px, mask and placement.
+        fn mask(font: &Font, c: char) -> (Vec<u8>, i32, i32) {
+            let mut atlas = GlyphAtlas::new(256, 1, 100);
+            atlas.begin_frame();
+            let at = atlas.glyph(font, font.glyph_id(c), 32.0, 0).expect("room");
+            let rect = crate::image::TexelRect {
+                x: at.x,
+                y: at.y,
+                width: at.width,
+                height: at.height,
+            };
+            (atlas.region(at.page as usize, rect), at.left, at.top)
+        }
+
+        let found = SystemFonts::new()
+            .find(&FontQuery::new("sans-serif"))
+            .expect("the system has a sans-serif");
+        let mapped = Font::from_system(&found).expect("the face maps and parses");
+        let read = Font::parse(found.read().expect("the face reads")).expect("parses");
+        assert_eq!(mapped.data(), read.data());
+        assert_eq!(mapped.metrics(), read.metrics());
+        assert_eq!(mapped.glyph_count(), read.glyph_count());
+        let mut inked = 0;
+        for c in ['A', 'g', 'W', '&', '7'] {
+            let glyph = read.glyph_id(c);
+            assert_eq!(mapped.glyph_id(c), glyph, "{c:?}");
+            assert_eq!(mapped.advance(glyph), read.advance(glyph), "{c:?}");
+            let drawn = mask(&mapped, c);
+            assert_eq!(drawn, mask(&read, c), "{c:?}");
+            inked += usize::from(drawn.0.iter().any(|&texel| texel > 0));
+        }
+        assert!(inked > 0, "no glyph drew any ink, so no mask was compared");
+
+        #[cfg(target_os = "linux")]
+        {
+            let single = found.read().unwrap() == std::fs::read(&found.path).unwrap();
+            if single && found.path.starts_with("/usr/share/fonts") {
+                assert!(found.map().unwrap().is_mapped(), "{found:?}");
+            }
+            if !found.map().unwrap().is_mapped() {
+                eprintln!(
+                    "skipped: {} is read, not mapped, so the memory map is not checked",
+                    found.path.display()
+                );
+            } else {
+                let file = std::fs::canonicalize(&found.path).unwrap();
+                let at = mapped.data().as_ptr() as usize;
+                let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+                let of_file = maps.lines().any(|line| {
+                    let (range, path) = line.split_at(line.find('/').unwrap_or(line.len()));
+                    let (start, end) = range
+                        .split_whitespace()
+                        .next()
+                        .and_then(|range| range.split_once('-'))
+                        .unwrap();
+                    let start = usize::from_str_radix(start, 16).unwrap();
+                    let end = usize::from_str_radix(end, 16).unwrap();
+                    std::path::Path::new(path) == file && (start..end).contains(&at)
+                });
+                assert!(of_file, "{} is not mapped at {at:#x}", file.display());
+            }
+        }
     }
 
     /// The platforms whose CI image has a sans-serif this crate can read:
