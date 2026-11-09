@@ -13,6 +13,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-10
+
 ### Added
 
 - **glTF JPEG textures.** `crcbl_scene::gltf_render::decode_image` decodes a
@@ -22788,7 +22790,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.17.2...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/kryptic-sh/crcbl/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/kryptic-sh/crcbl/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/kryptic-sh/crcbl/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/kryptic-sh/crcbl/compare/v0.16.0...v0.17.0
