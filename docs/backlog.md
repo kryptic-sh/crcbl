@@ -56,6 +56,32 @@ Both confirmed by reading the code; neither fixed yet.
   every row of a list that has a selection, while a plain `Ui::list`'s rows stay
   unset; that needs the row to know which kind of list built it.
 
+## System fonts are read, not mapped (pikr, 2026-11-10)
+
+pikr's memory profile (massif plus `/proc/*/smaps`, crcbl 0.17.2) found its
+theme face to be about a quarter of its private dirty memory: 2.7 MB of Hack
+Nerd Font Mono against 11.8–13.8 MB in all. `crcbl_ui::Font::from_system` gets
+its bytes from `crcbl_font::FontMatch::read`, which is `std::fs::read` followed
+by `sfnt::standalone` (a copied face, for a collection), so every face, every
+lazily loaded fallback included, is a private allocation for the whole run.
+Mapped, it would be clean pages shared with the page cache, resident only where
+read. `crcbl-font` reads files on every platform; pikr's note that Windows and
+macOS already map their faces does not match this tree.
+
+- **Needs the owner's call: a dependency.** The standard answer is `memmap2`,
+  which the workspace does not have; the alternative is the platform calls by
+  hand (`mmap`, `MapViewOfFile`), which is the unsafe the ecosystem crate exists
+  to own.
+- **What a mapping has to answer:** a file replaced or truncated while mapped
+  raises `SIGBUS` on the next read (fontconfig-managed fonts change under a
+  package upgrade); a collection face would be parsed at an offset into the
+  mapping instead of copied out, so the parser must take a face index or a
+  slice; and `Font` would hold the mapping, not a `Vec<u8>`.
+- **Seen in the same profile, not acted on:** `accesskit_unix` starts its
+  async-io and blocking threads at start-up with no screen reader running (three
+  threads, about 0.09 MB). `ImageAtlas::new`'s zeroed 4 MiB page costs only what
+  is written (104 kB in a dmenu launch), so it needs nothing.
+
 ## The mesh-shader path hangs RDNA2 iGPUs (2026-10-30)
 
 Reported by EW (its raid, range and armor-dummy scenes on crcbl 0.13.0) and
