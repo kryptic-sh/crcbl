@@ -4177,3 +4177,28 @@ same thing on every backend, which is the whole point of the exhaustive
 change to how every recording method on that backend works, it wants a
 measurement first, and it is not what either of the two slices that hit the wall
 was about. **Needs the user's call**, or an explicit decision to measure.
+
+## A lone virtual keyboard can lose its first press (2026-11-10)
+
+Not a `crcbl-shell` bug; recorded so the next report of it is cheap. dsplr saw
+`wtype`'s first key go missing under headless sway 1.12, intermittently. When a
+`wtype` virtual keyboard is the seat's only keyboard, its arrival sends
+`wl_seat.capabilities` with the keyboard bit, the client answers with
+`get_keyboard`, and `wtype` presses about half a millisecond after creating the
+device without waiting for anyone. When sway handles the press first, it has no
+`wl_keyboard` to send it to; the client's `enter` then lists the key as already
+held, and only the release arrives as a `key` event. The Wayland backend ignores
+the keys `enter` lists on purpose (see `decode_keyboard` in
+`crates/crcbl-shell/src/wayland/mod.rs`), so the press never surfaces. When
+`wtype` exits, the seat loses the keyboard again, so every call races afresh,
+and the window's focus flips off and on with it.
+
+Measured over 28 `wtype` calls under the e2e harness's sway: with no other
+keyboard on the seat, 22 presses and 31 releases reached the shell, and each of
+the 9 lost presses matched an `enter` listing a held key. With a persistent
+virtual keyboard held on the seat, all 31 presses arrived, decoded with the
+right keysym, although sway swapped the keymap before each call's first key. A
+driver that keeps one keyboard on the seat for the session
+(`wtype -s 3600000 -m shift &`, as pikr's e2e does) avoids it. A real layout
+switch was not tested; sway's `xkb_switch_layout` moves the group through
+`modifiers`, not a keymap event.
