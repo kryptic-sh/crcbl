@@ -295,16 +295,20 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             let single = found.read().unwrap() == std::fs::read(&found.path).unwrap();
-            if single && found.path.starts_with("/usr/share/fonts") {
+            if single {
+                // A single face maps exactly when root alone may write its
+                // file. Not "every file under /usr/share/fonts": the GitHub
+                // Ubuntu image ships DejaVu Sans world-writable (mode 0777),
+                // and that one must be read.
                 use std::os::unix::fs::MetadataExt;
                 let metadata = std::fs::metadata(&found.path).unwrap();
-                let mount = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-                assert!(
+                let root_alone_writes = metadata.uid() == 0 && metadata.mode() & 0o022 == 0;
+                assert_eq!(
                     found.map().unwrap().is_mapped(),
-                    "{found:?} is read, not mapped: uid {} mode {:o} dev {:#x}; mounts:\n{mount}",
+                    root_alone_writes,
+                    "{found:?}: uid {} mode {:o}",
                     metadata.uid(),
                     metadata.mode(),
-                    metadata.dev(),
                 );
             }
             if !found.map().unwrap().is_mapped() {
