@@ -812,6 +812,7 @@ impl Win32Shell {
             | RawEvent::FilesDropped { .. }
             | RawEvent::MonitorsChanged
             | RawEvent::Preedit { .. }
+            | RawEvent::Commit { .. }
             | RawEvent::AppBar { .. }
             | RawEvent::DeviceRemoved { .. } => {}
             #[cfg(feature = "accesskit")]

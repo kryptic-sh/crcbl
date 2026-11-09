@@ -13,6 +13,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **Win32: a phrase committed by an input method arrives as one commit.** A
+  `WM_IME_COMPOSITION` result (`GCS_RESULTSTR`) is now one
+  `ShellEvent::TextCommit` carrying the whole string instead of one per
+  character, so a consumer that reacts to each commit (pikr re-ranks its search)
+  does that work once per phrase. Surrogate pairs, lone surrogates and control
+  characters are handled as before, and plain `WM_CHAR` typing still commits one
+  character at a time.
+
 ## [0.18.0] - 2026-11-10
 
 ### Added

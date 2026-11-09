@@ -35,17 +35,16 @@ sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
 
 ## Two gaps pikr reported against 0.17.2 (2026-11-10)
 
-Both confirmed by reading the code; neither fixed yet.
+Both confirmed by reading the code.
 
-- **A Win32 IME result arrives one UTF-16 unit at a time.** The
-  `WM_IME_COMPOSITION` arm in `crates/crcbl-shell/src/win32/proc.rs` pushes a
-  `RawEvent::Char` per unit of `input::composition_result`, as `WM_CHAR` would,
-  so a program gets one `TextCommit` per character of a committed phrase. pikr
-  re-ranks its search once per character. The fix is one commit carrying the
-  whole result string, which means a raw event that carries a string, with
-  surrogate pairs kept whole; `win32_e2e`'s Japanese-IME test is where to prove
-  it. Not done: checking whether Wayland's and X11's input-method paths already
-  commit whole strings (they receive one).
+- **An input method's commit on Wayland and X11: whole or per character?** Win32
+  now commits an IME result as one `TextCommit` (the `RawEvent::Commit` path in
+  `crates/crcbl-shell/src/win32/`). The Wayland and X11 input-method paths
+  receive the result as one string, but whether they deliver it as one commit
+  was not checked. The Win32 arm that turns a `RawEvent::Commit` into the event
+  (`Win32Shell::translate`) has no in-crate test; only the weekly Japanese-IME
+  e2e test (`an_input_method_composition_is_a_pre_edit_and_its_result_a_commit`)
+  runs it.
 - **Unselected rows of a `selectable_list` have no selected state.**
   `crcbl-ui`'s accessibility tree (`tree/accessibility.rs`) calls
   `set_selected(true)` on the checked `ListRow` only, so every other row has

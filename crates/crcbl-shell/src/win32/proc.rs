@@ -192,6 +192,30 @@ pub(super) struct Preedit {
     pub cursor: Option<usize>,
 }
 
+/// The result string one `WM_IME_COMPOSITION` committed.
+///
+/// Beside the queue for the reason [`Preedit`] is, and read in the procedure
+/// for the same one: the input context's result is gone by the next keystroke.
+/// [`RawEvent::Commit`] is the marker that claims it.
+#[derive(Clone, Debug)]
+pub(super) struct Commit {
+    /// Which window, so a marker claims its own payload.
+    pub hwnd: isize,
+    /// The committed string, as UTF-16 code units.
+    pub units: Vec<u16>,
+}
+
+/// Removes and returns the oldest payload in `queue` that `owned` accepts.
+///
+/// What the `take_*` methods on [`Shared`] have in common: each payload queue
+/// is matched by window, oldest first, for the reason
+/// [`take_drop`](Shared::take_drop) gives.
+fn take_oldest<T>(queue: &RefCell<VecDeque<T>>, owned: impl Fn(&T) -> bool) -> Option<T> {
+    let mut queue = queue.borrow_mut();
+    let index = queue.iter().position(owned)?;
+    queue.remove(index)
+}
+
 /// What the shell and its window procedure share.
 ///
 /// Owned by the shell as an `Rc`, and reached by the procedure as a raw pointer
@@ -216,6 +240,9 @@ pub(super) struct Shared {
     /// Composition payloads, oldest first, each claimed by the
     /// [`Preedit`](RawEvent::Preedit) marker that was pushed with it.
     preedits: RefCell<VecDeque<Preedit>>,
+    /// Committed results, oldest first, each claimed by the
+    /// [`Commit`](RawEvent::Commit) marker that was pushed with it.
+    commits: RefCell<VecDeque<Commit>>,
     /// Each window's text input area, in client pixels, as
     /// [`set_text_input_area`](crate::Shell::set_text_input_area) last said.
     /// Re-applied when a composition starts, because an input method is free
@@ -292,9 +319,7 @@ impl Shared {
     /// reached its marker — cannot hand the *next* window's paths to a marker
     /// that is not theirs.
     pub(super) fn take_drop(&self, hwnd: isize) -> Option<FileDrop> {
-        let mut drops = self.drops.borrow_mut();
-        let index = drops.iter().position(|drop| drop.hwnd == hwnd)?;
-        drops.remove(index)
+        take_oldest(&self.drops, |drop| drop.hwnd == hwnd)
     }
 
     /// Publishes the numbers the procedure answers `WM_GETMINMAXINFO` and
@@ -320,6 +345,9 @@ impl Shared {
         self.preedits
             .borrow_mut()
             .retain(|preedit| preedit.hwnd != hwnd);
+        self.commits
+            .borrow_mut()
+            .retain(|commit| commit.hwnd != hwnd);
         self.input_areas
             .borrow_mut()
             .retain(|&(known, _)| known != hwnd);
@@ -397,9 +425,18 @@ impl Shared {
     /// Takes the oldest composition recorded for `hwnd`, matched by window for
     /// the reason [`take_drop`](Self::take_drop) is.
     pub(super) fn take_preedit(&self, hwnd: isize) -> Option<Preedit> {
-        let mut preedits = self.preedits.borrow_mut();
-        let index = preedits.iter().position(|preedit| preedit.hwnd == hwnd)?;
-        preedits.remove(index)
+        take_oldest(&self.preedits, |preedit| preedit.hwnd == hwnd)
+    }
+
+    /// Records a committed result, for the marker pushed with it to claim.
+    fn push_commit(&self, commit: Commit) {
+        self.commits.borrow_mut().push_back(commit);
+    }
+
+    /// Takes the oldest result recorded for `hwnd`, matched by window for the
+    /// reason [`take_drop`](Self::take_drop) is.
+    pub(super) fn take_commit(&self, hwnd: isize) -> Option<Commit> {
+        take_oldest(&self.commits, |commit| commit.hwnd == hwnd)
     }
 
     /// Publishes a window's text input area, or clears it with `None`.
@@ -850,19 +887,21 @@ pub(super) unsafe extern "system" fn window_proc(
             0
         }
         msg::IME_COMPOSITION => {
-            // `lParam` names what changed. A result is the commit, recorded as
-            // the code units `WM_CHAR` would have carried, and before any new
-            // composition the same message carries: the committed part comes
-            // first in the text. Only a changed composition string is a
-            // pre-edit.
+            // `lParam` names what changed. A result is the commit, recorded
+            // whole: one `TextCommit` for the phrase, not one per character as
+            // the default handler's `WM_CHAR`s would give. It goes first,
+            // because one message can also carry the next composition, and
+            // the committed part comes first in the text. Only a changed
+            // composition string is a pre-edit.
             if keys::composition_committed(l_param) {
-                for unit in input::composition_result(hwnd) {
-                    shared.push(RawEvent::Char {
-                        hwnd: window,
-                        unit,
-                        millis,
-                    });
-                }
+                shared.push_commit(Commit {
+                    hwnd: window,
+                    units: input::composition_result(hwnd),
+                });
+                shared.push(RawEvent::Commit {
+                    hwnd: window,
+                    millis,
+                });
             }
             if keys::composition_changed(l_param) {
                 let (units, cursor) = input::composition(hwnd);
@@ -1700,6 +1739,26 @@ mod tests {
         assert_eq!(
             String::from_utf16_lossy(&shared.take_preedit(2).expect("untouched").units),
             "な"
+        );
+    }
+
+    #[test]
+    fn a_committed_result_is_claimed_whole_by_its_own_window_and_dies_with_it() {
+        let shared = Shared::default();
+        let commit = |hwnd, text: &str| Commit {
+            hwnd,
+            units: text.encode_utf16().collect(),
+        };
+        shared.push_commit(commit(1, "日本"));
+        shared.push_commit(commit(2, "かな"));
+        shared.push_commit(commit(1, "語"));
+        let first = shared.take_commit(1).expect("queued");
+        assert_eq!(String::from_utf16_lossy(&first.units), "日本");
+        shared.forget(1);
+        assert!(shared.take_commit(1).is_none(), "went with its window");
+        assert_eq!(
+            String::from_utf16_lossy(&shared.take_commit(2).expect("untouched").units),
+            "かな"
         );
     }
 

@@ -461,6 +461,23 @@ pub fn is_text(character: char) -> bool {
     !character.is_control()
 }
 
+/// An input method's committed result (`GCS_RESULTSTR`) as the text of **one**
+/// [`TextCommit`](crate::ShellEvent::TextCommit), empty if none of it is text.
+///
+/// Decoded and filtered exactly as the same units arriving one `WM_CHAR` at a
+/// time would be — through [`Utf16`] and [`is_text`] — so a surrogate pair stays
+/// one character and a lone half costs that one unit. What differs is only the
+/// grouping: a committed phrase is one commit, not one per character.
+#[must_use]
+pub fn result_text(units: &[u16]) -> String {
+    let mut decoder = Utf16::default();
+    units
+        .iter()
+        .filter_map(|&unit| decoder.push(unit))
+        .filter(|&character| is_text(character))
+        .collect()
+}
+
 /// A `WM_IME_SETCONTEXT`'s `lParam` with the input method's own composition
 /// window turned off, and its candidate windows left as they were.
 ///
@@ -967,5 +984,25 @@ mod tests {
         for text in ['a', ' ', 'é', '🎮', '日'] {
             assert!(is_text(text), "{text:?}");
         }
+    }
+
+    #[test]
+    fn an_input_method_result_is_one_string_decoded_as_its_characters_would_be() {
+        let units = |text: &str| text.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(result_text(&units("kana")), "kana");
+        assert_eq!(result_text(&units("日本語")), "日本語");
+        // An astral character is a pair of units, and stays one character.
+        assert_eq!(result_text(&units("か🎮な")), "か🎮な");
+        // A lone surrogate costs that one unit, as it would through `WM_CHAR`:
+        // a high half followed by a character, a lone low half, and a high
+        // half the string ends on.
+        assert_eq!(
+            result_text(&[0xD83C, 0x304B, 0xDFAE, 0x306A, 0xD83C]),
+            "かな"
+        );
+        // Controls are not text, here as anywhere.
+        assert_eq!(result_text(&units("か\rな")), "かな");
+        assert_eq!(result_text(&[]), "");
+        assert_eq!(result_text(&units("\r")), "");
     }
 }

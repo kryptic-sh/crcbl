@@ -27,7 +27,7 @@ use super::geometry;
 use super::icon;
 use super::input;
 use super::input::Contact;
-use super::keys::{Consumed, Utf16};
+use super::keys::{Consumed, Utf16, result_text};
 use super::panel::Panel;
 use super::pointer::{RawMotion, Visibility};
 use super::proc::{self, Shared};
@@ -1111,6 +1111,26 @@ impl Win32Shell {
                         cursor,
                     });
                 }
+                RawEvent::Commit { hwnd, millis } => {
+                    // Taken before anything can `continue`, for the reason the
+                    // drop payload is.
+                    let Some(commit) = self.shared.take_commit(hwnd) else {
+                        continue;
+                    };
+                    // A result interrupts the `WM_CHAR` stream: a high
+                    // surrogate left pending there is dropped, as it is before
+                    // any other unit, rather than joined to a low one arriving
+                    // after the result.
+                    self.text = Utf16::default();
+                    let Some(window) = window else { continue };
+                    let text = result_text(&commit.units);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let time = self.event_time(millis);
+                    self.queue
+                        .push_back(ShellEvent::TextCommit { window, time, text });
+                }
                 RawEvent::MonitorsChanged => {
                     let monitors = self.enumerate_monitors();
                     let removed =
@@ -1278,8 +1298,8 @@ impl Shell for Win32Shell {
     ///   composition on a real desktop.
     /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — `imm32`. An IME's committed
     ///   string is read from `WM_IME_COMPOSITION` (`GCS_RESULTSTR`) and
-    ///   delivered as a commit, and the composition in progress is read from
-    ///   the same message and reported as
+    ///   delivered as one commit, however many characters it holds; the
+    ///   composition in progress is read from the same message and reported as
     ///   [`TextPreedit`](ShellEvent::TextPreedit), and
     ///   [`set_text_input_area`](Shell::set_text_input_area) places the input
     ///   method's composition window and candidate list at the caret. The

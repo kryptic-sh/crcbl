@@ -314,6 +314,20 @@ pub enum RawEvent {
         /// `GetMessageTime` milliseconds.
         millis: u32,
     },
+    /// `WM_IME_COMPOSITION` with a result: the string the input method
+    /// committed, which is one [`TextCommit`](crate::ShellEvent::TextCommit)
+    /// however many characters it holds.
+    ///
+    /// **The string is not here** either, for the same reason as [`Preedit`]'s;
+    /// this is the marker that claims it.
+    ///
+    /// [`Preedit`]: Self::Preedit
+    Commit {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
     /// `WM_DISPLAYCHANGE` — a monitor was plugged, unplugged or reconfigured
     /// — or `WM_SETTINGCHANGE` for a work area that moved.
     MonitorsChanged,
@@ -357,6 +371,7 @@ impl RawEvent {
             | Self::RawMotion { hwnd, .. }
             | Self::RawKey { hwnd, .. }
             | Self::Preedit { hwnd, .. }
+            | Self::Commit { hwnd, .. }
             | Self::AppBar { hwnd, .. }
             | Self::FilesDropped { hwnd, .. } => Some(hwnd),
             #[cfg(all(target_os = "windows", feature = "accesskit"))]
@@ -496,6 +511,16 @@ mod tests {
             RawEvent::Preedit {
                 hwnd: A,
                 millis: 1_301,
+            },
+            // Two commits in one pump are two strings of text, each with its
+            // payload to claim.
+            RawEvent::Commit {
+                hwnd: A,
+                millis: 1_400,
+            },
+            RawEvent::Commit {
+                hwnd: A,
+                millis: 1_401,
             },
         ];
         for event in events {
@@ -781,6 +806,11 @@ mod tests {
             Some(B),
             "a drop's marker has to name its window, because that is what the \
              payload is matched by"
+        );
+        assert_eq!(
+            RawEvent::Commit { hwnd: B, millis: 0 }.hwnd(),
+            Some(B),
+            "and so does a commit's"
         );
         assert_eq!(
             RawEvent::AppBar {

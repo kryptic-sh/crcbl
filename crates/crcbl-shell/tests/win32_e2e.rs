@@ -103,6 +103,9 @@ mod scancode {
     /// `K`.
     #[cfg(feature = "win32-ime-e2e")]
     pub const K: u32 = 0x25;
+    /// `N`.
+    #[cfg(feature = "win32-ime-e2e")]
+    pub const N: u32 = 0x31;
     /// `Enter`.
     #[cfg(feature = "win32-ime-e2e")]
     pub const ENTER: u32 = 0x1C;
@@ -2194,10 +2197,11 @@ fn a_key_typed_by_another_process_carries_its_position_its_symbol_and_its_text()
 /// on a machine that could not have run it is the trap this suite exists to
 /// avoid.
 ///
-/// Typing `k` `a` in hiragana composes `か`. That is the pre-edit, with the
-/// input method's cursor after it (byte 3, since `か` is three bytes). Enter
-/// commits it: a `TextCommit` of `か` read from the composition's result, and an empty pre-edit
-/// when the composition ends.
+/// Typing `k` `a` `n` `a` in hiragana composes `かな`. That is the pre-edit,
+/// with the input method's cursor after it (byte 6, since each kana is three
+/// bytes). Enter commits it: **one** `TextCommit` of `かな` read from the
+/// composition's result, not one per character, and an empty pre-edit when the
+/// composition ends.
 #[cfg(feature = "win32-ime-e2e")]
 #[test]
 #[ignore = "needs the Japanese IME; see the win32-ime-e2e feature"]
@@ -2249,14 +2253,15 @@ fn an_input_method_composition_is_a_pre_edit_and_its_result_a_commit() {
     session.take_names();
 
     let mut sender = Sender::start();
-    sender.send(&format!("key {:#x}", scancode::K));
-    sender.send(&format!("key {:#x}", scancode::A));
+    for key in [scancode::K, scancode::A, scancode::N, scancode::A] {
+        sender.send(&format!("key {key:#x}"));
+    }
     sender.wait_for(&format!("sent \"key {:#x}\"", scancode::A));
     session.pump_until("the composition", |session| {
         session
             .events
             .iter()
-            .any(|event| matches!(event, ShellEvent::TextPreedit { text, .. } if text == "か"))
+            .any(|event| matches!(event, ShellEvent::TextPreedit { text, .. } if text == "かな"))
     });
     let preedit = session.events.iter().rev().find_map(|event| match event {
         ShellEvent::TextPreedit { text, cursor, .. } if !text.is_empty() => {
@@ -2266,7 +2271,7 @@ fn an_input_method_composition_is_a_pre_edit_and_its_result_a_commit() {
     });
     assert_eq!(
         preedit,
-        Some(("か".to_owned(), Some("か".len()))),
+        Some(("かな".to_owned(), Some("かな".len()))),
         "the composition and the cursor after it; the events were {:?}, the sender said {:?}",
         session.names(),
         sender.lines()
@@ -2295,7 +2300,7 @@ fn an_input_method_composition_is_a_pre_edit_and_its_result_a_commit() {
         );
         committed && ended
     });
-    let committed: String = session
+    let committed: Vec<&str> = session
         .events
         .iter()
         .filter_map(|event| match event {
@@ -2305,8 +2310,8 @@ fn an_input_method_composition_is_a_pre_edit_and_its_result_a_commit() {
         .collect();
     assert_eq!(
         committed,
-        "か",
-        "Enter commits the composition as text: {:?}",
+        ["かな"],
+        "Enter commits the composition as text, and the whole phrase as one commit: {:?}",
         session.names()
     );
     let ends = session
