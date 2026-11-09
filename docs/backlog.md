@@ -33,6 +33,29 @@ sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
   with default features errors on Linux and FreeBSD. CI documents with
   `--all-features` and does not see it. Older than this slice; not fixed.
 
+## Two gaps pikr reported against 0.17.2 (2026-11-10)
+
+Both confirmed by reading the code; neither fixed yet.
+
+- **A Win32 IME result arrives one UTF-16 unit at a time.** The
+  `WM_IME_COMPOSITION` arm in `crates/crcbl-shell/src/win32/proc.rs` pushes a
+  `RawEvent::Char` per unit of `input::composition_result`, as `WM_CHAR` would,
+  so a program gets one `TextCommit` per character of a committed phrase. pikr
+  re-ranks its search once per character. The fix is one commit carrying the
+  whole result string, which means a raw event that carries a string, with
+  surrogate pairs kept whole; `win32_e2e`'s Japanese-IME test is where to prove
+  it. Not done: checking whether Wayland's and X11's input-method paths already
+  commit whole strings (they receive one).
+- **Unselected rows of a `selectable_list` have no selected state.**
+  `crcbl-ui`'s accessibility tree (`tree/accessibility.rs`) calls
+  `set_selected(true)` on the checked `ListRow` only, so every other row has
+  `is_selected() == None`. `accesskit_windows` offers UIA's
+  `SelectionItemPattern` on a list item only when that is `Some`, so a client
+  cannot read or change an unselected row; ARIA's listbox says the same
+  (`aria-selected="false"` on the rest). The fix is `set_selected(false)` on
+  every row of a list that has a selection, while a plain `Ui::list`'s rows stay
+  unset; that needs the row to know which kind of list built it.
+
 ## The mesh-shader path hangs RDNA2 iGPUs (2026-10-30)
 
 Reported by EW (its raid, range and armor-dummy scenes on crcbl 0.13.0) and
