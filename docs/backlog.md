@@ -229,28 +229,6 @@ description) and 3 (anatomical profile) are built. Left from layer 1:
   awake ragdoll bodies at the p95 ticks, to tell more work per body from more
   bodies awake. Nobody has profiled 6632d416's cost directly.
 
-## Open at the end of the 2026-11-05 session
-
-- **The composed-path tests went to main unverified, on the owner's call.** They
-  are `crcbl-dcomp`'s `shared::tests`, the reverse-fence half of `crcbl-vk`'s
-  `a_shared_texture_cleared_by_vulkan_reads_back_in_d3d11`, and the `dx12 e2e`
-  step that runs the windowed one; the entry under _Vulkan on a transparent
-  Win32 window_ says what they cover. Verified locally: the two headless
-  `crcbl-dcomp` tests pass on WARP and the Vulkan test on the RX 7900 XTX, each
-  with a mutation turning it red; workspace clippy was clean. **Not verified:**
-  the workspace nextest, doctest and rustdoc passes (the run was stopped for low
-  memory), and
-  `a_shared_presenter_presents_a_renderer_s_frames_to_a_transparent_window`,
-  which has never run: it shows a window, so only CI runs it. Read main's
-  `dx12 e2e` job (or branch dispatch 41886481129) and fix what it finds.
-- **CI for main at `0770b9d5`** (run 41884016144) was still queued when the
-  session ended. The run before it, on `e8715bb7`, passed everything but three
-  macOS jobs that GitHub cancelled for runner capacity ("not acquired by Runner
-  … capacity constraints") on both attempts: `build + test (macos-latest)`,
-  `mtl hardware e2e (macos-26)` and `build x86_64-apple-darwin`. Its `mtl e2e`
-  jobs on macos-15 passed. Read 41884016144's macOS jobs before calling those
-  commits verified on Apple.
-
 ## Open at the end of the 2026-11-02 session
 
 - **Decisions still with the owner**, each recorded in its own entry: the ECS
@@ -631,13 +609,14 @@ build them first.
   went from 162.5–167.5 ms to 109.5–115.0 ms. `ForwardRenderer::prepare_content`
   (2026-11-01) builds them under a loading screen's `service` instead, and
   `apps/tide` calls it at start-up (`Stage::prepared`, with `Shell::keep_alive`
-  as `service`, 2026-11-10). `crcbl`'s screenshot scenes still set water or
-  grass without it and pay the build on their first frame. Tide's runtime switch
-  from a dry room onto the courtyard also still builds water on that frame;
-  preparing there would only move the compile before `begin_frame` on the same
-  frame. Tide's renderer build itself is not serviced:
-  `ForwardRenderer::with_scene_on_path` has no serviced form. `GrassScene::new`
-  (two 1×1 calm wind textures, no pipeline) stays in the build on purpose.
+  as `service`, 2026-11-10). `crcbl`'s screenshot scenes do not call it, on
+  purpose: each renders one frame, so preparing would only move the compile
+  ahead of `begin_frame` in that same frame. Tide's runtime switch from a dry
+  room onto the courtyard also still builds water on that frame; preparing there
+  would only move the compile before `begin_frame` on the same frame. Tide's
+  renderer build itself is not serviced: `ForwardRenderer::with_scene_on_path`
+  has no serviced form. `GrassScene::new` (two 1×1 calm wind textures, no
+  pipeline) stays in the build on purpose.
 - Tide's `Gpu::from_context` drops its `GpuContext` without
   `GpuContext::destroy` when the renderer, the stage (now including
   `prepare_content`) or the UI renderer fails, so the swapchain and surface skip
