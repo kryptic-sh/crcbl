@@ -70,6 +70,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and is checked against the span's text, font, fallback faces, size and line
   height before it is reused. A wrapping text now holds a layout at each width
   it keeps a measurement at.
+- **`crcbl_ui::tree` keeps a `text-overflow: ellipsis` span's cut at each of a
+  few widths per text**, so spans of the same text and style in boxes of
+  different widths no longer evict each other's cut and re-cut, shaping their
+  prefixes again, every frame of a kept `Ui`. A text holds at most a fixed
+  number of cuts, the oldest dropped first.
 
 ### Fixed
 

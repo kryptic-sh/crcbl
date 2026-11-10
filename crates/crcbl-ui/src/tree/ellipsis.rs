@@ -152,8 +152,9 @@ impl Ui {
     }
 }
 
-/// A span's text as [`Ui::cut_text`] last cut it, kept beside the layout of
-/// that text in the measure cache: what the cut showed, at what width.
+/// A span's text as [`Ui::cut_text`] cut it at one width, kept beside the
+/// layout of that text in the measure cache: what the cut showed, at what
+/// width.
 #[derive(Clone, Debug)]
 pub(crate) struct KeptCut {
     /// The bits of the content-box width it was cut at.

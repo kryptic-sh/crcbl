@@ -789,3 +789,126 @@ fn a_cut_lands_where_a_binary_search_does() {
         .sum();
     assert!(cuts > 1000, "only {cuts} cuts were compared");
 }
+
+/// One frame of a column of `width`-pixel boxes, each holding one span
+/// `selector` of `text`; returns the spans' keys and what the frame emitted.
+fn cards(ui: &mut Ui, widths: &[f32], selector: &str, text: &str) -> (Vec<NodeKey>, DrawList) {
+    let mut keys = Vec::new();
+    frame(ui, idle(), |ui| {
+        ui.block(".card", &[], |ui| {
+            for &width in widths {
+                ui.block(
+                    ".card",
+                    &[Declaration::Width(LengthAuto::Px(width))],
+                    |ui| keys.push(ui.span(selector, text, &[]).key),
+                );
+            }
+        });
+    });
+    let mut list = DrawList::new();
+    ui.emit(&mut list);
+    (keys, list)
+}
+
+/// **Spans of one text cut at different widths each keep their cut**: a
+/// second frame of the same tree shapes nothing, and draws what a fresh tree
+/// draws.
+#[test]
+fn same_text_cut_at_two_widths_keeps_both_cuts() {
+    use crate::font::shape::shaped_runs;
+    const WIDTHS: [f32; 2] = [60.0, 137.0];
+    // A parse of its own, so no other test's shaping is counted.
+    let font = Font::parse(crate::font::SANS_TTF).expect("parses");
+    let counted = || {
+        let mut ui = tree();
+        ui.add_stylesheet("counted.css", ".counted { font-family: counted; }");
+        ui.register_font("counted", font.clone())
+            .expect("not reserved");
+        ui
+    };
+    let mut ui = counted();
+    let (keys, _) = cards(&mut ui, &WIDTHS, ".line.counted", ACTION);
+    for key in &keys {
+        let shown = ui.text(*key).expect("a text span");
+        assert_ne!(
+            shown,
+            ACTION,
+            "at {}px it was not cut",
+            content_width(&ui, *key)
+        );
+    }
+    assert_ne!(
+        ui.text(keys[0]),
+        ui.text(keys[1]),
+        "both widths cut to the same text"
+    );
+    let before = shaped_runs(&font);
+    let (_, steady) = cards(&mut ui, &WIDTHS, ".line.counted", ACTION);
+    let shaped = shaped_runs(&font) - before;
+    assert_eq!(shaped, 0, "an unchanged frame shaped {shaped} runs again");
+    let (_, fresh) = cards(&mut counted(), &WIDTHS, ".line.counted", ACTION);
+    assert_eq!(
+        format!("{:?}", steady.commands()),
+        format!("{:?}", fresh.commands()),
+        "the kept cuts drew differently from a fresh tree"
+    );
+}
+
+/// **A text's cuts are held at no more than [`super::layout::CUTS_KEPT`]
+/// widths**: spans of it at more widths than that keep only the latest cuts,
+/// and still draw what a fresh tree draws.
+#[test]
+fn a_texts_cuts_are_bounded() {
+    use super::layout::CUTS_KEPT;
+    let widths: Vec<f32> = (0..2 * CUTS_KEPT)
+        .map(|at| 60.0 + 7.0 * at as f32)
+        .collect();
+    let mut ui = tree();
+    let (keys, _) = cards(&mut ui, &widths, ".line.sans", ACTION);
+    let hash = ui
+        .nodes
+        .iter()
+        .find(|node| node.key == keys[0])
+        .expect("built")
+        .content_hash;
+    assert_eq!(
+        ui.measure.cuts(hash),
+        CUTS_KEPT,
+        "the cuts were not bounded"
+    );
+    let (_, again) = cards(&mut ui, &widths, ".line.sans", ACTION);
+    assert_eq!(ui.measure.cuts(hash), CUTS_KEPT, "the cuts grew");
+    let (_, fresh) = cards(&mut tree(), &widths, ".line.sans", ACTION);
+    assert_eq!(
+        format!("{:?}", again.commands()),
+        format!("{:?}", fresh.commands()),
+        "evicted cuts drew differently from a fresh tree"
+    );
+}
+
+/// **Past [`super::layout::CUTS_KEPT`] widths, the cut kept first is the one
+/// dropped**: after a frame cuts one text at more widths than that, a frame at
+/// only the latest of them shapes nothing.
+#[test]
+fn a_texts_oldest_cut_is_dropped_first() {
+    use super::layout::CUTS_KEPT;
+    use crate::font::shape::shaped_runs;
+    let widths: Vec<f32> = (0..2 * CUTS_KEPT)
+        .map(|at| 60.0 + 7.0 * at as f32)
+        .collect();
+    // A parse of its own, so no other test's shaping is counted.
+    let font = Font::parse(crate::font::SANS_TTF).expect("parses");
+    let mut ui = tree();
+    ui.add_stylesheet("counted.css", ".counted { font-family: counted; }");
+    ui.register_font("counted", font.clone())
+        .expect("not reserved");
+    cards(&mut ui, &widths, ".line.counted", ACTION);
+    let latest = &widths[widths.len() - CUTS_KEPT..];
+    let before = shaped_runs(&font);
+    cards(&mut ui, latest, ".line.counted", ACTION);
+    let shaped = shaped_runs(&font) - before;
+    assert_eq!(
+        shaped, 0,
+        "the latest cuts were not the ones kept: {shaped} runs shaped again"
+    );
+}

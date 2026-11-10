@@ -74,7 +74,8 @@ pub(super) const SWEEP_EVERY: u64 = 64;
 /// Room for one churning label's whole window and the layouts between sweeps,
 /// so a single one never reaches it. Each text holds a few sizes, at most
 /// [`WIDTHS_KEPT`] definite widths and a wrapped layout at each, and at most
-/// one `nowrap` layout and its cut, so this bounds the cache's memory.
+/// one `nowrap` layout and [`CUTS_KEPT`] cuts of it, so this bounds the
+/// cache's memory.
 pub(super) const TEXTS_KEPT: usize = 2048;
 
 /// How many texts a layout that finds more than [`TEXTS_KEPT`] keeps: the
@@ -89,6 +90,14 @@ pub(super) const TEXTS_AFTER_EVICTION: usize = TEXTS_KEPT / 4 * 3;
 /// box dragged through every width does not grow its text's entry without
 /// bound.
 pub(super) const WIDTHS_KEPT: usize = 8;
+
+/// The most cuts one `nowrap` text is held at, each at its own width; a new
+/// one past it drops the one kept first. A layout cuts a text at as many
+/// widths as it has ellipsis spans of that text in boxes of different widths,
+/// so this holds a few such spans' cuts at once, each found again next frame,
+/// while a box dragged through every width does not grow its text's entry
+/// without bound.
+pub(super) const CUTS_KEPT: usize = 4;
 
 const _: () = assert!(TEXTS_KEPT as u64 > RETENTION_CYCLES + SWEEP_EVERY);
 
@@ -119,8 +128,9 @@ const _: () = assert!(TEXTS_KEPT as u64 > RETENTION_CYCLES + SWEEP_EVERY);
 /// **A `nowrap` span's layout is kept with its size**, so cutting it to fit
 /// ([`super::ellipsis`]) and drawing it shape nothing again: one layout per
 /// `nowrap` span's text in a parsed font, held as long as its sizes are. **So is
-/// the cut** an ellipsis span's text was last cut to fit with, and the width it
-/// was cut at, so a steady frame cuts none of its spans again. **A wrapped
+/// each cut** an ellipsis span's text was cut to fit with, and the width it
+/// was cut at, up to [`CUTS_KEPT`] widths, so a steady frame cuts none of its
+/// spans again, even spans of one text in boxes of different widths. **A wrapped
 /// span's layout is kept at each definite width it is held at**, so drawing
 /// it at a width it was measured or drawn at shapes nothing again.
 #[derive(Clone, Debug, Default)]
@@ -170,7 +180,7 @@ impl MeasureCache {
                         return Measured {
                             size: size_of(&layout),
                             layout: Some(Arc::new(layout)),
-                            cut: None,
+                            cuts: Vec::new(),
                         };
                     }
                     (WhiteSpace::Normal, AvailableSpace::Definite(width)) => {
@@ -227,15 +237,18 @@ impl MeasureCache {
         width: f32,
     ) -> Option<&KeptCut> {
         self.nowrap(content_hash, font, text, size, line_height)?
-            .cut
-            .as_ref()
-            .filter(|cut| cut.width == width.to_bits())
+            .cuts
+            .iter()
+            .find(|cut| cut.width == width.to_bits())
     }
 
     /// Keeps `cut` beside the layout of the `nowrap` span of content
-    /// `content_hash`, in place of any cut kept before. Does nothing when no
-    /// layout is held for it, so a cut is never kept that
-    /// [`MeasureCache::kept_cut`] could not check.
+    /// `content_hash`, a cut at a width [`MeasureCache::kept_cut`] found none
+    /// at; past [`CUTS_KEPT`], in place of the one kept first. Does nothing
+    /// when no layout is held for it, so a cut is never kept that
+    /// [`MeasureCache::kept_cut`] could not check. Checks only that a layout
+    /// is held, not that it is this cut's text's: the caller has already found
+    /// it with [`MeasureCache::nowrap_layout`].
     pub fn keep_cut(&mut self, content_hash: u64, cut: KeptCut) {
         let key = MeasureKey {
             text: content_hash,
@@ -244,7 +257,10 @@ impl MeasureCache {
         if let Some(entry) = self.held_mut(key)
             && entry.layout.is_some()
         {
-            entry.cut = Some(cut);
+            if entry.cuts.len() >= CUTS_KEPT {
+                entry.cuts.remove(0);
+            }
+            entry.cuts.push(cut);
         }
     }
 
@@ -281,7 +297,7 @@ impl MeasureCache {
             self.entry(key, || Measured {
                 size: size_of(&layout),
                 layout: Some(Arc::clone(&layout)),
-                cut: None,
+                cuts: Vec::new(),
             });
         }
         layout
@@ -440,6 +456,15 @@ impl MeasureCache {
         self.texts.contains_key(&content_hash)
     }
 
+    /// How many cuts are kept for the `nowrap` text of content `content_hash`.
+    #[cfg(all(test, feature = "parsed-font"))]
+    pub fn cuts(&self, content_hash: u64) -> usize {
+        self.texts
+            .get(&content_hash)
+            .and_then(|held| held.any.as_ref())
+            .map_or(0, |measured| measured.cuts.len())
+    }
+
     /// How many measurements are held, under every width of every text.
     #[cfg(all(test, feature = "parsed-font"))]
     pub fn measurements(&self) -> usize {
@@ -474,9 +499,10 @@ struct Measured {
     /// at a definite width for a wrapped one. `None` for every other
     /// measurement.
     layout: Option<Arc<TextLayout>>,
-    /// What `layout`'s text was last cut to under `text-overflow: ellipsis`;
-    /// `None` until it is cut, and for every measurement without a layout.
-    cut: Option<KeptCut>,
+    /// What `layout`'s text was cut to under `text-overflow: ellipsis` at
+    /// each width it is kept at, in the order they were kept; empty until it
+    /// is cut, and for every measurement without a layout.
+    cuts: Vec<KeptCut>,
 }
 
 impl Measured {
@@ -485,7 +511,7 @@ impl Measured {
         Self {
             size,
             layout: None,
-            cut: None,
+            cuts: Vec::new(),
         }
     }
 
@@ -495,7 +521,7 @@ impl Measured {
         Self {
             size: size_of(&layout),
             layout: Some(Arc::new(layout)),
-            cut: None,
+            cuts: Vec::new(),
         }
     }
 }

@@ -365,13 +365,6 @@ about 7.5 ms CPU a frame, 6.1 ms of it label text, ~71% of that compiling
 harfrust shape plans. Plans are now cached per face (`font::shape::Shaper`) and
 an ellipsis span draws the layout its cut measured. Left:
 
-- **Two `nowrap` ellipsis spans of the same text at different widths re-cut
-  every frame.** A cut is kept (`KeptCut`, beside the `nowrap` layout in the
-  measure cache's width-independent entry, found by `MeasureCache::kept_cut`)
-  with the exact bits of the width it was cut at, so a steady frame of a kept
-  `Ui` cuts nothing again — but there is one slot per text, and the same text
-  cut at two widths in one layout evicts the other's cut each time. Holding a
-  few cuts per text, as `WIDTHS_KEPT` does for wrapped widths, would cover it.
 - Drawing a kept layout copies it once a frame only where aligning moves it:
   centred, right- or end-aligned text, or right-to-left start-aligned text
   narrower than its box; `emit_node` borrows it when `TextLayout::is_aligned`
