@@ -198,7 +198,9 @@ impl PendingGpu {
     /// device it produced.
     pub fn poll(&mut self) -> Result<Option<Gpu>, GpuError> {
         match self.pending.poll()? {
-            Some(ctx) => Gpu::from_context(ctx, self.forced).map(Some),
+            // No `service`: a browser's shell has nothing to keep alive, and
+            // the page's own loop runs again once this poll returns.
+            Some(ctx) => Gpu::from_context(ctx, self.forced, &mut || {}).map(Some),
             None => Ok(None),
         }
     }
@@ -210,13 +212,19 @@ impl Gpu {
     /// `extent` must come from the window system — call this only after the first
     /// configure.
     ///
+    /// **`shell` is kept alive while the water builds.** A run that opens on
+    /// water compiles its passes here rather than on the first frame, so
+    /// [`Shell::keep_alive`] is called before each round of compiles — see
+    /// [`Stage::prepared`]. Whatever the window saw meanwhile is the first
+    /// frame's to handle.
+    ///
     /// # Errors
     ///
     /// [`GpuError`] if no backend opened, if the backend exposes no adapter, no
     /// graphics queue or no surface format, if the gallery's description does not
     /// fit what it reserves, or if any HAL call fails.
     pub fn open<S: Shell + ?Sized>(
-        shell: &S,
+        shell: &mut S,
         window: WindowId,
         extent: (u32, u32),
         gpu: GpuOptions,
@@ -225,6 +233,7 @@ impl Gpu {
         Self::from_context(
             GpuContext::open(shell, window, extent, &desc(gpu, forced))?,
             forced,
+            &mut || shell.keep_alive(),
         )
     }
 
@@ -251,11 +260,18 @@ impl Gpu {
     /// Builds the renderer, stages the knobs' scene and the two UI passes on an
     /// already-open context.
     ///
+    /// `service` is called before each round of the water passes' compiles —
+    /// see [`Gpu::open`], which is the caller with a window to keep alive.
+    ///
     /// # Errors
     ///
     /// [`GpuError`] if the description does not fit what it reserves, or if any
     /// HAL call fails.
-    fn from_context(ctx: GpuContext, forced: ForcedPaths) -> Result<Self, GpuError> {
+    fn from_context(
+        ctx: GpuContext,
+        forced: ForcedPaths,
+        service: &mut dyn FnMut(),
+    ) -> Result<Self, GpuError> {
         let caps = ctx.device().caps();
         let report = downgrades(forced.optional_features(), &caps);
         if report.is_empty() {
@@ -272,7 +288,13 @@ impl Gpu {
                 .unwrap_or_else(|| ctx.device().preferred_geometry_path()),
         )?;
         let knobs = crate::knobs::read();
-        let stage = match Stage::new(&mut renderer, knobs.scene, knobs.medium) {
+        let stage = match Stage::prepared(
+            ctx.device(),
+            &mut renderer,
+            knobs.scene,
+            knobs.medium,
+            service,
+        ) {
             Ok(stage) => stage,
             Err(error) => {
                 renderer.destroy(ctx.device());

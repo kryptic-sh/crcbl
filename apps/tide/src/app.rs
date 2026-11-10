@@ -252,7 +252,7 @@ pub fn with_shell<S: Shell + ?Sized>(
     // Before the GPU opens, because the GPU stages the scene the cell names.
     options.apply();
     let gpu = Gpu::open(
-        shell.as_ref(),
+        shell.as_mut(),
         window,
         extent,
         options.common.gpu(),

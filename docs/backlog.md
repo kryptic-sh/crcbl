@@ -590,11 +590,21 @@ build them first.
   2026-11-01 (same GPU, cold with `MESA_SHADER_CACHE_DISABLE`, quiet window,
   load 3.2–3.3, five interleaved pairs): a first frame with a pond and a lawn
   went from 162.5–167.5 ms to 109.5–115.0 ms. `ForwardRenderer::prepare_content`
-  (2026-11-01) builds them under a loading screen's `service` instead, but
-  nothing in the tree calls it yet: `apps/tide` and `crcbl`'s screenshot scenes
-  set water or grass and still pay the build on their first frame.
-  `GrassScene::new` (two 1×1 calm wind textures, no pipeline) stays in the build
-  on purpose.
+  (2026-11-01) builds them under a loading screen's `service` instead, and
+  `apps/tide` calls it at start-up (`Stage::prepared`, with `Shell::keep_alive`
+  as `service`, 2026-11-10). `crcbl`'s screenshot scenes still set water or
+  grass without it and pay the build on their first frame. Tide's runtime switch
+  from a dry room onto the courtyard also still builds water on that frame;
+  preparing there would only move the compile before `begin_frame` on the same
+  frame. Tide's renderer build itself is not serviced:
+  `ForwardRenderer::with_scene_on_path` has no serviced form. `GrassScene::new`
+  (two 1×1 calm wind textures, no pipeline) stays in the build on purpose.
+- Tide's `Gpu::from_context` drops its `GpuContext` without
+  `GpuContext::destroy` when the renderer, the stage (now including
+  `prepare_content`) or the UI renderer fails, so the swapchain and surface skip
+  their ordered teardown; viewer's `from_context` calls `ctx.destroy()` there.
+  The process is exiting with an error at that point, so the cost is small.
+  Found in review 2026-11-10, not fixed.
 
 ### A failed lazy build still ends the game in the engine loop
 

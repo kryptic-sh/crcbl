@@ -52,6 +52,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   prefilter table** instead of each view uploading its own identical
   `"sky prefilter table"`, so `ForwardRenderer::create_view` creates one image
   and records one upload fewer.
+- **`apps/tide` builds its water passes while it starts up** rather than on its
+  first frame: `Gpu::from_context` stages the opening scene through the new
+  `Stage::prepared`, which calls `ForwardRenderer::prepare_content` with
+  `Shell::keep_alive` as its `service`. `tide`'s `Gpu::open` now takes `&mut S`.
+  A switch onto water at run time still builds it on that frame.
 
 ### Fixed
 

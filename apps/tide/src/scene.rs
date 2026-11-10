@@ -467,6 +467,32 @@ impl Stage {
         Ok(stage)
     }
 
+    /// [`Stage::new`], then builds the water passes the first frame would,
+    /// calling `service` before each round of their compiles — start-up's
+    /// form, so the first frame of a run that opens on water does not pay for
+    /// them. See [`ForwardRenderer::prepare_content`].
+    ///
+    /// **Start-up only.** A later [`Stage::show`] onto water from a dry room
+    /// leaves the build to the next frame: preparing there would pay the
+    /// same compiles on the same frame, before its `begin_frame` rather than
+    /// inside it.
+    ///
+    /// # Errors
+    ///
+    /// [`Stage::new`]'s, and [`HalError`] from the device building the passes.
+    /// The renderer is left as placed either way; the caller releases it.
+    pub fn prepared(
+        device: &dyn Device,
+        renderer: &mut ForwardRenderer,
+        scene: Scene,
+        medium: Preset,
+        service: &mut dyn FnMut(),
+    ) -> Result<Self, HalError> {
+        let stage = Self::new(renderer, scene, medium)?;
+        renderer.prepare_content(device, service)?;
+        Ok(stage)
+    }
+
     /// Which scene is placed.
     #[must_use]
     pub const fn scene(&self) -> Scene {
@@ -725,6 +751,73 @@ mod tests {
                 assert!(mesh < desc.meshes.len() && material < desc.materials.len());
             }
         }
+    }
+
+    /// **A run that opens on the courtyard builds its water before the first
+    /// frame**, with `service` called before each round of compiles, and one
+    /// that opens on a room builds none — counted on the null backend, where no
+    /// frame is ever drawn.
+    #[test]
+    fn start_up_builds_the_water_passes_before_the_first_frame() {
+        use crcbl::hal::null::{Event, NullInstance, ObjectKind, Recorder};
+        use crcbl::hal::{DeviceDesc, Instance, QueueKind};
+
+        /// Every pipeline the water passes create: the copy and the surface.
+        const WATER: [&str; 2] = ["water copy", "water"];
+        let water = |recorder: &Recorder| {
+            WATER.map(|label| {
+                recorder
+                    .events()
+                    .into_iter()
+                    .filter(|event| {
+                        matches!(
+                            event,
+                            Event::Created {
+                                kind: ObjectKind::GraphicsPipeline | ObjectKind::ComputePipeline,
+                                label: Some(created),
+                            } if created == label
+                        )
+                    })
+                    .count()
+            })
+        };
+
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(adapter.id))
+            .expect("null device");
+        let device = device.as_ref();
+        let queue = device.queue(QueueKind::Graphics).expect("graphics queue");
+
+        for (scene, built) in [
+            (Scene::Courtyard, [1; 2]),
+            (Scene::Courtyard.next(), [0; 2]),
+        ] {
+            assert_eq!(scene.bodies(Preset::default()).is_empty(), built == [0; 2]);
+            let mut renderer = renderer(
+                device,
+                queue,
+                Format::Rgba8UnormSrgb,
+                GeometryPath::IndirectPerBatch,
+            )
+            .expect("tide's renderer on the null backend");
+            recorder.clear();
+            let mut services = 0;
+            Stage::prepared(device, &mut renderer, scene, Preset::default(), &mut || {
+                services += 1;
+            })
+            .expect("the null backend accepts every descriptor");
+            assert_eq!(water(&recorder), built, "{scene:?}");
+            assert_eq!(
+                services > 0,
+                built != [0; 2],
+                "{scene:?}: `service` ran {services} times"
+            );
+            renderer.destroy(device);
+        }
+        assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
     }
 
     /// **The orbit is a pure function of its tick** and comes back round.
