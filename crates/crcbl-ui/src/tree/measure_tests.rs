@@ -206,3 +206,167 @@ fn a_text_holds_a_bounded_number_of_widths() {
     build(&mut ui, 100.0 + (4 * WIDTHS_KEPT - 1) as f32);
     assert_eq!(ui.measure.misses, misses, "the last width was not held");
 }
+
+/// A [`Ui`] whose `.counted` spans are drawn in `font`.
+#[cfg(feature = "parsed-font")]
+fn counted(font: &crate::font::Font) -> Ui {
+    let mut ui = Ui::new();
+    ui.add_stylesheet("counted.css", ".counted { font-family: counted; }");
+    ui.register_font("counted", font.clone())
+        .expect("not reserved");
+    ui
+}
+
+/// One frame of a `width`-pixel column holding one wrapped `.counted` span of
+/// `text`, `align`ed, laid out and drawn; returns what it drew.
+#[cfg(feature = "parsed-font")]
+fn wrapped_card(ui: &mut Ui, width: f32, align: TextAlign, text: &str) -> String {
+    use crate::draw_list::DrawList;
+    use crate::style::Declaration;
+    frame(ui, idle(), |ui| {
+        ui.block("", &[Declaration::Width(LengthAuto::Px(width))], |ui| {
+            ui.span(".counted", text, &[Declaration::TextAlign(align)]);
+        });
+    });
+    let mut list = DrawList::new();
+    ui.emit(&mut list);
+    format!("{:?}", list.commands())
+}
+
+/// What a fresh [`Ui`] draws for [`wrapped_card`]: nothing kept from before.
+#[cfg(feature = "parsed-font")]
+fn drawn_afresh(font: &crate::font::Font, width: f32, align: TextAlign, text: &str) -> String {
+    wrapped_card(&mut counted(font), width, align, text)
+}
+
+/// **A wrapped span is not shaped again to draw it while it is unchanged**:
+/// the second frame of the same wrapped span, left- or centre-aligned, shapes
+/// nothing, and draws what the first frame drew — which is what laying its
+/// text out afresh draws.
+#[cfg(feature = "parsed-font")]
+#[test]
+fn a_wrapped_span_is_shaped_once() {
+    use crate::font::Font;
+    use crate::font::shape::shaped_runs;
+    const TEXT: &str = "Wrapped labels lay out under Taffy, one greedy line at a time.";
+    for align in [TextAlign::Left, TextAlign::Center] {
+        // A parse of its own, so no other test's shaping is counted.
+        let font = Font::parse(crate::font::SANS_TTF).expect("parses");
+        let mut ui = counted(&font);
+        let before = shaped_runs(&font);
+        let first = wrapped_card(&mut ui, 140.0, align, TEXT);
+        assert!(
+            shaped_runs(&font) > before,
+            "{align:?}: the first frame shaped nothing"
+        );
+        let before = shaped_runs(&font);
+        let steady = wrapped_card(&mut ui, 140.0, align, TEXT);
+        assert_eq!(
+            shaped_runs(&font) - before,
+            0,
+            "{align:?}: an unchanged frame shaped the wrapped span again"
+        );
+        let wrapped = ui
+            .nodes
+            .iter()
+            .find_map(|node| node.shown_layout.as_ref())
+            .expect("the span kept no layout");
+        assert!(
+            wrapped.lines().len() > 1,
+            "{align:?}: the span did not wrap"
+        );
+        assert_eq!(steady, first, "{align:?}: a steady frame drew differently");
+        assert_eq!(
+            steady,
+            drawn_afresh(&font, 140.0, align, TEXT),
+            "{align:?}: the kept layout drew differently from a fresh one"
+        );
+    }
+}
+
+/// **Two widths broken at the same [`crate::font::layout::wrap_width`] share
+/// one kept layout, and each is still aligned to its own box**: the second
+/// width shapes nothing, yet draws what a fresh [`Ui`] draws at it, not what
+/// the first width drew — so the kept layout is the unaligned one.
+#[cfg(feature = "parsed-font")]
+#[test]
+fn a_wrap_width_s_widths_share_a_layout_and_align_apart() {
+    use crate::font::Font;
+    use crate::font::layout::wrap_width;
+    use crate::font::shape::shaped_runs;
+    const TEXT: &str = "Wrapped labels lay out under Taffy, one greedy line at a time.";
+    const FIRST: f32 = 140.3;
+    const SECOND: f32 = 140.8;
+    assert_eq!(
+        wrap_width(FIRST).to_bits(),
+        wrap_width(SECOND).to_bits(),
+        "the two widths must break alike for this test to ask its question"
+    );
+    for align in [TextAlign::Center, TextAlign::Right] {
+        let font = Font::parse(crate::font::SANS_TTF).expect("parses");
+        let mut ui = counted(&font);
+        let first = wrapped_card(&mut ui, FIRST, align, TEXT);
+        let before = shaped_runs(&font);
+        let second = wrapped_card(&mut ui, SECOND, align, TEXT);
+        assert_eq!(
+            shaped_runs(&font) - before,
+            0,
+            "{align:?}: a width in the same wrap width shaped the span again"
+        );
+        assert_ne!(
+            second, first,
+            "{align:?}: the two boxes aligned alike, so this cannot see a kept alignment"
+        );
+        assert_eq!(
+            second,
+            drawn_afresh(&font, SECOND, align, TEXT),
+            "{align:?}: the shared layout drew differently from a fresh one at {SECOND}px"
+        );
+    }
+}
+
+/// **A held wrapped layout is never another text's**, even under the same
+/// content hash: [`MeasureCache::wrapped_layout`] checks the text itself.
+#[cfg(feature = "parsed-font")]
+#[test]
+fn a_wrapped_layout_under_a_colliding_hash_is_not_served() {
+    use crate::font::Font;
+    let font = Font::parse(crate::font::SANS_TTF).expect("parses");
+    let mut cache = MeasureCache::default();
+    let (size, line_height, width) = (16.0, 20.0, 140.0);
+    let held = cache.wrapped_layout(7, &font, "one text", size, line_height, width);
+    assert!(held.lays_out(&font, "one text", size, line_height));
+    let other = cache.wrapped_layout(7, &font, "another text", size, line_height, width);
+    assert!(
+        other.lays_out(&font, "another text", size, line_height),
+        "the layout held for one text was served for another under its hash"
+    );
+}
+
+/// **A wrapped span whose width or text changes is laid out again**, never
+/// drawn from the layout kept for the old one: each change draws what a fresh
+/// [`Ui`] draws for it.
+#[cfg(feature = "parsed-font")]
+#[test]
+fn a_changed_wrapped_span_is_laid_out_again() {
+    use crate::font::Font;
+    const TEXT: &str = "Wrapped labels lay out under Taffy, one greedy line at a time.";
+    const OTHER: &str = "Other labels break somewhere else entirely, a word or two on.";
+    let font = Font::parse(crate::font::SANS_TTF).expect("parses");
+    let mut ui = counted(&font);
+    let align = TextAlign::Left;
+    for (width, text) in [
+        (140.0, TEXT),
+        (140.0, TEXT),
+        (100.0, TEXT),
+        (140.0, TEXT),
+        (140.0, OTHER),
+        (100.0, OTHER),
+    ] {
+        assert_eq!(
+            wrapped_card(&mut ui, width, align, text),
+            drawn_afresh(&font, width, align, text),
+            "{text:?} at {width}px drew differently from a fresh tree"
+        );
+    }
+}

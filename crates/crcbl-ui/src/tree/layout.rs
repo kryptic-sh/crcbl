@@ -73,8 +73,8 @@ pub(super) const SWEEP_EVERY: u64 = 64;
 ///
 /// Room for one churning label's whole window and the layouts between sweeps,
 /// so a single one never reaches it. Each text holds a few sizes, at most
-/// [`WIDTHS_KEPT`] definite widths, and at most one `nowrap` layout and its
-/// cut, so this bounds the cache's memory.
+/// [`WIDTHS_KEPT`] definite widths and a wrapped layout at each, and at most
+/// one `nowrap` layout and its cut, so this bounds the cache's memory.
 pub(super) const TEXTS_KEPT: usize = 2048;
 
 /// How many texts a layout that finds more than [`TEXTS_KEPT`] keeps: the
@@ -120,7 +120,9 @@ const _: () = assert!(TEXTS_KEPT as u64 > RETENTION_CYCLES + SWEEP_EVERY);
 /// ([`super::ellipsis`]) and drawing it shape nothing again: one layout per
 /// `nowrap` span's text in a parsed font, held as long as its sizes are. **So is
 /// the cut** an ellipsis span's text was last cut to fit with, and the width it
-/// was cut at, so a steady frame cuts none of its spans again.
+/// was cut at, so a steady frame cuts none of its spans again. **A wrapped
+/// span's layout is kept at each definite width it is held at**, so drawing
+/// it at a width it was measured or drawn at shapes nothing again.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MeasureCache {
     texts: HashMap<u64, Held>,
@@ -171,9 +173,12 @@ impl MeasureCache {
                             cut: None,
                         };
                     }
+                    (WhiteSpace::Normal, AvailableSpace::Definite(width)) => {
+                        let layout = TextLayout::new(font, text, size, line_height, Some(width));
+                        return Measured::wrapped(layout);
+                    }
                     (WhiteSpace::Normal, AvailableSpace::MaxContent) => None,
                     (WhiteSpace::Normal, AvailableSpace::MinContent) => Some(0.0),
-                    (WhiteSpace::Normal, AvailableSpace::Definite(width)) => Some(width),
                 };
                 Measured::size(size_of(&TextLayout::new(
                     font,
@@ -191,7 +196,7 @@ impl MeasureCache {
     /// measured from — `text` laid out by [`TextLayout::nowrap`] in `font` at
     /// `size` and `line_height` — when one is held.
     ///
-    /// The layout is checked against all four rather than trusted to the hash,
+    /// The layout is checked against each of them rather than trusted to the hash,
     /// so a held one is never another text's, nor the same text's in another
     /// font, fallback faces and all, or at another size or line height.
     pub fn nowrap_layout(
@@ -243,9 +248,48 @@ impl MeasureCache {
         }
     }
 
+    /// The layout a `white-space: normal` span of content `content_hash` is
+    /// drawn from at content-box `width`: `text` in `font` at `size` and
+    /// `line_height`, broken as [`TextLayout::new`] breaks it at `width`.
+    ///
+    /// The one held in `width`'s bucket when it lays out each of them, checked as
+    /// [`MeasureCache::nowrap_layout`] checks it; the bucket is the
+    /// [`wrap_width`] every width in it is broken at, so that layout is the
+    /// one `width` would give. Otherwise laid out now and held there, unless
+    /// the bucket holds another measurement under the same hash.
+    pub fn wrapped_layout(
+        &mut self,
+        content_hash: u64,
+        font: &Font,
+        text: &str,
+        size: f32,
+        line_height: f32,
+        width: f32,
+    ) -> Arc<TextLayout> {
+        let key = MeasureKey {
+            text: content_hash,
+            width: bucket(AvailableSpace::Definite(width)),
+        };
+        let held = self.held(key);
+        if let Some(layout) = held.and_then(|held| held.layout.as_ref())
+            && layout.lays_out(font, text, size, line_height)
+        {
+            return Arc::clone(layout);
+        }
+        let layout = Arc::new(TextLayout::new(font, text, size, line_height, Some(width)));
+        if held.is_none() {
+            self.entry(key, || Measured {
+                size: size_of(&layout),
+                layout: Some(Arc::clone(&layout)),
+                cut: None,
+            });
+        }
+        layout
+    }
+
     /// The entry of the `nowrap` span of content `content_hash`, when it
     /// holds a layout of `text` in `font` — the same fallback faces and all —
-    /// at `size` and `line_height`: checked against all four rather than
+    /// at `size` and `line_height`: checked against each of them rather than
     /// trusted to the hash, so it is never another text's.
     fn nowrap(
         &self,
@@ -425,8 +469,10 @@ struct Held {
 #[derive(Clone, Debug)]
 struct Measured {
     size: Size<f32>,
-    /// What a `nowrap` span in a parsed font was measured from: its text laid
-    /// out by [`TextLayout::nowrap`]. `None` for every other measurement.
+    /// What a span in a parsed font was measured from: its text laid out by
+    /// [`TextLayout::nowrap`] for a `nowrap` span, or by [`TextLayout::new`]
+    /// at a definite width for a wrapped one. `None` for every other
+    /// measurement.
     layout: Option<Arc<TextLayout>>,
     /// What `layout`'s text was last cut to under `text-overflow: ellipsis`;
     /// `None` until it is cut, and for every measurement without a layout.
@@ -439,6 +485,16 @@ impl Measured {
         Self {
             size,
             layout: None,
+            cut: None,
+        }
+    }
+
+    /// A wrapped span's measurement at a definite width, keeping the layout
+    /// it was measured from.
+    fn wrapped(layout: TextLayout) -> Self {
+        Self {
+            size: size_of(&layout),
+            layout: Some(Arc::new(layout)),
             cut: None,
         }
     }

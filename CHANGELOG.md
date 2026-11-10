@@ -61,6 +61,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Stage::prepared`, which calls `ForwardRenderer::prepare_content` with
   `Shell::keep_alive` as its `service`. `tide`'s `Gpu::open` now takes `&mut S`.
   A switch onto water at run time still builds it on that frame.
+- **`crcbl_ui::tree` no longer shapes a wrapped (`white-space: normal`) span in
+  a parsed font again to draw it.** The layout a span is measured from at a
+  definite width is kept beside that measurement, and `Ui::emit` draws it
+  instead of laying the text out again at its content width, so an unchanged
+  frame of a kept `Ui` shapes no wrapped text either. The drawing is unchanged:
+  a layout is kept per whole-pixel wrap width, which is all line breaking reads,
+  and is checked against the span's text, font, fallback faces, size and line
+  height before it is reused. A wrapping text now holds a layout at each width
+  it keeps a measurement at.
 
 ### Fixed
 

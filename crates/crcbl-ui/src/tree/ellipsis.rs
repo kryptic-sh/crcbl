@@ -55,7 +55,9 @@ impl Ui {
     /// kept, when it shows its text whole, so neither this nor drawing it
     /// shapes that text again. **Its cut is kept beside that layout** with the
     /// width it was cut at, and handed back while both are unchanged, so a
-    /// steady frame cuts none of its spans again.
+    /// steady frame cuts none of its spans again. A wrapped span in a parsed
+    /// font, which is never cut, is handed the layout the measure cache keeps
+    /// at the width it was laid out at.
     pub(super) fn cut_text(&mut self, atlas: &FontAtlas) {
         self.cut.clear();
         for node in &mut self.nodes {
@@ -73,6 +75,20 @@ impl Ui {
                 .as_ref()
                 .filter(|_| style.white_space == WhiteSpace::NoWrap)
                 .map(|font| (font, style.font_size, style.text_line_height(font)));
+            if let Some(font) = &font
+                && style.white_space == WhiteSpace::Normal
+            {
+                let width = content_width(&self.store.get(node.slot).unrounded);
+                node.shown_layout = Some(self.measure.wrapped_layout(
+                    node.content_hash,
+                    font,
+                    text,
+                    style.font_size,
+                    style.text_line_height(font),
+                    width,
+                ));
+                continue;
+            }
             let measured = nowrap.and_then(|(font, size, line_height)| {
                 self.measure
                     .nowrap_layout(node.content_hash, font, text, size, line_height)

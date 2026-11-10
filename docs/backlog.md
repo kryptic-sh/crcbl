@@ -365,17 +365,13 @@ about 7.5 ms CPU a frame, 6.1 ms of it label text, ~71% of that compiling
 harfrust shape plans. Plans are now cached per face (`font::shape::Shaper`) and
 an ellipsis span draws the layout its cut measured. Left:
 
-- **A cut span re-cuts every frame.** `cut_text` reuses the measured layout for
-  a line's whole-text check, but a span that does not fit runs its cluster
-  binary search — one `TextLayout::nowrap` per probe — at every layout, even in
-  a kept `Ui` whose span and width did not change. Caching the cut text and its
-  layout by content hash and the exact content width's bits in the measure entry
-  would make a steady frame shape nothing there too. EW builds a fresh `Ui` per
-  label each frame, so it would not gain from that.
-- **Wrapped (`white-space: normal`) spans are still shaped again to draw.** Only
-  `nowrap` layouts are kept; `emit` lays a wrapped span out at its content width
-  every frame. Keeping the definite-width bucket's layout would cover it, at a
-  layout per width bucket held.
+- **Two `nowrap` ellipsis spans of the same text at different widths re-cut
+  every frame.** A cut is kept (`KeptCut`, beside the `nowrap` layout in the
+  measure cache's width-independent entry, found by `MeasureCache::kept_cut`)
+  with the exact bits of the width it was cut at, so a steady frame of a kept
+  `Ui` cuts nothing again — but there is one slot per text, and the same text
+  cut at two widths in one layout evicts the other's cut each time. Holding a
+  few cuts per text, as `WIDTHS_KEPT` does for wrapped widths, would cover it.
 - Drawing a kept layout copies it once a frame only where aligning moves it:
   centred, right- or end-aligned text, or right-to-left start-aligned text
   narrower than its box; `emit_node` borrows it when `TextLayout::is_aligned`
@@ -397,8 +393,7 @@ an ellipsis span draws the layout its cut measured. Left:
     it ("O…" for "Of…"). A fontTools-built fixture (as in
     `crates/crcbl-ui/src/font/fixtures.rs`) with a kern against "…" above 0.25
     em and a `calt` that fires only before "…" would pin it. Also: a wrongly
-    rejected probe goes unnoticed (shorter cut), and two spans with the same
-    text at different widths share one kept-cut slot and re-cut each frame.
+    rejected probe goes unnoticed (shorter cut).
   - **One layout with more live texts than the measure cache keeps**
     (`TEXTS_KEPT` in `crates/crcbl-ui/src/tree/layout.rs`, evicting to
     three-quarters of it) drops some of its own texts each cycle and measures

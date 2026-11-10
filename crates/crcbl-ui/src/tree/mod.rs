@@ -450,9 +450,12 @@ struct FrameNode {
     /// nothing again: the layout [`TextLayout::nowrap`] gives its shown text
     /// in its font, at its size and line height — whether a one-line
     /// `text-overflow: ellipsis` span was cut or fits whole. Shared with the
-    /// measure cache when the span shows its whole text. `None` until laid
-    /// out, for a span layout did not measure, an ellipsis span of several
-    /// lines, one too narrow for even the ellipsis, and every other node.
+    /// measure cache when the span shows its whole text. For a wrapped span
+    /// in a parsed font, its text as [`TextLayout::new`] breaks it at its
+    /// content-box width, shared with the measure cache. `None` until laid
+    /// out, for a `nowrap` span layout did not measure, an ellipsis span of
+    /// several lines, one too narrow for even the ellipsis, and every other
+    /// node.
     shown_layout: Option<Arc<TextLayout>>,
     content_hash: u64,
     /// Folded over each child's key as the child is built.

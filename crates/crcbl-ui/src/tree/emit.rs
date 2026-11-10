@@ -272,24 +272,28 @@ impl Ui {
                     // Broken at the width the layout measured it under —
                     // the unrounded one — unless it is `nowrap`, and
                     // aligned in the box it is drawn in, the rounded one.
+                    // Measuring or cutting it laid out what it shows
+                    // already: drawn as it is, or a copy where aligning
+                    // moves its glyphs.
                     let unrounded = &self.store.get(node.slot).unrounded;
                     let (size, line_height) = (style.font_size, style.text_line_height(font));
-                    let mut layout = match style.white_space {
-                        WhiteSpace::Normal => Cow::Owned(TextLayout::new(
-                            font,
-                            text,
-                            size,
-                            line_height,
-                            Some(content_width(unrounded)),
-                        )),
-                        // Measuring or cutting it laid out what it shows
-                        // already: drawn as it is, or a copy where aligning
-                        // moves its glyphs.
-                        WhiteSpace::NoWrap => node.shown_layout.as_deref().map_or_else(
-                            || Cow::Owned(TextLayout::nowrap(font, text, size, line_height)),
-                            Cow::Borrowed,
-                        ),
-                    };
+                    let mut layout = node.shown_layout.as_deref().map_or_else(
+                        || {
+                            Cow::Owned(match style.white_space {
+                                WhiteSpace::Normal => TextLayout::new(
+                                    font,
+                                    text,
+                                    size,
+                                    line_height,
+                                    Some(content_width(unrounded)),
+                                ),
+                                WhiteSpace::NoWrap => {
+                                    TextLayout::nowrap(font, text, size, line_height)
+                                }
+                            })
+                        },
+                        Cow::Borrowed,
+                    );
                     let (width, align) = (content_max.x - content_min.x, style.text_align);
                     if !layout.is_aligned(width, align) {
                         layout.to_mut().align(width, align);
