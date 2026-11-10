@@ -611,6 +611,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "an exhaustive arithmetic sweep with no unsafe; minutes under miri"
+    )]
     fn the_sine_tracks_the_reference() {
         let (worst, worst_at, visited) = worst_over_samples(sin, reference_sin);
         assert!(
@@ -625,6 +629,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "an exhaustive arithmetic sweep with no unsafe; minutes under miri"
+    )]
     fn the_cosine_tracks_the_reference() {
         let (worst, worst_at, visited) = worst_over_samples(cos, reference_cos);
         assert!(
@@ -735,6 +743,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "an exhaustive arithmetic sweep with no unsafe; minutes under miri"
+    )]
     fn the_sine_is_odd_and_the_cosine_even() {
         let mut visited = 0u32;
         for_each_sampled_argument(|x| {

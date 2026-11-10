@@ -207,6 +207,10 @@ fn a_version_1_spool_recovers_with_its_joins_naming_nobody() {
 /// record leaves — the file holds the records before it, as `ReplayWriter`
 /// writes them, and reads back.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "an exhaustive sweep over every byte, with no unsafe; minutes under miri"
+)]
 fn a_spool_cut_inside_a_record_keeps_every_whole_one_before_it() {
     let pushes = session();
     let (spool, _) = spooled(&pushes);
@@ -268,6 +272,10 @@ fn a_spool_without_a_whole_header_is_refused() {
 /// never past it and never in a panic: every bit of every record is flipped
 /// in turn, and the file holds exactly the records before the damaged one.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "an exhaustive sweep over every byte, with no unsafe; minutes under miri"
+)]
 fn a_flipped_bit_stops_the_recovery_at_its_record() {
     let pushes = session();
     let (spool, _) = spooled(&pushes);

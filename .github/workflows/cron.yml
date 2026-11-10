@@ -78,6 +78,13 @@ jobs:
   # for**; that one arrived on 2026-08-22 and was found only because the job was
   # triggered by hand.
   #
+  # `crcbl-ui` runs its `draw_list` tests alone. Its one unsafe is the
+  # `bytemuck::Pod` impl for `Vertex2d`, which those tests cast through, and
+  # its library suite grew from 17 s interpreted to 23110 s (measured locally
+  # on 2026-11-10, one style-cache test alone 13040 s) — six hours of safe
+  # layout code, and the reason this job ended cancelled every week from
+  # 2026-09-15. The `draw_list` tests interpret in 6 s.
+  #
   # `crcbl-jobs` is the one whose unsafe is *concurrent* rather than merely
   # aliasing, and it is what turns this job from a nice-to-have into the only
   # check of its kind here. Its mailbox hands slots between two threads through
@@ -113,10 +120,11 @@ jobs:
   # instrumentation. Re-measure and add it here when either miri or the suite
   # gets faster.
   #
-  # Weekly rather than per-PR: the step below takes about three and a half
-  # minutes of interpretation on top of a cold compile, measured locally with
-  # this job's environment — `crcbl-core` 81 s, `crcbl-store` 58 s, `crcbl-jobs`
-  # 25 s, `crcbl-ui` 17 s, `crcbl-ecs` 6 s, `crcbl-hal` 2 s.
+  # Weekly rather than per-PR: the steps below take about eight minutes of
+  # interpretation on top of a cold compile, measured locally with this job's
+  # environment on 2026-11-10 at load 1.3 — `crcbl-ecs` 208 s, `crcbl-core`
+  # 132 s, `crcbl-hal` 68 s, `crcbl-store` 46 s, `crcbl-jobs` 22 s and the
+  # `crcbl-ui` draw list 6 s.
   miri:
     name: miri (crates without FFI)
     runs-on: ubuntu-latest
@@ -187,7 +195,12 @@ jobs:
       - name: Interpret the seam and container crates
         run: >-
           cargo miri test --tests -p crcbl-core -p crcbl-hal -p crcbl-ecs -p
-          crcbl-store -p crcbl-ui -p crcbl-jobs
+          crcbl-store -p crcbl-jobs
+      # Only the tests that reach `crcbl-ui`'s unsafe; see "The target list is
+      # the unsafe census" above.
+      - name: Interpret the UI draw list's vertex cast
+        run: >-
+          cargo miri test --lib -p crcbl-ui -- draw_list::
 
   # A scheduled run nobody is watching went red and stayed red twice before
   # anyone typed `gh workflow run cron.yml`, so a failure here opens an issue,
