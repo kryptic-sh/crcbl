@@ -49,7 +49,7 @@ jobs:
   # path — is outside its reach by construction. What it *does* cover is the
   # crates whose unsafe is pure Rust: the handle allocators and the frame arena
   # in `crcbl-core`, the seam types and the null backend in `crcbl-hal`, the
-  # storage containers, the UI vertex builders, and `crcbl-jobs`.
+  # UI vertex builders, and `crcbl-jobs`.
   #
   # ## The target list is the unsafe census, and it is checked rather than assumed
   #
@@ -77,6 +77,14 @@ jobs:
   # in one of these crates and runs for seconds natively is the thing to watch
   # for**; that one arrived on 2026-08-22 and was found only because the job was
   # triggered by hand.
+  #
+  # `crcbl-store` left on 2026-11-10 by the same rule: on Linux it compiles no
+  # unsafe — what it has is under `web/`, which is wasm32-only, and its
+  # `crcbl-spawn` dependency's is Windows FFI. It went because the nightly of
+  # 2026-11-09 brought a miri that refuses `fsync` on a directory descriptor
+  # ("only supported on file-backed file descriptors"), which `sync_dir` does on
+  # every `write_atomic`; the nightly of 2026-09-09 accepted it. If the crate
+  # grows unsafe and comes back, that refusal comes with it.
   #
   # `crcbl-ui` runs its `draw_list` tests alone. Its one unsafe is the
   # `bytemuck::Pod` impl for `Vertex2d`, which those tests cast through, and
@@ -120,11 +128,11 @@ jobs:
   # instrumentation. Re-measure and add it here when either miri or the suite
   # gets faster.
   #
-  # Weekly rather than per-PR: the steps below take about eight minutes of
+  # Weekly rather than per-PR: the steps below take about seven minutes of
   # interpretation on top of a cold compile, measured locally with this job's
   # environment on 2026-11-10 at load 1.3 — `crcbl-ecs` 208 s, `crcbl-core`
-  # 132 s, `crcbl-hal` 68 s, `crcbl-store` 46 s, `crcbl-jobs` 22 s and the
-  # `crcbl-ui` draw list 6 s.
+  # 132 s, `crcbl-hal` 68 s, `crcbl-jobs` 22 s and the `crcbl-ui` draw list
+  # 6 s.
   miri:
     name: miri (crates without FFI)
     runs-on: ubuntu-latest
@@ -147,7 +155,7 @@ jobs:
           shared-key: miri
       # **No ALSA headers here, unlike every other linux job.**
       # `cargo miri test -p` builds only the named crates and their
-      # dependencies, and none of the six below reaches `cpal` — checked with
+      # dependencies, and none of the crates below reaches `cpal` — checked with
       # `cargo tree -e normal` rather than assumed. The install this job briefly
       # carried was for `crcbl-audio`, and it goes with it. If a target ever
       # grows an audio dependency, it comes back.
@@ -195,7 +203,7 @@ jobs:
       - name: Interpret the seam and container crates
         run: >-
           cargo miri test --tests -p crcbl-core -p crcbl-hal -p crcbl-ecs -p
-          crcbl-store -p crcbl-jobs
+          crcbl-jobs
       # Only the tests that reach `crcbl-ui`'s unsafe; see "The target list is
       # the unsafe census" above.
       - name: Interpret the UI draw list's vertex cast
