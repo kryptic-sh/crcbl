@@ -583,13 +583,16 @@ pub(crate) struct SsrPipelines {
 }
 
 impl SsrPipelines {
-    /// Creates the layouts and both pipelines one after the other, for a
-    /// build with no batch to put them in — a view made after the renderer.
+    /// Creates the layouts and both pipelines one after the other, for tests:
+    /// the sweep of this set's failures alone, and a fixture for
+    /// [`Ssr::new`]'s. Every build compiles them in a batch, out of
+    /// `forward::view::ViewPipelineLayouts`.
     ///
     /// # Errors
     ///
     /// [`HalError`] from any seam call. A failure part-way through releases
     /// everything already created — see [`crate::partial`].
+    #[cfg(test)]
     pub(crate) fn new(
         device: &dyn Device,
         build_fullscreen: impl Fn(

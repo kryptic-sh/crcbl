@@ -538,13 +538,16 @@ pub(crate) struct VolumetricPipelines {
 }
 
 impl VolumetricPipelines {
-    /// Creates the layouts and the three pipelines one after another, for a
-    /// build with no batch to put them in — a view made after the renderer.
+    /// Creates the layouts and the three pipelines one after another, for
+    /// tests: the sweep of this set's failures alone, and a fixture for
+    /// [`Volumetric::new`]'s. Every build compiles them in a batch, out of
+    /// `forward::view::ViewPipelineLayouts`.
     ///
     /// # Errors
     ///
     /// [`HalError`] from any seam call. A failure part-way through releases
     /// everything already created — see [`crate::partial`].
+    #[cfg(test)]
     pub(crate) fn new(
         device: &dyn Device,
         build_fullscreen: impl Fn(

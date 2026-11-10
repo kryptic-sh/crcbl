@@ -964,29 +964,167 @@ pub(super) struct View {
 /// **Apart from the passes** so the camera's can be compiled in the renderer's
 /// mesh-pass batch, beside the compiles they would otherwise follow — see
 /// `ForwardRenderer::build`. A view made later builds its own with
-/// [`ViewPipelines::new`].
+/// [`ViewPipelines::new`]. Both list their members out of
+/// [`ViewPipelineLayouts`].
 pub(super) struct ViewPipelines {
     pub(super) volumetric: VolumetricPipelines,
     pub(super) ssr: SsrPipelines,
 }
 
 impl ViewPipelines {
-    /// Both sets, one pipeline after another, for a view built after the
-    /// renderer: there is no build's batch left for it to join.
+    /// Both sets, out of a [`pipeline_batch`] of their own, for a view built
+    /// after the renderer: there is no build's batch left for it to join. The
+    /// members are [`ViewPipelineLayouts`]', in the order the build lists
+    /// them.
+    ///
+    /// `service` runs before each round of the batch, or before each pipeline
+    /// where the batch is serial — see `crate::pipeline_batch`.
     ///
     /// # Errors
     ///
     /// [`HalError`] from any seam call, having released whatever it created.
-    pub(super) fn new(device: &dyn Device) -> Result<Self, HalError> {
-        let fullscreen = ForwardRenderer::build_fullscreen;
-        let volumetric = VolumetricPipelines::new(device, fullscreen)?;
-        match SsrPipelines::new(device, fullscreen) {
-            Ok(ssr) => Ok(Self { volumetric, ssr }),
-            Err(error) => {
-                volumetric.destroy(device);
-                Err(error)
-            }
+    pub(super) fn new(device: &dyn Device, service: &mut dyn FnMut()) -> Result<Self, HalError> {
+        let mut pending = Partial::new(device);
+        let layouts = ViewPipelineLayouts::new(device, &mut pending)?;
+        let leading = layouts.leading(device);
+        let trailing = layouts.trailing(device);
+        let jobs: Vec<&pipeline_batch::Job<'_, _>> = leading
+            .iter()
+            .map(|job| job as &pipeline_batch::Job<'_, _>)
+            .chain(
+                trailing
+                    .iter()
+                    .map(|job| job as &pipeline_batch::Job<'_, _>),
+            )
+            .collect();
+        let mut made = pipeline_batch::create_listed(device, service, &jobs).into_iter();
+        let mut next = || {
+            made.next()
+                .unwrap_or_else(|| unreachable!("one result per job"))
+        };
+        let leading = leading.each_ref().map(|_| next());
+        let trailing = trailing.each_ref().map(|_| next());
+        layouts.finish(pending, leading, trailing)
+    }
+}
+
+/// One member of [`ViewPipelineLayouts`]' share of a batch.
+type ViewMember = fn(ViewPipelineLayouts, &dyn Device) -> Result<Pipeline, HalError>;
+
+/// [`ViewPipelines`]' layouts, created ahead of the pipelines so each pipeline
+/// can be one member of a [`pipeline_batch`]: the renderer's mesh batch for the
+/// camera's sets, a batch of their own for a view made later.
+///
+/// **The one list of the sets' members and of how they are read back** —
+/// [`leading`](Self::leading), [`trailing`](Self::trailing) and
+/// [`finish`](Self::finish) — so the two batches cannot drift apart from each
+/// other. Within it, `finish` names the results in [`Self::LEADING`]'s and
+/// [`Self::TRAILING`]'s order, so a member moved in a list moves in `finish`'s
+/// patterns too: a compute and a graphics member swapped panics there, but two
+/// graphics members swapped would hand each set the other's pipeline.
+///
+/// Handles only, and `Copy` so each job can take them: nothing here owns them
+/// until [`finish`](Self::finish) hands them to the sets.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ViewPipelineLayouts {
+    volumetric: VolumetricLayouts,
+    ssr: SsrLayouts,
+}
+
+impl ViewPipelineLayouts {
+    /// Each set's costly compile — the volume's scatter pass and the march —
+    /// which a batch lists first, so both are in its first round whatever a
+    /// round's size.
+    const LEADING: [ViewMember; 2] = [
+        |layouts, device| layouts.volumetric.scatter(device).map(Pipeline::Compute),
+        |layouts, device| {
+            layouts
+                .ssr
+                .march(device, ForwardRenderer::build_fullscreen)
+                .map(Pipeline::Graphics)
+        },
+    ];
+
+    /// The sets' other members, never timed alone and taken to be cheap, which
+    /// a batch lists after everything else in it.
+    const TRAILING: [ViewMember; 3] = [
+        |layouts, device| layouts.volumetric.integrate(device).map(Pipeline::Compute),
+        |layouts, device| {
+            layouts
+                .volumetric
+                .composite(device, ForwardRenderer::build_fullscreen)
+                .map(Pipeline::Graphics)
+        },
+        |layouts, device| {
+            layouts
+                .ssr
+                .blur(device, ForwardRenderer::build_fullscreen)
+                .map(Pipeline::Graphics)
+        },
+    ];
+
+    /// Creates the volume's layouts and the march's, each held in `pending` —
+    /// so the caller's guard releases them if anything after fails.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any layout.
+    pub(super) fn new(device: &dyn Device, pending: &mut Partial<'_>) -> Result<Self, HalError> {
+        Ok(Self {
+            volumetric: VolumetricLayouts::new(device, pending)?,
+            ssr: SsrLayouts::new(device, pending)?,
+        })
+    }
+
+    /// The jobs a batch lists first — see [`Self::LEADING`].
+    pub(super) fn leading<'a>(
+        self,
+        device: &'a dyn Device,
+    ) -> [impl Fn() -> Result<Pipeline, HalError> + 'a; Self::LEADING.len()] {
+        Self::LEADING.map(|member| move || member(self, device))
+    }
+
+    /// The jobs a batch lists last — see [`Self::TRAILING`].
+    pub(super) fn trailing<'a>(
+        self,
+        device: &'a dyn Device,
+    ) -> [impl Fn() -> Result<Pipeline, HalError> + 'a; Self::TRAILING.len()] {
+        Self::TRAILING.map(|member| move || member(self, device))
+    }
+
+    /// Both sets, out of these layouts and the batch's results for
+    /// [`leading`](Self::leading) and [`trailing`](Self::trailing), each in its
+    /// jobs' order.
+    ///
+    /// **All or nothing**: every success is held in `pending`, which holds the
+    /// layouts already, before any error propagates — the batch ran each member
+    /// whatever the others returned, and dropping an unvisited result does not
+    /// release its handle. On an error `pending` releases everything it holds;
+    /// on success the sets own it all and `pending` lets go.
+    ///
+    /// # Errors
+    ///
+    /// The first failed member's [`HalError`].
+    pub(super) fn finish(
+        self,
+        mut pending: Partial<'_>,
+        [scatter, march]: [Result<Pipeline, HalError>; Self::LEADING.len()],
+        [integrate, composite, blur]: [Result<Pipeline, HalError>; Self::TRAILING.len()],
+    ) -> Result<ViewPipelines, HalError> {
+        for pipeline in [&scatter, &march, &integrate, &composite, &blur]
+            .into_iter()
+            .flatten()
+        {
+            pending.add(*pipeline);
         }
+        let volumetric = self.volumetric.finish(
+            scatter?.compute(),
+            integrate?.compute(),
+            composite?.graphics(),
+        );
+        let ssr = self.ssr.finish(march?.graphics(), blur?.graphics());
+        pending.keep();
+        Ok(ViewPipelines { volumetric, ssr })
     }
 }
 
@@ -3735,7 +3873,8 @@ impl ForwardRenderer {
         // the next frame is on the same queue, after it — so a view made
         // between frames no longer drains the device.
         let mut uploads = UploadBatch::new(device, queue, "view");
-        let pipelines = ViewPipelines::new(device)?;
+        // `create_view` takes no service, so its batch runs none.
+        let pipelines = ViewPipelines::new(device, &mut || {})?;
         let view = View::build(
             device,
             &mut uploads,

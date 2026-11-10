@@ -52,6 +52,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   prefilter table** instead of each view uploading its own identical
   `"sky prefilter table"`, so `ForwardRenderer::create_view` creates one image
   and records one upload fewer.
+- **`ForwardRenderer::create_view` compiles its froxel volume's and reflection
+  march's pipelines as one batch**, side by side on Vulkan, D3D12 and Metal,
+  instead of one after another. The members and their order are the ones the
+  renderer's build already compiles them in, listed once for both.
 - **`apps/tide` builds its water passes while it starts up** rather than on its
   first frame: `Gpu::from_context` stages the opening scene through the new
   `Stage::prepared`, which calls `ForwardRenderer::prepare_content` with

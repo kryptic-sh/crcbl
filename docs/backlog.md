@@ -514,9 +514,10 @@ Left:
   with `MESA_SHADER_CACHE_DISABLE`, quiet window, load 1.7–1.8, five interleaved
   pairs): a cold `ForwardRenderer::new` went from 261.8–267.0 ms to 191.5–204.4
   ms. Still one after the other: the mesh batch and `DrawGenPipelines::new`'s
-  two batches. A view made by `create_view` compiles its volume's and march's
-  pipelines serially (`ViewPipelines::new`); a batch of its own would need the
-  five members listed a second time.
+  two batches. A view made by `create_view` compiles its two sets as one batch
+  of its own (`ViewPipelines::new`, 2026-11-10), which spawns a `crcbl_jobs`
+  pool per call on vk, dx12 and mtl: unmeasured whether that pays for a single
+  view's sets, and no test runs it on a backend that takes the parallel path.
 - Water's and grass's pipelines compile in one batch per view on the first frame
   with a body or a field (`ContentPasses` in `View::build_content`, 2026-11-01):
   the water surface and every grass draw lead it, and the water copy and the

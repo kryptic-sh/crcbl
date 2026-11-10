@@ -225,7 +225,10 @@ pub use shadow_inputs::{FRAME_UNIFORMS_READERS, UniformsField, UniformsReader};
 
 use bucket_draws::{BucketDraws, EmitTail, RegionStep};
 
-use view::{FramePasses, Overlays, TonemapPipeline, View, ViewInputs, ViewOutput, ViewPipelines};
+use view::{
+    FramePasses, Overlays, TonemapPipeline, View, ViewInputs, ViewOutput, ViewPipelineLayouts,
+    ViewPipelines,
+};
 pub use view::{
     FrameTargets, MAX_VIEWS, ViewBackground, ViewDesc, ViewId, ViewLighting, ViewMask, ViewTarget,
 };
@@ -5268,8 +5271,7 @@ impl ForwardRenderer {
         let any_masked = holds(masked) || holds(masked_double);
         let updates_probes = scene.probes.update == ProbeUpdate::EveryFrame;
         let mut pending = Partial::new(device);
-        let volumetric = VolumetricLayouts::new(device, &mut pending)?;
-        let ssr = SsrLayouts::new(device, &mut pending)?;
+        let view_layouts = ViewPipelineLayouts::new(device, &mut pending)?;
         let modules = MeshModules::new(device, emit, culls_clusters)?;
         let layout = mesh_pipeline_layout;
         let [back, none] = MeshModules::SIDES;
@@ -5280,7 +5282,6 @@ impl ForwardRenderer {
         let depth = |cull| raster(modules.depth_pipeline(device, layout, cull));
         let depth_masked = |cull| raster(modules.depth_masked_pipeline(device, layout, cull));
         let rsm = |cull| raster(modules.rsm_pipeline(device, layout, cull));
-        let fullscreen = Self::build_fullscreen;
         // Each member beside whether this scene needs it, in one fixed order the
         // results are read back out of below.
         let members: [(bool, &pipeline_batch::Job<'_, _>); 9] = [
@@ -5299,38 +5300,33 @@ impl ForwardRenderer {
         // The view passes' costly pair leads the batch, so it is in the first
         // round whatever a round's size, and the mesh pass's members follow it
         // into the earliest rounds left. Their other members, never timed alone
-        // and taken to be cheap, trail every mesh member.
-        let leading: [&pipeline_batch::Job<'_, _>; 2] = [
-            &|| volumetric.scatter(device).map(Pipeline::Compute),
-            &|| ssr.march(device, fullscreen).map(Pipeline::Graphics),
-        ];
-        let trailing: [&pipeline_batch::Job<'_, _>; 3] = [
-            &|| volumetric.integrate(device).map(Pipeline::Compute),
-            &|| {
-                volumetric
-                    .composite(device, fullscreen)
-                    .map(Pipeline::Graphics)
-            },
-            &|| ssr.blur(device, fullscreen).map(Pipeline::Graphics),
-        ];
+        // and taken to be cheap, trail every mesh member. A view made later
+        // lists the same members alone — see [`ViewPipelineLayouts`].
+        let leading = view_layouts.leading(device);
+        let trailing = view_layouts.trailing(device);
         let jobs: Vec<&pipeline_batch::Job<'_, _>> = leading
-            .into_iter()
+            .iter()
+            .map(|job| job as &pipeline_batch::Job<'_, _>)
             .chain(
                 members
                     .iter()
                     .filter_map(|(needed, job)| needed.then_some(*job)),
             )
-            .chain(trailing)
+            .chain(
+                trailing
+                    .iter()
+                    .map(|job| job as &pipeline_batch::Job<'_, _>),
+            )
             .collect();
         let mut made = pipeline_batch::create_listed(device, service, &jobs).into_iter();
         let mut next = || {
             made.next()
                 .unwrap_or_else(|| unreachable!("one result per job"))
         };
-        let [scatter, march] = [(); 2].map(|()| next());
+        let leading = leading.each_ref().map(|_| next());
         let results: [Option<Result<Pipeline, HalError>>; 9] =
             members.map(|(needed, _)| needed.then(&mut next));
-        let [integrate, composite, blur] = [(); 3].map(|()| next());
+        let trailing = trailing.each_ref().map(|_| next());
         modules.destroy(device);
         // Register every successful creation before propagating any error.
         // Results later in this batch may own pipelines even when the first
@@ -5340,19 +5336,7 @@ impl ForwardRenderer {
         for pipeline in results.iter().flatten().flatten() {
             rollback.pipelines.push(pipeline.graphics());
         }
-        for pipeline in [&scatter, &march, &integrate, &composite, &blur]
-            .into_iter()
-            .flatten()
-        {
-            pending.add(*pipeline);
-        }
-        let volumetric = volumetric.finish(
-            scatter?.compute(),
-            integrate?.compute(),
-            composite?.graphics(),
-        );
-        let ssr = ssr.finish(march?.graphics(), blur?.graphics());
-        pending.keep();
+        let ViewPipelines { volumetric, ssr } = view_layouts.finish(pending, leading, trailing)?;
         rollback.volumetric_pipelines = Some(volumetric);
         rollback.ssr_pipelines = Some(ssr);
         let [
@@ -12258,6 +12242,7 @@ mod tests {
     mod shadow_reach;
     mod skin_cull;
     mod upload_waits;
+    mod view_pipelines;
 
     use super::*;
     use crate::effects::{Antialiasing, EffectOverride};

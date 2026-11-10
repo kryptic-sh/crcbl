@@ -546,8 +546,8 @@ fn a_build_failing_in_its_pipeline_batch_leaks_nothing() {
 
 /// **A view made after the renderer builds both its pipeline sets or neither**:
 /// `ViewPipelines::new` failed at each creation leaves nothing alive — and in
-/// particular where the march's set fails after the volume's was made, which
-/// it then has to release itself.
+/// particular where a member fails after its batch has made others, which it
+/// then has to release itself.
 #[test]
 fn a_views_pipeline_sets_release_on_every_failure() {
     let (recorder, device, _) = open();
@@ -564,7 +564,7 @@ fn a_views_pipeline_sets_release_on_every_failure() {
         "ViewPipelines::new",
         &recorder,
         device,
-        ViewPipelines::new,
+        |device| ViewPipelines::new(device, &mut || {}),
         |pipelines, device| {
             pipelines.ssr.destroy(device);
             pipelines.volumetric.destroy(device);
