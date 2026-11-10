@@ -613,12 +613,6 @@ build them first.
   renderer build itself is not serviced: `ForwardRenderer::with_scene_on_path`
   has no serviced form. `GrassScene::new` (two 1×1 calm wind textures, no
   pipeline) stays in the build on purpose.
-- Tide's `Gpu::from_context` drops its `GpuContext` without
-  `GpuContext::destroy` when the renderer, the stage (now including
-  `prepare_content`) or the UI renderer fails, so the swapchain and surface skip
-  their ordered teardown; viewer's `from_context` calls `ctx.destroy()` there.
-  The process is exiting with an error at that point, so the cost is small.
-  Found in review 2026-11-10, not fixed.
 
 ### A failed lazy build still ends the game in the engine loop
 

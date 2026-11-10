@@ -279,14 +279,23 @@ impl Gpu {
         } else {
             crcbl::log::info!("tide: {report}");
         }
-        let mut renderer = scene::renderer(
+        // Every failure from here on is unwound by hand: neither `Gpu` nor
+        // `GpuContext` has a `Drop`, so a `?` would leak what was built and
+        // skip the swapchain's and surface's ordered teardown.
+        let mut renderer = match scene::renderer(
             ctx.device(),
             ctx.queue(),
             ctx.format(),
             forced
                 .geometry
                 .unwrap_or_else(|| ctx.device().preferred_geometry_path()),
-        )?;
+        ) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                ctx.destroy()?;
+                return Err(GpuError::Hal(error));
+            }
+        };
         let knobs = crate::knobs::read();
         let stage = match Stage::prepared(
             ctx.device(),
@@ -298,6 +307,7 @@ impl Gpu {
             Ok(stage) => stage,
             Err(error) => {
                 renderer.destroy(ctx.device());
+                ctx.destroy()?;
                 return Err(GpuError::Hal(error));
             }
         };
@@ -318,19 +328,19 @@ impl Gpu {
             paths.effects.row(),
         );
 
-        let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
-        if timers.is_none() {
-            crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
-        }
-        // Rolled back by hand: `Gpu` has no `Drop`, so a `?` here would leak the
-        // forward renderer's pipelines rather than release them.
         let ui = match UiRenderer::new(ctx.device(), ctx.queue(), ctx.format()) {
             Ok(ui) => ui,
             Err(error) => {
                 renderer.destroy(ctx.device());
+                ctx.destroy()?;
                 return Err(GpuError::Hal(error));
             }
         };
+        // After the last fallible build, so no failure has timers to release.
+        let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
+        if timers.is_none() {
+            crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
+        }
 
         Ok(Self {
             ctx,
