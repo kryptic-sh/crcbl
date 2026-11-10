@@ -575,10 +575,10 @@ Still built unconditionally by `ForwardRenderer::build`
 Decided eager, with reasons (2026-10-30): `Exposure` (the tonemap binds its
 measured buffer every frame; `exposure_buffers` is public), `Volumetric` (water
 binds its buffers; its composite runs for an atmosphere with the fog bit off;
-`froxel_buffers` is public), `Ssr` (water binds its block and sky prefilter).
-`Volumetric` and `Ssr` now take their pipelines prebuilt, so the pipelines could
-become lazy without the buffers. Water and the atmosphere's composite would then
-have to build them first.
+`froxel_buffers` is public), `Ssr` (water binds its block). `Volumetric` and
+`Ssr` now take their pipelines prebuilt, so the pipelines could become lazy
+without the buffers. Water and the atmosphere's composite would then have to
+build them first.
 
 - Measured 2026-10-30 (RX 7900 XTX, radv, cold, load ~12): making the post
   passes lazy saved ~21 ms of a ~815 ms cold `ForwardRenderer::new`, so the
@@ -645,9 +645,6 @@ by itself on the build path:
   resident meshes' group count, at least one, × 4 bytes) for the primary view
   and each shadow cull. Small at the default capacity, but it grows with the
   capacity: the same trade-off that kept the pages out, not yet measured.
-- `Ssr::new` still uploads `crcbl_shaders::sky_prefilter`'s table once per view,
-  now inside the batch; it is the same bytes for every view and could be the
-  renderer's, as the DFG table now is.
 
 Measured with a throwaway test on the null backend: the build's `wait_idle`
 count went from 23 to 6 and `create_view`'s from 5 to 1. On an RX 7900 XTX

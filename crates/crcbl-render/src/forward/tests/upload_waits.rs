@@ -238,8 +238,8 @@ fn destroy_before_the_first_frame_waits_for_the_upload_first() {
 }
 
 /// **A view made after the build is one submission and no wait**: its cull
-/// state, its exposure ring and its reflection table share a batch of its own,
-/// whose staging lives until a frame retires it.
+/// state and its exposure ring share a batch of its own, whose staging lives
+/// until a frame retires it.
 #[test]
 fn a_late_view_does_not_wait() {
     let (recorder, device, queue) = open();
@@ -264,6 +264,59 @@ fn a_late_view_does_not_wait() {
     }
     renderer.destroy_view(device, view);
     renderer.destroy(device);
+    recorder.assert_valid();
+}
+
+/// **The sky prefilter table is the renderer's, uploaded once however many
+/// views it draws**: every view's reflection march — and the water surface,
+/// through [`Ssr::sky_prefilter_view`] — reads the one image the build made,
+/// and a view made later uploads nothing for it.
+#[test]
+fn every_view_reads_the_one_sky_prefilter_table() {
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    recorder.clear();
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb)
+        .expect("the null backend accepts every descriptor");
+    let views = [
+        renderer
+            .create_view(device, queue, &ViewDesc::default())
+            .expect("a second view fits"),
+        renderer
+            .create_view(device, queue, &ViewDesc::default())
+            .expect("a third view fits"),
+    ];
+    let tables = recorder
+        .events()
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::Created { kind: ObjectKind::Image, label: Some(label) }
+                    if label == "sky prefilter table"
+            )
+        })
+        .count();
+    assert_eq!(
+        tables,
+        1,
+        "the table was uploaded {tables} times for {} views",
+        1 + views.len()
+    );
+    let shared = renderer.sky_prefilter.view;
+    for id in views {
+        let view = renderer.views[id.index() - 1]
+            .as_ref()
+            .expect("a live view");
+        assert_eq!(view.ssr.sky_prefilter_view(), shared);
+    }
+    assert_eq!(renderer.primary.ssr.sky_prefilter_view(), shared);
+
+    for view in views {
+        renderer.destroy_view(device, view);
+    }
+    renderer.destroy(device);
+    assert_eq!(recorder.total_live_objects(), 0, "the renderer leaked");
     recorder.assert_valid();
 }
 

@@ -20,15 +20,13 @@
 //! constructor that also records into an
 //! [`UploadBatch`](crate::texture::UploadBatch) still has to
 //! [abandon](crate::texture::UploadBatch::abandon) it on failure, since the
-//! batch would otherwise copy into what this destroyed — `Ssr::new` and
-//! `Exposure::new` do.
+//! batch would otherwise copy into what this destroyed — `Exposure::new`
+//! does.
 
 use crcbl_hal::{
     BindGroupHandle, BindGroupLayoutHandle, BufferHandle, ComputePipelineHandle, Device,
     GraphicsPipelineHandle, ImageHandle, ImageViewHandle, PipelineLayoutHandle, SamplerHandle,
 };
-
-use crate::texture::UploadedTexture;
 
 /// One handle a [`Partial`] holds, tagged with the `destroy_*` it needs.
 #[derive(Clone, Copy, Debug)]
@@ -106,14 +104,6 @@ impl<'d> Partial<'d> {
     pub(crate) fn add<H: Copy + Into<Created>>(&mut self, handle: H) -> H {
         self.created.push(handle.into());
         handle
-    }
-
-    /// Holds an uploaded texture's image and view, and hands it back — the
-    /// view released first, as [`UploadedTexture::destroy`] does.
-    pub(crate) fn add_texture(&mut self, texture: UploadedTexture) -> UploadedTexture {
-        self.add(texture.image);
-        self.add(texture.view);
-        texture
     }
 
     /// Lets go of everything without destroying it, once the finished pass owns

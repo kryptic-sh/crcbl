@@ -48,6 +48,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and drawing ASCII grew a process's private dirty memory by 3288 kB read and by
   472 kB mapped. Faces of a collection (`.ttc`, such as Noto Sans CJK) are
   copied as before.
+- **Every view's reflection march and water surface read the renderer's sky
+  prefilter table** instead of each view uploading its own identical
+  `"sky prefilter table"`, so `ForwardRenderer::create_view` creates one image
+  and records one upload fewer.
 
 ### Fixed
 

@@ -443,6 +443,9 @@ pub(super) struct ViewInputs<'a> {
     pub(super) probes: &'a [BufferHandle],
     pub(super) specular_dfg: ImageViewHandle,
     pub(super) ltc_table: ImageViewHandle,
+    /// The renderer's sky prefilter table, which the view's [`Ssr`] borrows —
+    /// see [`crate::ssr::Ssr::sky_prefilter_view`].
+    pub(super) sky_prefilter: ImageViewHandle,
     /// The shadow atlas and the sampler that compares against it.
     pub(super) shadow_map: ImageViewHandle,
     pub(super) shadow_sampler: SamplerHandle,
@@ -1463,8 +1466,8 @@ impl View {
         // their release order lives.
         //
         // **Built here whatever the effects say**, unlike the occlusion pair:
-        // the water surface binds this pass's block and prefiltered sky on
-        // every frame it draws — see [`crate::water`]. Its pipelines were
+        // the water surface binds this pass's block on every frame it draws —
+        // see [`crate::water`]. Its pipelines were
         // compiled before this — see [`ViewPipelines`].
         //
         // The Hi-Z pyramid the march climbs is not: nothing else reads it, so
@@ -1472,11 +1475,11 @@ impl View {
         // [`View::build_passes`].
         rollback.ssr = Some(Ssr::new(
             device,
-            uploads,
             rollback
                 .ssr_pipelines
                 .take()
                 .unwrap_or_else(|| unreachable!("`View::build` placed the march's set above")),
+            inputs.sky_prefilter,
             inputs.specular_dfg,
             frames,
         )?);
@@ -3778,6 +3781,7 @@ impl ForwardRenderer {
                 probes: &probes,
                 specular_dfg: self.specular_dfg.view,
                 ltc_table: self.ltc_table.view,
+                sky_prefilter: self.sky_prefilter.view,
                 shadow_map: self.shadow_atlas_view,
                 shadow_sampler: self.shadow_sampler,
                 ambient_occlusion: self.ambient_occlusion_placeholder.view,

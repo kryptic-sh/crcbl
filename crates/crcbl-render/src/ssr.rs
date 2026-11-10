@@ -48,20 +48,16 @@ use crcbl_hal::{
     ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc,
     PipelineLayoutHandle, SampleType, ShaderStages, StoreOp, check_portable_storage_buffers,
 };
-use crcbl_shaders::{SSR, SSR_BLUR, sky_prefilter, ssr};
+use crcbl_shaders::{SSR, SSR_BLUR, ssr};
 
 use crate::graph::{ImageId, RenderGraph};
 use crate::partial::Partial;
 use crate::ssao::cached_group;
-use crate::texture::{UploadBatch, UploadedTexture};
 
-/// The binding `ssr.slang` reads [`sky_prefilter`]'s table through — after the
-/// pyramid's slots, so Metal's declaration-order argument numbering stays
-/// aligned with this layout.
+/// The binding `ssr.slang` reads [`crcbl_shaders::sky_prefilter`]'s table
+/// through — after the pyramid's slots, so Metal's declaration-order argument
+/// numbering stays aligned with this layout.
 const SKY_PREFILTER_BINDING: u32 = 5 + crate::hiz::MAX_LEVELS;
-
-/// [`sky_prefilter::PREFILTER_SIZE`] as an image extent.
-const SKY_PREFILTER_SIZE: u32 = sky_prefilter::PREFILTER_SIZE as u32;
 
 /// The binding `ssr.slang` reads [`crcbl_shaders::dfg`]'s pair through,
 /// beside the sky table.
@@ -226,11 +222,11 @@ pub(crate) struct Ssr {
     /// hand the even frames' block to the odd frames.
     blur_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
     /// `crcbl_shaders::sky_prefilter`'s table as the `Rgba8Unorm` image
-    /// `ssr.slang` reads the sky through at a surface's roughness. Uploaded
-    /// once here rather than by [`crate::forward`], because this pass is its
-    /// only reader — the DFG table beside it in the forward pass has a reader
-    /// there.
-    sky_prefilter: UploadedTexture,
+    /// `ssr.slang` reads the sky through at a surface's roughness. **The
+    /// renderer's own table, borrowed**, on [`Ssr::dfg`]'s terms: the bytes are
+    /// the same for every view, so [`crate::forward`] uploads them once, owns
+    /// the image and destroys it after every view that binds it.
+    sky_prefilter: ImageViewHandle,
     /// `crcbl_shaders::dfg`'s pair as the `Rgba8Unorm` image `ssr.slang`
     /// scales its environment by — `f0 · scale + bias`, the split-sum's second
     /// half. **The renderer's own table, borrowed**: [`crate::forward`]
@@ -640,58 +636,25 @@ impl Ssr {
     /// Passes [`Ssr::add_passes`] adds to a frame.
     pub(crate) const PASSES: u32 = 2;
 
-    /// Builds the uniform ring against `pipelines`, which it owns from here,
-    /// recording the sky table's upload into `uploads` — so no frame may run
-    /// these passes until that batch has been submitted.
+    /// Builds the uniform ring against `pipelines`, which it owns from here.
     ///
-    /// `dfg` is the renderer's split-sum table — see [`Ssr::dfg`] — and must
-    /// outlive this.
+    /// `sky_prefilter` and `dfg` are the renderer's tables — see
+    /// [`Ssr::sky_prefilter`] and [`Ssr::dfg`] — and must outlive this.
     ///
     /// # Errors
     ///
     /// [`HalError`] from any seam call. A failure part-way through releases
     /// everything already created and `pipelines` with it — see
-    /// [`crate::partial`] — and [abandons](UploadBatch::abandon) `uploads`,
-    /// which by then may hold the sky table's copy into an image that release
-    /// destroyed.
+    /// [`crate::partial`].
     pub(crate) fn new(
         device: &dyn Device,
-        uploads: &mut UploadBatch<'_>,
         pipelines: SsrPipelines,
+        sky_prefilter: ImageViewHandle,
         dfg: ImageViewHandle,
         frames: usize,
     ) -> Result<Self, HalError> {
         let mut made = Partial::new(device);
         pipelines.hold(&mut made);
-        let built = Self::build(device, uploads, pipelines, dfg, frames, &mut made);
-        match built {
-            Ok(_) => made.keep(),
-            Err(_) => uploads.abandon(),
-        }
-        built
-    }
-
-    /// [`Ssr::new`]'s body, with every object it creates held in `made`.
-    fn build(
-        device: &dyn Device,
-        uploads: &mut UploadBatch<'_>,
-        pipelines: SsrPipelines,
-        dfg: ImageViewHandle,
-        frames: usize,
-        made: &mut Partial<'_>,
-    ) -> Result<Self, HalError> {
-        // The committed table, fixed point in four bytes a texel — see
-        // `sky_prefilter::PREFILTER_TEXEL_BYTES`. Not baked here, for the DFG
-        // table's reason in `crate::forward`: the integrator is a Monte Carlo
-        // sum and four backends would bake four tables.
-        let sky_prefilter = made.add_texture(uploads.texture(
-            "sky prefilter table",
-            Format::Rgba8Unorm,
-            (SKY_PREFILTER_SIZE, SKY_PREFILTER_SIZE),
-            &[&[&sky_prefilter::texels()]],
-            ImageViewType::D2,
-        )?);
-
         let mut uniforms = Vec::with_capacity(frames);
         for _ in 0..frames {
             uniforms.push(made.add(device.create_buffer(&BufferDesc {
@@ -701,6 +664,7 @@ impl Ssr {
                 memory: MemoryLocation::HostUpload,
             })?));
         }
+        made.keep();
 
         Ok(Self {
             uniforms,
@@ -728,10 +692,11 @@ impl Ssr {
         self.uniforms[frame]
     }
 
-    /// The sky prefilter table's view — see [`Ssr::uniforms`] for why
-    /// [`crate::water`] reads this rather than uploading the table again.
+    /// The renderer's sky prefilter table, which this pass borrows and
+    /// [`crate::water`] reads through it, beside [`Ssr::uniforms`]: the
+    /// surface falls back to the sky exactly as this pass does.
     pub(crate) fn sky_prefilter_view(&self) -> ImageViewHandle {
-        self.sky_prefilter.view
+        self.sky_prefilter
     }
 
     /// Writes `frame`'s uniform block.
@@ -793,7 +758,7 @@ impl Ssr {
         let pipeline_layout = self.pipelines.layouts.pipeline_layout;
         let layout = self.pipelines.layouts.layout;
         let uniforms = self.uniforms[frame];
-        let sky_prefilter_view = self.sky_prefilter.view;
+        let sky_prefilter_view = self.sky_prefilter;
         let dfg_view = self.dfg;
         // Split so the two closures below borrow different halves of `self`, on
         // `Ssao::add_passes`' terms: one `&mut self` shared between them is what
@@ -1027,7 +992,6 @@ impl Ssr {
         for buffer in self.uniforms {
             device.destroy_buffer(buffer);
         }
-        self.sky_prefilter.destroy(device);
     }
 }
 

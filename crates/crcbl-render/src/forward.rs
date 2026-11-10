@@ -152,8 +152,8 @@ use crcbl_hal::{
 use crcbl_shaders::meshlet::MeshClusters;
 use crcbl_shaders::probe_gather::PunctualProducer;
 use crcbl_shaders::{
-    MESH, MESH_CLUSTER, Stage, TONEMAP, contact_shadows, dfg, level_select, ltc, mesh, ssao, ssr,
-    tonemap,
+    MESH, MESH_CLUSTER, Stage, TONEMAP, contact_shadows, dfg, level_select, ltc, mesh,
+    sky_prefilter, ssao, ssr, tonemap,
 };
 use glam::{Mat4, Quat, Vec3};
 use std::sync::Arc;
@@ -714,6 +714,10 @@ const DFG_SIZE_U32: u32 = dfg::DFG_SIZE as u32;
 /// module is what would make a day they were not into a compile error here
 /// rather than a stretched image.
 const LTC_SIZE_U32: u32 = ltc::LTC_SIZE as u32;
+
+/// [`crcbl_shaders::sky_prefilter::PREFILTER_SIZE`] as an image extent, on
+/// [`DFG_SIZE_U32`]'s terms.
+const SKY_PREFILTER_SIZE_U32: u32 = sky_prefilter::PREFILTER_SIZE as u32;
 
 /// The `Rgba8Unorm` texel that occludes nothing and steers nothing.
 ///
@@ -2380,6 +2384,15 @@ pub struct ForwardRenderer {
     /// it is bound on every path because Slang's Metal backend materialises
     /// every global into every entry point.
     ltc_table: UploadedTexture,
+    /// `crcbl_shaders::sky_prefilter`'s table as an `Rgba8Unorm` image, which
+    /// every view's reflection march reads the sky through at a surface's
+    /// roughness — see [`crate::ssr::Ssr::sky_prefilter_view`] — and the water
+    /// surface beside it.
+    ///
+    /// Uploaded once, on [`ForwardRenderer::specular_dfg`]'s terms: the bytes
+    /// are the same for every view, so each view's [`crate::ssr::Ssr`] borrows
+    /// this image, and it is destroyed after the views.
+    sky_prefilter: UploadedTexture,
     /// `[frame][view]`: the entries [`ForwardRenderer::shadow_groups`] was built
     /// from.
     ///
@@ -5143,6 +5156,19 @@ impl ForwardRenderer {
             ImageViewType::D2,
         )?;
         rollback.textures.push(ltc_table);
+
+        // The sky's prefiltered table, which only the views' reflection
+        // marches and the water surface read — uploaded here rather than per
+        // view, for the DFG table's reason above. Fixed point: see
+        // `crcbl_shaders::sky_prefilter::PREFILTER_TEXEL_BYTES`.
+        let sky_prefilter = uploads.texture(
+            "sky prefilter table",
+            Format::Rgba8Unorm,
+            (SKY_PREFILTER_SIZE_U32, SKY_PREFILTER_SIZE_U32),
+            &[&[&sky_prefilter::texels()]],
+            ImageViewType::D2,
+        )?;
+        rollback.textures.push(sky_prefilter);
         service();
 
         // **A comparison sampler, and that is the PCF.** Each
@@ -5400,6 +5426,7 @@ impl ForwardRenderer {
                 probes: &probe_buffers,
                 specular_dfg: specular_dfg.view,
                 ltc_table: ltc_table.view,
+                sky_prefilter: sky_prefilter.view,
                 shadow_map: shadow_atlas_view,
                 shadow_sampler,
                 ambient_occlusion: ambient_occlusion_placeholder.view,
@@ -6060,6 +6087,7 @@ impl ForwardRenderer {
             probe_occluders,
             specular_dfg,
             ltc_table,
+            sky_prefilter,
             shadow_group_entries,
             // Off, and unbuilt: the grid is opt-in, so a caller that never asks
             // for one draws the frame it drew before this module existed.
@@ -11426,6 +11454,7 @@ impl ForwardRenderer {
         }
         self.specular_dfg.destroy(device);
         self.ltc_table.destroy(device);
+        self.sky_prefilter.destroy(device);
         self.normal_page.destroy(device);
         self.mro_page.destroy(device);
         self.emissive_page.destroy(device);

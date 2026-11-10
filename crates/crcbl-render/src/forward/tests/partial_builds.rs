@@ -257,9 +257,6 @@ fn the_view_build_passes_release_on_every_failure() {
     let device = device.as_ref();
     let fullscreen = ForwardRenderer::build_fullscreen;
 
-    // Ssr records its sky table's upload, so a failure must abandon the batch
-    // as well as release; the batch is dropped unsubmitted either way, which
-    // releases its staging buffers before the count is read.
     let dfg_image = device
         .create_image(&ImageDesc {
             label: Some("dfg"),
@@ -297,18 +294,10 @@ fn the_view_build_passes_release_on_every_failure() {
         &recorder,
         device,
         |device| {
-            let mut uploads = UploadBatch::new(device, queue, "test");
             let pipelines = SsrPipelines::new(device, fullscreen)?;
-            let built = Ssr::new(device, &mut uploads, pipelines, dfg, FRAMES);
-            // A failed build must abandon the batch, or a later submit would
-            // copy into the objects it just released.
-            if built.is_err() {
-                assert!(
-                    uploads.submit().is_err(),
-                    "Ssr::new did not abandon its upload batch"
-                );
-            }
-            built
+            // The DFG view stands in for the renderer's sky table too: `Ssr`
+            // borrows both and releases neither.
+            Ssr::new(device, pipelines, dfg, dfg, FRAMES)
         },
         Ssr::destroy,
     );
@@ -451,7 +440,8 @@ const OPTIONAL: [&str; 1] = ["cull stats readback"];
 /// layouts to its last creation leaks nothing** — which is the whole of the
 /// mesh pass's [`pipeline_batch`] with the froxel volume's and the reflection
 /// march's members in it, the camera's build with the two passes that are
-/// handed a set, and everything the renderer builds after the camera.
+/// handed a set, and everything the renderer builds after the camera — and at
+/// the renderer's sky prefilter table, which the camera's march borrows.
 ///
 /// Every member of a batch runs whatever the others returned, so a refusal
 /// part way through leaves the later members' pipelines live: the mesh pass's
@@ -487,7 +477,7 @@ fn a_build_failing_in_its_pipeline_batch_leaks_nothing() {
         (ObjectKind::ComputePipeline, "volumetric integrate"),
         (ObjectKind::GraphicsPipeline, "volumetric composite"),
         (ObjectKind::GraphicsPipeline, "ssr blur"),
-        (ObjectKind::Image, "sky prefilter table"),
+        (ObjectKind::Buffer, "ssr params"),
         (ObjectKind::Buffer, "volumetric params 0"),
     ] {
         assert!(
@@ -496,9 +486,25 @@ fn a_build_failing_in_its_pipeline_batch_leaks_nothing() {
              creation, so this window does not cover it"
         );
     }
+    // The renderer's sky prefilter table, which every view's march borrows, is
+    // uploaded before that window: its staging buffer, image and view are
+    // failed too, since a view's build no longer creates them.
+    let table = index(ObjectKind::Image, "sky prefilter table");
+    let sky_table = table - 1..=table + 1;
+    for creates in sky_table.clone() {
+        assert!(
+            created[creates]
+                .1
+                .as_deref()
+                .is_some_and(|label| label.starts_with("sky prefilter table")),
+            "creation {creates}, {:?}, is not the sky prefilter table's",
+            created[creates]
+        );
+    }
 
     let mut tolerated = Vec::new();
-    for (creates, failed) in created.iter().enumerate().take(last + 1).skip(first) {
+    for creates in sky_table.chain(first..=last) {
+        let failed = &created[creates];
         recorder.clear();
         recorder.fail_create_after(u32::try_from(creates).expect("fits"));
         let error = match ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb) {
