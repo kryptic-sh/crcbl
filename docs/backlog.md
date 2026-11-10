@@ -3,6 +3,28 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## A horde test hung once on Windows CI (2026-11-10)
+
+`horde`'s `game::tests::two_games_with_one_seed_agree_about_every_run` timed out
+at nextest's 240 s cap in `build + test (windows-latest)` on 1c6fcaeb (CI run
+42787524043, first attempt). It passed in 0.06–0.10 s on the four Windows runs
+before it; the rerun of the failed job was green, and 300 local runs on Linux
+all passed. Every other test in that run passed.
+
+- **Not the commit:** 1c6fcaeb changed only `crcbl-shell`'s key events, and the
+  test's harness feeds `Game::key_event` directly.
+- **Suspect, unverified:** the test has no loop of its own (`Harness::tap`
+  presses, releases and ticks), so the wait is inside `Game::tick` or
+  `Harness::staged`'s setup. Each tick's steering runs on a `crcbl_jobs::Pool`
+  through `Pool::par_for`, and the game logic sits behind a `Mutex` (`lock` in
+  `apps/horde/src/game.rs`). A lost wake-up in the pool, under a starved
+  four-core runner, would look like this.
+- **What would settle it:** a second occurrence, or a stress test of
+  `Pool::par_for` with more threads than cores on Windows. nextest's timeout
+  kills the process without a stack dump, so catching the next one needs a
+  watchdog in the test that dumps every thread before the cap, or a reproduction
+  under `--test-threads` saturation on a Windows machine.
+
 ## `crcbl-wayland`: what the dsplr slice left (2026-11-04)
 
 `crcbl-wayland` holds the libwayland binding and `Display`, so a program outside
