@@ -41,10 +41,6 @@ sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
 - **dsplr M7 needs X11 output configuration (2026-11-09, not started).** Whether
   `crcbl-shell`'s RandR FFI grows a set path or dsplr uses x11rb is the owner's
   call (see dsplr's backlog).
-- **`crcbl-shell`'s docs fail without features.** `wayland`'s module docs link
-  to `e2e`, which exists only under `wayland-e2e`, so `cargo doc -p crcbl-shell`
-  with default features errors on Linux and FreeBSD. CI documents with
-  `--all-features` and does not see it. Older than this slice; not fixed.
 
 ## `shortcut_keysym` on the web still has Caps Lock applied (2026-11-10)
 

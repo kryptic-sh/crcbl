@@ -100,7 +100,12 @@
 //!    manager's tree, **and no `wl_pointer.enter` or `wl_keyboard.enter`** —
 //!    an unmapped surface cannot receive input, because there is nothing on
 //!    screen to point at. Attaching a buffer is the renderer's job, so this
-//!    backend cannot map a window on its own, by design; see [`e2e`].
+//!    backend cannot map a window on its own, by design; see
+#![cfg_attr(feature = "wayland-e2e", doc = "   [`e2e`].")]
+#![cfg_attr(
+    not(feature = "wayland-e2e"),
+    doc = "   `e2e`, behind the `wayland-e2e` feature."
+)]
 //! 5. **A seat can have no devices at all.** `wl_seat.capabilities` is `0` on
 //!    a headless compositor and changes at runtime when a device is plugged
 //!    in. There is no "the keyboard" — there is whatever the seat currently
