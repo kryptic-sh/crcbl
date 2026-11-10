@@ -36,6 +36,14 @@
 //! | What the OS calls that key | [`Scancode`] | no | round-tripping keys we have no name for |
 //! | What symbol it produces | [`Keysym`] | **yes** | rebind menus, shortcut display, layout-sensitive shortcuts |
 //!
+//! The symbol comes twice on a shell's key event: as the key produces it, and
+//! as it would with Caps Lock off (`ShellEvent::Key`'s `shortcut_keysym`). A
+//! shortcut matches the second, so `Ctrl+R` with Caps Lock on is still
+//! `Ctrl+r`; text and labels read the first. The difference is the layout's,
+//! not a case swap: AZERTY's `caps:digits_row` makes Caps Lock move the digit
+//! row as well. A Shift Lock (`caps:shiftlock`) is a locked Shift, not Caps
+//! Lock, so it stays applied to both symbols and in [`Modifiers`].
+//!
 //! And a fourth, which is not a keystroke at all: **text**. Composed text
 //! arrives as a separate commit string (`ShellEvent::TextCommit`) because IME
 //! input has no one-to-one relationship with key presses — one keystroke can

@@ -687,6 +687,9 @@ pub(crate) mod shim {
             scancode: scancode_of(code),
             key_code: key_code_of(code),
             keysym: keysym_of(key),
+            // `key` already has Caps Lock applied and nothing says what it
+            // would be without; see the field's docs.
+            shortcut_keysym: keysym_of(key),
             state: edge(state),
             repeat: state & STATE_REPEAT != 0,
             modifiers: modifiers(state),

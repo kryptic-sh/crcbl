@@ -625,13 +625,17 @@ impl Win32Shell {
                 {
                     return;
                 }
+                let keysym = Self::keysym_of(key_code, virtual_key);
                 let event = ShellEvent::Key {
                     window,
                     device,
                     time,
                     scancode: Scancode(scancode),
                     key_code,
-                    keysym: Self::keysym_of(key_code, virtual_key),
+                    keysym,
+                    // `keysym_of` never applies Caps Lock: it reads the
+                    // layout's unshifted character.
+                    shortcut_keysym: keysym,
                     state,
                     repeat,
                     modifiers,

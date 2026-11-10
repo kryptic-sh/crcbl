@@ -505,10 +505,12 @@ impl WaylandShell {
             })
             .flatten();
         let seat = &self.seats[index];
-        let keysym = seat
+        let (keysym, shortcut_keysym) = seat
             .keymap
             .as_ref()
-            .map_or(Keysym::NONE, |keymap| keymap.keysym(key));
+            .map_or((Keysym::NONE, Keysym::NONE), |keymap| {
+                (keymap.keysym(key), keymap.shortcut_keysym(key))
+            });
         let event_time = seat.repeat.not_before(self.time.event_time(time));
         let event = ShellEvent::Key {
             window,
@@ -517,6 +519,7 @@ impl WaylandShell {
             scancode: Scancode(key),
             key_code,
             keysym,
+            shortcut_keysym,
             state: ButtonState::from_pressed(pressed),
             repeat: false,
             modifiers: seat.modifiers,
@@ -554,6 +557,7 @@ impl WaylandShell {
                     scancode: key,
                     key_code,
                     keysym,
+                    shortcut_keysym,
                 },
             );
         } else if !pressed {
@@ -593,6 +597,7 @@ impl WaylandShell {
                     scancode: Scancode(key.scancode),
                     key_code: key.key_code,
                     keysym: key.keysym,
+                    shortcut_keysym: key.shortcut_keysym,
                     state: ButtonState::Pressed,
                     repeat: true,
                     modifiers: seat.modifiers,

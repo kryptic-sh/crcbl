@@ -185,6 +185,32 @@ pub enum ShellEvent {
         /// moves have named constants, [`Keysym::ESCAPE`], [`Keysym::DOWN`]
         /// and the rest.
         keysym: Keysym,
+        /// The symbol this key produces with Caps Lock (xkb's `Lock`
+        /// modifier) not applied: what a shortcut or a menu accelerator should
+        /// match, so `Ctrl+R` with Caps Lock on still reads as `Ctrl+r`. Equal
+        /// to `keysym` whenever Caps Lock is off.
+        ///
+        /// Shift is still applied wherever `keysym` applies it — `Ctrl+Shift+R`
+        /// is its own shortcut. Per backend:
+        ///
+        /// * **Wayland, X11** — read from a second xkb state that tracks the
+        ///   first with Lock removed, so the layout decides what Lock would
+        ///   have changed (AZERTY's `caps:digits_row` moves the digit row too;
+        ///   some layouts leave keys alone). A Shift Lock (`caps:shiftlock`) is
+        ///   a locked Shift, not Lock, so it stays applied here and in
+        ///   `modifiers`. [`Keysym::NONE`] without libxkbcommon, as `keysym`
+        ///   is.
+        /// * **Win32** — `keysym`, which `MAPVK_VK_TO_CHAR` answers without
+        ///   reading any modifier state, Caps Lock and Shift included.
+        /// * **AppKit** — `keysym`, read from `charactersIgnoringModifiers`,
+        ///   which ignores every modifier but Shift, Caps Lock included.
+        ///   Letters are lowercased; Shift still applies to the rest, so
+        ///   Shift+1 is `!`.
+        /// * **Headless** — `keysym`; the synthetic keyboard has no Caps Lock.
+        /// * **Web** — `keysym`, *with* Caps Lock applied: the browser's
+        ///   `KeyboardEvent.key` arrives with it, and nothing in the event says
+        ///   what the key would have produced without it.
+        shortcut_keysym: Keysym,
         /// Down or up.
         state: ButtonState,
         /// Whether this is an auto-repeat, not a fresh press.
@@ -692,6 +718,7 @@ mod tests {
             scancode: Scancode(57),
             key_code: Some(KeyCode::Space),
             keysym: Keysym::from_char(' '),
+            shortcut_keysym: Keysym::from_char(' '),
             state: ButtonState::Pressed,
             repeat: false,
             modifiers: Modifiers::empty(),

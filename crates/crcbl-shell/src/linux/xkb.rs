@@ -56,7 +56,7 @@
 //! | --- | --- | --- |
 //! | [`KeyCode`] | our evdev table | our evdev table — **unchanged** |
 //! | [`Scancode`](crcbl_core::input::Scancode) | the evdev code | the evdev code — **unchanged** |
-//! | [`Keysym`] | the layout's symbol | [`Keysym::NONE`](crcbl_core::input::Keysym::NONE) |
+//! | [`Keysym`], both [`Keymap::keysym`] and [`Keymap::shortcut_keysym`] | the layout's symbol | [`Keysym::NONE`](crcbl_core::input::Keysym::NONE) |
 //! | `TextCommit` | committed UTF-8, with dead keys and Compose sequences | never emitted |
 //! | [`Modifiers`] | XKB's effective state | derived from held [`KeyCode`]s |
 //! | key repeats at all | `xkb_keymap_key_repeats` | every key repeats |
@@ -125,8 +125,20 @@ const RTLD_NOW: c_int = 2;
 
 /// `XKB_KEYMAP_FORMAT_TEXT_V1` — the only format there is.
 const KEYMAP_FORMAT_TEXT_V1: c_int = 1;
+/// `XKB_STATE_MODS_DEPRESSED`.
+const STATE_MODS_DEPRESSED: c_int = 1 << 0;
+/// `XKB_STATE_MODS_LATCHED`.
+const STATE_MODS_LATCHED: c_int = 1 << 1;
+/// `XKB_STATE_MODS_LOCKED`.
+const STATE_MODS_LOCKED: c_int = 1 << 2;
 /// `XKB_STATE_MODS_EFFECTIVE`.
 const STATE_MODS_EFFECTIVE: c_int = 1 << 3;
+/// `XKB_STATE_LAYOUT_DEPRESSED`.
+const STATE_LAYOUT_DEPRESSED: c_int = 1 << 4;
+/// `XKB_STATE_LAYOUT_LATCHED`.
+const STATE_LAYOUT_LATCHED: c_int = 1 << 5;
+/// `XKB_STATE_LAYOUT_LOCKED`.
+const STATE_LAYOUT_LOCKED: c_int = 1 << 6;
 /// `XKB_MOD_INVALID`.
 const MOD_INVALID: u32 = u32::MAX;
 
@@ -202,6 +214,12 @@ mod prototype {
     /// `enum xkb_state_component xkb_state_update_key(struct xkb_state *,
     /// xkb_keycode_t, enum xkb_key_direction)`
     pub type StateUpdateKey = unsafe extern "C" fn(*mut XkbState, u32, c_int) -> c_int;
+    /// `xkb_mod_mask_t xkb_state_serialize_mods(struct xkb_state *,
+    /// enum xkb_state_component)`
+    pub type StateSerializeMods = unsafe extern "C" fn(*mut XkbState, c_int) -> u32;
+    /// `xkb_layout_index_t xkb_state_serialize_layout(struct xkb_state *,
+    /// enum xkb_state_component)`
+    pub type StateSerializeLayout = unsafe extern "C" fn(*mut XkbState, c_int) -> u32;
 }
 
 /// The C prototypes this module asserts about **libxkbcommon-x11**.
@@ -260,6 +278,8 @@ struct Lib {
     state_key_get_one_sym: prototype::StateKeyGetOneSym,
     state_key_get_utf8: prototype::StateKeyGetUtf8,
     state_mod_index_is_active: prototype::StateModIndexIsActive,
+    state_serialize_mods: prototype::StateSerializeMods,
+    state_serialize_layout: prototype::StateSerializeLayout,
     /// The compose module, or `None` in a libxkbcommon without one.
     compose: Option<ComposeLib>,
 }
@@ -364,6 +384,11 @@ fn load_uncached() -> Option<Lib> {
             "xkb_state_mod_index_is_active",
             prototype::StateModIndexIsActive
         ),
+        state_serialize_mods: symbol!("xkb_state_serialize_mods", prototype::StateSerializeMods),
+        state_serialize_layout: symbol!(
+            "xkb_state_serialize_layout",
+            prototype::StateSerializeLayout
+        ),
         compose: load_compose(handle),
     })
 }
@@ -454,6 +479,16 @@ pub struct Keymap {
     context: *mut XkbContext,
     keymap: *mut XkbKeymap,
     state: *mut XkbState,
+    /// A second state on the same keymap, kept equal to `state` except that
+    /// the Lock modifier is never set in it: what
+    /// [`shortcut_keysym`](Self::shortcut_keysym) reads. Re-derived from
+    /// `state` by [`sync_shortcut_state`](Self::sync_shortcut_state) after
+    /// every change, so it can never drift from the state the keysym and the
+    /// text come from.
+    shortcut_state: *mut XkbState,
+    /// The mask bit of XKB's `Lock` modifier in this keymap, or `0` when the
+    /// keymap has none — taken out of every mask `shortcut_state` is given.
+    lock_mask: u32,
     /// `(xkb modifier index, engine bit)` for the modifiers this keymap has.
     /// A modifier the keymap does not define is absent rather than always-off,
     /// which is the same thing here but costs one fewer call per event.
@@ -580,7 +615,7 @@ impl Keymap {
 
         // SAFETY: a null context flag set is `XKB_CONTEXT_NO_FLAGS`, and every
         // pointer is checked before use. Each object is released exactly once —
-        // here on the failure paths, or in `Drop` on success.
+        // here or in `assemble` on the failure paths, or in `Drop` on success.
         unsafe {
             let context = (lib.context_new)(0);
             if context.is_null() {
@@ -604,15 +639,63 @@ impl Keymap {
                 (lib.context_unref)(context);
                 return None;
             }
-            Some(Self {
-                lib,
-                context,
-                keymap,
-                state,
-                modifiers: Self::modifier_indices(lib, keymap),
-                compose: Compose::for_locale(lib, context),
-            })
+            Self::assemble(lib, context, keymap, state)
         }
+    }
+
+    /// Builds the value from the three objects a constructor made, adding the
+    /// [`shortcut_state`](Self::shortcut_state) and seeding it from `state`.
+    ///
+    /// Takes ownership of all three: on failure they are released here, so the
+    /// caller has nothing left to clean up whichever way this returns.
+    ///
+    /// # Safety
+    ///
+    /// `context`, `keymap` and `state` must be live, non-null, made by `lib`,
+    /// with `keymap` built on `context` and `state` on `keymap`, and owned by
+    /// the caller — one reference each, which this takes over.
+    unsafe fn assemble(
+        lib: &'static Lib,
+        context: *mut XkbContext,
+        keymap: *mut XkbKeymap,
+        state: *mut XkbState,
+    ) -> Option<Self> {
+        // SAFETY: the caller guarantees `keymap` is live; the result is
+        // checked for null before use.
+        let shortcut_state = unsafe { (lib.state_new)(keymap) };
+        if shortcut_state.is_null() {
+            // SAFETY: the caller handed over one reference to each, released
+            // here exactly once, innermost first as `Drop` does.
+            unsafe {
+                (lib.state_unref)(state);
+                (lib.keymap_unref)(keymap);
+                (lib.context_unref)(context);
+            }
+            return None;
+        }
+        // SAFETY: the caller guarantees `keymap` is live.
+        let modifiers = unsafe { Self::modifier_indices(lib, keymap) };
+        let lock_mask = modifiers
+            .iter()
+            .find(|(_, bit)| *bit == Modifiers::CAPS_LOCK)
+            .and_then(|(index, _)| 1u32.checked_shl(*index))
+            .unwrap_or(0);
+        // SAFETY: the caller guarantees `context` is live.
+        let compose = unsafe { Compose::for_locale(lib, context) };
+        let mut assembled = Self {
+            lib,
+            context,
+            keymap,
+            state,
+            shortcut_state,
+            lock_mask,
+            modifiers,
+            compose,
+        };
+        // An X11 state starts with the server's latched modifiers already in
+        // it; the shortcut state must start from the same place.
+        assembled.sync_shortcut_state();
+        Some(assembled)
     }
 
     /// `(xkb modifier index, engine bit)` for every modifier this keymap has.
@@ -661,8 +744,8 @@ impl Keymap {
 
         // SAFETY: a null context flag set is `XKB_CONTEXT_NO_FLAGS`. The
         // context, keymap and state are each checked for null before use, and
-        // each is released exactly once — here on the failure paths, or in
-        // `Drop` on success.
+        // each is released exactly once — here or in `assemble` on the failure
+        // paths, or in `Drop` on success.
         let compiled = unsafe {
             let context = (lib.context_new)(0);
             if context.is_null() {
@@ -688,16 +771,9 @@ impl Keymap {
                 (lib.context_unref)(context);
                 return Self::unmap(mapped, size, None);
             }
-            Self {
-                lib,
-                context,
-                keymap,
-                state,
-                modifiers: Self::modifier_indices(lib, keymap),
-                compose: Compose::for_locale(lib, context),
-            }
+            Self::assemble(lib, context, keymap, state)
         };
-        Self::unmap(mapped, size, Some(compiled))
+        Self::unmap(mapped, size, compiled)
     }
 
     /// Releases the mapping and forwards `result`.
@@ -718,6 +794,40 @@ impl Keymap {
         // opaque integers XKB validates itself.
         unsafe {
             (self.lib.state_update_mask)(self.state, depressed, latched, locked, 0, 0, group);
+        }
+        self.sync_shortcut_state();
+    }
+
+    /// Copies `state` into [`shortcut_state`](Self::shortcut_state), with the
+    /// Lock modifier taken out of every mask.
+    ///
+    /// Copied from the state rather than fed the same inputs, because the X11
+    /// path feeds key transitions ([`update_key`](Self::update_key)): a Caps
+    /// Lock press fed to the shortcut state would lock Lock in it too. Reading
+    /// back what the real state concluded and removing one bit is the same
+    /// answer for every input path.
+    fn sync_shortcut_state(&mut self) {
+        let lib = self.lib;
+        let state = self.state;
+        // SAFETY: `state` is live for this value's lifetime, and the
+        // components are single `xkb_state_component` bits.
+        let mods = |component| unsafe { (lib.state_serialize_mods)(state, component) };
+        // SAFETY: as above.
+        let layout = |component| unsafe { (lib.state_serialize_layout)(state, component) };
+        let unlocked = !self.lock_mask;
+        // SAFETY: `self.shortcut_state` is live for this value's lifetime and
+        // built on the same keymap as `state`, so the masks and layout indices
+        // read from one are valid for the other.
+        unsafe {
+            (lib.state_update_mask)(
+                self.shortcut_state,
+                mods(STATE_MODS_DEPRESSED) & unlocked,
+                mods(STATE_MODS_LATCHED) & unlocked,
+                mods(STATE_MODS_LOCKED) & unlocked,
+                layout(STATE_LAYOUT_DEPRESSED),
+                layout(STATE_LAYOUT_LATCHED),
+                layout(STATE_LAYOUT_LOCKED),
+            );
         }
     }
 
@@ -754,6 +864,7 @@ impl Keymap {
         unsafe {
             (self.lib.state_update_key)(self.state, keycode, if pressed { DOWN } else { UP });
         }
+        self.sync_shortcut_state();
     }
 
     /// Re-seeds the state from an X11 event's `state` mask and layout group.
@@ -810,6 +921,27 @@ impl Keymap {
         Keysym(unsafe { (self.lib.state_key_get_one_sym)(self.state, scancode + EVDEV_OFFSET) })
     }
 
+    /// The symbol `scancode` (an evdev code) produces with Caps Lock — XKB's
+    /// `Lock` modifier — not applied, and everything else as in
+    /// [`keysym`](Self::keysym): what a shortcut matches, so `Ctrl+R` with Caps
+    /// Lock on reads as `Ctrl+r`.
+    ///
+    /// Read from a state with the modifier removed rather than by changing the
+    /// case of [`keysym`](Self::keysym), because what Lock does is the
+    /// layout's: `caps:digits_row` on AZERTY makes Lock move the digit row as
+    /// well as letters, and some layouts leave keys alone that a case swap
+    /// would change. A Shift Lock (`caps:shiftlock`) is a locked *Shift*, not
+    /// Lock, so it stays applied here, as it does in
+    /// [`modifiers`](Self::modifiers).
+    #[must_use]
+    pub fn shortcut_keysym(&self, scancode: u32) -> Keysym {
+        // SAFETY: as in `keysym`, on the shortcut state, which is live for
+        // this value's lifetime.
+        Keysym(unsafe {
+            (self.lib.state_key_get_one_sym)(self.shortcut_state, scancode + EVDEV_OFFSET)
+        })
+    }
+
     /// The text pressing `scancode` commits in the current layout, or `None`
     /// when it commits nothing a text field should receive.
     ///
@@ -864,6 +996,7 @@ impl Drop for Keymap {
         // and is released exactly once, innermost first — a state holds a
         // reference to its keymap, and a keymap to its context.
         unsafe {
+            (self.lib.state_unref)(self.shortcut_state);
             (self.lib.state_unref)(self.state);
             (self.lib.keymap_unref)(self.keymap);
             (self.lib.context_unref)(self.context);
@@ -966,6 +1099,159 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), count, "two bits must not read the same index");
+    }
+
+    /// A self-contained keymap — no includes, so no xkeyboard-config needed —
+    /// with the three keys the Caps Lock tests press: `h` on an `ALPHABETIC`
+    /// key, as every letter is in xkeyboard-config, plus Shift and Caps Lock
+    /// with the actions that make pressing them set and lock their modifiers.
+    const CAPS_KEYMAP: &str = r#"xkb_keymap {
+    xkb_keycodes "caps" {
+        minimum = 8;
+        maximum = 255;
+        <LFSH> = 50;
+        <AC06> = 43;
+        <CAPS> = 66;
+    };
+    xkb_types "caps" {
+        type "ONE_LEVEL" {
+            modifiers = none;
+            level_name[Level1] = "Any";
+        };
+        type "ALPHABETIC" {
+            modifiers = Shift+Lock;
+            map[Shift] = Level2;
+            map[Lock] = Level2;
+            level_name[Level1] = "Base";
+            level_name[Level2] = "Caps";
+        };
+    };
+    xkb_compat "caps" {
+        interpret Shift_L { action = SetMods(modifiers = Shift); };
+        interpret Caps_Lock { action = LockMods(modifiers = Lock); };
+    };
+    xkb_symbols "caps" {
+        key <LFSH> { [ Shift_L ] };
+        key <CAPS> { [ Caps_Lock ] };
+        key <AC06> { type = "ALPHABETIC", [ h, H ] };
+        modifier_map Shift { <LFSH> };
+        modifier_map Lock { <CAPS> };
+    };
+};
+"#;
+    /// evdev `KEY_H`, `<AC06>` in [`CAPS_KEYMAP`].
+    const KEY_H: u32 = 35;
+    /// evdev `KEY_LEFTSHIFT`, `<LFSH>`.
+    const KEY_LEFTSHIFT: u32 = 42;
+    /// evdev `KEY_CAPSLOCK`, `<CAPS>`.
+    const KEY_CAPSLOCK: u32 = 58;
+
+    unsafe extern "C" {
+        fn memfd_create(name: *const c_char, flags: core::ffi::c_uint) -> c_int;
+    }
+
+    /// [`CAPS_KEYMAP`], compiled through [`Keymap::from_fd`] the way a
+    /// compositor's keymap is, from an anonymous file as a compositor sends —
+    /// one per call, so tests running on threads of one process cannot share
+    /// it.
+    fn caps_keymap() -> Keymap {
+        use std::io::Write;
+        use std::os::fd::IntoRawFd;
+
+        assert!(
+            available(),
+            "libxkbcommon, which CI installs for the unit tests"
+        );
+        // SAFETY: the name is a NUL-terminated literal, and `memfd_create`
+        // either returns a fresh descriptor or -1.
+        let fd = unsafe { memfd_create(c"crcbl-xkb-caps-keymap".as_ptr(), 0) };
+        assert!(fd >= 0, "memfd_create failed");
+        // SAFETY: `fd` was just created and nothing else owns it.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        file.write_all(CAPS_KEYMAP.as_bytes())
+            .and_then(|()| file.write_all(&[0]))
+            .expect("the keymap written");
+        let size = u32::try_from(CAPS_KEYMAP.len() + 1).expect("a small keymap");
+        Keymap::from_fd(file.into_raw_fd(), size).expect("the test keymap compiles")
+    }
+
+    /// The real-modifier mask of `name` in `keymap`.
+    fn mask(keymap: &Keymap, name: &CStr) -> u32 {
+        // SAFETY: `keymap.keymap` is live, and `name` is NUL-terminated.
+        let index = unsafe { (keymap.lib.keymap_mod_get_index)(keymap.keymap, name.as_ptr()) };
+        assert_ne!(index, MOD_INVALID, "{name:?} is a real modifier");
+        1 << index
+    }
+
+    #[test]
+    fn the_shortcut_keysym_ignores_caps_lock_set_by_a_modifiers_event() {
+        let mut keymap = caps_keymap();
+        let (lower, upper) = (Keysym::from_char('h'), Keysym::from_char('H'));
+        let (shift, lock) = (mask(&keymap, c"Shift"), mask(&keymap, c"Lock"));
+
+        assert_eq!(keymap.keysym(KEY_H), lower, "Caps Lock off");
+        assert_eq!(keymap.shortcut_keysym(KEY_H), lower, "Caps Lock off");
+
+        // Wayland's `wl_keyboard.modifiers`: Caps Lock locked.
+        keymap.update(0, 0, lock, 0);
+        assert!(keymap.modifiers().contains(Modifiers::CAPS_LOCK));
+        assert_eq!(keymap.keysym(KEY_H), upper, "Caps Lock types capitals");
+        assert_eq!(
+            keymap.shortcut_keysym(KEY_H),
+            lower,
+            "a shortcut matches as if Caps Lock were off"
+        );
+
+        // Shift is a shortcut's own modifier and stays applied.
+        keymap.update(shift, 0, 0, 0);
+        assert_eq!(keymap.keysym(KEY_H), upper, "Shift held");
+        assert_eq!(keymap.shortcut_keysym(KEY_H), upper, "Shift held");
+
+        // Both: the layout decides `keysym`, and the shortcut view is Shift's.
+        keymap.update(shift, 0, lock, 0);
+        assert_eq!(keymap.shortcut_keysym(KEY_H), upper, "Shift with Caps Lock");
+
+        keymap.update(0, 0, 0, 0);
+        assert_eq!(keymap.keysym(KEY_H), lower, "Caps Lock off again");
+        assert_eq!(keymap.shortcut_keysym(KEY_H), lower, "Caps Lock off again");
+    }
+
+    #[test]
+    fn the_shortcut_keysym_ignores_caps_lock_set_by_key_transitions() {
+        // X11's path: the state is driven by key presses, not masks.
+        let mut keymap = caps_keymap();
+        let (lower, upper) = (Keysym::from_char('h'), Keysym::from_char('H'));
+        let tap = |keymap: &mut Keymap, scancode: u32| {
+            keymap.update_key(scancode + EVDEV_OFFSET, true);
+            keymap.update_key(scancode + EVDEV_OFFSET, false);
+        };
+
+        tap(&mut keymap, KEY_CAPSLOCK);
+        assert!(keymap.modifiers().contains(Modifiers::CAPS_LOCK));
+        assert_eq!(keymap.keysym(KEY_H), upper, "Caps Lock types capitals");
+        assert_eq!(keymap.shortcut_keysym(KEY_H), lower, "but not shortcuts");
+
+        keymap.update_key(KEY_LEFTSHIFT + EVDEV_OFFSET, true);
+        assert_eq!(keymap.shortcut_keysym(KEY_H), upper, "Shift with Caps Lock");
+        keymap.update_key(KEY_LEFTSHIFT + EVDEV_OFFSET, false);
+
+        tap(&mut keymap, KEY_CAPSLOCK);
+        assert!(!keymap.modifiers().contains(Modifiers::CAPS_LOCK));
+        assert_eq!(keymap.keysym(KEY_H), lower, "Caps Lock unlocked");
+        assert_eq!(keymap.shortcut_keysym(KEY_H), lower, "Caps Lock unlocked");
+        keymap.update_key(KEY_LEFTSHIFT + EVDEV_OFFSET, true);
+        assert_eq!(keymap.keysym(KEY_H), upper, "Shift held");
+        assert_eq!(keymap.shortcut_keysym(KEY_H), upper, "Shift held");
+        keymap.update_key(KEY_LEFTSHIFT + EVDEV_OFFSET, false);
+
+        // The focus-in resync, from a core event's `LockMask`.
+        keymap.resync_from_x11_state(u16::try_from(mask(&keymap, c"Lock")).expect("a core bit"));
+        assert_eq!(keymap.keysym(KEY_H), upper, "resynced with Caps Lock");
+        assert_eq!(
+            keymap.shortcut_keysym(KEY_H),
+            lower,
+            "resynced with Caps Lock"
+        );
     }
 
     #[test]

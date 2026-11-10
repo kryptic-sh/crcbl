@@ -815,6 +815,8 @@ impl HeadlessShell {
             scancode: synthetic_scancode(key),
             key_code: Some(key),
             keysym: synthetic_keysym(key),
+            // The synthetic keyboard has no Caps Lock to apply.
+            shortcut_keysym: synthetic_keysym(key),
             state,
             repeat,
             modifiers: self.modifiers,

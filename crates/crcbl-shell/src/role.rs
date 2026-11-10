@@ -682,6 +682,7 @@ mod tests {
             scancode: Scancode(0),
             key_code,
             keysym,
+            shortcut_keysym: keysym,
             state,
             repeat,
             modifiers: Modifiers::empty(),

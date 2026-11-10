@@ -24,6 +24,34 @@ sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
   with default features errors on Linux and FreeBSD. CI documents with
   `--all-features` and does not see it. Older than this slice; not fixed.
 
+## `shortcut_keysym` on the web still has Caps Lock applied (2026-11-10)
+
+`ShellEvent::Key::shortcut_keysym` (asked for by dsplr) is Caps-Lock-free on
+Wayland and X11, from a second xkb state in `linux::xkb::Keymap` with the `Lock`
+modifier removed. Win32 and AppKit need nothing: Win32's `MAPVK_VK_TO_CHAR`
+reads no modifier state, and AppKit's `charactersIgnoringModifiers` ignores
+every modifier but Shift (letters are then lowercased; Shift+1 stays `!`), so
+Caps Lock reaches neither. The web backend (`web::shim::__crcbl_web_key`) sets
+it to `keysym_of(KeyboardEvent.key)`, which the browser has already passed
+through Caps Lock, so `Ctrl+R` with Caps Lock on still reads as `R` there.
+
+- **Declined: swapping case when `CAPS_LOCK` is set.** Wrong on AZERTY with
+  `caps:digits_row` (Caps Lock moves the digit row too) and on keys Caps Lock
+  leaves alone. A Shift Lock (`caps:shiftlock`) is a locked Shift, not Lock, so
+  it is kept in both `shortcut_keysym` and `modifiers`.
+- **What it would take:** a layout query the browser exposes. The Keyboard Map
+  API (`navigator.keyboard.getLayoutMap()`) gives each `code`'s unshifted
+  character in Chromium only, and no Shift-applied form, so it cannot answer
+  `Ctrl+Shift+R` either. Not attempted; needs the owner's call on whether a
+  Chromium-only path is worth having.
+- **Not verified:** Wayland's half runs in `run-wayland-e2e.sh`
+  (`caps_lock_changes_the_keysym_and_not_the_shortcut_keysym`) and X11's in
+  `run-x11-e2e.sh`, both on the default US-style keymaps only; no
+  `caps:digits_row`, `caps:shiftlock` or non-Latin layout was tried end to end.
+  The unit tests in `linux::xkb` use a hand-written keymap. Nothing tests the
+  seed sync in `Keymap::assemble`, the path where X11 starts with Caps Lock
+  already on.
+
 ## What pikr's two 0.17.2 gaps left (2026-11-10)
 
 Both gaps are fixed; these are the parts not done.

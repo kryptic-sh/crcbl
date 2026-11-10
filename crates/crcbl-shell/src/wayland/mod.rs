@@ -1940,6 +1940,7 @@ struct RepeatKey {
     scancode: u32,
     key_code: Option<KeyCode>,
     keysym: Keysym,
+    shortcut_keysym: Keysym,
     /// `CLOCK_MONOTONIC` nanoseconds at which the next repeat is due.
     next_nanos: u64,
     /// Nanoseconds between repeats.
@@ -1960,6 +1961,7 @@ impl Repeat {
             scancode: key.scancode,
             key_code: key.key_code,
             keysym: key.keysym,
+            shortcut_keysym: key.shortcut_keysym,
             next_nanos: now_nanos.saturating_add(delay_nanos),
             interval_nanos,
         });
@@ -2030,6 +2032,7 @@ struct RepeatKeyRequest {
     scancode: u32,
     key_code: Option<KeyCode>,
     keysym: Keysym,
+    shortcut_keysym: Keysym,
 }
 
 // ---------------------------------------------------------------------------
@@ -5107,6 +5110,7 @@ mod tests {
                 scancode: 30,
                 key_code: Some(KeyCode::KeyA),
                 keysym: Keysym::from_char('a'),
+                shortcut_keysym: Keysym::from_char('a'),
             },
         );
         let key = repeat.key.expect("repeat armed");
@@ -5132,6 +5136,7 @@ mod tests {
             scancode: 30,
             key_code: Some(KeyCode::KeyA),
             keysym: Keysym::from_char('a'),
+            shortcut_keysym: Keysym::from_char('a'),
         }
     }
 
@@ -5216,6 +5221,7 @@ mod tests {
                 scancode: 30,
                 key_code: Some(KeyCode::KeyA),
                 keysym: Keysym::NONE,
+                shortcut_keysym: Keysym::NONE,
             },
         );
         assert!(repeat.key.is_none());

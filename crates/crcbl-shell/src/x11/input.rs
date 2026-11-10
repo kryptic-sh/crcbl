@@ -234,10 +234,12 @@ impl X11Shell {
         // same ordering makes `modifiers` the state at the time of the event,
         // which is what X11's own `state` field means and what
         // [`event`](crate::event) specifies for this seam.
-        let keysym = self
+        let (keysym, shortcut_keysym) = self
             .keymap
             .as_ref()
-            .map_or(Keysym::NONE, |keymap| keymap.keysym(scancode));
+            .map_or((Keysym::NONE, Keysym::NONE), |keymap| {
+                (keymap.keysym(scancode), keymap.shortcut_keysym(scancode))
+            });
         let text = if pressed {
             self.keymap
                 .as_mut()
@@ -265,6 +267,7 @@ impl X11Shell {
             scancode: Scancode(scancode),
             key_code: keys::key_code(event.detail),
             keysym,
+            shortcut_keysym,
             state: if pressed {
                 ButtonState::Pressed
             } else {

@@ -15,6 +15,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_shell::ShellEvent::Key::shortcut_keysym`.** The symbol the key
+  produces with Caps Lock (xkb's `Lock` modifier) not applied, for matching
+  shortcuts and menu accelerators: with Caps Lock on, `Ctrl+r` arrives with
+  `keysym` `R` and `shortcut_keysym` `r`, while Shift still applies to both. On
+  Wayland and X11 it is read from a second xkb state that tracks the first with
+  Lock removed, so the layout, not a case swap, decides what Caps Lock would
+  have changed; a Shift Lock (`caps:shiftlock`) is a locked Shift and stays
+  applied. On Win32, AppKit and the headless shell it equals `keysym`, which
+  never has Caps Lock applied there (AppKit's still has Shift applied to
+  non-letters, so Shift+1 is `!`); on the web it equals `keysym` with Caps Lock
+  still applied, since `KeyboardEvent.key` carries no Caps-free form. A new
+  public field, so every `ShellEvent::Key` struct literal must add it.
 - **`crcbl_shell::MonitorInfo::connector`.** The connector name the window
   system reported for a monitor — Wayland's `wl_output.name` (version 4 and
   later, else `zxdg_output_v1.name`), X11's RandR output name — so a monitor can

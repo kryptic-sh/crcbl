@@ -55,6 +55,8 @@ mod keycode {
     pub const A: u8 = 38;
     /// `KEY_LEFTSHIFT`, evdev 42.
     pub const LEFT_SHIFT: u8 = 50;
+    /// `KEY_CAPSLOCK`, evdev 58.
+    pub const CAPS_LOCK: u8 = 66;
     /// `KEY_ESC`, evdev 1.
     pub const ESCAPE: u8 = 9;
     /// `KEY_APOSTROPHE`, evdev 40: `dead_acute` in `us(intl)`.
@@ -1981,6 +1983,106 @@ fn modifiers_are_stamped_on_the_event_they_modify() {
             shifted.1,
             crcbl_shell::Keysym::from_char('A'),
             "and the keysym is the shifted one"
+        );
+    }
+}
+
+/// **Caps Lock changes `keysym` and leaves `shortcut_keysym` alone**, so
+/// `Ctrl+a` with Caps Lock on still matches as `Ctrl+a`.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn caps_lock_changes_the_keysym_and_not_the_shortcut_keysym() {
+    let mut session = Session::open();
+    let window = session.window(&desc("caps lock"));
+    session.focus(window);
+    session.take_names();
+    // `(keysym, shortcut_keysym, modifiers)` of every A press so far.
+    let a_presses =
+        |session: &Session| -> Vec<(crcbl_shell::Keysym, crcbl_shell::Keysym, Modifiers)> {
+            session
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    ShellEvent::Key {
+                        key_code: Some(KeyCode::KeyA),
+                        state: ButtonState::Pressed,
+                        keysym,
+                        shortcut_keysym,
+                        modifiers,
+                        ..
+                    } => Some((*keysym, *shortcut_keysym, *modifiers)),
+                    _ => None,
+                })
+                .collect()
+        };
+    /// The session while the X server's Caps Lock is on. The lock outlives
+    /// this test, so dropping this turns it off again — on a panic's unwind
+    /// too — rather than leaving the rest of the suite typing capitals.
+    struct CapsLockOn(Option<Session>);
+    impl CapsLockOn {
+        fn lock(session: Session) -> Self {
+            tap(&session, keycode::CAPS_LOCK);
+            Self(Some(session))
+        }
+        fn session(&mut self) -> &mut Session {
+            self.0.as_mut().expect("still locked")
+        }
+        /// Turns Caps Lock off and hands the session back.
+        fn unlock(mut self) -> Session {
+            let session = self.0.take().expect("still locked");
+            tap(&session, keycode::CAPS_LOCK);
+            session
+        }
+    }
+    impl Drop for CapsLockOn {
+        fn drop(&mut self) {
+            if let Some(session) = &self.0 {
+                tap(session, keycode::CAPS_LOCK);
+            }
+        }
+    }
+    fn tap(session: &Session, keycode: u8) {
+        session.peer.key(keycode, true);
+        session.peer.key(keycode, false);
+    }
+
+    let mut locked = CapsLockOn::lock(session);
+    tap(locked.session(), keycode::A);
+    locked
+        .session()
+        .pump_until("the A with Caps Lock on", |session| {
+            !a_presses(session).is_empty()
+        });
+    let mut session = locked.unlock();
+    tap(&session, keycode::A);
+    session.pump_until("the A with Caps Lock off", |session| {
+        a_presses(session).len() == 2
+    });
+
+    let presses = a_presses(&session);
+    if session.shell.caps().contains(ShellCaps::TEXT_COMPOSE) {
+        assert!(
+            presses[0].2.contains(Modifiers::CAPS_LOCK),
+            "Caps Lock was on: {presses:?}"
+        );
+        assert_eq!(
+            presses[0].0,
+            crcbl_shell::Keysym::from_char('A'),
+            "Caps Lock types the capital: {presses:?}"
+        );
+        assert_eq!(
+            presses[0].1,
+            crcbl_shell::Keysym::from_char('a'),
+            "a shortcut matches as if Caps Lock were off: {presses:?}"
+        );
+        assert!(!presses[1].2.contains(Modifiers::CAPS_LOCK), "{presses:?}");
+        assert_eq!(
+            (presses[1].0, presses[1].1),
+            (
+                crcbl_shell::Keysym::from_char('a'),
+                crcbl_shell::Keysym::from_char('a')
+            ),
+            "Caps Lock off: {presses:?}"
         );
     }
 }

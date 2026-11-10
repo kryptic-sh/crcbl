@@ -37,6 +37,7 @@ mod evdev {
     pub const KEY_E: u32 = 18;
     pub const KEY_APOSTROPHE: u32 = 40;
     pub const KEY_LEFTSHIFT: u32 = 42;
+    pub const KEY_CAPSLOCK: u32 = 58;
     pub const KEY_ESC: u32 = 1;
     pub const BTN_LEFT: u32 = 0x110;
     pub const BTN_SIDE: u32 = 0x113;
@@ -1642,6 +1643,79 @@ fn modifiers_ride_on_each_event_and_shift_changes_the_keysym() {
             .any(|key| key.0 == Some(KeyCode::ShiftLeft)),
         "the modifier key is reported too: {:?}",
         session.keys()
+    );
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// **Caps Lock changes `keysym` and leaves `shortcut_keysym` alone**, so
+/// `Ctrl+a` with Caps Lock on still matches as `Ctrl+a`; Shift changes both.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn caps_lock_changes_the_keysym_and_not_the_shortcut_keysym() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e caps lock");
+    // `(keysym, shortcut_keysym, modifiers)` of every A press so far.
+    let a_presses = |session: &Session| -> Vec<(Keysym, Keysym, Modifiers)> {
+        session
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::Key {
+                    key_code: Some(KeyCode::KeyA),
+                    state: ButtonState::Pressed,
+                    keysym,
+                    shortcut_keysym,
+                    modifiers,
+                    ..
+                } => Some((*keysym, *shortcut_keysym, *modifiers)),
+                _ => None,
+            })
+            .collect()
+    };
+
+    input.tap(evdev::KEY_CAPSLOCK);
+    input.tap(evdev::KEY_A);
+    session.pump_until("the A with Caps Lock on", |session| {
+        !a_presses(session).is_empty()
+    });
+    let (keysym, shortcut_keysym, modifiers) = a_presses(&session)[0];
+    assert!(
+        modifiers.contains(Modifiers::CAPS_LOCK),
+        "Caps Lock is on: {modifiers:?}"
+    );
+    assert_eq!(
+        keysym,
+        Keysym::from_char('A'),
+        "Caps Lock types the capital"
+    );
+    assert_eq!(
+        shortcut_keysym,
+        Keysym::from_char('a'),
+        "a shortcut matches as if Caps Lock were off"
+    );
+
+    input.key(evdev::KEY_LEFTSHIFT, true);
+    input.tap(evdev::KEY_A);
+    input.key(evdev::KEY_LEFTSHIFT, false);
+    input.tap(evdev::KEY_CAPSLOCK);
+    input.key(evdev::KEY_LEFTSHIFT, true);
+    input.tap(evdev::KEY_A);
+    input.key(evdev::KEY_LEFTSHIFT, false);
+    session.pump_until("the two shifted As", |session| {
+        a_presses(session).len() == 3
+    });
+    let presses = a_presses(&session);
+    assert_eq!(
+        presses[1].1,
+        Keysym::from_char('A'),
+        "Shift is a shortcut's own modifier, Caps Lock on or not: {presses:?}"
+    );
+    assert!(!presses[2].2.contains(Modifiers::CAPS_LOCK), "{presses:?}");
+    assert_eq!(
+        (presses[2].0, presses[2].1),
+        (Keysym::from_char('A'), Keysym::from_char('A')),
+        "Shift with Caps Lock off: {presses:?}"
     );
     drop(input);
     session.shell.destroy_window(window).expect("destroy");

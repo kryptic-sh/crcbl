@@ -155,13 +155,17 @@ impl AppKitShell {
             } => {
                 let time = self.event_time(seconds);
                 let key_code = keys::key_code(keycode);
+                let keysym = keysym_of(key_code, character);
                 let event = ShellEvent::Key {
                     window,
                     device: KEYBOARD_DEVICE,
                     time,
                     scancode: Scancode(u32::from(keycode)),
                     key_code,
-                    keysym: keysym_of(key_code, character),
+                    keysym,
+                    // `charactersIgnoringModifiers` ignores Caps Lock (every
+                    // modifier but Shift), so it never reaches `keysym`.
+                    shortcut_keysym: keysym,
                     state,
                     repeat,
                     modifiers: keys::modifiers(flags),
@@ -202,6 +206,7 @@ impl AppKitShell {
                     scancode: Scancode(u32::from(keycode)),
                     key_code: Some(key_code),
                     keysym: keys::named_keysym(key_code).unwrap_or(Keysym::NONE),
+                    shortcut_keysym: keys::named_keysym(key_code).unwrap_or(Keysym::NONE),
                     state: ButtonState::from_pressed(down),
                     // A held modifier does not repeat on this platform: the
                     // flags stop changing, so no further event arrives.
