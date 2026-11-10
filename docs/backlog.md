@@ -528,8 +528,9 @@ Left:
   ms. Still one after the other: the mesh batch and `DrawGenPipelines::new`'s
   two batches. A view made by `create_view` compiles its two sets as one batch
   of its own (`ViewPipelines::new`, 2026-11-10), which spawns a `crcbl_jobs`
-  pool per call on vk, dx12 and mtl: unmeasured whether that pays for a single
-  view's sets, and no test runs it on a backend that takes the parallel path.
+  pool per call on vk, dx12 and mtl; cold on radv that took `create_view` from
+  110.4 to 78.1 ms (medians, see the changelog). No test runs it on a backend
+  that takes the parallel path, and dx12 and mtl are unmeasured.
 - Water's and grass's pipelines compile in one batch per view on the first frame
   with a body or a field (`ContentPasses` in `View::build_content`, 2026-11-01):
   the water surface and every grass draw lead it, and the water copy and the

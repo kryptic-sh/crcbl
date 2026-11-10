@@ -67,7 +67,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`ForwardRenderer::create_view` compiles its froxel volume's and reflection
   march's pipelines as one batch**, side by side on Vulkan, D3D12 and Metal,
   instead of one after another. The members and their order are the ones the
-  renderer's build already compiles them in, listed once for both.
+  renderer's build already compiles them in, listed once for both. A cold
+  `create_view` on an RX 7900 XTX (radv, `MESA_SHADER_CACHE_DISABLE=true` and
+  `RADV_DEBUG=nocache`, release, ten interleaved fresh processes per build,
+  quiet window at load 0.5–0.9) went from a median of 110.4 ms to 78.1 ms.
 - **`apps/tide` builds its water passes while it starts up** rather than on its
   first frame: `Gpu::from_context` stages the opening scene through the new
   `Stage::prepared`, which calls `ForwardRenderer::prepare_content` with
@@ -86,7 +89,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   few widths per text**, so spans of the same text and style in boxes of
   different widths no longer evict each other's cut and re-cut, shaping their
   prefixes again, every frame of a kept `Ui`. A text holds at most a fixed
-  number of cuts, the oldest dropped first.
+  number of cuts, the oldest dropped first. With the wrapped-span change above,
+  a steady frame of 180 labels in one kept `Ui` (90 wrapped, 90 ellipsis spans
+  of 30 texts at three widths each, Ryzen 9 9950X3D, release, seven interleaved
+  pairs of 500-frame runs, quiet window at load 0.5–0.9) went from a median of
+  1882 µs to 111 µs.
 
 ### Fixed
 
