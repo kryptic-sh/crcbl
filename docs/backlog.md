@@ -38,13 +38,33 @@ sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
   its own XML and carries its own copy of the core tables. Harmless on a
   separate connection, since libwayland matches interfaces by name. Revisit if
   two crates must share proxies on one connection.
-- **dsplr M7 needs X11 output configuration (in progress, 2026-11-11).** The
-  owner chose crcbl over x11rb, as relayed by dsplr's session. The plan is a
-  `crcbl-x11` crate beside `crcbl-wayland`. The first step moves the libxcb and
-  RandR binding out of `crcbl-shell`. The second adds a public `Connection` with
-  RandR 1.5 reads, the set path (grab, `SetCrtcConfig`, `SetScreenSize`, CRTC
-  transforms), output properties and RandR events, and a probe that the X11 e2e
-  jobs run. dsplr pins a crcbl git rev until a release carries it.
+
+## `crcbl-x11`: what the dsplr slice left (2026-11-11)
+
+`crcbl_x11::Connection` is dsplr's RandR client for X11 output configuration.
+`crcbl-x11-probe`'s tests run it against Xvfb in `run-x11-e2e.sh`, which cannot
+reach everything:
+
+- **Not exercised against a server:** `set_panning` and `set_crtc_transform`
+  (Xvfb refuses both, so only the typed-error branch runs; argument order was
+  checked against `randr.h` by hand), `GetMonitors` with more than one monitor,
+  a connection that dies mid-`poll_event` (checked by hand once: queued events
+  first, then `Err(Connection(Socket))`), and the provider, resource and lease
+  `Notify` sub-codes, which decode as `OtherRandrNotify`.
+- **X.Org checks neither `SetCrtcConfig` timestamp**, so `InvalidTime` and
+  `InvalidConfigTime` never come back on Xvfb (verified with stale and corrupt
+  timestamps). Documented on `SetConfigStatus`; a real server with a second CRTC
+  is what `run-x11-xorg-e2e.sh` could add, once Xorg is installed locally to
+  verify a test there.
+- **`crcbl-shell`'s `x11::monitors` still decodes RandR itself** rather than
+  running on `Connection`, so the reply decoding exists twice. Moving it means
+  the shell's connection becomes a `Connection`, as `crcbl-wayland`'s `Display`
+  did for the Wayland backend.
+- **`RandrLib` needs libxcb-randr 1.12 or newer (2016)**, because it resolves
+  `xcb_randr_get_monitors`; an older library leaves the shell with one
+  whole-screen monitor and `Connection` without RandR.
+- **`crcbl-x11/src/ffi.rs` keeps growing** with each extension; split it into
+  core and RandR modules as a move-only change.
 
 ## `shortcut_keysym` on the web still has Caps Lock applied (2026-11-10)
 

@@ -511,6 +511,41 @@ pub struct QueryExtensionReply {
     pub first_error: u8,
 }
 
+/// `xcb_get_atom_name_reply_t`. The name follows it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GetAtomNameReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// Bytes in the name.
+    pub name_len: u16,
+    /// Padding.
+    pub pad1: [u8; 22],
+}
+
+/// `xcb_get_input_focus_reply_t`: the cheapest request with a reply, which is
+/// what makes it the round trip a sync is built on.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GetInputFocusReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Where focus reverts to.
+    pub revert_to: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// The focused window.
+    pub focus: u32,
+}
+
 /// `xcb_extension_t` — the per-extension descriptor libxcb caches lazily.
 ///
 /// A **data** symbol, not a function: `xcb_randr_id` and `xcb_input_id` are
@@ -545,7 +580,9 @@ pub struct RandrQueryVersionReply {
     pub minor_version: u32,
 }
 
-/// `xcb_randr_get_screen_resources_current_reply_t`.
+/// `xcb_randr_get_screen_resources_current_reply_t`, and
+/// `xcb_randr_get_screen_resources_reply_t`, the probing request's, which has
+/// the same layout field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct RandrScreenResourcesReply {
@@ -693,6 +730,311 @@ pub struct RandrOutputPrimaryReply {
     pub length: u32,
     /// The primary output, or `0` if none is set.
     pub output: u32,
+}
+
+/// `xcb_randr_get_screen_size_range_reply_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrScreenSizeRangeReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// Smallest screen width the server accepts, in pixels.
+    pub min_width: u16,
+    /// Smallest screen height.
+    pub min_height: u16,
+    /// Largest screen width — the framebuffer the driver can allocate.
+    pub max_width: u16,
+    /// Largest screen height.
+    pub max_height: u16,
+    /// Padding.
+    pub pad1: [u8; 16],
+}
+
+/// `xcb_randr_get_monitors_reply_t`. The monitors follow it, each a
+/// [`RandrMonitorInfo`] trailed by its outputs.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrGetMonitorsReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// Timestamp of the configuration.
+    pub timestamp: u32,
+    /// How many monitors follow.
+    pub n_monitors: u32,
+    /// How many outputs the monitors name between them.
+    pub n_outputs: u32,
+    /// Padding.
+    pub pad1: [u8; 12],
+}
+
+/// `xcb_randr_monitor_info_t`: one monitor, followed by `n_output` output ids.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrMonitorInfo {
+    /// The monitor's name, as an atom.
+    pub name: u32,
+    /// Whether it is the primary monitor.
+    pub primary: u8,
+    /// Whether the server made it from a CRTC rather than a client defining it.
+    pub automatic: u8,
+    /// How many output ids follow.
+    pub n_output: u16,
+    /// Left edge in the screen.
+    pub x: i16,
+    /// Top edge.
+    pub y: i16,
+    /// Width in pixels.
+    pub width: u16,
+    /// Height in pixels.
+    pub height: u16,
+    /// Physical width in millimetres.
+    pub width_in_millimeters: u32,
+    /// Physical height in millimetres.
+    pub height_in_millimeters: u32,
+}
+
+/// `xcb_randr_monitor_info_iterator_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrMonitorInfoIterator {
+    /// The monitor this iterator is on.
+    pub data: *mut RandrMonitorInfo,
+    /// How many remain after this one.
+    pub rem: c_int,
+    /// Byte index into the reply.
+    pub index: c_int,
+}
+
+/// `xcb_randr_get_crtc_gamma_size_reply_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrCrtcGammaSizeReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// Entries in each of the CRTC's red, green and blue ramps.
+    pub size: u16,
+    /// Padding.
+    pub pad1: [u8; 22],
+}
+
+/// `xcb_randr_get_panning_reply_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrGetPanningReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Configuration status.
+    pub status: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// Timestamp of the panning configuration.
+    pub timestamp: u32,
+    /// Left edge of the panning area.
+    pub left: u16,
+    /// Top edge of the panning area.
+    pub top: u16,
+    /// Width of the panning area; `0` means panning is off.
+    pub width: u16,
+    /// Height of the panning area.
+    pub height: u16,
+    /// Left edge of the area the pointer is tracked in.
+    pub track_left: u16,
+    /// Top edge of the tracking area.
+    pub track_top: u16,
+    /// Width of the tracking area.
+    pub track_width: u16,
+    /// Height of the tracking area.
+    pub track_height: u16,
+    /// Distance from the left edge at which panning starts.
+    pub border_left: i16,
+    /// Distance from the top edge.
+    pub border_top: i16,
+    /// Distance from the right edge.
+    pub border_right: i16,
+    /// Distance from the bottom edge.
+    pub border_bottom: i16,
+}
+
+/// `xcb_randr_set_panning_reply_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrSetPanningReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// `xcb_randr_set_config_t`.
+    pub status: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// Timestamp of the new panning configuration.
+    pub timestamp: u32,
+}
+
+/// `xcb_render_transform_t`: a 3×3 projective matrix of 16.16 fixed-point
+/// numbers, row-major (`matrix11`, `matrix12`, … `matrix33`).
+///
+/// Passed **by value** to `xcb_randr_set_crtc_transform`, so its layout is the
+/// call's ABI, not only a reply's.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderTransform {
+    /// The nine entries, row by row.
+    pub matrix: [i32; 9],
+}
+
+/// `xcb_randr_get_crtc_transform_reply_t`. The pending filter name, its
+/// parameters, the current filter name and its parameters follow it, each
+/// padded to four bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrGetCrtcTransformReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// The transform the next `SetCrtcConfig` applies.
+    pub pending_transform: RenderTransform,
+    /// Whether the CRTC can be transformed at all.
+    pub has_transforms: u8,
+    /// Padding.
+    pub pad1: [u8; 3],
+    /// The transform in effect.
+    pub current_transform: RenderTransform,
+    /// Padding.
+    pub pad2: [u8; 4],
+    /// Bytes in the pending filter's name.
+    pub pending_len: u16,
+    /// Number of pending filter parameters.
+    pub pending_nparams: u16,
+    /// Bytes in the current filter's name.
+    pub current_len: u16,
+    /// Number of current filter parameters.
+    pub current_nparams: u16,
+}
+
+/// `xcb_randr_set_crtc_config_reply_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrSetCrtcConfigReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// `xcb_randr_set_config_t`.
+    pub status: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// Timestamp of the new configuration.
+    pub timestamp: u32,
+    /// Padding.
+    pub pad1: [u8; 20],
+}
+
+/// `xcb_randr_create_mode_reply_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrCreateModeReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// The new mode's id.
+    pub mode: u32,
+    /// Padding.
+    pub pad1: [u8; 20],
+}
+
+/// `xcb_randr_list_output_properties_reply_t`. The atoms follow it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrListOutputPropertiesReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// How many atoms follow.
+    pub num_atoms: u16,
+    /// Padding.
+    pub pad1: [u8; 22],
+}
+
+/// `xcb_randr_get_output_property_reply_t`. The data follows it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrGetOutputPropertyReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Bits per item: `8`, `16` or `32`; `0` when the property does not
+    /// exist.
+    pub format: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// The property's type atom; `0` when it does not exist.
+    pub type_: u32,
+    /// Bytes left after what was returned.
+    pub bytes_after: u32,
+    /// Items returned, each `format` bits.
+    pub num_items: u32,
+    /// Padding.
+    pub pad0: [u8; 12],
+}
+
+/// `xcb_randr_query_output_property_reply_t`. The valid values follow it,
+/// as many as `length` says.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RandrQueryOutputPropertyReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length — also the number of valid values.
+    pub length: u32,
+    /// Whether a change waits for the next `SetCrtcConfig`.
+    pub pending: u8,
+    /// Whether the valid values are a `[min, max]` pair.
+    pub range: u8,
+    /// Whether clients may change it.
+    pub immutable: u8,
+    /// Padding.
+    pub pad1: [u8; 21],
 }
 
 // ---------------------------------------------------------------------------
@@ -973,6 +1315,137 @@ pub struct MappingNotifyEvent {
     pub pad1: u8,
 }
 
+/// `xcb_randr_screen_change_notify_event_t`: RandR's `first_event + 0`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RandrScreenChangeNotifyEvent {
+    /// Event number.
+    pub response_type: u8,
+    /// The screen's new rotation, as `xcb_randr_rotation_t` bits.
+    pub rotation: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Timestamp of the change.
+    pub timestamp: u32,
+    /// Timestamp of the last configuration change.
+    pub config_timestamp: u32,
+    /// The root window of the screen that changed.
+    pub root: u32,
+    /// The window the event was selected on.
+    pub request_window: u32,
+    /// Index into the RandR 1.0 size list.
+    pub size_id: u16,
+    /// Subpixel order.
+    pub subpixel_order: u16,
+    /// New width in pixels.
+    pub width: u16,
+    /// New height in pixels.
+    pub height: u16,
+    /// New width in millimetres.
+    pub mwidth: u16,
+    /// New height in millimetres.
+    pub mheight: u16,
+}
+
+/// `xcb_randr_crtc_change_t`: the body of a `Notify` with sub-code
+/// `CrtcChange`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RandrCrtcChange {
+    /// Timestamp of the change.
+    pub timestamp: u32,
+    /// The window the event was selected on.
+    pub window: u32,
+    /// The CRTC that changed.
+    pub crtc: u32,
+    /// Its mode now; `0` when it was disabled.
+    pub mode: u32,
+    /// Its rotation, as `xcb_randr_rotation_t` bits.
+    pub rotation: u16,
+    /// Padding.
+    pub pad0: [u8; 2],
+    /// Left edge in the screen.
+    pub x: i16,
+    /// Top edge.
+    pub y: i16,
+    /// Width in pixels.
+    pub width: u16,
+    /// Height in pixels.
+    pub height: u16,
+}
+
+/// `xcb_randr_output_change_t`: the body of a `Notify` with sub-code
+/// `OutputChange`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RandrOutputChange {
+    /// Timestamp of the change.
+    pub timestamp: u32,
+    /// Timestamp of the last configuration change.
+    pub config_timestamp: u32,
+    /// The window the event was selected on.
+    pub window: u32,
+    /// The output that changed.
+    pub output: u32,
+    /// The CRTC it is on, or `0`.
+    pub crtc: u32,
+    /// The CRTC's mode, or `0`.
+    pub mode: u32,
+    /// The CRTC's rotation.
+    pub rotation: u16,
+    /// `0` connected, `1` disconnected, `2` unknown.
+    pub connection: u8,
+    /// Subpixel order.
+    pub subpixel_order: u8,
+}
+
+/// `xcb_randr_output_property_t`: the body of a `Notify` with sub-code
+/// `OutputProperty`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RandrOutputProperty {
+    /// The window the event was selected on.
+    pub window: u32,
+    /// The output whose property changed.
+    pub output: u32,
+    /// Which property.
+    pub atom: u32,
+    /// Timestamp of the change.
+    pub timestamp: u32,
+    /// `0` new value, `1` deleted.
+    pub status: u8,
+    /// Padding.
+    pub pad0: [u8; 11],
+}
+
+/// `xcb_randr_notify_event_t`, RandR's `first_event + 1`, with the union
+/// arm `sub_code` selects as `B`.
+///
+/// One generic struct rather than the C union: each arm is a whole event of
+/// its own layout, and reading one as its own type is what the union is for.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RandrNotifyEvent<B> {
+    /// Event number.
+    pub response_type: u8,
+    /// Which arm the body is: [`randr_notify::CRTC_CHANGE`], …
+    pub sub_code: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// The arm.
+    pub body: B,
+}
+
+/// `xcb_randr_notify_t`: the sub-codes of RandR's `Notify` event.
+pub mod randr_notify {
+    /// A CRTC's mode, position, rotation or outputs changed.
+    pub const CRTC_CHANGE: u8 = 0;
+    /// An output's CRTC, mode or connection changed.
+    pub const OUTPUT_CHANGE: u8 = 1;
+    /// An output property changed or was deleted.
+    pub const OUTPUT_PROPERTY: u8 = 2;
+}
+
 // ---------------------------------------------------------------------------
 // Protocol constants
 // ---------------------------------------------------------------------------
@@ -1185,10 +1658,11 @@ const RTLD_NOW: c_int = 2;
 /// `xcb/xcb.h` or `xcb/randr.h` and is ABI-stable across libxcb 1.x.
 ///
 /// Requests that return no reply are declared as returning [`Cookie`] rather
-/// than `()` because they do — `xcb_void_cookie_t`. Nothing here consumes one:
-/// the shell never calls `xcb_request_check`, so those requests go out
-/// unchecked and a protocol error from one arrives asynchronously, on the event
-/// queue, rather than at the call site.
+/// than `()` because they do — `xcb_void_cookie_t`. The shell never consumes
+/// one: its requests go out unchecked and a protocol error from one arrives
+/// asynchronously, on the event queue, rather than at the call site. The
+/// crate's `Connection` sends the `_checked` variants and hands each cookie to
+/// `xcb_request_check`, so its errors arrive at the call that caused them.
 mod prototype {
     #[cfg(feature = "query-tree")]
     use super::QueryTreeReply;
@@ -1196,10 +1670,28 @@ mod prototype {
         Connection, Cookie, Depth, DepthIterator, Extension, GenericError, GenericEvent,
         GetGeometryReply, GetPropertyReply, GetSelectionOwnerReply, GrabPointerReply,
         InternAtomReply, QueryExtensionReply, QueryPointerReply, RandrCrtcInfoReply,
-        RandrOutputInfoReply, RandrOutputPrimaryReply, RandrQueryVersionReply,
-        RandrScreenResourcesReply, Rectangle, Screen, ScreenIterator, Setup,
-        TranslateCoordinatesReply, VisualTypeIterator, c_char, c_int, c_void,
+        RandrGetMonitorsReply, RandrModeInfo, RandrMonitorInfoIterator, RandrOutputInfoReply,
+        RandrOutputPrimaryReply, RandrQueryVersionReply, RandrScreenResourcesReply, Rectangle,
+        RenderTransform, Screen, ScreenIterator, Setup, TranslateCoordinatesReply,
+        VisualTypeIterator, c_char, c_int, c_void,
     };
+
+    /// `xcb_<request>_reply_t *xcb_<request>_reply(xcb_connection_t *,
+    /// xcb_<request>_cookie_t, xcb_generic_error_t **)` — the shape every
+    /// reply function has, named once for the ones added with the crate's
+    /// `Connection`.
+    pub type ReplyFn<R> =
+        unsafe extern "C" fn(*mut Connection, Cookie, *mut *mut GenericError) -> *mut R;
+    /// `T *xcb_<request>_<field>(const xcb_<request>_reply_t *R)` — the shape
+    /// of every accessor for a list that trails a reply.
+    pub type Accessor<R, T> = unsafe extern "C" fn(*const R) -> *mut T;
+    /// `xcb_generic_error_t *xcb_request_check(xcb_connection_t *,
+    /// xcb_void_cookie_t)`
+    pub type RequestCheck = unsafe extern "C" fn(*mut Connection, Cookie) -> *mut GenericError;
+    /// `xcb_get_input_focus_cookie_t xcb_get_input_focus(xcb_connection_t *)`,
+    /// and `xcb_grab_server_checked`/`xcb_ungrab_server_checked`, which are
+    /// the same shape.
+    pub type ConnRequest = unsafe extern "C" fn(*mut Connection) -> Cookie;
 
     /// `xcb_connection_t *xcb_connect(const char *displayname, int *screenp)`
     pub type Connect = unsafe extern "C" fn(*const c_char, *mut c_int) -> *mut Connection;
@@ -1460,8 +1952,102 @@ mod prototype {
     ) -> *mut RandrQueryVersionReply;
     /// `xcb_randr_get_screen_resources_current_cookie_t
     /// xcb_randr_get_screen_resources_current(xcb_connection_t *,
-    /// xcb_window_t)`, and `xcb_randr_get_output_primary`.
+    /// xcb_window_t)`, and every other RandR request whose one argument is an
+    /// id: `get_output_primary`, `get_screen_size_range`,
+    /// `get_crtc_gamma_size`, `get_panning`, `get_crtc_transform`,
+    /// `destroy_mode_checked`, `list_output_properties`.
     pub type RandrWindowRequest = unsafe extern "C" fn(*mut Connection, u32) -> Cookie;
+    /// `xcb_void_cookie_t xcb_randr_add_output_mode_checked(
+    /// xcb_connection_t *, xcb_randr_output_t, xcb_randr_mode_t)`, and every
+    /// other RandR request whose two arguments are ids:
+    /// `delete_output_mode_checked`, `set_output_primary_checked` (window,
+    /// output), `query_output_property` and `delete_output_property_checked`
+    /// (output, atom).
+    pub type RandrIdPairRequest = unsafe extern "C" fn(*mut Connection, u32, u32) -> Cookie;
+    /// `xcb_randr_get_monitors_cookie_t xcb_randr_get_monitors(
+    /// xcb_connection_t *, xcb_window_t, uint8_t get_active)`
+    pub type RandrGetMonitors = unsafe extern "C" fn(*mut Connection, u32, u8) -> Cookie;
+    /// `xcb_randr_monitor_info_iterator_t
+    /// xcb_randr_get_monitors_monitors_iterator(
+    /// const xcb_randr_get_monitors_reply_t *)`
+    pub type RandrMonitorsIterator =
+        unsafe extern "C" fn(*const RandrGetMonitorsReply) -> RandrMonitorInfoIterator;
+    /// `void xcb_randr_monitor_info_next(xcb_randr_monitor_info_iterator_t *)`
+    pub type RandrMonitorInfoNext = unsafe extern "C" fn(*mut RandrMonitorInfoIterator);
+    /// `xcb_randr_set_panning_cookie_t xcb_randr_set_panning(
+    /// xcb_connection_t *, xcb_randr_crtc_t, xcb_timestamp_t,
+    /// uint16_t left, top, width, height, track_left, track_top, track_width,
+    /// track_height, int16_t border_left, border_top, border_right,
+    /// border_bottom)`
+    pub type RandrSetPanning = unsafe extern "C" fn(
+        *mut Connection,
+        u32,
+        u32,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        i16,
+        i16,
+        i16,
+        i16,
+    ) -> Cookie;
+    /// `xcb_void_cookie_t xcb_randr_set_crtc_transform_checked(
+    /// xcb_connection_t *, xcb_randr_crtc_t, xcb_render_transform_t transform,
+    /// uint16_t filter_len, const char *filter_name,
+    /// uint32_t filter_params_len, const xcb_render_fixed_t *filter_params)`
+    pub type RandrSetCrtcTransform = unsafe extern "C" fn(
+        *mut Connection,
+        u32,
+        RenderTransform,
+        u16,
+        *const c_char,
+        u32,
+        *const i32,
+    ) -> Cookie;
+    /// `xcb_randr_set_crtc_config_cookie_t xcb_randr_set_crtc_config(
+    /// xcb_connection_t *, xcb_randr_crtc_t, xcb_timestamp_t timestamp,
+    /// xcb_timestamp_t config_timestamp, int16_t x, int16_t y,
+    /// xcb_randr_mode_t mode, uint16_t rotation, uint32_t outputs_len,
+    /// const xcb_randr_output_t *outputs)`
+    pub type RandrSetCrtcConfig = unsafe extern "C" fn(
+        *mut Connection,
+        u32,
+        u32,
+        u32,
+        i16,
+        i16,
+        u32,
+        u16,
+        u32,
+        *const u32,
+    ) -> Cookie;
+    /// `xcb_void_cookie_t xcb_randr_set_screen_size_checked(
+    /// xcb_connection_t *, xcb_window_t, uint16_t width, uint16_t height,
+    /// uint32_t mm_width, uint32_t mm_height)`
+    pub type RandrSetScreenSize =
+        unsafe extern "C" fn(*mut Connection, u32, u16, u16, u32, u32) -> Cookie;
+    /// `xcb_randr_create_mode_cookie_t xcb_randr_create_mode(
+    /// xcb_connection_t *, xcb_window_t, xcb_randr_mode_info_t mode_info,
+    /// uint32_t name_len, const char *name)`
+    pub type RandrCreateMode =
+        unsafe extern "C" fn(*mut Connection, u32, RandrModeInfo, u32, *const c_char) -> Cookie;
+    /// `xcb_randr_get_output_property_cookie_t xcb_randr_get_output_property(
+    /// xcb_connection_t *, xcb_randr_output_t, xcb_atom_t property,
+    /// xcb_atom_t type, uint32_t long_offset, uint32_t long_length,
+    /// uint8_t _delete, uint8_t pending)`
+    pub type RandrGetOutputProperty =
+        unsafe extern "C" fn(*mut Connection, u32, u32, u32, u32, u32, u8, u8) -> Cookie;
+    /// `xcb_void_cookie_t xcb_randr_change_output_property_checked(
+    /// xcb_connection_t *, xcb_randr_output_t, xcb_atom_t property,
+    /// xcb_atom_t type, uint8_t format, uint8_t mode, uint32_t num_units,
+    /// const void *data)`
+    pub type RandrChangeOutputProperty =
+        unsafe extern "C" fn(*mut Connection, u32, u32, u32, u8, u8, u32, *const c_void) -> Cookie;
     /// `xcb_randr_get_screen_resources_current_reply_t
     /// *xcb_randr_get_screen_resources_current_reply(…)`
     pub type RandrScreenResourcesReplyFn = unsafe extern "C" fn(
@@ -1512,9 +2098,10 @@ mod prototype {
     pub type RandrSelectInput = unsafe extern "C" fn(*mut Connection, u32, u16) -> Cookie;
 }
 
-/// Every libxcb entry point `crcbl-shell`'s X11 backend uses.
+/// Every libxcb entry point `crcbl-shell`'s X11 backend or this crate's
+/// `Connection` uses.
 ///
-/// The backend's functions, and behind the `query-tree` feature those its
+/// Those functions, and behind the `query-tree` feature those the shell's
 /// harness needs to walk another process's window tree. Each one is used; a
 /// function that stops being used is deleted from this struct in the same
 /// commit, which is what "audited by use" means in the windowing rules
@@ -1599,6 +2186,14 @@ pub struct Lib {
     pub create_gc: prototype::CreateGc,
     pub poly_fill_rectangle: prototype::PolyFillRectangle,
     pub free_gc: prototype::FreeResource,
+    pub request_check: prototype::RequestCheck,
+    pub get_input_focus: prototype::ConnRequest,
+    pub get_input_focus_reply: prototype::ReplyFn<GetInputFocusReply>,
+    pub grab_server_checked: prototype::ConnRequest,
+    pub ungrab_server_checked: prototype::ConnRequest,
+    pub get_atom_name: prototype::DrawableRequest,
+    pub get_atom_name_reply: prototype::ReplyFn<GetAtomNameReply>,
+    pub get_atom_name_name: prototype::Accessor<GetAtomNameReply, c_char>,
 }
 
 impl core::fmt::Debug for Lib {
@@ -1634,6 +2229,59 @@ pub struct RandrLib {
     pub get_output_primary: prototype::RandrWindowRequest,
     pub get_output_primary_reply: prototype::RandrOutputPrimaryReplyFn,
     pub select_input: prototype::RandrSelectInput,
+    pub select_input_checked: prototype::RandrSelectInput,
+    pub get_screen_resources: prototype::RandrWindowRequest,
+    pub get_screen_resources_reply: prototype::ReplyFn<RandrScreenResourcesReply>,
+    pub probed_resources_crtcs: prototype::Accessor<RandrScreenResourcesReply, u32>,
+    pub probed_resources_outputs: prototype::Accessor<RandrScreenResourcesReply, u32>,
+    pub probed_resources_modes: prototype::Accessor<RandrScreenResourcesReply, RandrModeInfo>,
+    pub probed_resources_names: prototype::Accessor<RandrScreenResourcesReply, u8>,
+    pub resources_outputs: prototype::Accessor<RandrScreenResourcesReply, u32>,
+    pub resources_names: prototype::Accessor<RandrScreenResourcesReply, u8>,
+    pub output_crtcs: prototype::Accessor<RandrOutputInfoReply, u32>,
+    pub output_modes: prototype::Accessor<RandrOutputInfoReply, u32>,
+    pub output_clones: prototype::Accessor<RandrOutputInfoReply, u32>,
+    pub crtc_possible: prototype::Accessor<RandrCrtcInfoReply, u32>,
+    pub get_screen_size_range: prototype::RandrWindowRequest,
+    pub get_screen_size_range_reply: prototype::ReplyFn<RandrScreenSizeRangeReply>,
+    pub set_output_primary_checked: prototype::RandrIdPairRequest,
+    pub get_monitors: prototype::RandrGetMonitors,
+    pub get_monitors_reply: prototype::ReplyFn<RandrGetMonitorsReply>,
+    pub monitors_iterator: prototype::RandrMonitorsIterator,
+    pub monitor_info_next: prototype::RandrMonitorInfoNext,
+    pub monitor_info_outputs: prototype::Accessor<RandrMonitorInfo, u32>,
+    pub get_crtc_gamma_size: prototype::RandrWindowRequest,
+    pub get_crtc_gamma_size_reply: prototype::ReplyFn<RandrCrtcGammaSizeReply>,
+    pub get_panning: prototype::RandrWindowRequest,
+    pub get_panning_reply: prototype::ReplyFn<RandrGetPanningReply>,
+    pub set_panning: prototype::RandrSetPanning,
+    pub set_panning_reply: prototype::ReplyFn<RandrSetPanningReply>,
+    pub get_crtc_transform: prototype::RandrWindowRequest,
+    pub get_crtc_transform_reply: prototype::ReplyFn<RandrGetCrtcTransformReply>,
+    pub transform_pending_filter_name: prototype::Accessor<RandrGetCrtcTransformReply, c_char>,
+    pub transform_pending_params: prototype::Accessor<RandrGetCrtcTransformReply, i32>,
+    pub transform_current_filter_name: prototype::Accessor<RandrGetCrtcTransformReply, c_char>,
+    pub transform_current_params: prototype::Accessor<RandrGetCrtcTransformReply, i32>,
+    pub set_crtc_transform_checked: prototype::RandrSetCrtcTransform,
+    pub set_crtc_config: prototype::RandrSetCrtcConfig,
+    pub set_crtc_config_reply: prototype::ReplyFn<RandrSetCrtcConfigReply>,
+    pub set_screen_size_checked: prototype::RandrSetScreenSize,
+    pub create_mode: prototype::RandrCreateMode,
+    pub create_mode_reply: prototype::ReplyFn<RandrCreateModeReply>,
+    pub destroy_mode_checked: prototype::RandrWindowRequest,
+    pub add_output_mode_checked: prototype::RandrIdPairRequest,
+    pub delete_output_mode_checked: prototype::RandrIdPairRequest,
+    pub list_output_properties: prototype::RandrWindowRequest,
+    pub list_output_properties_reply: prototype::ReplyFn<RandrListOutputPropertiesReply>,
+    pub list_output_properties_atoms: prototype::Accessor<RandrListOutputPropertiesReply, u32>,
+    pub get_output_property: prototype::RandrGetOutputProperty,
+    pub get_output_property_reply: prototype::ReplyFn<RandrGetOutputPropertyReply>,
+    pub get_output_property_data: prototype::Accessor<RandrGetOutputPropertyReply, u8>,
+    pub query_output_property: prototype::RandrIdPairRequest,
+    pub query_output_property_reply: prototype::ReplyFn<RandrQueryOutputPropertyReply>,
+    pub query_output_property_valid_values: prototype::Accessor<RandrQueryOutputPropertyReply, i32>,
+    pub change_output_property_checked: prototype::RandrChangeOutputProperty,
+    pub delete_output_property_checked: prototype::RandrIdPairRequest,
 }
 
 impl core::fmt::Debug for RandrLib {
@@ -1862,6 +2510,23 @@ fn load_uncached() -> Result<Lib, String> {
         create_gc: symbol!("xcb_create_gc", prototype::CreateGc),
         poly_fill_rectangle: symbol!("xcb_poly_fill_rectangle", prototype::PolyFillRectangle),
         free_gc: symbol!("xcb_free_gc", prototype::FreeResource),
+        request_check: symbol!("xcb_request_check", prototype::RequestCheck),
+        get_input_focus: symbol!("xcb_get_input_focus", prototype::ConnRequest),
+        get_input_focus_reply: symbol!(
+            "xcb_get_input_focus_reply",
+            prototype::ReplyFn<GetInputFocusReply>
+        ),
+        grab_server_checked: symbol!("xcb_grab_server_checked", prototype::ConnRequest),
+        ungrab_server_checked: symbol!("xcb_ungrab_server_checked", prototype::ConnRequest),
+        get_atom_name: symbol!("xcb_get_atom_name", prototype::DrawableRequest),
+        get_atom_name_reply: symbol!(
+            "xcb_get_atom_name_reply",
+            prototype::ReplyFn<GetAtomNameReply>
+        ),
+        get_atom_name_name: symbol!(
+            "xcb_get_atom_name_name",
+            prototype::Accessor<GetAtomNameReply, c_char>
+        ),
     })
 }
 
@@ -1941,6 +2606,203 @@ fn load_randr_uncached() -> Result<RandrLib, String> {
             prototype::RandrOutputPrimaryReplyFn
         ),
         select_input: symbol!("xcb_randr_select_input", prototype::RandrSelectInput),
+        select_input_checked: symbol!(
+            "xcb_randr_select_input_checked",
+            prototype::RandrSelectInput
+        ),
+        get_screen_resources: symbol!(
+            "xcb_randr_get_screen_resources",
+            prototype::RandrWindowRequest
+        ),
+        get_screen_resources_reply: symbol!(
+            "xcb_randr_get_screen_resources_reply",
+            prototype::ReplyFn<RandrScreenResourcesReply>
+        ),
+        probed_resources_crtcs: symbol!(
+            "xcb_randr_get_screen_resources_crtcs",
+            prototype::Accessor<RandrScreenResourcesReply, u32>
+        ),
+        probed_resources_outputs: symbol!(
+            "xcb_randr_get_screen_resources_outputs",
+            prototype::Accessor<RandrScreenResourcesReply, u32>
+        ),
+        probed_resources_modes: symbol!(
+            "xcb_randr_get_screen_resources_modes",
+            prototype::Accessor<RandrScreenResourcesReply, RandrModeInfo>
+        ),
+        probed_resources_names: symbol!(
+            "xcb_randr_get_screen_resources_names",
+            prototype::Accessor<RandrScreenResourcesReply, u8>
+        ),
+        resources_outputs: symbol!(
+            "xcb_randr_get_screen_resources_current_outputs",
+            prototype::Accessor<RandrScreenResourcesReply, u32>
+        ),
+        resources_names: symbol!(
+            "xcb_randr_get_screen_resources_current_names",
+            prototype::Accessor<RandrScreenResourcesReply, u8>
+        ),
+        output_crtcs: symbol!(
+            "xcb_randr_get_output_info_crtcs",
+            prototype::Accessor<RandrOutputInfoReply, u32>
+        ),
+        output_modes: symbol!(
+            "xcb_randr_get_output_info_modes",
+            prototype::Accessor<RandrOutputInfoReply, u32>
+        ),
+        output_clones: symbol!(
+            "xcb_randr_get_output_info_clones",
+            prototype::Accessor<RandrOutputInfoReply, u32>
+        ),
+        crtc_possible: symbol!(
+            "xcb_randr_get_crtc_info_possible",
+            prototype::Accessor<RandrCrtcInfoReply, u32>
+        ),
+        get_screen_size_range: symbol!(
+            "xcb_randr_get_screen_size_range",
+            prototype::RandrWindowRequest
+        ),
+        get_screen_size_range_reply: symbol!(
+            "xcb_randr_get_screen_size_range_reply",
+            prototype::ReplyFn<RandrScreenSizeRangeReply>
+        ),
+        set_output_primary_checked: symbol!(
+            "xcb_randr_set_output_primary_checked",
+            prototype::RandrIdPairRequest
+        ),
+        get_monitors: symbol!("xcb_randr_get_monitors", prototype::RandrGetMonitors),
+        get_monitors_reply: symbol!(
+            "xcb_randr_get_monitors_reply",
+            prototype::ReplyFn<RandrGetMonitorsReply>
+        ),
+        monitors_iterator: symbol!(
+            "xcb_randr_get_monitors_monitors_iterator",
+            prototype::RandrMonitorsIterator
+        ),
+        monitor_info_next: symbol!(
+            "xcb_randr_monitor_info_next",
+            prototype::RandrMonitorInfoNext
+        ),
+        monitor_info_outputs: symbol!(
+            "xcb_randr_monitor_info_outputs",
+            prototype::Accessor<RandrMonitorInfo, u32>
+        ),
+        get_crtc_gamma_size: symbol!(
+            "xcb_randr_get_crtc_gamma_size",
+            prototype::RandrWindowRequest
+        ),
+        get_crtc_gamma_size_reply: symbol!(
+            "xcb_randr_get_crtc_gamma_size_reply",
+            prototype::ReplyFn<RandrCrtcGammaSizeReply>
+        ),
+        get_panning: symbol!("xcb_randr_get_panning", prototype::RandrWindowRequest),
+        get_panning_reply: symbol!(
+            "xcb_randr_get_panning_reply",
+            prototype::ReplyFn<RandrGetPanningReply>
+        ),
+        set_panning: symbol!("xcb_randr_set_panning", prototype::RandrSetPanning),
+        set_panning_reply: symbol!(
+            "xcb_randr_set_panning_reply",
+            prototype::ReplyFn<RandrSetPanningReply>
+        ),
+        get_crtc_transform: symbol!(
+            "xcb_randr_get_crtc_transform",
+            prototype::RandrWindowRequest
+        ),
+        get_crtc_transform_reply: symbol!(
+            "xcb_randr_get_crtc_transform_reply",
+            prototype::ReplyFn<RandrGetCrtcTransformReply>
+        ),
+        transform_pending_filter_name: symbol!(
+            "xcb_randr_get_crtc_transform_pending_filter_name",
+            prototype::Accessor<RandrGetCrtcTransformReply, c_char>
+        ),
+        transform_pending_params: symbol!(
+            "xcb_randr_get_crtc_transform_pending_params",
+            prototype::Accessor<RandrGetCrtcTransformReply, i32>
+        ),
+        transform_current_filter_name: symbol!(
+            "xcb_randr_get_crtc_transform_current_filter_name",
+            prototype::Accessor<RandrGetCrtcTransformReply, c_char>
+        ),
+        transform_current_params: symbol!(
+            "xcb_randr_get_crtc_transform_current_params",
+            prototype::Accessor<RandrGetCrtcTransformReply, i32>
+        ),
+        set_crtc_transform_checked: symbol!(
+            "xcb_randr_set_crtc_transform_checked",
+            prototype::RandrSetCrtcTransform
+        ),
+        set_crtc_config: symbol!("xcb_randr_set_crtc_config", prototype::RandrSetCrtcConfig),
+        set_crtc_config_reply: symbol!(
+            "xcb_randr_set_crtc_config_reply",
+            prototype::ReplyFn<RandrSetCrtcConfigReply>
+        ),
+        set_screen_size_checked: symbol!(
+            "xcb_randr_set_screen_size_checked",
+            prototype::RandrSetScreenSize
+        ),
+        create_mode: symbol!("xcb_randr_create_mode", prototype::RandrCreateMode),
+        create_mode_reply: symbol!(
+            "xcb_randr_create_mode_reply",
+            prototype::ReplyFn<RandrCreateModeReply>
+        ),
+        destroy_mode_checked: symbol!(
+            "xcb_randr_destroy_mode_checked",
+            prototype::RandrWindowRequest
+        ),
+        add_output_mode_checked: symbol!(
+            "xcb_randr_add_output_mode_checked",
+            prototype::RandrIdPairRequest
+        ),
+        delete_output_mode_checked: symbol!(
+            "xcb_randr_delete_output_mode_checked",
+            prototype::RandrIdPairRequest
+        ),
+        list_output_properties: symbol!(
+            "xcb_randr_list_output_properties",
+            prototype::RandrWindowRequest
+        ),
+        list_output_properties_reply: symbol!(
+            "xcb_randr_list_output_properties_reply",
+            prototype::ReplyFn<RandrListOutputPropertiesReply>
+        ),
+        list_output_properties_atoms: symbol!(
+            "xcb_randr_list_output_properties_atoms",
+            prototype::Accessor<RandrListOutputPropertiesReply, u32>
+        ),
+        get_output_property: symbol!(
+            "xcb_randr_get_output_property",
+            prototype::RandrGetOutputProperty
+        ),
+        get_output_property_reply: symbol!(
+            "xcb_randr_get_output_property_reply",
+            prototype::ReplyFn<RandrGetOutputPropertyReply>
+        ),
+        get_output_property_data: symbol!(
+            "xcb_randr_get_output_property_data",
+            prototype::Accessor<RandrGetOutputPropertyReply, u8>
+        ),
+        query_output_property: symbol!(
+            "xcb_randr_query_output_property",
+            prototype::RandrIdPairRequest
+        ),
+        query_output_property_reply: symbol!(
+            "xcb_randr_query_output_property_reply",
+            prototype::ReplyFn<RandrQueryOutputPropertyReply>
+        ),
+        query_output_property_valid_values: symbol!(
+            "xcb_randr_query_output_property_valid_values",
+            prototype::Accessor<RandrQueryOutputPropertyReply, i32>
+        ),
+        change_output_property_checked: symbol!(
+            "xcb_randr_change_output_property_checked",
+            prototype::RandrChangeOutputProperty
+        ),
+        delete_output_property_checked: symbol!(
+            "xcb_randr_delete_output_property_checked",
+            prototype::RandrIdPairRequest
+        ),
     })
 }
 
@@ -1995,6 +2857,41 @@ mod tests {
         assert_eq!(size_of::<RandrModeInfo>(), 32);
         assert_eq!(size_of::<RandrCrtcInfoReply>(), 32);
         assert_eq!(size_of::<RandrOutputInfoReply>(), 36);
+        assert_eq!(size_of::<GetAtomNameReply>(), 32);
+        assert_eq!(size_of::<GetInputFocusReply>(), 12);
+        assert_eq!(size_of::<RandrScreenSizeRangeReply>(), 32);
+        assert_eq!(size_of::<RandrGetMonitorsReply>(), 32);
+        assert_eq!(size_of::<RandrMonitorInfo>(), 24);
+        assert_eq!(size_of::<RandrMonitorInfoIterator>(), 16);
+        assert_eq!(size_of::<RandrCrtcGammaSizeReply>(), 32);
+        assert_eq!(size_of::<RandrGetPanningReply>(), 36);
+        assert_eq!(size_of::<RandrSetPanningReply>(), 12);
+        assert_eq!(
+            size_of::<RenderTransform>(),
+            36,
+            "passed by value to SetCrtcTransform"
+        );
+        assert_eq!(size_of::<RandrGetCrtcTransformReply>(), 96);
+        assert_eq!(
+            core::mem::offset_of!(RandrGetCrtcTransformReply, current_transform),
+            48
+        );
+        assert_eq!(
+            core::mem::offset_of!(RandrGetCrtcTransformReply, pending_len),
+            88
+        );
+        assert_eq!(size_of::<RandrSetCrtcConfigReply>(), 32);
+        assert_eq!(size_of::<RandrCreateModeReply>(), 32);
+        assert_eq!(size_of::<RandrListOutputPropertiesReply>(), 32);
+        assert_eq!(size_of::<RandrGetOutputPropertyReply>(), 32);
+        assert_eq!(size_of::<RandrQueryOutputPropertyReply>(), 32);
+        assert_eq!(size_of::<RandrScreenChangeNotifyEvent>(), 32);
+        assert_eq!(size_of::<RandrCrtcChange>(), 28);
+        assert_eq!(size_of::<RandrOutputChange>(), 28);
+        assert_eq!(size_of::<RandrOutputProperty>(), 28);
+        assert_eq!(size_of::<RandrNotifyEvent<RandrCrtcChange>>(), 32);
+        assert_eq!(size_of::<RandrNotifyEvent<RandrOutputChange>>(), 32);
+        assert_eq!(size_of::<RandrNotifyEvent<RandrOutputProperty>>(), 32);
         // Every core event body is exactly 32 wire bytes, which is also what
         // `SendEvent` requires of the ones a client constructs.
         assert_eq!(size_of::<InputEvent>(), 32);

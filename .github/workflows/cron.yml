@@ -187,6 +187,14 @@ jobs:
         run: >-
           cargo miri test --lib -p crcbl-wayland-probe && cargo miri test --lib
           -p crcbl-wayland -- ffi::
+      # The same reasoning for the X11 binding: connecting dlopens libxcb, but
+      # the reply bounds checks, the setup walk and the event decoders are
+      # pointer work over buffers the tests build by hand. Everything except
+      # the tests that call into libxcb runs here.
+      - name: Interpret the X11 reply and event decoders
+        run: >-
+          cargo miri test --lib -p crcbl-x11 -- --skip
+          connection::tests::libxcb::
       # **`--tests`, and it is load-bearing rather than tidy.** Without it cargo
       # also *builds* every example of every crate named here, and
       # `crcbl-jobs`' `web_worker_gate` is a `cdylib` — which miri's target does

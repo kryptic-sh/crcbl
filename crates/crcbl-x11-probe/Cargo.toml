@@ -1,0 +1,34 @@
+[package]
+name = "crcbl-x11-probe"
+description = "Proof that crcbl-x11's RandR connection drives an X server from outside the engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# A program that is not the engine, using the X11 binding the way one would:
+# its own `crcbl_x11::Connection`, reading and changing the output
+# configuration through RandR. dsplr is the first such program; this crate
+# keeps the path it depends on from breaking unseen.
+
+[features]
+# The end-to-end test, which needs an X server with RandR. Off by default and
+# `#[ignore]`d as well, so `cargo nextest run --workspace --all-features` on a
+# machine with no display stays green; `crcbl-shell`'s `tests/run-x11-e2e.sh`
+# is the only thing that runs it, against its Xvfb.
+x11-e2e = []
+
+[[test]]
+name = "x11_e2e"
+required-features = ["x11-e2e"]
+
+[lints]
+workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+crcbl-x11.workspace = true
+
+[dev-dependencies]
+crcbl-spawn = { path = "../crcbl-spawn" }

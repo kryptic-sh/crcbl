@@ -1243,6 +1243,14 @@ name = "crcbl-x11"
 version = "0.18.0"
 
 [[package]]
+name = "crcbl-x11-probe"
+version = "0.18.0"
+dependencies = [
+ "crcbl-spawn",
+ "crcbl-x11",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"

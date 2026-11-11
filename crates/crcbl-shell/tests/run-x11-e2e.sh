@@ -152,6 +152,33 @@ if [ "$STATUS" -ne 0 ] || ! crcbl_nextest_summary "$ACCESS_PLAIN" "crcbl e2e" \
     exit 1
 fi
 
+# The X11 binding from outside the engine: `crcbl-x11-probe` drives its own
+# `crcbl_x11::Connection`, as dsplr does, and reads, changes and restores this
+# server's RandR configuration — a mode, the screen size, an output property.
+# One test at a time, because each changes the one server they share, and
+# after the suites above, which assume the screen they were started on.
+echo "crcbl e2e: the X11 binding from outside the engine"
+PROBE_LOG="${RUNTIME_DIR}/probe.log"
+set +e
+cargo nextest run \
+    --locked \
+    --package crcbl-x11-probe \
+    --features x11-e2e \
+    --test x11_e2e \
+    --run-ignored all \
+    --test-threads 1 2>&1 | tee "$PROBE_LOG"
+STATUS=${PIPESTATUS[0]}
+set -e
+PROBE_PLAIN="${RUNTIME_DIR}/probe.plain.log"
+crcbl_nextest_plain "$PROBE_LOG" "$PROBE_PLAIN"
+if [ "$STATUS" -ne 0 ] || ! crcbl_nextest_summary "$PROBE_PLAIN" "crcbl e2e" \
+    "The x11-e2e feature or the ignore attribute stopped matching the probe's tests."; then
+    echo "crcbl e2e: the outside-the-engine probe failed or ran nothing" >&2
+    log_tail
+    exit 1
+fi
+echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN probe tests ran against Xvfb on ${DISPLAY}"
+
 # S16 under an X compositing manager: picom on this Xvfb, a transparent Vulkan
 # window over an opaque one, and the screen read back with ImageMagick's
 # `import`, which is the only check that a plain X server's compositor blends

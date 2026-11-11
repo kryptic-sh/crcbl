@@ -22,7 +22,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `free_reply`. `crcbl-shell` keeps the XInput 2, XKB, libxcb-cursor, SHAPE and
   DRI3 libraries and loads them with `crcbl-x11`'s `open_library`. The
   `query-tree` feature adds `QueryTree`, which only the shell's X11 harness
-  uses. Linux and FreeBSD only; empty elsewhere.
+  uses. A program outside the engine drives its own server with
+  `crcbl_x11::Connection`: `connect` (the default screen's root and size from
+  the setup), `flush`, `sync`, `has_error`, `AsFd` for an async runtime's poll,
+  and disconnect on drop. Its RandR requests (negotiated at 1.5) cover what a
+  display configurator transcribing `xrandr` needs: screen resources (probed and
+  current), size range, output and CRTC info, primary output, monitors, gamma
+  size, panning, CRTC transforms, `set_crtc_config` (both timestamps, a typed
+  `SetConfigStatus`), `set_screen_size`, creating, adding and deleting modes,
+  output properties (list, get, query, change, delete), atoms, server grabs and
+  `select_input`. Replies are copied into owned values, every request is checked
+  so an X error comes back as `Error::Protocol` from the call that caused it,
+  and `poll_event` decodes RandR's `ScreenChangeNotify` and its CRTC, output and
+  output-property notifies without blocking. RandR now needs libxcb-randr 1.12
+  (2016) or newer, for `GetMonitors`; with an older one the shell falls back to
+  one monitor covering the screen, as it does with none. Linux and FreeBSD only;
+  empty elsewhere.
 - **`crcbl_shell::ShellEvent::Key::shortcut_keysym`.** The symbol the key
   produces with Caps Lock (xkb's `Lock` modifier) not applied, for matching
   shortcuts and menu accelerators: with Caps Lock on, `Ctrl+r` arrives with
