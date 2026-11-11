@@ -12,7 +12,8 @@
 //! this engine is developed on. Everything that calls AppKit is
 //! `#[cfg(target_os = "macos")]` inside the module, which is also why there is
 //! no `dlopen` here — see [`ffi`], which makes the same argument
-//! `src/win32/ffi.rs` does and the reverse of `src/x11/ffi.rs`'s.
+//! `src/win32/ffi.rs` does and the reverse of
+//! `crates/crcbl-x11/src/ffi.rs`'s.
 //!
 //! The windowing backend table's macOS row (`docs/notes/backends.md`), which
 //! reads in full: "hand-written

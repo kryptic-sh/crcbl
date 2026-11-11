@@ -621,8 +621,8 @@ jobs:
           shared-key: freebsd
       - run: >-
           cargo clippy --locked --all-features --all-targets -p crcbl-shell -p
-          crcbl-wayland -p crcbl-font --target x86_64-unknown-freebsd -- -D
-          warnings
+          crcbl-wayland -p crcbl-x11 -p crcbl-font --target
+          x86_64-unknown-freebsd -- -D warnings
       - run: >-
           cargo clippy --locked --all-features -p crcbl-ui -p crcbl-frame -p
           crcbl-vk -p crcbl-app --target x86_64-unknown-freebsd -- -D warnings

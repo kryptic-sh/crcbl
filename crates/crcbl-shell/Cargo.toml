@@ -31,6 +31,11 @@ thiserror = { workspace = true }
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.crcbl-wayland]
 workspace = true
 
+# libxcb and libxcb-randr, which the X11 backend runs on; the backend loads the
+# other extension libraries itself. Target-gated for the same reason.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.crcbl-x11]
+workspace = true
+
 # Build-time only: turns `wayland-protocols/*.xml` into `wl_interface` tables,
 # request wrappers and event decoders. A workspace crate rather than a module in
 # `build.rs` so its output can be unit-tested against `wayland-scanner`'s — see
@@ -117,8 +122,9 @@ wayland-e2e = []
 
 # The Xvfb end-to-end suite, on the same terms and for the same reasons: off by
 # default so a plain `cargo nextest run` on a machine with no display stays
-# green, and `tests/run-x11-e2e.sh` is the only thing that turns it on.
-x11-e2e = []
+# green, and `tests/run-x11-e2e.sh` is the only thing that turns it on. It
+# brings `crcbl-x11`'s `QueryTree`, which only the harness uses.
+x11-e2e = ["crcbl-x11/query-tree"]
 
 # The Win32 end-to-end suite (P5C W4), on exactly the same terms: off by
 # default, the tests additionally `#[ignore]`d, and `tests/run-win32-e2e.ps1`

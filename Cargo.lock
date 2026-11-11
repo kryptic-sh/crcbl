@@ -1103,6 +1103,7 @@ dependencies = [
  "crcbl-spawn",
  "crcbl-wayland",
  "crcbl-wl-scanner",
+ "crcbl-x11",
  "thiserror 2.0.21",
  "windows",
 ]
@@ -1235,6 +1236,10 @@ dependencies = [
 
 [[package]]
 name = "crcbl-wl-scanner"
+version = "0.18.0"
+
+[[package]]
+name = "crcbl-x11"
 version = "0.18.0"
 
 [[package]]

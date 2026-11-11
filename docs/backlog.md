@@ -38,9 +38,13 @@ sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
   its own XML and carries its own copy of the core tables. Harmless on a
   separate connection, since libwayland matches interfaces by name. Revisit if
   two crates must share proxies on one connection.
-- **dsplr M7 needs X11 output configuration (2026-11-09, not started).** Whether
-  `crcbl-shell`'s RandR FFI grows a set path or dsplr uses x11rb is the owner's
-  call (see dsplr's backlog).
+- **dsplr M7 needs X11 output configuration (in progress, 2026-11-11).** The
+  owner chose crcbl over x11rb, as relayed by dsplr's session. The plan is a
+  `crcbl-x11` crate beside `crcbl-wayland`. The first step moves the libxcb and
+  RandR binding out of `crcbl-shell`. The second adds a public `Connection` with
+  RandR 1.5 reads, the set path (grab, `SetCrtcConfig`, `SetScreenSize`, CRTC
+  transforms), output properties and RandR events, and a probe that the X11 e2e
+  jobs run. dsplr pins a crcbl git rev until a release carries it.
 
 ## `shortcut_keysym` on the web still has Caps Lock applied (2026-11-10)
 

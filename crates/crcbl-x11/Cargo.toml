@@ -1,0 +1,21 @@
+[package]
+name = "crcbl-x11"
+description = "Crucible's libxcb binding: the X11 core protocol and RandR, loaded with dlopen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# No dependencies, on purpose. libxcb and libxcb-randr are reached with `dlopen`
+# through hand-written declarations in `src/ffi.rs`; see that module for why
+# not `#[link]`, and `crcbl-shell`'s manifest for why not a binding crate.
+
+[features]
+# `QueryTree` and the reply accessors that read it. Only `crcbl-shell`'s Xvfb
+# end-to-end harness walks another process's window tree, so its `x11-e2e`
+# feature turns this on and no other build resolves those symbols.
+query-tree = []
+
+[lints]
+workspace = true

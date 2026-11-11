@@ -9,7 +9,8 @@
 //! machine the engine is developed on rather than only by the Windows CI
 //! runner. Everything that calls `user32` is `#[cfg(target_os = "windows")]`
 //! inside the module, which is also why there is no `dlopen` here — see [`ffi`]
-//! for that argument, which is the reverse of the one `src/x11/ffi.rs` makes.
+//! for that argument, which is the reverse of the one
+//! `crates/crcbl-x11/src/ffi.rs` makes.
 //!
 //! The windowing backend table's Windows row (`docs/notes/backends.md`), which
 //! reads in full: "hand-written

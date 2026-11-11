@@ -58,7 +58,8 @@
 //! at runtime. A backend linked against `libwayland-client.so.0` — or
 //! `libxcb.so.1` — with `DT_NEEDED` cannot: the process dies in `ld.so` before
 //! `main`, on any machine without the library, and this list never runs.
-//! `src/wayland/ffi.rs` has the full argument and `src/x11/ffi.rs` sharpens it,
+//! `crates/crcbl-wayland/src/ffi.rs` has the full argument and
+//! `crates/crcbl-x11/src/ffi.rs` sharpens it,
 //! since X11 is the *fallback* and is reached only after Wayland has already
 //! failed.
 //!

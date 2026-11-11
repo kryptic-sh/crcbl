@@ -194,6 +194,7 @@ crcbl-input = { path = "crates/crcbl-input", version = "0.18.0" }
 crcbl-jobs = { path = "crates/crcbl-jobs", version = "0.18.0" }
 crcbl-wl-scanner = { path = "crates/crcbl-wl-scanner", version = "0.18.0" }
 crcbl-wayland = { path = "crates/crcbl-wayland", version = "0.18.0" }
+crcbl-x11 = { path = "crates/crcbl-x11", version = "0.18.0" }
 crcbl-store = { path = "crates/crcbl-store", version = "0.18.0" }
 crcbl-profile = { path = "crates/crcbl-profile", version = "0.18.0" }
 crcbl-audio = { path = "crates/crcbl-audio", version = "0.18.0" }

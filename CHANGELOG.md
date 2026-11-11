@@ -15,6 +15,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-x11`: the libxcb and RandR binding, usable outside the engine.** A
+  new crate holding the core of what was `crcbl-shell`'s private `x11::ffi`:
+  libxcb and libxcb-randr loaded with `dlopen` (`ffi::load`, `ffi::load_randr`),
+  the core-protocol and RandR wire structures, event numbers and constants, and
+  `free_reply`. `crcbl-shell` keeps the XInput 2, XKB, libxcb-cursor, SHAPE and
+  DRI3 libraries and loads them with `crcbl-x11`'s `open_library`. The
+  `query-tree` feature adds `QueryTree`, which only the shell's X11 harness
+  uses. Linux and FreeBSD only; empty elsewhere.
 - **`crcbl_shell::ShellEvent::Key::shortcut_keysym`.** The symbol the key
   produces with Caps Lock (xkb's `Lock` modifier) not applied, for matching
   shortcuts and menu accelerators: with Caps Lock on, `Ctrl+r` arrives with
