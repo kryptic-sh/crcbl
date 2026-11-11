@@ -264,6 +264,8 @@ impl From<ConnectionError> for Error {
 ///
 /// A snapshot from connect time: the size changes with `SetScreenSize`, and
 /// the new one arrives in [`Event::ScreenChange`], not here.
+/// [`Connection::geometry`] on [`root`](Self::root) asks the server for the
+/// current one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Screen {
     /// The screen's number — the `.1` in `:0.1`, `0` when the name has none.
@@ -278,6 +280,27 @@ pub struct Screen {
     pub width_mm: u16,
     /// Height in millimetres.
     pub height_mm: u16,
+}
+
+/// A drawable's geometry, as [`Connection::geometry`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Geometry {
+    /// The root window of the drawable's screen.
+    pub root: Window,
+    /// The drawable's depth: bits per pixel that hold colour.
+    pub depth: u8,
+    /// X of the outside of the border, relative to the parent — *not* the
+    /// desktop, under a reparenting window manager. `0` for a root window or
+    /// a pixmap.
+    pub x: i16,
+    /// Y, as `x`.
+    pub y: i16,
+    /// Width in pixels, inside the border.
+    pub width: u16,
+    /// Height in pixels, inside the border.
+    pub height: u16,
+    /// Border width in pixels; `0` for a pixmap.
+    pub border_width: u16,
 }
 
 /// RandR as this connection negotiated it.
@@ -549,6 +572,9 @@ impl Connection {
     }
 
     /// The default screen: the one the display name chose.
+    ///
+    /// Its size is the connection setup's, from connect time;
+    /// [`geometry`](Self::geometry) on its root reads the current one.
     #[must_use]
     pub const fn screen(&self) -> Screen {
         self.screen
@@ -689,6 +715,34 @@ impl Connection {
         let name = unsafe { (self.lib.get_atom_name_name)(reply.as_ptr()) };
         let name = reply.list(name.cast::<u8>(), usize::from(reply.name_len))?;
         Ok(String::from_utf8_lossy(&name).into_owned())
+    }
+
+    /// `GetGeometry`: `drawable`'s size, position, border and depth.
+    ///
+    /// On a screen's root window this is the screen's current size, which
+    /// follows every `SetScreenSize` — unlike [`screen`](Self::screen), the
+    /// copy taken at connect time.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Protocol`] with `BadDrawable` for an id that is no window or
+    /// pixmap, or what else the request met.
+    pub fn geometry(&self, drawable: Window) -> Result<Geometry, Error> {
+        // SAFETY: the connection is live.
+        let cookie = unsafe { (self.lib.get_geometry)(self.raw(), drawable) };
+        let reply = self.reply("GetGeometry", |error| {
+            // SAFETY: the cookie is this connection's, for a GetGeometry.
+            unsafe { (self.lib.get_geometry_reply)(self.raw(), cookie, error) }
+        })?;
+        Ok(Geometry {
+            root: reply.root,
+            depth: reply.depth,
+            x: reply.x,
+            y: reply.y,
+            width: reply.width,
+            height: reply.height,
+            border_width: reply.border_width,
+        })
     }
 
     /// `GrabServer`: no other client's requests are processed until
@@ -952,6 +1006,7 @@ macro_rules! wire_replies {
 
 wire_replies!(
     GetAtomNameReply,
+    GetGeometryReply,
     GetInputFocusReply,
     InternAtomReply,
     RandrCreateModeReply,

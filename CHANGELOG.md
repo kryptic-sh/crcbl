@@ -13,6 +13,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`crcbl-x11`: `Connection::geometry`, core `GetGeometry`, returning a new
+  `Geometry`** (root, depth, position, size, border width). On a root window it
+  is the screen's current size, so a long-lived connection — dsplr's watch mode
+  and GUI — reads the size after a `SetScreenSize` without waiting for a
+  `ScreenChangeNotify`. `Connection::screen()` stays the copy taken from the
+  connection setup at connect time.
+
 ## [0.19.1] - 2026-11-12
 
 The first release to reach crates.io with the changes listed under 0.19.0. That

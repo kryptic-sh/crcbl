@@ -25,6 +25,10 @@ const ATOM_ATOM: u32 = 4;
 const BAD_VALUE: u8 = 2;
 /// Core `BadMatch`.
 const BAD_MATCH: u8 = 8;
+/// Core `BadDrawable`.
+const BAD_DRAWABLE: u8 = 9;
+/// Core `GetGeometry`'s major opcode, from the X protocol.
+const GET_GEOMETRY: u8 = 14;
 /// RandR minor opcodes, from `randrproto.txt`.
 const GET_OUTPUT_INFO: u16 = 9;
 const DESTROY_MODE: u16 = 17;
@@ -203,11 +207,60 @@ fn randr_is_1_5_and_every_read_agrees_with_the_others() {
     assert_eq!(connection.has_error(), None);
 }
 
+/// Millimetres for `pixels` of a screen dimension that is `total` pixels and
+/// `mm` millimetres long, so a resized screen keeps its physical density.
+fn scaled_mm(pixels: u16, total: u16, mm: u16) -> u32 {
+    u32::from(mm) * u32::from(pixels) / u32::from(total).max(1)
+}
+
+/// Sets the screen back to its connect-time size, then lights `crtc` again as
+/// `before` described it, and says which step refused. Never panics: it also
+/// runs while a failed test unwinds, where a second panic would abort before
+/// the rest was put back.
+fn restore_size_and_crtc(
+    connection: &Connection,
+    crtc: Crtc,
+    before: &CrtcInfo,
+) -> Result<(), String> {
+    let refused = |step: &'static str| move |error: Error| format!("{step}: {error}");
+    let screen = connection.screen();
+    connection
+        .set_screen_size(
+            screen.root,
+            screen.width,
+            screen.height,
+            u32::from(screen.width_mm),
+            u32::from(screen.height_mm),
+        )
+        .map_err(refused("SetScreenSize"))?;
+    let resources = connection
+        .screen_resources_current(screen.root)
+        .map_err(refused("GetScreenResourcesCurrent"))?;
+    let reply = connection
+        .set_crtc_config(
+            crtc,
+            0,
+            resources.config_timestamp,
+            &CrtcConfig {
+                x: before.x,
+                y: before.y,
+                mode: before.mode,
+                rotation: before.rotation,
+                outputs: &before.outputs,
+            },
+        )
+        .map_err(refused("SetCrtcConfig"))?;
+    if reply.status == SetConfigStatus::Success {
+        Ok(())
+    } else {
+        Err(format!("SetCrtcConfig answered {:?}", reply.status))
+    }
+}
+
 /// Puts the screen and CRTC back if the test that changed them panics, so a
 /// failure here does not leave the harness's later steps a different screen.
 struct Restore<'a> {
     connection: &'a Connection,
-    root: Window,
     crtc: Crtc,
     before: CrtcInfo,
     output: Output,
@@ -221,36 +274,7 @@ impl Restore<'_> {
     fn restore(&self) -> Result<(), String> {
         let refused = |step: &'static str| move |error: Error| format!("{step}: {error}");
         let connection = self.connection;
-        let screen = connection.screen();
-        connection
-            .set_screen_size(
-                self.root,
-                screen.width,
-                screen.height,
-                u32::from(screen.width_mm),
-                u32::from(screen.height_mm),
-            )
-            .map_err(refused("SetScreenSize"))?;
-        let resources = connection
-            .screen_resources_current(self.root)
-            .map_err(refused("GetScreenResourcesCurrent"))?;
-        let reply = connection
-            .set_crtc_config(
-                self.crtc,
-                0,
-                resources.config_timestamp,
-                &CrtcConfig {
-                    x: self.before.x,
-                    y: self.before.y,
-                    mode: self.before.mode,
-                    rotation: self.before.rotation,
-                    outputs: &self.before.outputs,
-                },
-            )
-            .map_err(refused("SetCrtcConfig"))?;
-        if reply.status != SetConfigStatus::Success {
-            return Err(format!("SetCrtcConfig answered {:?}", reply.status));
-        }
+        restore_size_and_crtc(connection, self.crtc, &self.before)?;
         connection
             .delete_output_mode(self.output, self.mode)
             .map_err(refused("DeleteOutputMode"))?;
@@ -312,7 +336,6 @@ fn a_new_mode_drives_the_crtc_and_the_events_report_it() {
         .expect("AddOutputMode");
     let restore = Restore {
         connection: &connection,
-        root,
         crtc,
         before: before.clone(),
         output,
@@ -358,16 +381,13 @@ fn a_new_mode_drives_the_crtc_and_the_events_report_it() {
     // records whatever `timestamp` it is sent — so the two time statuses
     // cannot be provoked here; `SetConfigStatus`'s unit test maps them.
 
-    let mm = |pixels: u16, total: u16, mm: u16| {
-        u32::from(mm) * u32::from(pixels) / u32::from(total).max(1)
-    };
     connection
         .set_screen_size(
             root,
             1024,
             768,
-            mm(1024, screen.width, screen.width_mm),
-            mm(768, screen.height, screen.height_mm),
+            scaled_mm(1024, screen.width, screen.width_mm),
+            scaled_mm(768, screen.height, screen.height_mm),
         )
         .expect("SetScreenSize to the CRTC's size");
 
@@ -705,6 +725,160 @@ fn ids_that_do_not_exist_are_typed_randr_errors_and_the_connection_survives() {
             .all(|event| !matches!(event, Event::Error(_))),
         "a checked error is not delivered twice"
     );
+}
+
+/// Puts the screen back to its connect-time size, and the CRTC switched off
+/// to make room back on, if the test that changed them panics — as
+/// [`Restore`] does for a mode.
+struct RestoreSize<'a> {
+    connection: &'a Connection,
+    crtc: Crtc,
+    before: CrtcInfo,
+}
+
+impl RestoreSize<'_> {
+    /// Puts both back, as [`restore_size_and_crtc`] does.
+    fn restore(&self) -> Result<(), String> {
+        restore_size_and_crtc(self.connection, self.crtc, &self.before)
+    }
+}
+
+impl Drop for RestoreSize<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking()
+            && let Err(error) = self.restore()
+        {
+            eprintln!("crcbl e2e: restoring the screen size after a failure: {error}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs an X server with RandR; run-x11-e2e.sh provides one"]
+fn geometry_reads_the_current_screen_size_where_screen_keeps_the_setup_copy() {
+    let connection = connect();
+    let screen = connection.screen();
+    let root = screen.root;
+
+    let before = connection.geometry(root).expect("GetGeometry on the root");
+    assert_eq!(
+        (before.root, before.x, before.y, before.border_width),
+        (root, 0, 0, 0)
+    );
+    assert_eq!(
+        (before.width, before.height),
+        (screen.width, screen.height),
+        "unchanged, the server and the setup agree"
+    );
+
+    // Xvfb's largest screen is the one it started with, so the new size is
+    // smaller — and a lit CRTC must fit inside the screen (`BadMatch`
+    // otherwise), so it is switched off for the shrink and back on after.
+    let range = connection
+        .screen_size_range(root)
+        .expect("GetScreenSizeRange");
+    let shrunk = |now: u16, min: u16| now.saturating_sub(64).max(min);
+    let (width, height) = (
+        shrunk(screen.width, range.min_width),
+        shrunk(screen.height, range.min_height),
+    );
+    assert_ne!(
+        (width, height),
+        (screen.width, screen.height),
+        "the server's smallest screen ({range:?}) leaves no room to shrink"
+    );
+    let resources = connection
+        .screen_resources_current(root)
+        .expect("the resources");
+    let (crtc, before_crtc) = lit_crtc(&connection, &resources);
+    let restore = RestoreSize {
+        connection: &connection,
+        crtc,
+        before: before_crtc,
+    };
+    let off = connection
+        .set_crtc_config(
+            crtc,
+            0,
+            resources.config_timestamp,
+            &CrtcConfig {
+                x: 0,
+                y: 0,
+                mode: 0,
+                rotation: Rotation::ROTATE_0,
+                outputs: &[],
+            },
+        )
+        .expect("SetCrtcConfig switching the CRTC off");
+    assert_eq!(off.status, SetConfigStatus::Success);
+    connection
+        .set_screen_size(
+            root,
+            width,
+            height,
+            scaled_mm(width, screen.width, screen.width_mm),
+            scaled_mm(height, screen.height, screen.height_mm),
+        )
+        .expect("SetScreenSize to a smaller screen");
+    connection.sync().expect("the round trip");
+
+    let after = connection.geometry(root).expect("GetGeometry on the root");
+    assert_eq!(
+        (after.width, after.height),
+        (width, height),
+        "GetGeometry reports the new size"
+    );
+    assert_eq!(
+        connection.screen(),
+        screen,
+        "screen() is still the connect-time copy"
+    );
+
+    restore
+        .restore()
+        .expect("the screen size and the CRTC go back");
+    let restored = connection.geometry(root).expect("GetGeometry on the root");
+    assert_eq!(
+        (restored.width, restored.height),
+        (screen.width, screen.height)
+    );
+    let crtc_after = connection
+        .crtc_info(crtc, 0)
+        .expect("the CRTC after restoring");
+    assert_eq!(
+        (
+            crtc_after.mode,
+            crtc_after.x,
+            crtc_after.y,
+            crtc_after.width,
+            crtc_after.height
+        ),
+        (
+            restore.before.mode,
+            restore.before.x,
+            restore.before.y,
+            restore.before.width,
+            restore.before.height
+        ),
+        "the CRTC is lit again where it was"
+    );
+
+    let error = connection
+        .geometry(0x1)
+        .expect_err("0x1 is no client's drawable");
+    let Error::Protocol(error) = error else {
+        panic!("a refused reply is an X error: {error:?}");
+    };
+    assert_eq!(
+        (
+            error.error_code,
+            error.major_opcode,
+            error.minor_opcode,
+            error.resource_id
+        ),
+        (BAD_DRAWABLE, GET_GEOMETRY, 0, 0x1)
+    );
+    assert_eq!(connection.has_error(), None, "an X error is not fatal");
 }
 
 #[test]

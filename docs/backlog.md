@@ -52,12 +52,17 @@ sway in `run-wayland-e2e.sh`, and read Hyprland's outputs on the dev machine.
 `crcbl-x11-probe`'s tests run it against Xvfb in `run-x11-e2e.sh`, which cannot
 reach everything:
 
-- **Not exercised against a server:** `set_panning` and `set_crtc_transform`
-  (Xvfb refuses both, so only the typed-error branch runs; argument order was
-  checked against `randr.h` by hand), `GetMonitors` with more than one monitor,
-  a connection that dies mid-`poll_event` (checked by hand once: queued events
-  first, then `Err(Connection(Socket))`), and the provider, resource and lease
-  `Notify` sub-codes, which decode as `OtherRandrNotify`.
+- **Not exercised against a server:** `set_panning` and `set_crtc_transform`.
+  Xvfb's driver has no `rrGetPanning` hook, so `GetPanning` answers with zero
+  area, tracking and border fields (its timestamp is still the screen's last set
+  time), and it refuses `SetPanning` (`BadRRCrtc`) and `SetCrtcTransform`
+  (`BadValue`) — seen by dsplr against xorg-server 21.1.26, and read in
+  `ProcRRGetPanning` — so only the typed-error branch of each runs; argument
+  order was checked against `randr.h` by hand. Also unexercised: `GetMonitors`
+  with more than one monitor, a connection that dies mid-`poll_event` (checked
+  by hand once: queued events first, then `Err(Connection(Socket))`), and the
+  provider, resource and lease `Notify` sub-codes, which decode as
+  `OtherRandrNotify`.
 - **X.Org checks neither `SetCrtcConfig` timestamp**, so `InvalidTime` and
   `InvalidConfigTime` never come back on Xvfb (verified with stale and corrupt
   timestamps). Documented on `SetConfigStatus`; a real server with a second CRTC
