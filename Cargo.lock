@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "alcove"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "asteroids"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -197,9 +197,9 @@ dependencies = [
 
 [[package]]
 name = "async-lock"
-version = "3.4.2"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "290f7f2596bd5b78a9fec8088ccd89180d7f9f55b94b0576823bbbdc72ee8311"
+checksum = "0876700b0d007ad25d5508865a4259c3af9af6d296bf663a0d586d0bc3369f6f"
 dependencies = [
  "event-listener",
  "event-listener-strategy",
@@ -232,7 +232,7 @@ checksum = "4f8abc12baad266b1c8cec146854c195b5864b4221d4b2ca7296a7ae82d9e451"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -267,7 +267,7 @@ checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -321,7 +321,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bare"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
 ]
@@ -341,7 +341,7 @@ version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56d87354e4229f54a44f7bf2435906a4656dba36026ab6eaca629a2c436a691c"
 dependencies = [
- "bit-vec 0.10.1",
+ "bit-vec 0.10.2",
 ]
 
 [[package]]
@@ -352,9 +352,9 @@ checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
 
 [[package]]
 name = "bit-vec"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5727b15fa97d4f4fee0a3b7c3d550ed0269f54329207b86388de918604e31269"
+checksum = "72503af1e72be411d74ca45cd6b309878fcb35354e252fc2a3a8bda3a97082a0"
 dependencies = [
  "borsh",
  "serde",
@@ -422,12 +422,12 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
 ]
 
 [[package]]
 name = "bracket"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -435,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "breach"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "breakout"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -475,7 +475,7 @@ checksum = "6a1f896587b6f2c069c73d2f0913e2d590c3990285cd2f0b6aa02b786b4c679c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -556,9 +556,9 @@ dependencies = [
 
 [[package]]
 name = "combine"
-version = "4.6.8"
+version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
+checksum = "4356eba6976435498d05a311ee9fc486da3bc81c200d3f0d7dd9703b41913f92"
 dependencies = [
  "bytes",
  "memchr",
@@ -634,16 +634,16 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.2"
+version = "1.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
+checksum = "2b929dd2a135771f40afabd1073f85eed59c800b7c61901e5c254270497dad64"
 dependencies = [
  "cfg-if",
 ]
 
 [[package]]
 name = "crcbl"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-anim",
  "crcbl-app",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-anim"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "crcbl-rand",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-app"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "crcbl-dx12",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-assets"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "crcbl-shaders",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-audio"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "cpal",
  "crcbl-core",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-cli"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-assets",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-client"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "crcbl-ecs",
@@ -765,11 +765,11 @@ dependencies = [
 
 [[package]]
 name = "crcbl-console"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "crcbl-core"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "bitflags",
  "crcbl-console",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-dcomp"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "crcbl-hal",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-dx12"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-console",
  "crcbl-core",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-ecs"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "crcbl-jobs",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-font"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-spawn",
  "memmap2",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-frame"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "bytemuck",
  "crcbl-core",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-golden"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-store",
  "png",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-greybox"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-render",
  "crcbl-shaders",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-hal"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "bitflags",
  "crcbl-core",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-image"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-font",
  "harfrust",
@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-input"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "ron",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-inventory"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "crcbl-rand",
@@ -896,14 +896,14 @@ dependencies = [
 
 [[package]]
 name = "crcbl-jobs"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "crcbl-mixer"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-spawn",
  "windows",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-mtl"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "block2",
  "crcbl-core",
@@ -927,7 +927,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-nav"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-phys",
  "glam",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-net"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "chacha20poly1305",
  "crcbl-core",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-notify"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "bitflags",
  "thiserror 2.0.21",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-phys"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "crcbl-ecs",
@@ -967,14 +967,14 @@ dependencies = [
 
 [[package]]
 name = "crcbl-profile"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "crcbl-ragdoll"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-anim",
  "crcbl-core",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-rand"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "getrandom",
  "rand_chacha",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-reflect"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-reflect-derive",
  "glam",
@@ -1006,16 +1006,16 @@ dependencies = [
 
 [[package]]
 name = "crcbl-reflect-derive"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
 ]
 
 [[package]]
 name = "crcbl-render"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-sample-test"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-scene"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-assets",
  "crcbl-core",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-server"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-client",
  "crcbl-console",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-shaders"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-scene",
  "crcbl-spawn",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-shell"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -1110,11 +1110,11 @@ dependencies = [
 
 [[package]]
 name = "crcbl-spawn"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "crcbl-sprite"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-store",
  "png",
@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-steam"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-input",
  "crcbl-net",
@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-store"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "crcbl-net",
@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-ui"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "accesskit",
  "bytemuck",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-vfx"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "glam",
  "proptest",
@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-vk"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "ash",
  "crcbl-core",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-water"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "proptest",
  "thiserror 2.0.21",
@@ -1203,11 +1203,11 @@ dependencies = [
 
 [[package]]
 name = "crcbl-wayland"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "crcbl-wayland-probe"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-wayland",
  "crcbl-wl-scanner",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-webgpu"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-core",
  "crcbl-hal",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-wind"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-assets",
  "crcbl-phys",
@@ -1236,15 +1236,15 @@ dependencies = [
 
 [[package]]
 name = "crcbl-wl-scanner"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "crcbl-x11"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "crcbl-x11-probe"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl-spawn",
  "crcbl-x11",
@@ -1284,9 +1284,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.5"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
+checksum = "261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f"
 dependencies = [
  "cmov",
 ]
@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "editor"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "breakout",
  "crcbl",
@@ -1423,9 +1423,9 @@ dependencies = [
 
 [[package]]
 name = "equivalent"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "errno"
@@ -1480,7 +1480,7 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "flappy"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -1490,9 +1490,9 @@ dependencies = [
 
 [[package]]
 name = "flate2"
-version = "1.1.10"
+version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
+checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
  "crc32fast",
  "miniz_oxide 0.9.1",
@@ -1513,9 +1513,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "font-types"
-version = "0.12.6"
+version = "0.12.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c92d9081c7ab3bd83ef1eecdfad090f3d966e3ce74106779664114cfe1a6274"
+checksum = "835ae9d781464a79026cde387f9cbc650c9a4909d7cf7e658b127e3c35d2f35d"
 dependencies = [
  "bytemuck",
 ]
@@ -1553,7 +1553,7 @@ checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -1589,9 +1589,9 @@ dependencies = [
 
 [[package]]
 name = "glam"
-version = "0.34.2"
+version = "0.34.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54af5066834d6c2d404eb26ea036a15b15d9ff80db510b9a73ff95ab07f30831"
+checksum = "627003914c6057c9c8f0832ee4f870b5a4f599d0cfa83f4072675114860cd0ff"
 
 [[package]]
 name = "gltf"
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "horde"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "hud"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -1729,18 +1729,18 @@ checksum = "a257582fdcde896fd96463bf2d40eefea0580021c0712a0e2b028b60b47a837a"
 
 [[package]]
 name = "inout"
-version = "0.2.2"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
+checksum = "3a580c13f0ffc335ef42dd3f6b1a41b726051c5e1656d9a3aa6fddb3c5dfbbf9"
 dependencies = [
  "hybrid-array",
 ]
 
 [[package]]
 name = "itoa"
-version = "1.0.18"
+version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jni"
@@ -1802,9 +1802,9 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.106"
+version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7883d941dae510fb2d978fc3fe018c71c9e2892fd38854de3e8b92c2e5ad9cc5"
+checksum = "8dc09d2154098bbf4ef54eab6b117a3c24cbbffe94046b16ee6d6d4510584d3a"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -1813,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "lantern"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -1829,9 +1829,9 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libc"
-version = "0.2.190"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libloading"
@@ -2158,7 +2158,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "options"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2166,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "orbit"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2327,7 +2327,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8530004ccb15eae51c7e40009fbe317f341f804db54dc033eec1c50be28cfa0"
 dependencies = [
  "bit-set 0.11.1",
- "bit-vec 0.10.1",
+ "bit-vec 0.10.2",
  "bitflags",
  "chacha20",
  "core_detect",
@@ -2342,7 +2342,7 @@ dependencies = [
 
 [[package]]
 name = "puppet"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2350,7 +2350,7 @@ dependencies = [
 
 [[package]]
 name = "quarry"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2421,11 +2421,12 @@ dependencies = [
 
 [[package]]
 name = "read-fonts"
-version = "0.45.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a5b7bed3d16ab428d8fa533640ab805ff50e7ad8a4d00649de1259e70023282"
+checksum = "4edc8db0d972de88e53a085b1f01fb3fbdae7bb0cb7a0ce2b2f8285a412fe3ef"
 dependencies = [
  "bytemuck",
+ "foldhash",
  "font-types",
  "once_cell",
  "yoke",
@@ -2449,7 +2450,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "render-harness"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2485,9 +2486,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",
@@ -2525,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2566,7 +2567,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -2590,14 +2591,14 @@ checksum = "8d3b1629de253c70a0508c3899572da79ca359fdab27c7920ff00406df418906"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
 ]
 
 [[package]]
 name = "serde_spanned"
-version = "1.1.1"
+version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+checksum = "9c187e0a369471c550af028cba56d4f4fa2a489ad28151ae95a4d340a2a8b782"
 dependencies = [
  "serde_core",
 ]
@@ -2615,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "shard"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2687,13 +2688,13 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.16.2"
+version = "1.16.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
+checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
 
 [[package]]
 name = "sparks"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2719,7 +2720,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sundial"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2739,9 +2740,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.9"
+version = "3.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
+checksum = "4ae9ccbea3a7b0b09443036490c8f34a8b1b760fd345e5c0dae0aac718faea79"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2756,7 +2757,7 @@ checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -2820,12 +2821,12 @@ checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
 ]
 
 [[package]]
 name = "tide"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -2834,9 +2835,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.6+spec-1.1.0"
+version = "1.2.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
+checksum = "d5755c51863cdac711f1956baf8eb9588e060755f7d3c4c979e70ea1e1f32cd7"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -2849,18 +2850,18 @@ dependencies = [
 
 [[package]]
 name = "toml_datetime"
-version = "1.1.1+spec-1.1.0"
+version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
+checksum = "173f25c883cd2176a2d8212155638c0a60d484a9d84546d270866f40f56b6e49"
 dependencies = [
  "serde_core",
 ]
 
 [[package]]
 name = "toml_edit"
-version = "0.25.15+spec-1.1.0"
+version = "0.25.19+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1340ea94a5856333492c9064b02c778b191dd2c853778d9609debdcdfea3a614"
+checksum = "dd43688c4858d7264ae1cf9a9f874a67c3feb74a883b1cd7bebd6a4ea8307218"
 dependencies = [
  "indexmap",
  "toml_datetime",
@@ -2870,22 +2871,22 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.3+spec-1.1.0"
+version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
+checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow",
 ]
 
 [[package]]
 name = "toml_writer"
-version = "1.1.2+spec-1.1.0"
+version = "1.2.0+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
+checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 
 [[package]]
 name = "towers"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2926,7 +2927,7 @@ dependencies = [
 
 [[package]]
 name = "tumble"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
@@ -2969,9 +2970,9 @@ checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.26"
+version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "unicode-linebreak"
@@ -2987,9 +2988,9 @@ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-width"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "universal-hash"
@@ -3003,9 +3004,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.28.0"
+version = "1.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
+checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
 dependencies = [
  "js-sys",
  "serde_core",
@@ -3020,7 +3021,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "viewer"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
@@ -3049,12 +3050,11 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.129"
+version = "0.2.130"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bb54f33acc68fd454578d9820b0bde1a1a3d17aa17bb7b6595806d02886d409"
+checksum = "a0181c14ddd6c7b8b0b0132a5f1ea2f32be0d893cd3ea97b6e3b28886b8a3d1c"
 dependencies = [
  "cfg-if",
- "once_cell",
  "rustversion",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
@@ -3062,9 +3062,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.129"
+version = "0.2.130"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e29d0c35b16e224a7eeb5cd2d25e3e1968fbd65604117b44d3b789d00ee8535"
+checksum = "6e931a02a39abdbf66966fc35902b5ed58344750a70885bed4ebb3d8eaf28ed9"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -3072,31 +3072,31 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.129"
+version = "0.2.130"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f501a8bc3719dba86ef8ae4728879c08001bea749eb1333ac5b91e040e2a6b7"
+checksum = "2ca4b54280e455bd831e33a6b8e734baf432fe63fbc35c42ac14ce67a043a53a"
 dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
  "wasm-bindgen-shared",
 ]
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.129"
+version = "0.2.130"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
+checksum = "3b1f9c3798725016c6ee5f2f57869ec0831e8bbc0ab0310a86e787e97f41389e"
 dependencies = [
  "unicode-ident",
 ]
 
 [[package]]
 name = "web-sys"
-version = "0.3.106"
+version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88261b9deccee56594c11a3460c462c41f58d148598fe70ad77070126a68aba4"
+checksum = "d7d179596ff5ec0f6de4db64d54011bde6289cc49603d3a6e4ce3f329207ab88"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -3232,9 +3232,9 @@ dependencies = [
 
 [[package]]
 name = "winnow"
-version = "1.0.4"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 dependencies = [
  "memchr",
 ]
@@ -3252,9 +3252,9 @@ dependencies = [
 
 [[package]]
 name = "yoke"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "709fe23a0424b6a435d82152b1bd3fdfb0833487d5fa90d05d42762a9891fef5"
+checksum = "417ef3fcf6c300b7dbd25c85531a746931c02ad536f3cf4786ed1e88223340b3"
 dependencies = [
  "stable_deref_trait",
  "yoke-derive",
@@ -3269,7 +3269,7 @@ checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
  "synstructure",
 ]
 
@@ -3341,7 +3341,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
  "zbus_names",
  "zvariant",
  "zvariant_utils",
@@ -3372,27 +3372,27 @@ dependencies = [
 
 [[package]]
 name = "zcheapstr"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1afec51604565183aeb5c54c20aeab286120d4e4460f7f76e3e8bb8c0d99473"
+checksum = "939f186d9ecebe044315a5cb6d6f78568bbc21152adc954d5a0c2f58bdbc9920"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "zerocopy"
-version = "0.8.61"
+version = "0.8.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "879fb705ce98c32e41ebdb970fbe1204f8492423b314c6ab0354c3e7b5542866"
+checksum = "e5fe1f8f1b06191a00962174c61aa5005e0bb391a6d80d07e24d115c01a92ed8"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.61"
+version = "0.8.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "708882a28301d604fa039cc7727607a98d04c4b86dc76ec9cc683f805d709759"
+checksum = "863ad3ac83293fb4d740aedbfdc9240dd8d1a50c1099acd76ce80ce7c7230c7f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3416,7 +3416,7 @@ checksum = "f75b4683f6c7f45248d4d64056a24298c6281e0993356d7d1b4a1a962ef10d4a"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
  "synstructure",
 ]
 
@@ -3462,7 +3462,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 3.0.10",
  "zvariant_utils",
 ]
 
@@ -3475,6 +3475,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde",
- "syn 3.0.9",
+ "syn 3.0.10",
  "winnow",
 ]
