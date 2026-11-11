@@ -71,7 +71,10 @@ reach everything:
 - **`crcbl-shell`'s `x11::monitors` still decodes RandR itself** rather than
   running on `Connection`, so the reply decoding exists twice. Moving it means
   the shell's connection becomes a `Connection`, as `crcbl-wayland`'s `Display`
-  did for the Wayland backend.
+  did for the Wayland backend. The same move retires the shell's `x11::connect`
+  `has_extension`, a second hand-written `QueryExtension` that clamps an
+  overlong name and discards the error, in favour of
+  `Connection::query_extension`.
 - **`RandrLib` needs libxcb-randr 1.12 or newer (2016)**, because it resolves
   `xcb_randr_get_monitors`; an older library leaves the shell with one
   whole-screen monitor and `Connection` without RandR.
