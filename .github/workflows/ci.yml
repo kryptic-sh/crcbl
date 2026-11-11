@@ -3302,6 +3302,7 @@ jobs:
       DXC_ASSET: 'linux_dxc_2026_07_29.x86_x64.tar.gz'
       SPIRV_TOOLS_VERSION: '2026.1-1'
       SPIRV_TOOLS_MAJOR: '2026.1'
+      SPIRV_TOOLS_SHA256: '24e972ed4f2e92ada6f64b32ff40550fda02038385656736af871ca3dcb2b867'
     steps:
       - uses: actions/checkout@v7
       # `spirv-val` and `spirv-dis`: the script validates every fresh artifact
@@ -3335,26 +3336,34 @@ jobs:
           # run. `.github/actions/apt-packages` makes this argument at length;
           # these fetches were simply never given the same treatment.
           #
-          # **From two hosts.** The runner's own mirror is asked first, and
-          # Canonical's archive only if it does not deliver: on 2026-11-11 the
-          # runners could not resolve `archive.ubuntu.com` for over an hour,
-          # failing this step in every attempt while apt kept installing from
-          # `azure.archive.ubuntu.com` in the jobs beside it. Both serve the
-          # same pool, and the version check below holds either to the pin.
-          POOL="ubuntu/pool/universe/s/spirv-tools/spirv-tools_${SPIRV_TOOLS_VERSION}_amd64.deb"
-          for HOST in azure.archive.ubuntu.com archive.ubuntu.com; do
+          # **From three hosts, held to a hash.** On 2026-11-11 the runners
+          # could resolve no `ubuntu.com` name for over an hour — neither Canonical's
+          # archive nor the runner's own `azure.archive.ubuntu.com` mirror — and
+          # this step failed every attempt of a release tag's run, skipping
+          # every publish job. So the mirrors are tried in turn, ending with
+          # kernel.org's, which is outside that domain. Any of them may serve
+          # the file because none is trusted: the bytes must match
+          # `SPIRV_TOOLS_SHA256`, taken from Canonical's archive.
+          POOL="pool/universe/s/spirv-tools/spirv-tools_${SPIRV_TOOLS_VERSION}_amd64.deb"
+          FETCHED=""
+          for MIRROR in http://azure.archive.ubuntu.com/ubuntu \
+            http://archive.ubuntu.com/ubuntu \
+            https://mirrors.edge.kernel.org/ubuntu; do
             if curl -sSfL --retry 3 --retry-delay 5 --retry-all-errors \
               --connect-timeout 20 --max-time 120 -o /tmp/spirv-tools.deb \
-              "http://${HOST}/${POOL}"; then
-              echo "crcbl shaders: spirv-tools fetched from ${HOST}"
+              "${MIRROR}/${POOL}" &&
+              echo "${SPIRV_TOOLS_SHA256}  /tmp/spirv-tools.deb" | sha256sum -c --quiet; then
+              FETCHED="${MIRROR}"
               break
             fi
+            echo "crcbl shaders: ${MIRROR} did not deliver the pinned .deb"
             rm -f /tmp/spirv-tools.deb
           done
-          if [ ! -s /tmp/spirv-tools.deb ]; then
+          if [ -z "${FETCHED}" ]; then
             echo "crcbl shaders: no mirror delivered ${POOL}" >&2
             exit 1
           fi
+          echo "crcbl shaders: spirv-tools fetched from ${FETCHED}"
           # Best-effort, and deliberately not chained to the install: a refresh
           # that uses its whole timeout must not consume the attempt after it.
           timeout 120 sudo apt-get update \
