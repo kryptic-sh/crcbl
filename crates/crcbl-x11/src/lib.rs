@@ -2,7 +2,7 @@
 //!
 //! `crcbl-shell`'s X11 backend is built on it, and so can a program outside the
 //! engine that talks to an X server on its own connection — to read and set
-//! the output configuration through RandR, say, which [`Connection`] opens and
+//! the output configuration through RandR, say, which `Connection` opens and
 //! drives. `crcbl-shell` adds the extension libraries only a windowing backend
 //! needs (XInput 2, XKB, libxcb-cursor, SHAPE, DRI3) on top of this crate's
 //! loader.
