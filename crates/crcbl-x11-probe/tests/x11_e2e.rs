@@ -889,6 +889,37 @@ fn geometry_reads_the_current_screen_size_where_screen_keeps_the_setup_copy() {
 
 #[test]
 #[ignore = "needs an X server with RandR; run-x11-e2e.sh provides one"]
+fn query_extension_agrees_with_randr_and_finds_no_xwayland_on_xvfb() {
+    let connection = connect();
+    let randr = connection.randr().expect("the server has RandR");
+    let info = connection
+        .query_extension("RANDR")
+        .expect("QueryExtension")
+        .expect("Xvfb has RandR");
+    assert_eq!(
+        (info.major_opcode, info.first_event, info.first_error),
+        (randr.major_opcode, randr.first_event, randr.first_error),
+        "QueryExtension and the negotiated RandR agree"
+    );
+    assert_eq!(
+        connection
+            .query_extension("XWAYLAND")
+            .expect("QueryExtension"),
+        None,
+        "Xvfb is not Xwayland"
+    );
+    assert_eq!(
+        connection
+            .query_extension("CRCBL-NO-SUCH-EXTENSION")
+            .expect("QueryExtension"),
+        None,
+        "a made-up name is not present"
+    );
+    assert_eq!(connection.has_error(), None);
+}
+
+#[test]
+#[ignore = "needs an X server with RandR; run-x11-e2e.sh provides one"]
 fn a_grabbed_server_still_answers_its_grabber() {
     let connection = connect();
     connection.grab_server().expect("GrabServer");

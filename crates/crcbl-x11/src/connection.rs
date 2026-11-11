@@ -320,6 +320,21 @@ pub struct Geometry {
     pub border_width: u16,
 }
 
+/// An extension the server has, as [`Connection::query_extension`] reads it.
+///
+/// An extension with no events or no errors of its own has `0` for that
+/// number, as the protocol says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ExtensionInfo {
+    /// The major opcode the extension's requests carry, which is what an
+    /// [`XError::major_opcode`] is compared to.
+    pub major_opcode: u8,
+    /// The event number of the extension's first event.
+    pub first_event: u8,
+    /// The error number of the extension's first error.
+    pub first_error: u8,
+}
+
 /// RandR as this connection negotiated it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RandrExtension {
@@ -769,6 +784,42 @@ impl Connection {
         Ok(reply.atom)
     }
 
+    /// `QueryExtension`, the core request: whether the server has the
+    /// extension called `name`, and its numbers if it does — `Ok(None)` when
+    /// it does not. `"RANDR"` answers with the numbers
+    /// [`randr`](Self::randr) holds. `"XWAYLAND"` present means the server is
+    /// Xwayland, but absent proves nothing: Xwayland before 23.1 lacks it, a
+    /// build without `xwaylandproto` registers none, and `-extension XWAYLAND`
+    /// turns it off.
+    ///
+    /// The server compares names byte for byte, so `"randr"` is not RandR;
+    /// extension names are ASCII in practice. An empty name is a valid request,
+    /// which the server answers with not present.
+    ///
+    /// Every call is a round trip. libxcb caches an extension's answer only
+    /// for `xcb_get_extension_data`, keyed by the `xcb_extension_t` a binding
+    /// for that extension defines; this request goes out on its own.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooLong`] for a name longer than the request's 16-bit length
+    /// counts — no extension has one, and a truncated name would ask about a
+    /// different extension — or what the request met.
+    pub fn query_extension(&self, name: &str) -> Result<Option<ExtensionInfo>, Error> {
+        let len = u16::try_from(name.len()).map_err(|_| Error::TooLong {
+            what: "extension name",
+        })?;
+        // SAFETY: the connection is live, and `name` is `len` bytes that
+        // outlive the call (libxcb copies them into its buffer).
+        let cookie = unsafe { (self.lib.query_extension)(self.live()?, len, name.as_ptr().cast()) };
+        let reply = self.reply::<ffi::QueryExtensionReply>("QueryExtension", cookie)?;
+        Ok((reply.present != 0).then(|| ExtensionInfo {
+            major_opcode: reply.major_opcode,
+            first_event: reply.first_event,
+            first_error: reply.first_error,
+        }))
+    }
+
     /// `GetAtomName`: the name `atom` was interned as.
     ///
     /// Atom names are Latin-1 by the protocol and ASCII in practice; a byte
@@ -1210,6 +1261,7 @@ wire_replies!(
     GetGeometryReply,
     GetInputFocusReply,
     InternAtomReply,
+    QueryExtensionReply,
     RandrCreateModeReply,
     RandrCrtcGammaSizeReply,
     RandrCrtcInfoReply,

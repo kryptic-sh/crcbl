@@ -21,8 +21,8 @@ mod randr;
 
 #[cfg(desktop_unix)]
 pub use connection::{
-    Atom, ConnectError, Connection, ConnectionError, Error, Geometry, RandrErrorKind,
-    RandrExtension, RandrVersion, Screen, Timestamp, Window, XError,
+    Atom, ConnectError, Connection, ConnectionError, Error, ExtensionInfo, Geometry,
+    RandrErrorKind, RandrExtension, RandrVersion, Screen, Timestamp, Window, XError,
 };
 #[cfg(desktop_unix)]
 pub use event::{

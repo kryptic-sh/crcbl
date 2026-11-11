@@ -31,6 +31,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   sent during another client's grab applies when the grab ends — so reconnect
   and read the state again after one. `Connection::connect` itself still has no
   deadline.
+- **`crcbl-x11`: `Connection::query_extension`, core `QueryExtension`, returning
+  a new `ExtensionInfo`** (major opcode, first event, first error), or `None`
+  when the server does not have the extension. A caller can now ask about any
+  extension without unsafe FFI on `Connection::as_ptr` — dsplr checks for
+  `XWAYLAND` to refuse output changes under Xwayland. Its presence identifies
+  Xwayland; its absence does not rule it out, since Xwayland before 23.1, a
+  build without `xwaylandproto` and `-extension XWAYLAND` all lack it. A name
+  longer than the request's 16-bit length is `Error::TooLong`, not truncated.
 
 ### Changed
 
