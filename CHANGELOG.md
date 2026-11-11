@@ -13,6 +13,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-11-12
+
+The first release to reach crates.io with the changes listed under 0.19.0. That
+version was tagged but never published: GitHub's runners could not resolve any
+`ubuntu.com` host while its release run was going, so a prerequisite check
+failed and every publish job was skipped. Nothing in the library changed between
+the two.
+
 ## [0.19.0] - 2026-11-11
 
 ### Added
@@ -22917,7 +22925,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.19.1...HEAD
+[0.19.1]: https://github.com/kryptic-sh/crcbl/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/kryptic-sh/crcbl/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/kryptic-sh/crcbl/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/kryptic-sh/crcbl/compare/v0.17.1...v0.17.2
