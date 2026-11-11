@@ -35,6 +35,39 @@ sway_log_tail() {
     echo "--- end sway log ---" >&2
 }
 
+# Refuses to start sway where its Xwayland could take a live X server's
+# display. wlroots (`xwayland/sockets.c`, `open_display_sockets`) walks
+# displays from 0, claims one whose lock is missing or names a pid `kill`
+# cannot reach, binds the abstract `@/tmp/.X11-unix/X<n>` and then **unlinks
+# and rebinds** the socket path. A server listening on the abstract name too
+# stops it at the first bind; one listening only on the path — Hyprland's
+# Xwayland is one — loses its socket file to the reclaim, and every new client
+# of that desktop fails. On 2026-11-11 a sandboxed harness, which saw the
+# desktop's lock pid as dead from inside its own PID namespace, did exactly
+# that to `:0` with Xvfb. So a display with a path-only listener and a lock
+# this shell cannot vouch for is a reason not to run. Linux only, because
+# `/proc/net/unix` is: elsewhere this fails rather than passing unchecked.
+sway_session_guard_x_displays() {
+    if [ ! -r /proc/net/unix ]; then
+        echo "crcbl e2e: /proc/net/unix is unreadable, so nothing can show sway's Xwayland would not take a live X display; refusing to start it" >&2
+        exit 1
+    fi
+    local listeners display lock pid
+    listeners="$(awk '{print $NF}' /proc/net/unix)"
+    # wlroots' own range: it gives up past display 32.
+    for display in $(seq 0 32); do
+        grep -qxF "/tmp/.X11-unix/X${display}" <<<"$listeners" || continue
+        grep -qxF "@/tmp/.X11-unix/X${display}" <<<"$listeners" && continue
+        lock="/tmp/.X${display}-lock"
+        pid="$(tr -cd '0-9' <"$lock" 2>/dev/null || true)"
+        if [ -n "$pid" ] && kill -0 "$((10#$pid))" 2>/dev/null; then
+            continue
+        fi
+        echo "crcbl e2e: X display :${display} has a server listening on /tmp/.X11-unix/X${display} only, and its lock ($lock) is missing or names a pid this shell cannot see; sway's Xwayland would unlink that socket, so this will not start sway" >&2
+        exit 1
+    done
+}
+
 # `sway_session_start <config path>`
 sway_session_start() {
     local config="$1"
@@ -43,6 +76,7 @@ sway_session_start() {
         echo "crcbl e2e: sway is not installed; install it or run the harness elsewhere" >&2
         exit 1
     fi
+    sway_session_guard_x_displays
 
     # A private XDG_RUNTIME_DIR so this never collides with a real session when
     # a developer runs it on a live desktop, and so the socket poll below cannot
