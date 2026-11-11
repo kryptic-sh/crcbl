@@ -77,6 +77,31 @@ reach everything:
   whole-screen monitor and `Connection` without RandR.
 - **`crcbl-x11/src/ffi.rs` keeps growing** with each extension; split it into
   core and RandR modules as a move-only change.
+- **`Connection::set_reply_timeout` leaves three waits without a deadline.**
+  `Connection::connect` (the setup and RandR's `QueryVersion`) runs before a
+  timeout can be set; a connect-time timeout would need the setup read by hand
+  or `xcb_connect` on a thread. `xcb_flush` blocks while the socket's send
+  buffer is full and the server reads nothing, which a grab causes; every
+  request this crate sends is far smaller than the buffer, but a long
+  `ChangeOutputProperty` is not bounded. And `xcb_poll_for_reply` itself can
+  block: libxcb's `read_packet` (`xcb_in.c`, 1.17) needs only a packet's first
+  32 bytes to start on it, then `read_block` waits for the rest with
+  `poll(..., -1)` while holding the connection's lock, so a server that stops
+  partway through a longer reply hangs the deadline wait. No fix short of
+  reading the socket ourselves.
+- **`Connection::wait` with another thread blocked in libxcb's reader is
+  reasoned, not tested.** `xcb_poll_for_reply` leaves the socket's bytes to that
+  thread, so the loop turns without sleeping (yielding each time) until the
+  thread takes them. The race with `poll_event` on another thread is tested
+  (`a_reply_another_thread_reads_off_the_socket_is_not_waited_out`); the blocked
+  reader case was measured once by review (15 of 2000 `sync` calls stalled to
+  the deadline before `POLL_SLICE` existed) but has no test.
+- **`poll(2)` is declared twice**: `crcbl_x11::ffi::poll` (with `PollFd`,
+  `POLLIN` and `Nfds`), which `Connection` and, through the re-export,
+  `crcbl-shell`'s `x11::ffi` use; and `crcbl-shell`'s `wayland::ffi`, with
+  `linux::Nfds`. The Wayland side cannot take it from `crcbl-x11` without
+  depending on the X11 binding; a shared libc-declarations home would serve
+  both.
 
 ## `shortcut_keysym` on the web still has Caps Lock applied (2026-11-10)
 

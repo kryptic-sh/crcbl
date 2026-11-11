@@ -7,8 +7,8 @@
 //! module for why `dlopen` rather than `#[link]`, and why the typed request
 //! wrappers. What stays here is what only a windowing backend needs: the
 //! XInput 2, XKB, libxcb-cursor, SHAPE and DRI3 libraries, loaded the same
-//! way, and the backend's own use of libc — `poll` on the connection and wake
-//! pipe, and `CLOCK_MONOTONIC`.
+//! way, and the backend's own use of libc — `poll` (declared in
+//! `crcbl_x11::ffi`) on the connection and wake pipe, and `CLOCK_MONOTONIC`.
 //!
 //! What is **not** taken from libxcb is anything above the wire:
 //! `xcb-util`'s ICCCM and EWMH helpers are not loaded, because
@@ -54,7 +54,7 @@ pub use crcbl_x11::ffi::*;
 use core::ffi::{CStr, c_char, c_int, c_long, c_void};
 use std::sync::OnceLock;
 
-use crate::linux::{CLOCK_MONOTONIC, Nfds};
+use crate::linux::CLOCK_MONOTONIC;
 
 // ---------------------------------------------------------------------------
 // Extension wire structures
@@ -273,16 +273,7 @@ pub mod value {
 // The symbols come from libc, which `std` already links on every Unix target.
 unsafe extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn poll(fds: *mut PollFd, nfds: Nfds, timeout: c_int) -> c_int;
     fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int;
-}
-
-/// `struct pollfd`.
-#[repr(C)]
-struct PollFd {
-    fd: c_int,
-    events: i16,
-    revents: i16,
 }
 
 /// `struct timespec`.
@@ -291,9 +282,6 @@ struct Timespec {
     tv_sec: c_long,
     tv_nsec: c_long,
 }
-
-/// `POLLIN`.
-const POLLIN: i16 = 0x001;
 
 /// The C prototypes this backend asserts about the extension libraries.
 ///

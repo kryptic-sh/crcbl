@@ -620,11 +620,9 @@ impl Connection {
     pub fn screen_resources_current(&self, window: Window) -> Result<ScreenResources, Error> {
         let randr = self.randr_at(1, 3)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.get_screen_resources_current)(self.raw(), window) };
-        let reply = self.reply("GetScreenResourcesCurrent", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_screen_resources_current_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.get_screen_resources_current)(self.live()?, window) };
+        let reply =
+            self.reply::<ffi::RandrScreenResourcesReply>("GetScreenResourcesCurrent", cookie)?;
         // SAFETY: each accessor reads only the live reply's header to locate
         // its list; `list` bounds-checks what it then copies.
         let lists = unsafe {
@@ -650,11 +648,8 @@ impl Connection {
     pub fn screen_resources(&self, window: Window) -> Result<ScreenResources, Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.get_screen_resources)(self.raw(), window) };
-        let reply = self.reply("GetScreenResources", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_screen_resources_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.get_screen_resources)(self.live()?, window) };
+        let reply = self.reply::<ffi::RandrScreenResourcesReply>("GetScreenResources", cookie)?;
         // SAFETY: as in `screen_resources_current`, with this request's own
         // accessors.
         let lists = unsafe {
@@ -677,11 +672,8 @@ impl Connection {
     pub fn screen_size_range(&self, window: Window) -> Result<ScreenSizeRange, Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.get_screen_size_range)(self.raw(), window) };
-        let reply = self.reply("GetScreenSizeRange", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_screen_size_range_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.get_screen_size_range)(self.live()?, window) };
+        let reply = self.reply::<ffi::RandrScreenSizeRangeReply>("GetScreenSizeRange", cookie)?;
         Ok(ScreenSizeRange {
             min_width: reply.min_width,
             min_height: reply.min_height,
@@ -704,11 +696,8 @@ impl Connection {
     ) -> Result<OutputInfo, Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.get_output_info)(self.raw(), output, config_timestamp) };
-        let reply = self.reply("GetOutputInfo", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_output_info_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.get_output_info)(self.live()?, output, config_timestamp) };
+        let reply = self.reply::<ffi::RandrOutputInfoReply>("GetOutputInfo", cookie)?;
         // SAFETY: each accessor reads only the live reply's header to locate
         // its list; `list` bounds-checks what it then copies.
         let (crtcs, modes, clones, name) = unsafe {
@@ -744,11 +733,8 @@ impl Connection {
     pub fn crtc_info(&self, crtc: Crtc, config_timestamp: Timestamp) -> Result<CrtcInfo, Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.get_crtc_info)(self.raw(), crtc, config_timestamp) };
-        let reply = self.reply("GetCrtcInfo", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_crtc_info_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.get_crtc_info)(self.live()?, crtc, config_timestamp) };
+        let reply = self.reply::<ffi::RandrCrtcInfoReply>("GetCrtcInfo", cookie)?;
         // SAFETY: each accessor reads only the live reply's header to locate
         // its list; `list` bounds-checks what it then copies.
         let (outputs, possible) = unsafe {
@@ -779,11 +765,8 @@ impl Connection {
     pub fn output_primary(&self, window: Window) -> Result<Output, Error> {
         let randr = self.randr_at(1, 3)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.get_output_primary)(self.raw(), window) };
-        let reply = self.reply("GetOutputPrimary", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_output_primary_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.get_output_primary)(self.live()?, window) };
+        let reply = self.reply::<ffi::RandrOutputPrimaryReply>("GetOutputPrimary", cookie)?;
         Ok(reply.output)
     }
 
@@ -795,7 +778,8 @@ impl Connection {
     pub fn set_output_primary(&self, window: Window, output: Output) -> Result<(), Error> {
         let randr = self.randr_at(1, 3)?;
         // SAFETY: the connection is live.
-        self.check(unsafe { (randr.set_output_primary_checked)(self.raw(), window, output) })
+        let cookie = unsafe { (randr.set_output_primary_checked)(self.live()?, window, output) };
+        self.check("SetOutputPrimary", cookie)
     }
 
     /// `GetMonitors` (RandR 1.5). With `get_active`, only monitors that are
@@ -807,11 +791,8 @@ impl Connection {
     pub fn monitors(&self, window: Window, get_active: bool) -> Result<Monitors, Error> {
         let randr = self.randr_at(1, 5)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.get_monitors)(self.raw(), window, u8::from(get_active)) };
-        let reply = self.reply("GetMonitors", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_monitors_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.get_monitors)(self.live()?, window, u8::from(get_active)) };
+        let reply = self.reply::<ffi::RandrGetMonitorsReply>("GetMonitors", cookie)?;
         // SAFETY: the reply is live; the iterator only locates the first
         // monitor and counts `n_monitors`.
         let mut iterator = unsafe { (randr.monitors_iterator)(reply.as_ptr()) };
@@ -862,11 +843,8 @@ impl Connection {
     pub fn crtc_gamma_size(&self, crtc: Crtc) -> Result<u16, Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.get_crtc_gamma_size)(self.raw(), crtc) };
-        let reply = self.reply("GetCrtcGammaSize", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_crtc_gamma_size_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.get_crtc_gamma_size)(self.live()?, crtc) };
+        let reply = self.reply::<ffi::RandrCrtcGammaSizeReply>("GetCrtcGammaSize", cookie)?;
         Ok(reply.size)
     }
 
@@ -879,11 +857,8 @@ impl Connection {
     pub fn get_panning(&self, crtc: Crtc) -> Result<Panning, Error> {
         let randr = self.randr_at(1, 3)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.get_panning)(self.raw(), crtc) };
-        let reply = self.reply("GetPanning", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_panning_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.get_panning)(self.live()?, crtc) };
+        let reply = self.reply::<ffi::RandrGetPanningReply>("GetPanning", cookie)?;
         Ok(Panning {
             timestamp: reply.timestamp,
             left: reply.left,
@@ -914,7 +889,7 @@ impl Connection {
         // SAFETY: the connection is live; the arguments are plain integers.
         let cookie = unsafe {
             (randr.set_panning)(
-                self.raw(),
+                self.live()?,
                 crtc,
                 p.timestamp,
                 p.left,
@@ -931,10 +906,7 @@ impl Connection {
                 p.border_bottom,
             )
         };
-        let reply = self.reply("SetPanning", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.set_panning_reply)(self.raw(), cookie, error) }
-        })?;
+        let reply = self.reply::<ffi::RandrSetPanningReply>("SetPanning", cookie)?;
         Ok(SetConfigReply {
             status: SetConfigStatus::from_raw(reply.status),
             timestamp: reply.timestamp,
@@ -950,11 +922,8 @@ impl Connection {
     pub fn crtc_transform(&self, crtc: Crtc) -> Result<CrtcTransform, Error> {
         let randr = self.randr_at(1, 3)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.get_crtc_transform)(self.raw(), crtc) };
-        let reply = self.reply("GetCrtcTransform", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_crtc_transform_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.get_crtc_transform)(self.live()?, crtc) };
+        let reply = self.reply::<ffi::RandrGetCrtcTransformReply>("GetCrtcTransform", cookie)?;
         // SAFETY: each accessor reads only the live reply's header to locate
         // its list; `list` bounds-checks what it then copies.
         let (pending_name, pending_params, current_name, current_params) = unsafe {
@@ -1006,9 +975,9 @@ impl Connection {
         })?;
         // SAFETY: the connection is live; the filter name and parameters are
         // the lengths given and outlive the call, which copies them.
-        self.check(unsafe {
+        let cookie = unsafe {
             (randr.set_crtc_transform_checked)(
-                self.raw(),
+                self.live()?,
                 crtc,
                 transform.to_raw(),
                 filter_len,
@@ -1016,7 +985,8 @@ impl Connection {
                 params_len,
                 params.as_ptr(),
             )
-        })
+        };
+        self.check("SetCrtcTransform", cookie)
     }
 
     /// `SetCrtcConfig` (RandR 1.2).
@@ -1047,7 +1017,7 @@ impl Connection {
         // outlive the call, which copies them.
         let cookie = unsafe {
             (randr.set_crtc_config)(
-                self.raw(),
+                self.live()?,
                 crtc,
                 timestamp,
                 config_timestamp,
@@ -1059,10 +1029,7 @@ impl Connection {
                 config.outputs.as_ptr(),
             )
         };
-        let reply = self.reply("SetCrtcConfig", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.set_crtc_config_reply)(self.raw(), cookie, error) }
-        })?;
+        let reply = self.reply::<ffi::RandrSetCrtcConfigReply>("SetCrtcConfig", cookie)?;
         Ok(SetConfigReply {
             status: SetConfigStatus::from_raw(reply.status),
             timestamp: reply.timestamp,
@@ -1087,9 +1054,17 @@ impl Connection {
     ) -> Result<(), Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live; the arguments are plain integers.
-        self.check(unsafe {
-            (randr.set_screen_size_checked)(self.raw(), window, width, height, mm_width, mm_height)
-        })
+        let cookie = unsafe {
+            (randr.set_screen_size_checked)(
+                self.live()?,
+                window,
+                width,
+                height,
+                mm_width,
+                mm_height,
+            )
+        };
+        self.check("SetScreenSize", cookie)
     }
 
     /// `CreateMode` (RandR 1.2): a new mode with `mode`'s timings and name,
@@ -1109,17 +1084,14 @@ impl Connection {
         // that outlive the call, which copies them.
         let cookie = unsafe {
             (randr.create_mode)(
-                self.raw(),
+                self.live()?,
                 window,
                 raw,
                 u32::from(raw.name_len),
                 mode.name.as_ptr().cast(),
             )
         };
-        let reply = self.reply("CreateMode", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.create_mode_reply)(self.raw(), cookie, error) }
-        })?;
+        let reply = self.reply::<ffi::RandrCreateModeReply>("CreateMode", cookie)?;
         Ok(reply.mode)
     }
 
@@ -1133,7 +1105,8 @@ impl Connection {
     pub fn destroy_mode(&self, mode: Mode) -> Result<(), Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        self.check(unsafe { (randr.destroy_mode_checked)(self.raw(), mode) })
+        let cookie = unsafe { (randr.destroy_mode_checked)(self.live()?, mode) };
+        self.check("DestroyMode", cookie)
     }
 
     /// `AddOutputMode` (RandR 1.2): lets `output` be driven at `mode`.
@@ -1145,7 +1118,8 @@ impl Connection {
     pub fn add_output_mode(&self, output: Output, mode: Mode) -> Result<(), Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        self.check(unsafe { (randr.add_output_mode_checked)(self.raw(), output, mode) })
+        let cookie = unsafe { (randr.add_output_mode_checked)(self.live()?, output, mode) };
+        self.check("AddOutputMode", cookie)
     }
 
     /// `DeleteOutputMode` (RandR 1.2).
@@ -1157,7 +1131,8 @@ impl Connection {
     pub fn delete_output_mode(&self, output: Output, mode: Mode) -> Result<(), Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        self.check(unsafe { (randr.delete_output_mode_checked)(self.raw(), output, mode) })
+        let cookie = unsafe { (randr.delete_output_mode_checked)(self.live()?, output, mode) };
+        self.check("DeleteOutputMode", cookie)
     }
 
     /// `ListOutputProperties` (RandR 1.2).
@@ -1169,11 +1144,9 @@ impl Connection {
     pub fn list_output_properties(&self, output: Output) -> Result<Vec<Atom>, Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.list_output_properties)(self.raw(), output) };
-        let reply = self.reply("ListOutputProperties", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.list_output_properties_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.list_output_properties)(self.live()?, output) };
+        let reply =
+            self.reply::<ffi::RandrListOutputPropertiesReply>("ListOutputProperties", cookie)?;
         // SAFETY: the accessor reads only the live reply's header; `list`
         // bounds-checks what it then copies.
         let atoms = unsafe { (randr.list_output_properties_atoms)(reply.as_ptr()) };
@@ -1208,7 +1181,7 @@ impl Connection {
         // SAFETY: the connection is live; the arguments are plain integers.
         let cookie = unsafe {
             (randr.get_output_property)(
-                self.raw(),
+                self.live()?,
                 output,
                 property,
                 type_,
@@ -1218,10 +1191,7 @@ impl Connection {
                 u8::from(pending),
             )
         };
-        let reply = self.reply("GetOutputProperty", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.get_output_property_reply)(self.raw(), cookie, error) }
-        })?;
+        let reply = self.reply::<ffi::RandrGetOutputPropertyReply>("GetOutputProperty", cookie)?;
         // SAFETY: the accessor reads only the live reply's header; `list`
         // bounds-checks what it then copies.
         let data = unsafe { (randr.get_output_property_data)(reply.as_ptr()) }.cast_const();
@@ -1260,11 +1230,9 @@ impl Connection {
     ) -> Result<PropertyInfo, Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        let cookie = unsafe { (randr.query_output_property)(self.raw(), output, property) };
-        let reply = self.reply("QueryOutputProperty", |error| {
-            // SAFETY: the cookie is this connection's, for this request.
-            unsafe { (randr.query_output_property_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (randr.query_output_property)(self.live()?, output, property) };
+        let reply =
+            self.reply::<ffi::RandrQueryOutputPropertyReply>("QueryOutputProperty", cookie)?;
         // SAFETY: the accessor reads only the live reply's header; `list`
         // bounds-checks what it then copies.
         let values = unsafe { (randr.query_output_property_valid_values)(reply.as_ptr()) };
@@ -1321,9 +1289,9 @@ impl Connection {
         // SAFETY: the connection is live; `data` is `units` items of
         // `value.format()` bits — the format comes from the same variant the
         // pointer and length do — and outlives the call, which copies it.
-        self.check(unsafe {
+        let cookie = unsafe {
             (randr.change_output_property_checked)(
-                self.raw(),
+                self.live()?,
                 output,
                 property,
                 type_,
@@ -1332,7 +1300,8 @@ impl Connection {
                 units,
                 data,
             )
-        })
+        };
+        self.check("ChangeOutputProperty", cookie)
     }
 
     /// `DeleteOutputProperty` (RandR 1.2).
@@ -1344,7 +1313,9 @@ impl Connection {
     pub fn delete_output_property(&self, output: Output, property: Atom) -> Result<(), Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        self.check(unsafe { (randr.delete_output_property_checked)(self.raw(), output, property) })
+        let cookie =
+            unsafe { (randr.delete_output_property_checked)(self.live()?, output, property) };
+        self.check("DeleteOutputProperty", cookie)
     }
 
     /// `SelectInput` (RandR 1.2): which RandR events `window` delivers to this
@@ -1357,7 +1328,8 @@ impl Connection {
     pub fn select_input(&self, window: Window, mask: NotifyMask) -> Result<(), Error> {
         let randr = self.randr_at(1, 2)?;
         // SAFETY: the connection is live.
-        self.check(unsafe { (randr.select_input_checked)(self.raw(), window, mask.0) })
+        let cookie = unsafe { (randr.select_input_checked)(self.live()?, window, mask.0) };
+        self.check("SelectInput", cookie)
     }
 }
 

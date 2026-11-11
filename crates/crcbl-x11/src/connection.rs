@@ -7,14 +7,18 @@
 //! and error plumbing. The decisions that shape it are on [`Connection`],
 //! where a caller reads them.
 
-use core::ffi::{CStr, c_int};
+use core::ffi::{CStr, c_int, c_uint, c_void};
 use core::fmt;
 use core::ptr::{self, NonNull};
+use core::time::Duration;
 use std::ffi::CString;
+use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use crate::event::{self, Event};
-use crate::ffi::{self, Cookie, GenericError, Lib, RandrLib};
+use crate::ffi::{self, Cookie, GenericError, Lib, POLLIN, PollFd, RandrLib};
 
 /// An X atom: an interned name.
 pub type Atom = u32;
@@ -226,6 +230,16 @@ pub enum Error {
         /// Which request's reply.
         request: &'static str,
     },
+    /// The server did not answer within the
+    /// [reply timeout](Connection::set_reply_timeout).
+    ///
+    /// The connection has given up on its replies: every later request
+    /// returns this same error, naming the request that timed out, without
+    /// being sent. Reconnect to go on.
+    Timeout {
+        /// The request that went unanswered.
+        request: &'static str,
+    },
 }
 
 impl fmt::Display for Error {
@@ -241,6 +255,9 @@ impl fmt::Display for Error {
             Self::TooLong { what } => write!(f, "{what} is too long for its request"),
             Self::MalformedReply { request } => {
                 write!(f, "the server's {request} reply is malformed")
+            }
+            Self::Timeout { request } => {
+                write!(f, "the X server did not answer {request} in time")
             }
         }
     }
@@ -358,7 +375,8 @@ pub(crate) struct Randr {
 /// An open connection to an X server.
 ///
 /// Disconnected when dropped. Every method is a request (or several) and
-/// waits for the server's answer.
+/// waits for the server's answer — for ever, unless
+/// [`set_reply_timeout`](Self::set_reply_timeout) set a deadline.
 ///
 /// # Decision: every request is checked, and answers at its call
 ///
@@ -396,7 +414,8 @@ pub(crate) struct Randr {
 ///
 /// `Send` and `Sync`: libxcb serialises every call on a connection with that
 /// connection's own lock, so one thread can wait in `poll_event`'s caller
-/// while another makes requests.
+/// while another makes requests. The reply timeout is set through `&mut`, so
+/// before the connection is shared.
 #[derive(Debug)]
 pub struct Connection {
     lib: &'static Lib,
@@ -404,19 +423,26 @@ pub struct Connection {
     fd: RawFd,
     screen: Screen,
     randr: Result<Randr, Error>,
+    /// How long a request waits for its answer; `None` waits for ever.
+    reply_timeout: Option<Duration>,
+    /// The error that made the connection give up on its replies, once one
+    /// has; every later request returns it unsent.
+    abandoned: OnceLock<Error>,
 }
 
 // SAFETY: libxcb is thread-safe: every entry point that touches an
 // `xcb_connection_t` takes the connection's own mutex (`c->iolock`), which is
 // what lets Xlib-xcb and the Vulkan WSI share one connection across threads.
 // The other fields are a `&'static` table of function pointers, plain
-// integers, and copies taken at connect time. Moving a `Connection` to another
+// integers, copies taken at connect time, a timeout only `&mut self` writes,
+// and a `OnceLock`, which is `Sync` itself. Moving a `Connection` to another
 // thread moves only the pointer; `xcb_disconnect` in `Drop` runs once, after
 // every borrow has ended, wherever that is.
 unsafe impl Send for Connection {}
 // SAFETY: as for `Send` — every `&self` method goes through libxcb, which
 // serialises concurrent callers on the connection's mutex, and reads nothing
-// of its own that another `&self` call could be writing.
+// of its own that another `&self` call could be writing but the `OnceLock`,
+// which synchronises its own writes.
 unsafe impl Sync for Connection {}
 
 impl Connection {
@@ -434,6 +460,12 @@ impl Connection {
     /// [`ConnectError::Failed`] when libxcb cannot connect, or the screen the
     /// name asks for does not exist, and [`ConnectError::MalformedSetup`] for a
     /// setup whose screens run past its end.
+    ///
+    /// # Blocking
+    ///
+    /// Connecting has no deadline: a [reply timeout](Self::set_reply_timeout)
+    /// can only be set on the connection this returns, so the connection
+    /// setup and RandR's `QueryVersion` wait for as long as the server takes.
     pub fn connect(display: Option<&str>) -> Result<Self, ConnectError> {
         let lib = ffi::load().map_err(ConnectError::Library)?;
         let name = display
@@ -488,6 +520,8 @@ impl Connection {
             fd,
             screen,
             randr: Err(Error::RandrMissing),
+            reply_timeout: None,
+            abandoned: OnceLock::new(),
         };
         connection.randr = connection.negotiate_randr();
         Ok(connection)
@@ -533,11 +567,8 @@ impl Connection {
     pub(crate) fn query_version_with(&self, lib: &RandrLib) -> Result<RandrVersion, Error> {
         let RandrVersion { major, minor } = RandrVersion::REQUESTED;
         // SAFETY: the connection is live; the arguments are plain integers.
-        let cookie = unsafe { (lib.query_version)(self.raw.as_ptr(), major, minor) };
-        let reply = self.reply("QueryVersion", |error| {
-            // SAFETY: the cookie is this connection's, for a QueryVersion.
-            unsafe { (lib.query_version_reply)(self.raw.as_ptr(), cookie, error) }
-        })?;
+        let cookie = unsafe { (lib.query_version)(self.live()?, major, minor) };
+        let reply = self.reply::<ffi::RandrQueryVersionReply>("QueryVersion", cookie)?;
         Ok(RandrVersion {
             major: reply.major_version,
             minor: reply.minor_version,
@@ -591,6 +622,48 @@ impl Connection {
         self.raw.as_ptr()
     }
 
+    /// The connection, to send a request on — or the error that made it give
+    /// up on its replies, so that nothing more is sent after a timeout.
+    pub(crate) fn live(&self) -> Result<*mut ffi::Connection, Error> {
+        match self.abandoned.get() {
+            Some(error) => Err(*error),
+            None => Ok(self.raw()),
+        }
+    }
+
+    /// Sets how long each request waits for the server's answer; `None`, the
+    /// default, waits for ever.
+    ///
+    /// Without a deadline, a server that stops answering — stopped, or
+    /// serving only another client that holds a server grab — blocks the
+    /// calling thread until it answers again. With one, the wait ends in
+    /// [`Error::Timeout`] instead. The deadline is per request, and every
+    /// request method sends one request: a request without a reply waits for
+    /// a `GetInputFocus` round trip behind it, inside the same deadline.
+    ///
+    /// A timeout ends the connection's usefulness: the request may still be
+    /// answered, so every later request returns the same [`Error::Timeout`]
+    /// without being sent, and the late reply is dropped when it arrives.
+    /// The request itself is *not* undone — a `SetCrtcConfig` sent while
+    /// another client grabs the server is carried out when the grab ends. So
+    /// after a timeout, reconnect and read the state again before deciding
+    /// anything on it.
+    ///
+    /// Waiting with a deadline flushes, then asks libxcb for the reply and
+    /// sleeps on the socket in turns, waking at least every few milliseconds:
+    /// another thread — [`poll_event`](Self::poll_event)'s caller, say — can
+    /// read the reply off the socket, and libxcb has no way to wake this one
+    /// when it does.
+    ///
+    /// Three waits still have no deadline. Sending: a request that does not
+    /// fit in the socket's buffer while the server reads nothing blocks in the
+    /// flush. A reply cut short: once a packet has begun to arrive, libxcb
+    /// waits for the rest of it unbounded. And [`connect`](Self::connect),
+    /// which returns before a timeout can be set.
+    pub fn set_reply_timeout(&mut self, timeout: Option<Duration>) {
+        self.reply_timeout = timeout;
+    }
+
     /// Why the connection is dead, or `None` while it is healthy.
     #[must_use]
     pub fn has_error(&self) -> Option<ConnectionError> {
@@ -623,13 +696,17 @@ impl Connection {
     ///
     /// [`Error::Connection`] when the connection is dead.
     pub fn sync(&self) -> Result<(), Error> {
+        self.round_trip("GetInputFocus")
+    }
+
+    /// A `GetInputFocus` round trip, whose wait is named `request`: the one
+    /// [`sync`](Self::sync) makes, and the one a checked request waits behind
+    /// under a deadline.
+    fn round_trip(&self, request: &'static str) -> Result<(), Error> {
         // SAFETY: the connection is live.
-        let cookie = unsafe { (self.lib.get_input_focus)(self.raw()) };
-        self.reply("GetInputFocus", |error| {
-            // SAFETY: the cookie is this connection's, for a GetInputFocus.
-            unsafe { (self.lib.get_input_focus_reply)(self.raw(), cookie, error) }
-        })
-        .map(drop)
+        let cookie = unsafe { (self.lib.get_input_focus)(self.live()?) };
+        self.reply::<ffi::GetInputFocusReply>(request, cookie)
+            .map(drop)
     }
 
     /// The next event libxcb has, without blocking; `Ok(None)` when there is
@@ -682,16 +759,13 @@ impl Connection {
         // outlive the call (libxcb copies them into its buffer).
         let cookie = unsafe {
             (self.lib.intern_atom)(
-                self.raw(),
+                self.live()?,
                 u8::from(only_if_exists),
                 len,
                 name.as_ptr().cast(),
             )
         };
-        let reply = self.reply("InternAtom", |error| {
-            // SAFETY: the cookie is this connection's, for an InternAtom.
-            unsafe { (self.lib.intern_atom_reply)(self.raw(), cookie, error) }
-        })?;
+        let reply = self.reply::<ffi::InternAtomReply>("InternAtom", cookie)?;
         Ok(reply.atom)
     }
 
@@ -706,11 +780,8 @@ impl Connection {
     /// what else the request met.
     pub fn atom_name(&self, atom: Atom) -> Result<String, Error> {
         // SAFETY: the connection is live.
-        let cookie = unsafe { (self.lib.get_atom_name)(self.raw(), atom) };
-        let reply = self.reply("GetAtomName", |error| {
-            // SAFETY: the cookie is this connection's, for a GetAtomName.
-            unsafe { (self.lib.get_atom_name_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (self.lib.get_atom_name)(self.live()?, atom) };
+        let reply = self.reply::<ffi::GetAtomNameReply>("GetAtomName", cookie)?;
         // SAFETY: the reply is a live GetAtomName reply.
         let name = unsafe { (self.lib.get_atom_name_name)(reply.as_ptr()) };
         let name = reply.list(name.cast::<u8>(), usize::from(reply.name_len))?;
@@ -729,11 +800,8 @@ impl Connection {
     /// pixmap, or what else the request met.
     pub fn geometry(&self, drawable: Window) -> Result<Geometry, Error> {
         // SAFETY: the connection is live.
-        let cookie = unsafe { (self.lib.get_geometry)(self.raw(), drawable) };
-        let reply = self.reply("GetGeometry", |error| {
-            // SAFETY: the cookie is this connection's, for a GetGeometry.
-            unsafe { (self.lib.get_geometry_reply)(self.raw(), cookie, error) }
-        })?;
+        let cookie = unsafe { (self.lib.get_geometry)(self.live()?, drawable) };
+        let reply = self.reply::<ffi::GetGeometryReply>("GetGeometry", cookie)?;
         Ok(Geometry {
             root: reply.root,
             depth: reply.depth,
@@ -754,7 +822,8 @@ impl Connection {
     /// What the request met.
     pub fn grab_server(&self) -> Result<(), Error> {
         // SAFETY: the connection is live.
-        self.check(unsafe { (self.lib.grab_server_checked)(self.raw()) })
+        let cookie = unsafe { (self.lib.grab_server_checked)(self.live()?) };
+        self.check("GrabServer", cookie)
     }
 
     /// `UngrabServer`.
@@ -764,7 +833,8 @@ impl Connection {
     /// What the request met.
     pub fn ungrab_server(&self) -> Result<(), Error> {
         // SAFETY: the connection is live.
-        self.check(unsafe { (self.lib.ungrab_server_checked)(self.raw()) })
+        let cookie = unsafe { (self.lib.ungrab_server_checked)(self.live()?) };
+        self.check("UngrabServer", cookie)
     }
 
     /// The error a dead connection has, for a call that failed without an X
@@ -775,8 +845,22 @@ impl Connection {
         Error::Connection(self.has_error().unwrap_or(ConnectionError::Other(0)))
     }
 
-    /// Waits for the verdict on a `_checked` request.
-    pub(crate) fn check(&self, cookie: Cookie) -> Result<(), Error> {
+    /// Waits for the verdict on a `_checked` request, named `request` for an
+    /// [`Error::Timeout`].
+    pub(crate) fn check(&self, request: &'static str, cookie: Cookie) -> Result<(), Error> {
+        if self.reply_timeout.is_some() {
+            // `xcb_request_check` has no deadline of its own. The server
+            // answers in order, so once a round trip sent behind the request
+            // is answered, so is the request, and `xcb_request_check` finds
+            // its verdict already read rather than waiting for it.
+            if let Err(error) = self.round_trip(request) {
+                // SAFETY: the connection is live and the sequence is the
+                // request's own. Its verdict will not be asked for now, so
+                // libxcb drops it on arrival rather than keeping it.
+                unsafe { (self.lib.discard_reply)(self.raw(), cookie.sequence) };
+                return Err(error);
+            }
+        }
         // SAFETY: the connection is live, and every caller passes the cookie
         // of a `_checked` request it just sent on it, which is what
         // `xcb_request_check` requires.
@@ -790,15 +874,16 @@ impl Connection {
             .map_or(Ok(()), |error| Err(Error::Connection(error)))
     }
 
-    /// Waits for a reply. `fetch` calls the request's `_reply` function with
-    /// the error out-pointer it is given.
+    /// Waits for the reply to `cookie`, a request of `request`'s whose reply
+    /// is an `R` — what its generated `xcb_<request>_reply` would return,
+    /// which is `xcb_wait_for_reply` cast to `R`.
     pub(crate) fn reply<R: WireReply>(
         &self,
         request: &'static str,
-        fetch: impl FnOnce(*mut *mut GenericError) -> *mut R,
+        cookie: Cookie,
     ) -> Result<Reply<R>, Error> {
         let mut error = ptr::null_mut();
-        let raw = fetch(&mut error);
+        let raw = self.wait(request, cookie.sequence, &mut error)?.cast::<R>();
         // SAFETY: libxcb sets the out-pointer to a `malloc`'d error or leaves
         // it null; either way it is ours.
         let error = unsafe { take_error(error) };
@@ -810,6 +895,122 @@ impl Connection {
         }
         reply.ok_or_else(|| self.lost())?
     }
+
+    /// Waits for the answer to request `sequence`, as `xcb_wait_for_reply`
+    /// does — the reply or null, and `error` set to an error or null — but
+    /// under the [reply timeout](Self::set_reply_timeout), if there is one.
+    /// Leaves `error` null when it returns an error of its own.
+    fn wait(
+        &self,
+        request: &'static str,
+        sequence: c_uint,
+        error: &mut *mut GenericError,
+    ) -> Result<*mut c_void, Error> {
+        // A timeout too long for the clock to reach is no deadline at all.
+        let deadline = self
+            .reply_timeout
+            .and_then(|timeout| Instant::now().checked_add(timeout));
+        let Some(deadline) = deadline else {
+            // SAFETY: the connection is live, `sequence` is a request sent on
+            // it whose reply no one else takes, and `error` is a live
+            // out-pointer.
+            return Ok(unsafe { (self.lib.wait_for_reply)(self.raw(), sequence, error) });
+        };
+        // `xcb_poll_for_reply`, unlike `xcb_wait_for_reply`, never writes, so
+        // the request has to be on its way before its answer can be read.
+        self.flush()?;
+        loop {
+            let mut reply = ptr::null_mut();
+            // SAFETY: as for `xcb_wait_for_reply` above, and `reply` is a
+            // live out-pointer. It reads what the socket has, queueing any
+            // events for `poll_event`. That read is not wholly non-blocking:
+            // once a packet's first 32 bytes are in, libxcb waits, holding
+            // the connection's lock and with no deadline, for the rest of a
+            // longer one, so a server that stops partway through a reply
+            // still hangs this call.
+            if unsafe { (self.lib.poll_for_reply)(self.raw(), sequence, &mut reply, error) } != 0 {
+                return Ok(reply);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(self.abandon(Error::Timeout { request }, sequence));
+            }
+            // Each `poll` sleeps one `POLL_SLICE` at most, because the
+            // socket is not the only way in for the reply. Another thread
+            // can read it between `xcb_poll_for_reply` and `poll` —
+            // `poll_event`, or a thread blocked in libxcb's own reader — and
+            // libxcb then queues the reply with the socket empty and wakes no
+            // one who is not waiting inside libxcb, so `poll` alone would
+            // sleep to the deadline with the reply already there. The slice
+            // bounds that to one turn of the loop.
+            //
+            // A readable socket returns early. With this thread the only
+            // reader, the next `xcb_poll_for_reply` takes those bytes and the
+            // `poll` after it sleeps again. With another thread blocked in
+            // libxcb's reader, `xcb_poll_for_reply` leaves the bytes to it,
+            // so they stay readable until that thread takes them, and the
+            // loop turns without sleeping meanwhile; yielding gives that
+            // thread the processor rather than racing it.
+            match wait_readable(self.fd, left.min(POLL_SLICE)) {
+                Ok(true) => std::thread::yield_now(),
+                Ok(false) => {}
+                // `poll` itself failing — out of memory, say — leaves no way
+                // to wait for the reply, which may still come.
+                Err(_) => {
+                    return Err(self.abandon(Error::Connection(ConnectionError::Socket), sequence));
+                }
+            }
+        }
+    }
+
+    /// Gives up on the connection's replies after a wait for `sequence`
+    /// ended without one: libxcb is told to drop that reply when it comes,
+    /// and every later request returns the first such error, unsent. Returns
+    /// `error`, for this call.
+    fn abandon(&self, error: Error, sequence: c_uint) -> Error {
+        // SAFETY: the connection is live and `sequence` was sent on it. The
+        // reply will never be asked for again; without this libxcb would keep
+        // it, once it arrives, for as long as the connection lives.
+        unsafe { (self.lib.discard_reply)(self.raw(), sequence) };
+        self.abandoned.get_or_init(|| error);
+        error
+    }
+}
+
+/// The longest one `poll` in [`Connection::wait`] sleeps before asking libxcb
+/// again: the most a reply another thread read off the socket waits to be
+/// noticed, and how often a waiting thread wakes. See there for why.
+const POLL_SLICE: Duration = Duration::from_millis(10);
+
+/// Waits up to `left` for `fd` to be readable: `Ok(true)` when it is — or has
+/// hung up or failed, which the next read reports — and `Ok(false)` when the
+/// time ran out or a signal cut the wait short, which the caller's loop
+/// treats alike, with whatever time is left.
+fn wait_readable(fd: RawFd, left: Duration) -> io::Result<bool> {
+    let mut pollfd = PollFd {
+        fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one live `pollfd`, and the count says one.
+    let ready = unsafe { ffi::poll(&mut pollfd, 1, poll_millis(left)) };
+    if ready >= 0 {
+        return Ok(ready > 0);
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::Interrupted {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+/// `poll`'s timeout for `left`: whole milliseconds rounded up, so that a wait
+/// for less than one still sleeps instead of returning at once, and capped
+/// at what a `c_int` holds.
+fn poll_millis(left: Duration) -> c_int {
+    let nanos_per_milli = u128::from(Duration::from_millis(1).subsec_nanos());
+    c_int::try_from(left.as_nanos().div_ceil(nanos_per_milli)).unwrap_or(c_int::MAX)
 }
 
 impl AsRawFd for Connection {
@@ -1162,6 +1363,15 @@ mod tests {
         );
         assert_eq!(extension.error_kind(&error(8)), None, "a core BadMatch");
         assert_eq!(extension.error_kind(&error(152)), None, "past RandR's");
+    }
+
+    #[test]
+    fn poll_timeouts_round_up_to_whole_milliseconds_and_saturate() {
+        assert_eq!(poll_millis(Duration::from_nanos(1)), 1);
+        assert_eq!(poll_millis(Duration::from_millis(1)), 1);
+        assert_eq!(poll_millis(Duration::from_micros(1001)), 2);
+        assert_eq!(poll_millis(Duration::from_millis(300)), 300);
+        assert_eq!(poll_millis(Duration::MAX), c_int::MAX);
     }
 
     #[test]

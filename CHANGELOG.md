@@ -21,6 +21,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and GUI — reads the size after a `SetScreenSize` without waiting for a
   `ScreenChangeNotify`. `Connection::screen()` stays the copy taken from the
   connection setup at connect time.
+- **`crcbl-x11`: `Connection::set_reply_timeout` and `Error::Timeout`.** Every
+  request waited for the server's answer with no deadline, so a stopped server,
+  or another client holding a server grab, blocked the caller for as long as it
+  lasted. With a timeout set, a request that is not answered in time returns
+  `Error::Timeout { request }`, and every later request on that connection
+  returns the same error without being sent. The default, `None`, waits as
+  before. A request that timed out may still be carried out — a `SetCrtcConfig`
+  sent during another client's grab applies when the grab ends — so reconnect
+  and read the state again after one. `Connection::connect` itself still has no
+  deadline.
+
+### Changed
+
+- **`crcbl_x11::Error` has a new variant, `Timeout`**, so a `match` over it that
+  names every variant must add an arm.
+- **`crcbl_x11::ffi::Lib` and `ffi::RandrLib` no longer load the typed reply
+  functions only `Connection` called**, which now waits through
+  `xcb_wait_for_reply` and `xcb_poll_for_reply` by sequence number. Removed from
+  `Lib`: `get_input_focus_reply` and `get_atom_name_reply`. Removed from
+  `RandrLib`: `get_screen_resources_reply`, `get_screen_size_range_reply`,
+  `get_monitors_reply`, `get_crtc_gamma_size_reply`, `get_panning_reply`,
+  `set_panning_reply`, `get_crtc_transform_reply`, `set_crtc_config_reply`,
+  `create_mode_reply`, `list_output_properties_reply`,
+  `get_output_property_reply` and `query_output_property_reply`. Code calling
+  one calls `Lib::wait_for_reply` with the cookie's `sequence` and casts the
+  result to the reply type, which is what the removed function did. `Lib` gains
+  `wait_for_reply`, `poll_for_reply` and `discard_reply`, and `ffi` gains
+  `poll`, `PollFd`, `POLLIN` and `Nfds`.
 
 ## [0.19.1] - 2026-11-12
 

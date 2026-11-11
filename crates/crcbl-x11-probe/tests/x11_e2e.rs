@@ -11,10 +11,16 @@
 
 #![cfg(any(target_os = "linux", target_os = "freebsd"))]
 
+use std::os::fd::AsRawFd;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant};
+
 use crcbl_x11::{
     Connection, Crtc, CrtcConfig, CrtcInfo, Error, Event, ModeInfo, NotifyMask, Output,
     OutputConnection, PropertyMode, PropertyState, PropertyValue, RandrErrorKind, RandrVersion,
-    Rotation, ScreenResources, SetConfigStatus, Transform, Window, mode_flag,
+    Rotation, ScreenResources, SetConfigStatus, Transform, mode_flag,
 };
 
 /// `XCB_ATOM_INTEGER`.
@@ -890,6 +896,261 @@ fn a_grabbed_server_still_answers_its_grabber() {
     connection.ungrab_server().expect("UngrabServer");
     answered.expect("the grabbing client is served during its grab");
     connection.sync().expect("the round trip after the grab");
+}
+
+/// The reply timeout the timeout tests set: long enough that an idle Xvfb
+/// always answers inside it, short enough to wait out.
+const REPLY_TIMEOUT: Duration = Duration::from_millis(300);
+/// How long a timed-out wait may take in all: the timeout, and slack for a
+/// loaded machine.
+const TIMED_OUT_WITHIN: Duration = Duration::from_secs(5);
+/// How long the watchdog waits for a timeout test's own thread before it
+/// fails the test: past [`TIMED_OUT_WITHIN`], so it fires only on a wait the
+/// timeout did not end.
+const WATCHDOG: Duration = Duration::from_secs(10);
+
+/// Runs `body` on a thread of its own and waits at most [`WATCHDOG`] for it.
+/// A wait the reply timeout fails to end would otherwise hang the whole run;
+/// this turns it into a failure — and the thread is answered and ends once
+/// the caller's [`Grab`] drops.
+fn within_watchdog<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        if sender.send(body()).is_err() {
+            eprintln!("crcbl e2e: a watched thread finished after its watchdog fired");
+        }
+    });
+    match receiver.recv_timeout(WATCHDOG) {
+        Ok(value) => value,
+        Err(RecvTimeoutError::Timeout) => {
+            panic!("{what}: no answer within {WATCHDOG:?}, so the reply timeout did not end a wait")
+        }
+        Err(RecvTimeoutError::Disconnected) => panic!("{what}: the thread panicked"),
+    }
+}
+
+/// A server grab on a connection of its own, ended when dropped — on a failed
+/// assertion too, so the harness's one Xvfb is never left grabbed for the
+/// tests after.
+struct Grab(Connection);
+
+impl Grab {
+    fn new() -> Self {
+        let connection = connect();
+        connection.grab_server().expect("GrabServer");
+        connection.sync().expect("the grab is in place");
+        Self(connection)
+    }
+}
+
+impl Drop for Grab {
+    fn drop(&mut self) {
+        // Closing the connection, which follows, ends the grab as well; the
+        // explicit ungrab is so the error, if any, is seen.
+        if let Err(error) = self.0.ungrab_server() {
+            eprintln!("crcbl e2e: UngrabServer failed, closing ends the grab: {error}");
+        }
+    }
+}
+
+/// A connection with [`REPLY_TIMEOUT`] set, connected while the server still
+/// answers: connecting has no deadline.
+fn connect_with_timeout() -> Connection {
+    let mut connection = connect();
+    connection.set_reply_timeout(Some(REPLY_TIMEOUT));
+    connection
+}
+
+#[test]
+#[ignore = "needs an X server with RandR; run-x11-e2e.sh provides one"]
+fn a_reply_timeout_ends_a_wait_on_a_grabbed_server_and_the_connection_stays_given_up() {
+    let waiter = connect_with_timeout();
+    let root = waiter.screen().root;
+    let grab = Grab::new();
+    let (waiter, first, first_took, later, later_took) =
+        within_watchdog("a reply wait on a grabbed server", move || {
+            let start = Instant::now();
+            let first = waiter.screen_resources_current(root).map(drop);
+            let first_took = start.elapsed();
+            let start = Instant::now();
+            let later = waiter.geometry(root).map(drop);
+            let later_took = start.elapsed();
+            (waiter, first, first_took, later, later_took)
+        });
+    drop(grab);
+
+    let timed_out = Err(Error::Timeout {
+        request: "GetScreenResourcesCurrent",
+    });
+    assert_eq!(first, timed_out);
+    assert!(
+        (REPLY_TIMEOUT..TIMED_OUT_WITHIN).contains(&first_took),
+        "the wait took {first_took:?}, not the timeout and a little"
+    );
+    assert_eq!(
+        later, timed_out,
+        "a later request returns the first timeout"
+    );
+    assert!(
+        later_took < REPLY_TIMEOUT,
+        "a later request is not sent, so does not wait: {later_took:?}"
+    );
+    assert_eq!(
+        waiter.sync(),
+        Err(Error::Timeout {
+            request: "GetScreenResourcesCurrent"
+        }),
+        "the connection stays given up after the server answers again"
+    );
+    assert_eq!(waiter.has_error(), None, "libxcb's connection is intact");
+}
+
+#[test]
+#[ignore = "needs an X server with RandR; run-x11-e2e.sh provides one"]
+fn a_reply_timeout_ends_a_checked_request_on_a_grabbed_server() {
+    let waiter = connect_with_timeout();
+    let root = waiter.screen().root;
+    // Setting the primary output to the one it is: harmless when the server
+    // carries it out after the grab, as it will.
+    let primary = waiter.output_primary(root).expect("GetOutputPrimary");
+    let grab = Grab::new();
+    let (result, took) = within_watchdog("a checked request on a grabbed server", move || {
+        let start = Instant::now();
+        let result = waiter.set_output_primary(root, primary);
+        (result, start.elapsed())
+    });
+    drop(grab);
+
+    assert_eq!(
+        result,
+        Err(Error::Timeout {
+            request: "SetOutputPrimary"
+        })
+    );
+    assert!(
+        (REPLY_TIMEOUT..TIMED_OUT_WITHIN).contains(&took),
+        "the wait took {took:?}, not the timeout and a little"
+    );
+}
+
+#[test]
+#[ignore = "needs an X server with RandR; run-x11-e2e.sh provides one"]
+fn a_reply_timeout_leaves_answered_requests_and_their_errors_alone() {
+    let connection = connect_with_timeout();
+    let root = connection.screen().root;
+    let connection = within_watchdog("requests under a reply timeout", move || {
+        let resources = connection
+            .screen_resources_current(root)
+            .expect("GetScreenResourcesCurrent under a timeout");
+        assert!(!resources.outputs.is_empty(), "{resources:?}");
+        let primary = connection
+            .output_primary(root)
+            .expect("GetOutputPrimary under a timeout");
+        connection
+            .set_output_primary(root, primary)
+            .expect("SetOutputPrimary under a timeout");
+        connection.sync().expect("a round trip under a timeout");
+
+        let Err(Error::Protocol(error)) = connection.geometry(0x1) else {
+            panic!("GetGeometry on 0x1 is refused with an X error");
+        };
+        assert_eq!(
+            (error.error_code, error.major_opcode, error.resource_id),
+            (BAD_DRAWABLE, GET_GEOMETRY, 0x1)
+        );
+        let refused = connection
+            .set_output_primary(root, BOGUS)
+            .expect_err("no output has the bogus id");
+        let randr = connection.randr().expect("RandR");
+        let Error::Protocol(error) = refused else {
+            panic!("a refused checked request is an X error: {refused:?}");
+        };
+        assert_eq!(randr.error_kind(&error), Some(RandrErrorKind::BadOutput));
+        connection
+    });
+    assert_eq!(
+        connection.sync(),
+        Ok(()),
+        "X errors under a timeout do not give the connection up"
+    );
+}
+
+/// The reply timeout of the two-thread test: long, so that a reply noticed
+/// only at the deadline stands out from one noticed at once.
+const RACED_TIMEOUT: Duration = Duration::from_millis(500);
+/// Round trips the two-thread test makes: enough that a reply read by the
+/// other thread is caught many times over.
+const RACED_ROUND_TRIPS: u32 = 400;
+/// The slowest round trip the two-thread test accepts: far below
+/// [`RACED_TIMEOUT`], which is what a reply missed until the deadline costs,
+/// and far above what an idle Xvfb takes.
+const RACED_SLOWEST: Duration = Duration::from_millis(250);
+
+#[test]
+#[ignore = "needs an X server with RandR; run-x11-e2e.sh provides one"]
+fn a_reply_another_thread_reads_off_the_socket_is_not_waited_out() {
+    let mut connection = connect();
+    connection.set_reply_timeout(Some(RACED_TIMEOUT));
+    let connection = Arc::new(connection);
+    let stop = Arc::new(AtomicBool::new(false));
+    // An event loop on its own thread, as an async runtime runs one: wait for
+    // the socket, then drain. Its `poll_event` reads whatever is on the
+    // socket — replies the other thread is waiting for among it.
+    let reader = {
+        let connection = Arc::clone(&connection);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let fd = connection.as_raw_fd();
+            while !stop.load(Ordering::Relaxed) {
+                let mut pollfd = crcbl_x11::ffi::PollFd {
+                    fd,
+                    events: crcbl_x11::ffi::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one live `pollfd`, and the count says one. The
+                // short timeout lets the loop see `stop`.
+                let ready = unsafe { crcbl_x11::ffi::poll(&mut pollfd, 1, 20) };
+                assert!(
+                    ready >= 0
+                        || std::io::Error::last_os_error().kind()
+                            == std::io::ErrorKind::Interrupted,
+                    "poll on the connection: {}",
+                    std::io::Error::last_os_error()
+                );
+                while let Some(_event) = connection.poll_event().expect("the connection is alive") {
+                }
+            }
+        })
+    };
+    let waiter = Arc::clone(&connection);
+    let outcome = within_watchdog("round trips beside an event loop", move || {
+        let mut slowest = Duration::ZERO;
+        for round in 0..RACED_ROUND_TRIPS {
+            let start = Instant::now();
+            if let Err(error) = waiter.sync() {
+                return Err(format!("round trip {round}: {error}"));
+            }
+            let took = start.elapsed();
+            // Stopping at the first slow one keeps a regression from
+            // stacking stalls past the watchdog, which would hide the cause.
+            if took >= RACED_SLOWEST {
+                return Err(format!(
+                    "round trip {round} took {took:?}: its reply sat in libxcb's queue, unseen"
+                ));
+            }
+            slowest = slowest.max(took);
+        }
+        Ok(slowest)
+    });
+    stop.store(true, Ordering::Relaxed);
+    reader.join().expect("the event loop thread");
+
+    match outcome {
+        Ok(slowest) => eprintln!(
+            "crcbl e2e: the slowest of {RACED_ROUND_TRIPS} raced round trips took {slowest:?}"
+        ),
+        Err(failure) => panic!("{failure}"),
+    }
 }
 
 #[test]
