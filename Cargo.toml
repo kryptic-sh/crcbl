@@ -126,7 +126,7 @@ thiserror = "2.0"
 # their names and weights, through this one entry so the two always read a face
 # alike. Default features off: `autohint_shaping` feeds the automatic hinter,
 # which neither uses. `std` stays on, because the other float backend is `libm`.
-skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
+skrifa = { version = "0.49.0", default-features = false, features = ["std"] }
 # OpenType shaping, HarfBuzz's Rust port: `crcbl-ui` shapes its parsed text
 # with it. Default features are `std` alone, kept explicit beside `skrifa`'s so
 # the two agree on the float backend; `icu` and `libm` stay off.
