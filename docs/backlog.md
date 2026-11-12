@@ -3,10 +3,10 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Dependency majors waiting (0.19.0 cut, 2026-11-11)
+## Dependency majors waiting (0.20.0 cut, 2026-11-12)
 
 `cargo update` stays within each requirement, so these newer majors were left
-for their own change: `harfrust` 0.15, `skrifa` 0.50, `taffy` 0.15 and
+for their own change: `harfrust` 0.16, `skrifa` 0.50, `taffy` 0.15 and
 `rand_core`/`rand_chacha` 0.10 (pinned on purpose; see the workspace manifest's
 randomness comment). `windows-core` 0.100 is transitive, through `cpal`.
 
