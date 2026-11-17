@@ -13,6 +13,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Changed
+
+- **Font parsing and shaping move to skrifa 0.50 and harfrust 0.16**, together,
+  so both read faces through one `read-fonts` 0.47 instead of two copies. No
+  crcbl API changes; feature selections are unchanged.
+
 ## [0.21.0] - 2026-11-26
 
 ### Added
