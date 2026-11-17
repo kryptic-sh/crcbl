@@ -42,7 +42,7 @@ windows = { version = "0.62.2", features = [
   "Win32_System_Variant",
   "Win32_UI_Shell_PropertiesSystem",
 ] }
-windows-core = "0.62.2"
+windows-core = "0.100.0"
 
 # The live test runs `pactl` as its witness, through the workspace's spawner.
 [dev-dependencies]
