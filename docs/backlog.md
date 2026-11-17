@@ -10,6 +10,39 @@ for their own change: `harfrust` 0.16, `skrifa` 0.50, `taffy` 0.15 and
 `rand_core`/`rand_chacha` 0.10 (pinned on purpose; see the workspace manifest's
 randomness comment). `windows-core` 0.100 is transitive, through `cpal`.
 
+**`taffy` 0.15 (Dependabot PR #32, left open 2026-11-18)** changes the layout
+traits, so `crcbl-ui` stops compiling (CI on the PR: 4 errors, all in
+`crcbl-ui`, which every other job then inherits):
+
+- `impl RoundTree for LayoutTree` (`tree/layout.rs`) is missing three new items,
+  `is_out_of_flow`, `hoisted_child_count` and `get_hoisted_child_id`: 0.15
+  hoists out-of-flow (absolutely positioned) children to their containing block.
+- `compute_root_layout` (`tree/mod.rs`) now requires `LayoutTree` to implement
+  `LayoutContainingBlock`, the same feature.
+- `FlexboxContainerStyle::align_items` and `justify_content` (`tree/style.rs`)
+  return a bare `AlignItems` / `AlignContent` where they returned `Option`; the
+  `None` our style maps to has to become whatever 0.15 calls `normal`.
+
+What it would take: read 0.15's changelog for the hoisting semantics, implement
+the containing-block traits so an absolute child resolves against the same box
+it does today, map our unset alignment to 0.15's default, then hold the result
+against `crates/crcbl-ui/tests/taffy_fixtures.rs` and the browser pixel goldens
+(Pages workflow) — a layout change shows there, not in the compiler. Not
+attempted: only the compile errors above were read, from the PR's CI log.
+
+## `a_second_guard_on_one_thread_nests_instead_of_waiting` failed once (2026-11-18)
+
+`crcbl`'s
+`debug_view::tests::a_second_guard_on_one_thread_nests_instead_of_waiting`
+panicked at its final `assert_eq!(current(), DebugView::Shaded)` in one local
+`cargo test --workspace` on Windows, with the skrifa 0.50 / harfrust 0.16 bump
+in the tree (nothing in `debug_view` touches fonts). Three reruns of
+`cargo test -p crcbl --lib debug_view` all passed. Suspect, unverified: the
+assertion reads the process-wide view cell after the lock is released, so
+another test thread that took the lock and set a different view can make it fail
+— the race the comment above the `HELD` assertion already describes for
+`VIEW_LOCK`. Asserting `current()` before `drop(outer)` would close it.
+
 ## A horde test hung once on Windows CI (2026-11-10)
 
 `horde`'s `game::tests::two_games_with_one_seed_agree_about_every_run` timed out
