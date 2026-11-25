@@ -3,6 +3,38 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## `crcbl-image` for infr's vision input (requested 2026-11-26)
+
+infr (`infr serve`, Gemma 4 image input) will depend on a published
+`crcbl-image` behind an optional feature, decoding PNG/JPEG/WebP/BMP bytes from
+OpenAI `image_url` data URIs and resizing them for a vision encoder. It needs
+only the version number once 1 and 2 ship; no reply to infr is owed otherwise.
+
+1. **A bicubic filter beside Lanczos-3, Lanczos staying the default.** infr must
+   match llama.cpp's Gemma 4 preprocessing, `resize_pillow` in
+   `tools/mtmd/mtmd-image.cpp` (checkout at `~/Projects/mxaddict/llama.cpp`,
+   read at 57291f2): Pillow's `Resample.c` transcribed, cubic with `a = -0.5`,
+   support 2 widened by the shrink factor. **Matching it numerically is more
+   than a kernel swap**, read in that file: it computes weights in `double`,
+   quantises them to fixed point with 22 fractional bits, runs a horizontal pass
+   then a vertical one, and rounds and clips to `u8` between them.
+   `resize::resize` filters in `f32`, premultiplied, with one rounding at the
+   end. So a Pillow-exact result wants its own integer path (or a mode on
+   `resize`), held to Pillow output on a committed fixture; for opaque RGB the
+   premultiply is a no-op. Not decided: whether Lanczos should also gain the
+   exact path.
+2. **Header-only dimensions per format** (`png`, `jpeg`, `webp`, `bmp`), no
+   pixel decode and no allocation, so infr can refuse an oversized or malformed
+   image before queueing it; plus a magic-byte sniff naming the decoder, since
+   otherwise infr trusts the data URL's media type. JPEG means walking markers
+   to the first SOF.
+3. **GIF, first frame, lowest priority.** OpenAI accepts GIF; infr can ship
+   without it. The crate has no GIF decoder (the SVG `<image>` path refuses GIF
+   by name). Do it only if cheap (LZW plus the palette), else record it here as
+   declined with the reason.
+
+Not wanted: float output, EXIF orientation, CMYK JPEG.
+
 ## Dependency majors waiting (0.20.0 cut, 2026-11-12)
 
 `cargo update` stays within each requirement, so these newer majors were left
