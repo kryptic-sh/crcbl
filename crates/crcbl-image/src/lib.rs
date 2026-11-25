@@ -39,6 +39,7 @@ pub mod format;
 pub mod raster;
 pub mod raw;
 pub mod resize;
+pub mod tensor;
 
 #[cfg(feature = "bmp")]
 pub mod bmp;

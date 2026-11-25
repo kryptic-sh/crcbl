@@ -38,6 +38,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   at load, make the image opaque first. `resize::resize` (Lanczos-3, `f32`) is
   unchanged and remains the default.
 
+- **`crcbl-image`: `tensor::opaque` and `tensor::normalised_rgb`.** `opaque`
+  sets every alpha to 255 and keeps the colour, as llama.cpp's loader drops
+  alpha; `normalised_rgb` turns an image into interleaved RGB `f32`s as
+  `(v / 255 - mean[c]) / std[c]`, the same operations in the same order as
+  llama.cpp's `clip_image_f32::from_u8` and `normalize`, so bit-identical
+  against a default-flag build. With `resize::resize_pillow` they reproduce
+  llama.cpp's preprocessing from the same decoded pixels: decode, `opaque`,
+  resize (bicubic), `normalised_rgb`. A model's target size, padding and
+  constants stay the caller's.
+
 ### Changed
 
 - **`crcbl-image`: WebP `decode` checks a frame against its canvas before
