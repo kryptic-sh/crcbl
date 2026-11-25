@@ -10,25 +10,10 @@ infr (`infr serve`, Gemma 4 image input) will depend on a published
 OpenAI `image_url` data URIs and resizing them for a vision encoder.
 `resize::resize_pillow`, header-only `dimensions` with `format::sniff`, the
 `tensor` float output, EXIF orientation (`decode_stored` for llama.cpp parity),
-CMYK/YCCK JPEG and GIF have landed (unreleased). The release, and the version
-number for infr, wait on the stb_image-compatible JPEG mode below. No other
-reply to infr is owed.
-
-## `crcbl-image`: an stb_image-compatible JPEG mode (decided 2026-11-26)
-
-The user's call, for this release (infr's parity): llama.cpp decodes JPEG with
-stb_image (`stbi_load_from_memory(..., 3)`), and the crate's JPEG decoder
-matches libjpeg-turbo instead. The tensor review measured, with stb v2.30 as
-vendored in llama.cpp at 57291f2, built with g++ -O2: llama.cpp's own
-`llama.cpp/tools/mtmd/test-1.jpeg` differs in about 5% of bytes by up to 3; some
-committed 4:2:2 and 4:2:0 fixtures by up to 115; crcbl matches `djpeg` exactly.
-PNG and BMP already matched stb on every variant tested. Wanted: a second JPEG
-output that reproduces stb's IDCT, chroma upsampling and YCbCr conversion byte
-for byte, held to stb's output on fixtures (stb's SIMD and scalar paths agreed
-on all 21 files tried), with libjpeg-turbo staying the default. Its shape (a
-function beside `decode_stored`, which also ignores EXIF as stb does) is the
-implementer's call. Scratch harnesses that decode through stb are in the session
-scratchpad's `review-tensor/` (not durable).
+CMYK/YCCK JPEG, GIF and `jpeg::decode_as_stb_image` have landed (unreleased).
+The release, and the version number for infr, wait on bounding JPEG's work by
+input size (the user's call, 2026-11-26; see "JPEG work is not bounded by input
+size" below). No other reply to infr is owed.
 
 ## `crcbl-image` EXIF slice leftovers (2026-11-26)
 
@@ -54,12 +39,18 @@ uses them. Not investigated further.
 
 ## `crcbl-image` JPEG: pre-existing findings from the stb review (2026-11-26)
 
-- **No cap on the number of scans.** Each extra 10-byte progressive scan costs
-  about 0.7 ms at 4096 by 4096 (measured by the reviewer, load not recorded), so
-  a small hostile file buys a lot of CPU in a server such as infr's.
-  libjpeg-turbo's `djpeg` has `-maxscan` for the same reason. Wanted: a scan cap
-  (a `Limits` field or a documented constant), refused as `TooLarge`, with a
-  test, applying to both `decode` and `decode_as_stb_image`.
+- **JPEG work is not bounded by input size: every scan walks every MCU.**
+  Measured by the stb re-review (2026-11-26, load not recorded): an 8192 by 8192
+  three-component frame under `Limits::DEFAULT` with 100 empty scans is a 1.5 KB
+  file that costs 6.5 s in `decode` and 4.8 s in `decode_as_stb_image` (real
+  stb_image: 8.8 s), about 45 ms per 14-byte scan, so roughly 3 s of CPU per KB,
+  linear in the file. A server such as infr's is exposed; until this is fixed,
+  infr should pass `Limits` sized to the largest image it accepts, since cost
+  scales with frame area. Options: a cap on scans (libjpeg-turbo's
+  `djpeg -maxscan`), a budget on scans times blocks, or ending a scan once its
+  entropy data is exhausted (harder for the stb flavour, whose reads past the
+  end are defined as zeros). Pick one that keeps stb parity on real files, and
+  test both decoders.
 - **The default decoder differs from `djpeg` on some YCbCr files**: 24 of the
   reviewer's generated files, unchanged since before the stb slice; one has luma
   sampled 1 by 2. The "same pixels as libjpeg-turbo" claim is therefore too wide

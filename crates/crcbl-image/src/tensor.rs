@@ -5,7 +5,10 @@
 //! A caller whose input must equal what llama.cpp's `mtmd` feeds a vision
 //! encoder takes four steps from the same decoded pixels:
 //!
-//! 1. decode the image to an [`Rgba8Image`];
+//! 1. decode the image to an [`Rgba8Image`] as stored, EXIF orientation not
+//!    applied, as stb_image decodes it: a JPEG with
+//!    `jpeg::decode_as_stb_image`, any other format with its
+//!    `decode_stored`;
 //! 2. make it [`opaque`], since llama.cpp loads with
 //!    `stbi_load_from_memory(..., 3)`, which drops alpha rather than
 //!    compositing it;
@@ -19,9 +22,12 @@
 //!
 //! This reproduces llama.cpp only from the same decoded pixels. llama.cpp
 //! decodes with stb_image. This crate's PNG and BMP decoders have agreed
-//! with it on every variant tested, but its JPEG decoder is
-//! libjpeg-turbo's, not stb's: the two differ by a few levels on typical
-//! files and by more on some chroma-subsampled ones.
+//! with it on every variant tested. Its default JPEG decoder
+//! (`jpeg::decode`) is libjpeg-turbo's, which differs from stb_image by a
+//! few levels on typical files and by more on chroma-subsampled and
+//! four-component ones, so a JPEG takes `jpeg::decode_as_stb_image`,
+//! which reproduces stb_image's bytes; its docs list the files where it
+//! cannot.
 //!
 //! The steps a model adds are the caller's: how it picks the target size,
 //! any padding, and its mean and deviation, each as that model's

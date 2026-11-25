@@ -65,6 +65,78 @@
 //! its fourth component like the others. The tests hold this to exact
 //! equality with libjpeg-turbo's output on committed files.
 //!
+//! # The same pixels as stb_image
+//!
+//! [`decode_as_stb_image`] gives what stb_image 2.30 gives instead: the
+//! decoder llama.cpp loads images with, as `stbi_load_from_memory(…, 3)`
+//! returns them in llama.cpp's x86-64 builds. It is stb_image's decoder
+//! transcribed from `stb_image.h`, not this one with other stages: stb_image
+//! reads markers, damage and truncation its own way, so its marker walk, bit
+//! buffer and block decoding are transcribed too, and only the frame header
+//! goes through the code here, for the [`Limits`] and the coefficient store.
+//!
+//! * The inverse DCT is stb_image's SSE2 version (`stbi__idct_simd`), which
+//!   x86-64 builds run: sums of input pairs in 16 bits that wrap, 32-bit
+//!   products, and each pass's results saturated to 16 bits. Its plain C
+//!   version (`stbi__idct_block`), which llama.cpp's arm64 builds run, since
+//!   llama.cpp does not define `STBI_NEON`, keeps 32 bits throughout. The
+//!   two give the same bytes unless a block's dequantised coefficients are
+//!   large enough to overflow 16 bits in those sums or results; there,
+//!   this matches x86-64 and not arm64.
+//! * Chroma is upsampled by stb_image's choice of filter: a triangle filter
+//!   for 2:1 horizontally (`stbi__resample_row_h_2`), vertically
+//!   (`stbi__resample_row_v_2`) and both ways (`stbi__resample_row_hv_2`),
+//!   each rounding its own way, and the nearest sample for every other
+//!   ratio.
+//! * YCbCr becomes RGB in stb_image's reduced-precision fixed point
+//!   (`stbi__YCbCr_to_RGB_row`, 12-bit constants).
+//! * Grey is copied to all three channels. Three components are RGB when
+//!   their ids spell `RGB`, or an Adobe marker's transform is 0 and there is
+//!   no JFIF marker; YCbCr otherwise. Four are CMYK when the Adobe
+//!   transform is 0, each channel times K by `stbi__blinn_8x8` with no
+//!   inversion; YCCK when it is 2, the YCbCr part's RGB inverted and then
+//!   times K; and with no Adobe marker or any other transform, YCbCr with
+//!   K ignored. None of this is Pillow's answer above.
+//! * The colour markers count wherever they are in the file, and the
+//!   quantisation tables are the ones in force when a sequential block is
+//!   read, or at the end of the file for a progressive one.
+//! * Damage reads as stb_image reads it: a table no marker defined decodes
+//!   as zeros, a file cut short reads on as zero bytes, a run past the end
+//!   of a block writes its last coefficient, bytes that are not a marker
+//!   between two segments before the frame are skipped, and a `DNL` marker
+//!   repeating the frame's height is read. What stb_image refuses is
+//!   refused, as [`ImageError::Malformed`]: among it a DC that does not fit
+//!   16 bits once dequantised, and a Huffman code the bits before a marker
+//!   cut short.
+//!
+//! The tests hold this to exact equality with stb_image's output on
+//! committed files: baseline, progressive, every chroma sampling stb_image
+//! filters and some it does not, odd sizes, restart intervals, grey, RGB,
+//! four components, coefficients that overflow 16 bits, and damage.
+//!
+//! stb_image allocates its sample and coefficient buffers without clearing
+//! them, and clears a block only by decoding it: a sequential block whole,
+//! a progressive one by its DC first pass. Where its result depends on a
+//! block it never cleared, it is whatever memory held, and the file is
+//! refused as [`ImageError::Unsupported`]:
+//!
+//! * At a marker after the frame that it cannot read (an unknown one, a
+//!   second frame, a table it cannot parse, bytes that are not a marker),
+//!   or at the end of a file with no end-of-image marker, stb_image stops
+//!   decoding and returns its buffers as they are. A sequential file is
+//!   decoded where every block it returns was decoded before the stop; a
+//!   progressive one never is, since stb_image transforms its coefficients
+//!   only at the end-of-image marker.
+//! * A restart interval with no marker after it ends its scan there, and
+//!   the blocks the scan did not reach keep what they held.
+//! * An AC refinement reads the coefficients it refines, and which it finds
+//!   nonzero decides how many bits it reads: on a block no DC first pass
+//!   has cleared, whether the scan fails, stops or decodes depends on
+//!   memory. Some such files decode to the same bytes however stb_image's
+//!   buffers start, when a later DC first pass clears every block the
+//!   refinement wrote, but nothing short of every start proves it, so they
+//!   are refused too.
+//!
 //! # Hostile input
 //!
 //! The frame's size passes the caller's [`Limits`] before anything is sized
@@ -74,6 +146,8 @@
 //! runs into a marker early is read as zeros, as libjpeg does with a damaged
 //! scan; a file that ends before its end-of-image marker is
 //! [`ImageError::Malformed`].
+
+mod stb;
 
 use crate::orientation::EXIF_IDENTIFIER;
 use crate::{ImageError, Limits, Orientation, Rgba8Image};
@@ -193,16 +267,29 @@ impl<'a> Bits<'a> {
             let byte = if self.at_marker {
                 0
             } else {
-                match (self.data.get(self.pos), self.data.get(self.pos + 1)) {
-                    (Some(0xff), Some(0x00)) => {
-                        self.pos += 2;
-                        0xff
+                match self.data.get(self.pos) {
+                    // Fill bytes may come before a stuffed zero as before a
+                    // marker, and are skipped there: as stb_image reads
+                    // them, and libjpeg-turbo's bit reader in its slow path
+                    // (`jpeg_fill_bit_buffer`). Its fast path, which it takes
+                    // where enough bytes remain, reads `ff ff` as a marker
+                    // instead, so its own output on such a stream depends on
+                    // where the bytes fall.
+                    Some(0xff) => {
+                        let after_fill = past_fill(self.data, self.pos);
+                        if self.data.get(after_fill + 1) == Some(&0x00) {
+                            self.pos = after_fill + 2;
+                            0xff
+                        } else {
+                            self.at_marker = true;
+                            0
+                        }
                     }
-                    (Some(0xff), _) | (None, _) => {
+                    None => {
                         self.at_marker = true;
                         0
                     }
-                    (Some(&byte), _) => {
+                    Some(&byte) => {
                         self.pos += 1;
                         byte
                     }
@@ -267,17 +354,32 @@ impl<'a> Bits<'a> {
         }
     }
 
-    /// The position of the marker after the scan's data.
+    /// The position of the marker after the scan's data, past any bytes
+    /// left before it, stuffed zeros (with fill bytes before them) among
+    /// them.
     fn end(&self) -> usize {
         let mut pos = self.pos;
         while pos < self.data.len() {
-            if self.data[pos] == 0xff && self.data.get(pos + 1).is_some_and(|&b| b != 0) {
-                return pos;
+            if self.data[pos] == 0xff {
+                let after_fill = past_fill(self.data, pos);
+                if self.data.get(after_fill + 1) != Some(&0x00) {
+                    return pos;
+                }
+                pos = after_fill + 1;
             }
             pos += 1;
         }
         pos
     }
+}
+
+/// The last `0xff` of the run that starts at `pos`: where a marker or a
+/// stuffed zero's `0xff` is, past the fill bytes before it.
+fn past_fill(data: &[u8], mut pos: usize) -> usize {
+    while data.get(pos + 1) == Some(&0xff) {
+        pos += 1;
+    }
+    pos
 }
 
 /// One component of the frame, with its coefficients.
@@ -374,6 +476,33 @@ pub fn decode_stored(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageE
         }
     }
     finish(&frame, colour.unwrap_or(tables.colour), limits)
+}
+
+/// Decodes a JPEG to straight RGBA8, every pixel opaque, as stb_image 2.30
+/// decodes it: the RGB llama.cpp's `stbi_load_from_memory(…, 3)` returns,
+/// byte for byte, with alpha 255. Any EXIF orientation is not applied,
+/// since stb_image does not read it.
+///
+/// [`decode_stored`] matches libjpeg-turbo instead, and the two differ by a
+/// few levels on typical files and by more on chroma-subsampled and
+/// four-component ones. The [module docs](self#the-same-pixels-as-stb_image)
+/// say where and why, and what this reads that stb_image does not and the
+/// reverse.
+///
+/// # Errors
+///
+/// [`ImageError::Empty`] or [`ImageError::TooLarge`] if the frame's size
+/// breaks `limits`, [`ImageError::Malformed`] for a file stb_image refuses,
+/// and [`ImageError::Unsupported`] for one whose stb_image result depends on
+/// memory it never wrote: one it stops decoding before every block it
+/// returns was decoded (at a marker it cannot read, at the end of a file
+/// with no end-of-image marker, or where a restart interval ends without
+/// its marker, so no whole scan reached some block), a progressive one it
+/// stops decoding at all, and one whose AC refinement reads a block no DC
+/// first pass cleared. The [module docs](self#the-same-pixels-as-stb_image)
+/// say more.
+pub fn decode_as_stb_image(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+    stb::decode(bytes, limits)
 }
 
 /// The width and height a JPEG's frame header gives, read without decoding
@@ -864,14 +993,17 @@ fn decode_block(
     let table = context.ac.ok_or_else(|| malformed("no AC table"))?;
     let start = scan.start.max(1);
     if scan.high == 0 {
+        let eobrun = frame.progressive.then_some(eobrun);
         decode_ac_first(bits, table, block, start, scan.end, scan.low, eobrun)
     } else {
         decode_ac_refine(bits, table, block, start, scan.end, scan.low, eobrun)
     }
 }
 
-/// A band's first pass, or a sequential block's AC: T.81 G.1.2.2 (and F.2.2.2
-/// with no end-of-band runs).
+/// A band's first pass, or a sequential block's AC: T.81 G.1.2.2, and F.2.2.2
+/// when `eobrun` is `None`. A sequential scan has no end-of-band runs, so
+/// there a zero-size symbol other than sixteen zeros ends the block and
+/// reads no run length, as libjpeg and stb_image read it.
 fn decode_ac_first(
     bits: &mut Bits<'_>,
     table: &Huffman,
@@ -879,9 +1011,11 @@ fn decode_ac_first(
     start: usize,
     end: usize,
     low: u32,
-    eobrun: &mut u32,
+    mut eobrun: Option<&mut u32>,
 ) -> Result<(), ImageError> {
-    if *eobrun > 0 {
+    if let Some(eobrun) = eobrun.as_deref_mut()
+        && *eobrun > 0
+    {
         *eobrun -= 1;
         return Ok(());
     }
@@ -891,9 +1025,11 @@ fn decode_ac_first(
         let (run, size) = (usize::from(symbol >> 4), u32::from(symbol & 0x0f));
         if size == 0 {
             if run < 15 {
-                *eobrun = (1 << run) - 1;
-                if run > 0 {
-                    *eobrun += bits.bits(run as u32);
+                if let Some(eobrun) = eobrun {
+                    *eobrun = (1 << run) - 1;
+                    if run > 0 {
+                        *eobrun += bits.bits(run as u32);
+                    }
                 }
                 break;
             }
@@ -1342,6 +1478,300 @@ mod tests {
             assert_eq!(image.pixels().len() / 4, rgb.len() / 3, "{name}");
             assert_eq!(first_difference(&image, rgb), None, "{name}");
         }
+    }
+
+    /// Each file beside stb_image's decode of it: v2.30, as vendored in
+    /// llama.cpp at 57291f2 (`llama.cpp/vendor/stb/stb_image.h`), built as
+    /// llama.cpp's `mtmd-helper.cpp` builds it (`STB_IMAGE_IMPLEMENTATION`
+    /// and no other option) by g++ 16 at `-O2` on x86-64, so its SSE2
+    /// kernels ran, and loaded with `stbi_load_from_memory(…, 3)`. The same
+    /// harness built with `-DSTBI_NO_SIMD` wrote identical bytes for every
+    /// file, these and all the others they were picked from, except the two
+    /// `idct-sse2` files whose coefficients overflow 16 bits in the SSE2
+    /// transform: `sum04` and `q32` (quantiser 32, coefficients of 1000 at
+    /// natural positions 8 and 56). Every output was checked again by three
+    /// more builds of the same harness whose stb_image fills its sample and
+    /// coefficient buffers with `0x00`, `0x37` and `0xc8` straight after
+    /// allocating them, each file in a process of its own: all three wrote
+    /// these bytes, so none of them is memory stb_image left unwritten.
+    ///
+    /// libjpeg-turbo 3.2.1's `cjpeg` wrote most of them, from a seeded
+    /// gradient with noise, at quality 85 unless named: each chroma
+    /// sampling stb_image filters (4:2:2, 4:2:0, 4:4:0) and some it takes
+    /// the nearest sample for (4:1:1, luma 1 × 4 and 2 × 4), sizes that
+    /// leave chroma one or two samples wide, progressive, restart intervals
+    /// (one an MCU), grey, and RGB; ImageMagick 7.1 wrote a progressive
+    /// 4:2:2. A script edited copies for the stream details stb_image reads
+    /// its own way: a fill byte before a stuffed zero, an Adobe marker
+    /// (transform 0, no JFIF) and a quantisation table both after the first
+    /// scan of a progressive file, `RGB` component ids beside a JFIF marker,
+    /// a progressive grey file's DC refinement scan read twice and its first
+    /// DC scan read again last, and two by hand: a sequential AC symbol of
+    /// size 0 and run 1, and an AC coefficient whose dequantised value
+    /// passes 16 bits (1023 · 64). Those marked
+    /// `shared` are the libjpeg-turbo fixtures above, decoded by stb_image.
+    ///
+    /// The rest are damage stb_image still decodes, edits of the files above
+    /// picked by breaking each behaviour in turn and keeping the smallest
+    /// file that then failed: SSE2 transforms whose 16-bit sums wrap or
+    /// whose passes saturate (hand-made by the review of this decoder); a
+    /// byte flip leaving too few bits for a coefficient at a marker, which
+    /// stb_image reads as 0; bytes before the frame; a `DNL` marker
+    /// repeating the height; a baseline file cut short, which reads on as
+    /// zeros; bytes, an unknown marker, and a Huffman table of more than 256
+    /// codes (from the review), each after the last scan of a baseline file,
+    /// where stb_image stops with every block written.
+    macro_rules! stb_fixture {
+        ($name:literal) => {
+            (
+                $name,
+                include_bytes!(concat!("../fixtures/jpeg/stb/", $name, ".jpg")) as &[u8],
+                include_bytes!(concat!("../fixtures/jpeg/stb/", $name, ".rgb")) as &[u8],
+            )
+        };
+        ($name:literal, shared) => {
+            (
+                $name,
+                include_bytes!(concat!("../fixtures/jpeg/", $name, ".jpg")) as &[u8],
+                include_bytes!(concat!("../fixtures/jpeg/stb/", $name, ".rgb")) as &[u8],
+            )
+        };
+    }
+
+    const STB_FIXTURES: [(&str, &[u8], &[u8]); 42] = [
+        stb_fixture!("baseline-444-17x9"),
+        stb_fixture!("baseline-422-33x7"),
+        stb_fixture!("baseline-420-17x9"),
+        stb_fixture!("baseline-440-9x33"),
+        stb_fixture!("baseline-411-33x7"),
+        stb_fixture!("baseline-luma-1x4-9x33"),
+        stb_fixture!("baseline-luma-2x4-17x9"),
+        stb_fixture!("baseline-420-2x2"),
+        stb_fixture!("baseline-422-2x2"),
+        stb_fixture!("baseline-422-3x5"),
+        stb_fixture!("baseline-420-3x5"),
+        stb_fixture!("progressive-420-33x7"),
+        stb_fixture!("progressive-restart-420-17x9"),
+        stb_fixture!("restart-422-17x9"),
+        stb_fixture!("grey-17x9"),
+        stb_fixture!("progressive-grey-9x33"),
+        stb_fixture!("rgb-17x9"),
+        stb_fixture!("quality-30-422-17x9"),
+        stb_fixture!("magick-progressive-422-17x9"),
+        stb_fixture!("fill-stuffed-420"),
+        stb_fixture!("late-adobe-progressive"),
+        stb_fixture!("late-dqt-progressive"),
+        stb_fixture!("rgb-ids-jfif"),
+        stb_fixture!("sequential-run-symbol"),
+        stb_fixture!("dequantised-wrap"),
+        stb_fixture!("dc-refined-twice"),
+        stb_fixture!("dc-scan-last"),
+        stb_fixture!("idct-sse2-sum04"),
+        stb_fixture!("idct-sse2-q32"),
+        stb_fixture!("idct-sse2-saturate"),
+        stb_fixture!("short-bits-at-marker"),
+        stb_fixture!("junk-before-frame"),
+        stb_fixture!("dnl-height"),
+        stb_fixture!("truncated-baseline"),
+        stb_fixture!("junk-after-last-scan"),
+        stb_fixture!("marker-after-last-scan"),
+        stb_fixture!("huffman-past-256-after-scans"),
+        stb_fixture!("narrow-420", shared),
+        stb_fixture!("baseline-422", shared),
+        stb_fixture!("cmyk-adobe", shared),
+        stb_fixture!("cmyk-plain", shared),
+        stb_fixture!("ycck-420", shared),
+    ];
+
+    /// The stb_image fixture of that name, its JPEG and stb_image's RGB.
+    fn stb_fixture(wanted: &str) -> (&'static [u8], &'static [u8]) {
+        let (_, jpeg, rgb) = STB_FIXTURES
+            .into_iter()
+            .find(|&(name, ..)| name == wanted)
+            .expect(wanted);
+        (jpeg, rgb)
+    }
+
+    #[test]
+    fn every_stb_fixture_decodes_to_exactly_stb_images_pixels() {
+        for (name, jpeg, rgb) in STB_FIXTURES {
+            let image = decode_as_stb_image(jpeg, &Limits::DEFAULT)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(image.pixels().len() / 4, rgb.len() / 3, "{name}");
+            assert_eq!(first_difference(&image, rgb), None, "{name}");
+        }
+    }
+
+    /// stb_image ignores EXIF, so an oriented file decodes as stored.
+    #[test]
+    fn stb_images_pixels_are_stored_not_oriented() {
+        let (_, _, six, _) = ORIENTED[5];
+        let stored = decode_as_stb_image(six, &Limits::DEFAULT).expect("decodes");
+        assert_eq!((stored.width(), stored.height()), (5, 3));
+    }
+
+    /// Two edited streams read as stb_image reads them. A fill byte before a
+    /// stuffed zero is skipped, so the file decodes as the one it was
+    /// edited from: libjpeg-turbo's slow-path bit reader skips it too, but
+    /// its fast path reads `ff ff` as a marker, so its own output on such a
+    /// stream depends on where the bytes fall (in the review, `djpeg` 3.2.1's
+    /// output moved on 37 of 436 such edits). A sequential AC symbol of size
+    /// 0 ends its block without reading a run length, as both of
+    /// libjpeg-turbo's paths read it, and `djpeg` gave these pixels.
+    #[test]
+    fn libjpeg_reads_fill_before_a_stuffed_zero_and_sequential_run_symbols_as_stb_image() {
+        let (original, _) = stb_fixture("baseline-420-17x9");
+        let (filled, _) = stb_fixture("fill-stuffed-420");
+        assert_ne!(original, filled);
+        assert_eq!(
+            decode_stored(filled, &Limits::DEFAULT),
+            decode_stored(original, &Limits::DEFAULT)
+        );
+        let (jpeg, rgb) = stb_fixture("sequential-run-symbol");
+        let image = decode_stored(jpeg, &Limits::DEFAULT).expect("decodes");
+        assert_eq!(first_difference(&image, rgb), None);
+    }
+
+    /// Files stb_image refuses, refused as malformed, and files where it
+    /// stops with memory it never wrote in its output, refused as
+    /// unsupported: a DC that overflows 16 bits once dequantised (from the
+    /// review), and a Huffman code a marker cuts short (an inserted `ff 01`);
+    /// an unknown marker after the last scan of a progressive file, and a
+    /// progressive file cut short, where stb_image stops before its inverse
+    /// DCT runs; a Huffman table of more than 256 codes between scans of a
+    /// progressive file (from the review); and a baseline file with restart
+    /// markers cut short, whose scan ends at the first interval without
+    /// its marker; and three from the second review where an AC refinement
+    /// reads blocks no DC first pass cleared, so the coefficients stb_image
+    /// finds nonzero, whatever memory held, steer the bits it reads: it
+    /// stops early on some memory and not on other, fails except on zeroed
+    /// memory, and (a mutated file) fails on zeroed memory but decodes on
+    /// other. On each of the undetermined ones the builds of the harness
+    /// that fill stb_image's buffers with `0x00`, `0x37` and `0xc8`
+    /// disagreed, in success or in pixels.
+    const STB_REFUSED: [(&str, &[u8], bool); 9] = [
+        (
+            "refused-dc-overflow",
+            include_bytes!("../fixtures/jpeg/stb/refused-dc-overflow.jpg"),
+            true,
+        ),
+        (
+            "refused-code-cut-by-marker",
+            include_bytes!("../fixtures/jpeg/stb/refused-code-cut-by-marker.jpg"),
+            true,
+        ),
+        (
+            "refused-marker-after-progressive",
+            include_bytes!("../fixtures/jpeg/stb/refused-marker-after-progressive.jpg"),
+            false,
+        ),
+        (
+            "refused-truncated-progressive",
+            include_bytes!("../fixtures/jpeg/stb/refused-truncated-progressive.jpg"),
+            false,
+        ),
+        (
+            "refused-progressive-huffman-past-256",
+            include_bytes!("../fixtures/jpeg/stb/refused-progressive-huffman-past-256.jpg"),
+            false,
+        ),
+        (
+            "refused-restart-cut",
+            include_bytes!("../fixtures/jpeg/stb/refused-restart-cut.jpg"),
+            false,
+        ),
+        (
+            "refused-ac-refine-stop",
+            include_bytes!("../fixtures/jpeg/stb/refused-ac-refine-stop.jpg"),
+            false,
+        ),
+        (
+            "refused-ac-refine-before-dc",
+            include_bytes!("../fixtures/jpeg/stb/refused-ac-refine-before-dc.jpg"),
+            false,
+        ),
+        (
+            "refused-garbage-decides-failure",
+            include_bytes!("../fixtures/jpeg/stb/refused-garbage-decides-failure.jpg"),
+            false,
+        ),
+    ];
+
+    #[test]
+    fn what_stb_image_refuses_or_leaves_unwritten_is_refused() {
+        for (name, jpeg, malformed) in STB_REFUSED {
+            let result = decode_as_stb_image(jpeg, &Limits::DEFAULT);
+            if malformed {
+                assert!(
+                    matches!(result, Err(ImageError::Malformed(_))),
+                    "{name}: {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(ImageError::Unsupported(_))),
+                    "{name}: {result:?}"
+                );
+            }
+        }
+    }
+
+    /// After the last scan of a baseline file every block is written, so
+    /// whatever stb_image stops at there, or skips, leaves the pixels as
+    /// they were: an unknown marker, `TEM`, a restart marker that does not
+    /// follow a scan, and a restart interval segment of the wrong length.
+    #[test]
+    fn a_stop_after_the_last_baseline_scan_keeps_the_pixels() {
+        let (jpeg, rgb) = stb_fixture("baseline-420-17x9");
+        let end = jpeg.len() - 2;
+        let with = |inserted: &[u8]| {
+            let mut bytes = jpeg[..end].to_vec();
+            bytes.extend_from_slice(inserted);
+            bytes.extend_from_slice(&jpeg[end..]);
+            bytes
+        };
+        for (what, bytes) in [
+            ("a restart marker after the scan", with(b"\xff\xd0")),
+            ("a comment", with(b"\xff\xfe\x00\x04hi")),
+            (
+                "a restart marker after a comment",
+                with(b"\xff\xfe\x00\x04hi\xff\xd0"),
+            ),
+            ("an unknown marker", with(b"\xff\xf0\x00\x04hi")),
+            ("TEM", with(b"\xff\x01")),
+            (
+                "a long restart interval segment",
+                with(b"\xff\xdd\x00\x05\x00\x01\x00"),
+            ),
+            ("no end-of-image marker", jpeg[..end].to_vec()),
+        ] {
+            let image = decode_as_stb_image(&bytes, &Limits::DEFAULT)
+                .unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert_eq!(first_difference(&image, rgb), None, "{what}");
+        }
+    }
+
+    /// A progressive component no DC first pass reached is never cleared by
+    /// stb_image: the progressive grey file without its first scan, the DC
+    /// one, up to the Huffman table the next scan reads.
+    #[test]
+    fn a_progressive_component_without_a_dc_scan_is_refused() {
+        let (progressive, _) = stb_fixture("progressive-grey-9x33");
+        let scan = progressive
+            .windows(2)
+            .position(|pair| pair == [0xff, 0xda])
+            .expect("a scan");
+        let next_table = scan
+            + progressive[scan..]
+                .windows(2)
+                .position(|pair| pair == [0xff, 0xc4])
+                .expect("a table after it");
+        let mut no_dc = progressive[..scan].to_vec();
+        no_dc.extend_from_slice(&progressive[next_table..]);
+        assert!(decode_stored(&no_dc, &Limits::DEFAULT).is_ok());
+        assert!(matches!(
+            decode_as_stb_image(&no_dc, &Limits::DEFAULT),
+            Err(ImageError::Unsupported(_))
+        ));
     }
 
     /// libjpeg's CMYK samples beside Pillow 13's RGB for them: each

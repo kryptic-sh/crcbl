@@ -69,6 +69,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reads the size from the headers, and `format::sniff` names the file
   `Format::Gif`.
 
+- **`crcbl-image`: `jpeg::decode_as_stb_image`.** Decodes to exactly the RGB of
+  stb_image 2.30's `stbi_load_from_memory(..., 3)` as llama.cpp's x86-64 builds
+  run it: stb's own marker walk, bit buffer and block decoding, its SSE2 inverse
+  DCT, chroma upsampling and YCbCr, CMYK and YCCK conversion, and its reading of
+  damaged and truncated files. EXIF is ignored, as stb ignores it. A file whose
+  stb output would depend on memory stb never wrote is refused as `Unsupported`.
+  It is the JPEG step of `tensor`'s llama.cpp recipe.
+
 ### Changed
 
 - **Breaking: `crcbl-image`'s `png`, `jpeg` and `webp` `decode` apply the EXIF
@@ -92,6 +100,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   decoding it.** A file with two faults may report a different one first, and a
   zero-sized lossy frame inside a `VP8X` canvas is now `Malformed` (it does not
   match the canvas) rather than `Empty`.
+
+### Fixed
+
+- **`crcbl-image`: `jpeg::decode` and `decode_stored` read two stream quirks as
+  libjpeg-turbo does.** A fill byte before a stuffed zero is skipped, as its
+  slow path skips it, and a sequential AC symbol of size zero ends its block
+  without reading a run length. Such streams were refused or decoded differently
+  before.
 
 ## [0.20.0] - 2026-11-12
 
