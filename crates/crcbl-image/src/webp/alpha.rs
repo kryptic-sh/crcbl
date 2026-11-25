@@ -25,29 +25,36 @@ const GRADIENT: u8 = 3;
 /// Decodes an `ALPH` chunk's data to `width` × `height` alpha values, row by
 /// row. The caller has checked the size against its limits.
 pub(super) fn decode(chunk: &[u8], width: usize, height: usize) -> Result<Vec<u8>, ImageError> {
+    let (compression, filter, data) = read_header(chunk)?;
+    let count = width * height;
+    let mut alpha = if compression == RAW {
+        data.get(..count)
+            .ok_or_else(|| malformed("raw alpha shorter than its image"))?
+            .to_vec()
+    } else {
+        lossless::decode_headerless(data, width, height)?
+            .into_iter()
+            .map(|pixel| (pixel >> 8) as u8)
+            .collect()
+    };
+    unfilter(&mut alpha, width, filter);
+    Ok(alpha)
+}
+
+/// An `ALPH` chunk's header byte, refused unless its compression method is
+/// one [`decode`] reads: the compression method, the filtering method and
+/// the data after the header.
+pub(super) fn read_header(chunk: &[u8]) -> Result<(u8, u8, &[u8]), ImageError> {
     let (&header, data) = chunk
         .split_first()
         .ok_or_else(|| malformed("an empty alpha chunk"))?;
     let compression = header & 3;
-    let filter = (header >> 2) & 3;
-    let count = width * height;
-    let mut alpha = match compression {
-        RAW => data
-            .get(..count)
-            .ok_or_else(|| malformed("raw alpha shorter than its image"))?
-            .to_vec(),
-        LOSSLESS => lossless::decode_headerless(data, width, height)?
-            .into_iter()
-            .map(|pixel| (pixel >> 8) as u8)
-            .collect(),
-        _ => {
-            return Err(unsupported(format!(
-                "alpha compression method {compression}"
-            )));
-        }
-    };
-    unfilter(&mut alpha, width, filter);
-    Ok(alpha)
+    if !matches!(compression, RAW | LOSSLESS) {
+        return Err(unsupported(format!(
+            "alpha compression method {compression}"
+        )));
+    }
+    Ok((compression, (header >> 2) & 3, data))
 }
 
 /// Undoes the filter the header names, in place: each value has the

@@ -13,6 +13,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`crcbl-image`: header-only `dimensions` for `png`, `jpeg`, `webp` and `bmp`,
+  and `format::sniff`.** Each `dimensions(bytes)` returns the width and height
+  `decode` would, read from the headers alone with no pixel decode, and refuses
+  a header `decode` refuses with the same error, including JPEG tables before
+  the frame, WebP's alpha chunk header and an animation's first frame. So a
+  server can turn away an oversized or unsupported image before queueing it. The
+  size is not checked against `Limits`: compare it, or call `Limits::rgba_bytes`
+  (a JPEG with large sampling factors can still be refused by `decode` under
+  very small limits; `jpeg::dimensions` says when). `format::sniff` names a
+  file's `Format` (PNG, JPEG, WebP, BMP, ICO/CUR) from its first bytes, needs no
+  codec feature, and returns `None` for anything else, so a decoder can be
+  chosen without trusting a file name or a `data:` URL's media type.
+
+### Changed
+
+- **`crcbl-image`: WebP `decode` checks a frame against its canvas before
+  decoding it.** A file with two faults may report a different one first, and a
+  zero-sized lossy frame inside a `VP8X` canvas is now `Malformed` (it does not
+  match the canvas) rather than `Empty`.
+
 ## [0.20.0] - 2026-11-12
 
 ### Added

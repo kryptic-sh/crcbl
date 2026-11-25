@@ -54,6 +54,73 @@ fn unsupported(why: impl Into<String>) -> ImageError {
 /// alpha compression method, and [`ImageError::Malformed`] for anything that
 /// is not a well-formed WebP.
 pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+    match find_image(bytes)? {
+        Image::Still {
+            fourcc,
+            data,
+            alpha,
+        } => decode_frame(&fourcc, data, alpha, limits),
+        Image::Animated {
+            canvas: (width, height),
+            first,
+        } => first_frame(first, width, height, limits),
+    }
+}
+
+/// The width and height of the image [`decode`] would return, read from the
+/// headers without decoding a pixel: a still image's bitstream header, or
+/// an animation's canvas.
+///
+/// The container is walked as [`decode`] walks it, a still image's size is
+/// held to its canvas's, and an animation's first frame is found and held
+/// inside its canvas by its bitstream's header, as there. Every header is
+/// refused as [`decode`] refuses it: the bitstream's, the alpha chunk's
+/// (its compression method) and the first frame's. The bitstreams past
+/// their headers are not read, so damage there is found only by decoding.
+/// The size is not checked against any [`Limits`]: compare it with the
+/// caller's, or ask [`Limits::rgba_bytes`].
+///
+/// # Errors
+///
+/// [`ImageError::Empty`] for a lossy frame of a zero side,
+/// [`ImageError::Unsupported`] for a reserved VP8 version or alpha
+/// compression method, and [`ImageError::Malformed`] if the bytes do not
+/// reach well-formed image headers.
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), ImageError> {
+    match find_image(bytes)? {
+        Image::Still {
+            fourcc,
+            data,
+            alpha,
+        } => frame_header(&fourcc, data, alpha),
+        Image::Animated {
+            canvas: (width, height),
+            first,
+        } => {
+            first_frame_header(first, width, height)?;
+            Ok((width, height))
+        }
+    }
+}
+
+/// Where a file's image is, as [`find_image`] finds it.
+enum Image<'a> {
+    /// A `VP8L` or `VP8 ` chunk's FourCC and data, and the `ALPH` chunk
+    /// before it, if any.
+    Still {
+        fourcc: [u8; 4],
+        data: &'a [u8],
+        alpha: Option<&'a [u8]>,
+    },
+    /// The `VP8X` chunk's canvas size and the first `ANMF` chunk's data.
+    Animated { canvas: (u32, u32), first: &'a [u8] },
+}
+
+/// Finds a file's image in its chunks: a still image is a `VP8L` or `VP8 `
+/// chunk, alone or after a `VP8X` chunk naming its canvas (and, if lossy,
+/// an `ALPH` chunk holding its alpha), whose size its header must match; an
+/// animation's first `ANMF` chunk holds its first frame.
+fn find_image(bytes: &[u8]) -> Result<Image<'_>, ImageError> {
     if bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WEBP") {
         return Err(malformed("not a RIFF WebP file"));
     }
@@ -61,9 +128,6 @@ pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
     let body = bytes
         .get(12..riff_size.saturating_add(8).min(bytes.len()))
         .ok_or_else(|| malformed("a RIFF size past the file"))?;
-    // A still image is a `VP8L` or `VP8 ` chunk, alone or after a `VP8X`
-    // chunk naming its canvas (and, if lossy, an `ALPH` chunk holding its
-    // alpha); an animation's first `ANMF` chunk holds its first frame.
     let mut canvas = None;
     let mut alpha = None;
     for chunk in Chunks::new(body) {
@@ -76,21 +140,51 @@ pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
             }
             b"ALPH" => alpha = Some(data),
             b"VP8L" | b"VP8 " => {
-                let image = decode_frame(&fourcc, data, alpha, limits)?;
-                if canvas.is_some_and(|size| size != (image.width(), image.height())) {
+                if canvas.is_some() && canvas != Some(frame_size(&fourcc, data)?) {
                     return Err(malformed("a still image the size its canvas is not"));
                 }
-                return Ok(image);
+                return Ok(Image::Still {
+                    fourcc,
+                    data,
+                    alpha,
+                });
             }
             b"ANMF" => {
-                let (width, height) =
+                let canvas =
                     canvas.ok_or_else(|| malformed("an animation frame without a VP8X chunk"))?;
-                return first_frame(data, width, height, limits);
+                return Ok(Image::Animated {
+                    canvas,
+                    first: data,
+                });
             }
             _ => {}
         }
     }
     Err(malformed("no image data"))
+}
+
+/// The width and height a frame's bitstream header gives.
+fn frame_size(fourcc: &[u8; 4], data: &[u8]) -> Result<(u32, u32), ImageError> {
+    if fourcc == b"VP8L" {
+        lossless::vp8l_size(data)
+    } else {
+        vp8::size(data)
+    }
+}
+
+/// A frame's size from its headers, refused as [`decode_frame`] refuses
+/// them: the bitstream's, and for a lossy frame the alpha chunk's.
+fn frame_header(
+    fourcc: &[u8; 4],
+    data: &[u8],
+    alpha: Option<&[u8]>,
+) -> Result<(u32, u32), ImageError> {
+    let (width, height) = frame_size(fourcc, data)?;
+    let size = crate::non_empty(width, height)?;
+    if fourcc == b"VP8 " {
+        alpha.map(alpha::read_header).transpose()?;
+    }
+    Ok(size)
 }
 
 /// Decodes one frame's bitstream chunk: lossless, or lossy with the alpha
@@ -129,38 +223,65 @@ fn first_frame(
     limits: &Limits,
 ) -> Result<Rgba8Image, ImageError> {
     let canvas_bytes = limits.rgba_bytes(canvas_width, canvas_height)?;
+    let header = first_frame_header(anmf, canvas_width, canvas_height)?;
+    let frame = decode_frame(&header.fourcc, header.data, header.alpha, limits)?;
+    let (x, y) = (header.x as usize, header.y as usize);
+    let mut pixels = vec![0u8; canvas_bytes];
+    let row = frame.width() as usize * 4;
+    for (row_index, source) in frame.pixels().chunks_exact(row).enumerate() {
+        let start = ((y + row_index) * canvas_width as usize + x) * 4;
+        pixels[start..start + row].copy_from_slice(source);
+    }
+    Ok(Rgba8Image::from_sized(canvas_width, canvas_height, pixels))
+}
+
+/// An animation frame's place on its canvas and its bitstream, as
+/// [`first_frame_header`] finds them.
+struct FrameHeader<'a> {
+    x: u32,
+    y: u32,
+    fourcc: [u8; 4],
+    data: &'a [u8],
+    alpha: Option<&'a [u8]>,
+}
+
+/// An `ANMF` chunk's offset and bitstream, its headers refused as
+/// [`frame_header`] refuses them, and the frame they size held inside the
+/// canvas.
+fn first_frame_header(
+    anmf: &[u8],
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Result<FrameHeader<'_>, ImageError> {
     let x = u24_at(anmf, 0)? * 2;
     let y = u24_at(anmf, 3)? * 2;
     let frame_data = anmf
         .get(16..)
         .ok_or_else(|| malformed("an animation frame is cut short"))?;
     let mut alpha = None;
-    let mut frame = None;
     for chunk in Chunks::new(frame_data) {
         let (fourcc, data) = chunk?;
         match &fourcc {
             b"ALPH" => alpha = Some(data),
             b"VP8L" | b"VP8 " => {
-                frame = Some(decode_frame(&fourcc, data, alpha, limits)?);
-                break;
+                let (width, height) = frame_header(&fourcc, data, alpha)?;
+                if u64::from(x) + u64::from(width) > u64::from(canvas_width)
+                    || u64::from(y) + u64::from(height) > u64::from(canvas_height)
+                {
+                    return Err(malformed("an animation frame outside its canvas"));
+                }
+                return Ok(FrameHeader {
+                    x,
+                    y,
+                    fourcc,
+                    data,
+                    alpha,
+                });
             }
             _ => {}
         }
     }
-    let frame = frame.ok_or_else(|| malformed("an animation frame with no image"))?;
-    let (frame_width, frame_height) = (frame.width(), frame.height());
-    if u64::from(x) + u64::from(frame_width) > u64::from(canvas_width)
-        || u64::from(y) + u64::from(frame_height) > u64::from(canvas_height)
-    {
-        return Err(malformed("an animation frame outside its canvas"));
-    }
-    let mut pixels = vec![0u8; canvas_bytes];
-    let row = frame_width as usize * 4;
-    for (row_index, source) in frame.pixels().chunks_exact(row).enumerate() {
-        let start = ((y as usize + row_index) * canvas_width as usize + x as usize) * 4;
-        pixels[start..start + row].copy_from_slice(source);
-    }
-    Ok(Rgba8Image::from_sized(canvas_width, canvas_height, pixels))
+    Err(malformed("an animation frame with no image"))
 }
 
 /// The chunks of a RIFF body, each its FourCC and its data, padding skipped.
@@ -216,6 +337,7 @@ fn u24_at(bytes: &[u8], at: usize) -> Result<u32, ImageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::discriminant;
 
     /// Each fixture beside libwebp's decode of it, through Pillow 12.3, made
     /// by a script that saves seeded images with Pillow's lossless encoder:
@@ -338,6 +460,184 @@ mod tests {
                 decode(webp, &small),
                 Err(ImageError::TooLarge { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn dimensions_are_the_size_decode_returns() {
+        for (name, webp, _) in FIXTURES.into_iter().chain(LOSSY) {
+            let image = decode(webp, &Limits::DEFAULT).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(
+                dimensions(webp),
+                Ok((image.width(), image.height())),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn dimensions_refuse_what_decode_refuses_in_the_headers() {
+        let (_, lossy, _) = LOSSY[0];
+        let frame = &lossy[20..];
+        let mut reserved = frame.to_vec();
+        reserved[0] |= 5 << 1;
+        let reserved = simple_lossy(&reserved);
+        assert!(matches!(
+            dimensions(&reserved),
+            Err(ImageError::Unsupported(_))
+        ));
+        assert!(matches!(
+            decode(&reserved, &Limits::DEFAULT),
+            Err(ImageError::Unsupported(_))
+        ));
+
+        // Every cut of a simple file, an extended still image and an
+        // animation leaves a chunk running past the file, or none at all,
+        // but for dropping the padding byte after an odd-sized last chunk:
+        // dimensions and decode give the same verdict on each.
+        let (_, lossless, _) = FIXTURES[0];
+        let (_, animated, _) = FIXTURES[9];
+        let (_, extended, _) = LOSSY[14];
+        assert_eq!(extended.get(12..16), Some(&b"VP8X"[..]), "a VP8X file");
+        let mut cuts_refused = 0;
+        for webp in [lossless, lossy, animated, extended] {
+            for end in 0..webp.len() {
+                let cut = &webp[..end];
+                let decoded = decode(cut, &Limits::DEFAULT);
+                let decoded = decoded.map(|image| (image.width(), image.height()));
+                assert_eq!(
+                    dimensions(cut).map_err(|e| discriminant(&e)),
+                    decoded.map_err(|e| discriminant(&e)),
+                    "cut at {end}"
+                );
+                cuts_refused += usize::from(dimensions(cut).is_err());
+            }
+        }
+        assert!(cuts_refused > 0, "no cut was refused");
+        let mut malformed: Vec<(String, Vec<u8>)> = Vec::new();
+        // The `VP8X` chunk's canvas width, a pixel wider than its image.
+        let mut wider = extended.to_vec();
+        wider[24] = wider[24].wrapping_add(1);
+        malformed.push(("a canvas the image does not fill".into(), wider));
+        let mut interframe = frame.to_vec();
+        interframe[0] |= 1;
+        malformed.push(("an interframe".into(), simple_lossy(&interframe)));
+        let mut version = lossless.to_vec();
+        // The lossless signature, then 14 bits of width, 14 of height and
+        // one of alpha: the version's three bits are the top of byte 24.
+        version[24] |= 1 << 5;
+        malformed.push(("a lossless version 1".into(), version));
+        for (what, bytes) in malformed {
+            assert!(
+                matches!(dimensions(&bytes), Err(ImageError::Malformed(_))),
+                "{what}: {:?}",
+                dimensions(&bytes)
+            );
+            assert_eq!(
+                dimensions(&bytes),
+                decode(&bytes, &Limits::DEFAULT).map(|image| (image.width(), image.height())),
+                "{what}: the same error as decode"
+            );
+        }
+
+        // A lossy frame of no width, the scale bits above it kept.
+        let mut empty = frame.to_vec();
+        empty[6] = 0;
+        empty[7] &= 0xc0;
+        let empty = simple_lossy(&empty);
+        let refused = |result: Result<(u32, u32), ImageError>| {
+            matches!(result, Err(ImageError::Empty { width: 0, .. }))
+        };
+        assert!(refused(dimensions(&empty)));
+        assert!(refused(
+            decode(&empty, &Limits::DEFAULT).map(|image| (image.width(), image.height()))
+        ));
+    }
+
+    /// A chunk of `fourcc` around `data`, padded to an even size.
+    fn chunk(fourcc: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = fourcc.to_vec();
+        chunk.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        chunk.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            chunk.push(0);
+        }
+        chunk
+    }
+
+    /// A RIFF WebP file of `chunks`, its size made to fit.
+    fn riff(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let body = chunks.concat();
+        let mut file = b"RIFF".to_vec();
+        file.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
+        file.extend_from_slice(b"WEBP");
+        file.extend_from_slice(&body);
+        file
+    }
+
+    /// A `VP8X` chunk declaring a `width` × `height` canvas under `flags`.
+    fn vp8x(flags: u8, width: u32, height: u32) -> Vec<u8> {
+        let mut data = vec![flags, 0, 0, 0];
+        data.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+        data.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+        chunk(b"VP8X", &data)
+    }
+
+    /// An `ANMF` chunk at the canvas's corner around `frame`'s chunks.
+    fn anmf(frame: &[Vec<u8>]) -> Vec<u8> {
+        let mut data = vec![0; 16];
+        data.extend_from_slice(&frame.concat());
+        chunk(b"ANMF", &data)
+    }
+
+    /// Headers decode refuses before a pixel, in the alpha chunk and in an
+    /// animation's first frame: dimensions refuses each with decode's own
+    /// error.
+    #[test]
+    fn dimensions_read_the_alpha_and_first_frame_headers() {
+        let (_, lossy, _) = LOSSY[0];
+        let frame = &lossy[20..];
+        let (width, height) = vp8::size(frame).expect("a VP8 header");
+        let mut reserved = frame.to_vec();
+        reserved[0] |= 5 << 1;
+        let alpha_flag = 0x10;
+        let animation_flag = 0x02;
+        let with_alpha = |alph: &[u8]| {
+            riff(&[
+                vp8x(alpha_flag, width, height),
+                chunk(b"ALPH", alph),
+                chunk(b"VP8 ", frame),
+            ])
+        };
+        let animated = |canvas: (u32, u32), first: &[Vec<u8>]| {
+            riff(&[vp8x(animation_flag, canvas.0, canvas.1), anmf(first)])
+        };
+        // Raw and unfiltered: the header byte, then a value a pixel.
+        let mut raw = vec![u8::MAX; 1 + (width * height) as usize];
+        raw[0] = 0;
+        let good_alpha = with_alpha(&raw);
+        assert!(decode(&good_alpha, &Limits::DEFAULT).is_ok());
+        assert_eq!(dimensions(&good_alpha), Ok((width, height)));
+        let good_animation = animated((width, height), &[chunk(b"VP8 ", frame)]);
+        assert!(decode(&good_animation, &Limits::DEFAULT).is_ok());
+        assert_eq!(dimensions(&good_animation), Ok((width, height)));
+        for (what, bytes) in [
+            ("alpha compression method 3", with_alpha(&[0x03])),
+            ("an empty alpha chunk", with_alpha(&[])),
+            ("a frame with no image", animated((1, 1), &[])),
+            (
+                "a frame outside its canvas",
+                animated((1, 1), &[chunk(b"VP8 ", frame)]),
+            ),
+            (
+                "a frame of a reserved VP8 version",
+                animated((width, height), &[chunk(b"VP8 ", &reserved)]),
+            ),
+        ] {
+            let decoded =
+                decode(&bytes, &Limits::DEFAULT).map(|image| (image.width(), image.height()));
+            assert!(decoded.is_err(), "{what}: decode");
+            assert_eq!(dimensions(&bytes), decoded, "{what}");
         }
     }
 

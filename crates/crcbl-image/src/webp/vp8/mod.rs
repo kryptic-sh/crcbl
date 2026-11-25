@@ -256,6 +256,35 @@ struct Macroblock {
 /// [`ImageError::Malformed`] for an interframe or a frame that is not
 /// well-formed.
 pub(super) fn decode(data: &[u8], limits: &Limits) -> Result<Picture, ImageError> {
+    let (width, height, first_partition) = read_key_frame_header(data)?;
+    limits.rgba_bytes(width, height)?;
+
+    let rest = &data[KEY_FRAME_HEADER_BYTES..];
+    let (first, rest) = rest
+        .split_at_checked(first_partition)
+        .ok_or_else(|| malformed("the first VP8 partition runs past its chunk"))?;
+    let mut modes = BoolDecoder::new(first);
+    let header = read_frame_header(&mut modes)?;
+    let mut partitions = token_partitions(rest, header.partitions)?;
+    decode_macroblocks(
+        &header,
+        &mut modes,
+        &mut partitions,
+        width as usize,
+        height as usize,
+    )
+}
+
+/// The width and height a `VP8 ` chunk's key frame header gives, its header
+/// refused as [`decode`] refuses it.
+pub(super) fn size(data: &[u8]) -> Result<(u32, u32), ImageError> {
+    let (width, height, _) = read_key_frame_header(data)?;
+    Ok((width, height))
+}
+
+/// The uncompressed header of a key frame, RFC 6386 section 9.1: its width,
+/// its height and the length of its first partition.
+fn read_key_frame_header(data: &[u8]) -> Result<(u32, u32, usize), ImageError> {
     let header = data
         .get(..KEY_FRAME_HEADER_BYTES)
         .ok_or_else(|| malformed("a VP8 frame header is cut short"))?;
@@ -277,22 +306,7 @@ pub(super) fn decode(data: &[u8], limits: &Limits) -> Result<Picture, ImageError
     // The top two bits of each are a scale for display, not the size.
     let width = u32::from(u16::from_le_bytes([header[6], header[7]]) & 0x3fff);
     let height = u32::from(u16::from_le_bytes([header[8], header[9]]) & 0x3fff);
-    limits.rgba_bytes(width, height)?;
-
-    let rest = &data[KEY_FRAME_HEADER_BYTES..];
-    let (first, rest) = rest
-        .split_at_checked(first_partition)
-        .ok_or_else(|| malformed("the first VP8 partition runs past its chunk"))?;
-    let mut modes = BoolDecoder::new(first);
-    let header = read_frame_header(&mut modes)?;
-    let mut partitions = token_partitions(rest, header.partitions)?;
-    decode_macroblocks(
-        &header,
-        &mut modes,
-        &mut partitions,
-        width as usize,
-        height as usize,
-    )
+    Ok((width, height, first_partition))
 }
 
 /// Reads the frame header from the first partition, RFC 6386 section 9 in

@@ -462,16 +462,7 @@ enum Transform {
 
 /// Decodes a `VP8L` chunk's bitstream to RGBA8.
 pub(super) fn decode_vp8l(data: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
-    if data.first() != Some(&VP8L_SIGNATURE) {
-        return Err(malformed("no lossless signature"));
-    }
-    let mut bits = Bits::new(&data[1..]);
-    let width = bits.read(14)? + 1;
-    let height = bits.read(14)? + 1;
-    let _alpha_is_used = bits.read(1)?;
-    if bits.read(3)? != 0 {
-        return Err(malformed("a lossless version other than 0"));
-    }
+    let (width, height, mut bits) = read_header(data)?;
     let bytes = limits.rgba_bytes(width, height)?;
     let pixels = decode_stream(&mut bits, width as usize, height as usize)?;
     let mut rgba = Vec::with_capacity(bytes);
@@ -484,6 +475,27 @@ pub(super) fn decode_vp8l(data: &[u8], limits: &Limits) -> Result<Rgba8Image, Im
         ]);
     }
     Ok(Rgba8Image::from_sized(width, height, rgba))
+}
+
+/// The width and height a `VP8L` chunk's header gives.
+pub(super) fn vp8l_size(data: &[u8]) -> Result<(u32, u32), ImageError> {
+    let (width, height, _) = read_header(data)?;
+    Ok((width, height))
+}
+
+/// A `VP8L` chunk's header: its width and height, and the bits after it.
+fn read_header(data: &[u8]) -> Result<(u32, u32, Bits<'_>), ImageError> {
+    if data.first() != Some(&VP8L_SIGNATURE) {
+        return Err(malformed("no lossless signature"));
+    }
+    let mut bits = Bits::new(&data[1..]);
+    let width = bits.read(14)? + 1;
+    let height = bits.read(14)? + 1;
+    let _alpha_is_used = bits.read(1)?;
+    if bits.read(3)? != 0 {
+        return Err(malformed("a lossless version other than 0"));
+    }
+    Ok((width, height, bits))
 }
 
 /// Decodes a lossless image stream with no header, `width` × `height`

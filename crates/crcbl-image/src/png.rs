@@ -78,6 +78,39 @@ pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
     Ok(Rgba8Image::from_sized(width, height, pixels))
 }
 
+/// The width and height a PNG's `IHDR` chunk gives, read without decoding a
+/// pixel: what [`decode`] would return an image of.
+///
+/// The header is read by the `png` crate's own parser, the one [`decode`]
+/// goes through, so a signature, an `IHDR` that is not the first chunk, a
+/// bad checksum or an impossible field is refused here exactly as there;
+/// damage past the header is found only by decoding. The size is not
+/// checked against any [`Limits`]: compare it with the caller's, or ask
+/// [`Limits::rgba_bytes`].
+///
+/// # Errors
+///
+/// [`ImageError::Malformed`] if the bytes do not start with a readable PNG
+/// header, a zero side included, as [`decode`] reports it.
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), ImageError> {
+    let mut decoder = ::png::StreamingDecoder::new();
+    let mut rest = bytes;
+    loop {
+        if let Some(info) = decoder.info() {
+            return Ok(info.size());
+        }
+        if rest.is_empty() {
+            return Err(ImageError::Malformed(
+                "the file ends before its IHDR chunk does".into(),
+            ));
+        }
+        let (consumed, _) = decoder
+            .update(rest, None)
+            .map_err(|error| ImageError::Malformed(error.to_string()))?;
+        rest = &rest[consumed..];
+    }
+}
+
 /// Encodes `image` as an 8-bit RGBA PNG.
 ///
 /// # Errors
@@ -207,6 +240,80 @@ mod tests {
             decode(&two, &small),
             Err(ImageError::TooLarge { .. })
         ));
+    }
+
+    /// `bytes`' size as [`dimensions`] reads it, and as [`decode`] does.
+    fn both_sizes(bytes: &[u8]) -> (Result<(u32, u32), ImageError>, (u32, u32)) {
+        let image = decode(bytes, &Limits::DEFAULT).expect("decodes");
+        (dimensions(bytes), (image.width(), image.height()))
+    }
+
+    #[test]
+    fn dimensions_are_the_size_decode_returns() {
+        use ::png::{BitDepth, ColorType};
+        let rgba = Rgba8Image::new(3, 2, vec![7; 24]).expect("sized");
+        for bytes in [
+            encode(&rgba).expect("encodes"),
+            png_of(5, 1, ColorType::Grayscale, BitDepth::Eight, &[0; 5]),
+            png_of(4, 3, ColorType::Grayscale, BitDepth::Two, &[0; 3]),
+            png_of(1, 7, ColorType::Rgb, BitDepth::Sixteen, &[0; 42]),
+        ] {
+            let (dimensions, decoded) = both_sizes(&bytes);
+            assert_eq!(dimensions, Ok(decoded));
+        }
+        // Past any limit: the caller decides.
+        let mut huge = Vec::new();
+        drop(
+            ::png::Encoder::new(&mut huge, 100_000, 70_000)
+                .write_header()
+                .expect("header"),
+        );
+        assert_eq!(dimensions(&huge), Ok((100_000, 70_000)));
+    }
+
+    #[test]
+    fn a_header_decode_refuses_is_refused_by_dimensions_too() {
+        let good = png_of(
+            2,
+            2,
+            ::png::ColorType::Rgba,
+            ::png::BitDepth::Eight,
+            &[9; 16],
+        );
+        // The signature, then IHDR's length, type, 13 bytes and checksum.
+        let ihdr_end = 8 + 4 + 4 + 13 + 4;
+        let mut refused: Vec<(String, Vec<u8>)> = (0..ihdr_end)
+            .map(|end| (format!("cut at {end}"), good[..end].to_vec()))
+            .collect();
+        let mut bad_crc = good.clone();
+        bad_crc[ihdr_end - 1] ^= 1;
+        refused.push(("a bad checksum".into(), bad_crc));
+        let mut zero_width = good.clone();
+        zero_width[16..20].fill(0);
+        refused.push(("a zero width".into(), zero_width));
+        let mut not_first = good[..8].to_vec();
+        not_first.extend_from_slice(&[0, 0, 0, 0]);
+        not_first.extend_from_slice(b"tIME");
+        not_first.extend_from_slice(&good[8..]);
+        refused.push(("a chunk before IHDR".into(), not_first));
+        let mut signature = good.clone();
+        signature[1] = b'Q';
+        refused.push(("a wrong signature".into(), signature));
+        for (what, bytes) in refused {
+            assert!(
+                matches!(dimensions(&bytes), Err(ImageError::Malformed(_))),
+                "{what}: {:?}",
+                dimensions(&bytes)
+            );
+            assert!(
+                matches!(
+                    decode(&bytes, &Limits::DEFAULT),
+                    Err(ImageError::Malformed(_))
+                ),
+                "{what}: decode"
+            );
+        }
+        assert_eq!(dimensions(&good[..ihdr_end]), Ok((2, 2)));
     }
 
     #[test]

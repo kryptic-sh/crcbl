@@ -28,11 +28,14 @@
 //! what it does not draw rather than drawing part of it), with `svg-text`
 //! for an icon's text, drawn in the system's fonts found through
 //! `crcbl-font`. The raw conversions, the
-//! resize, the coverage rasteriser and the [`data_url`] parser need none. The `theme` feature adds the
+//! resize, the coverage rasteriser, the [`data_url`] parser and the
+//! [`format::sniff`], which names a file's format from its first bytes, need
+//! none. The `theme` feature adds the
 //! freedesktop.org icon-theme lookup, which finds an icon's file by name;
 //! decoding it is the format's.
 
 pub mod data_url;
+pub mod format;
 pub mod raster;
 pub mod raw;
 pub mod resize;
@@ -100,9 +103,7 @@ impl Limits {
     /// a side or a byte count past these limits or past the host's address
     /// space.
     pub fn rgba_bytes(&self, width: u32, height: u32) -> Result<usize, ImageError> {
-        if width == 0 || height == 0 {
-            return Err(ImageError::Empty { width, height });
-        }
+        non_empty(width, height)?;
         let too_large = ImageError::TooLarge {
             width,
             height,
@@ -120,6 +121,15 @@ impl Limits {
             _ => Err(too_large),
         }
     }
+}
+
+/// `(width, height)`, or [`ImageError::Empty`] for a zero side: refused
+/// whatever the [`Limits`], so a header-only size reader refuses it too.
+pub(crate) fn non_empty(width: u32, height: u32) -> Result<(u32, u32), ImageError> {
+    if width == 0 || height == 0 {
+        return Err(ImageError::Empty { width, height });
+    }
+    Ok((width, height))
 }
 
 impl Default for Limits {

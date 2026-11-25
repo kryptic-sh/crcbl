@@ -71,6 +71,33 @@ fn u32_at(bytes: &[u8], at: usize) -> Result<u32, ImageError> {
 /// `limits`, [`ImageError::Unsupported`] for a kind of bitmap the [module
 /// docs](self) do not list, and [`ImageError::Malformed`] otherwise.
 pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+    let (header, pixels) = read_file(bytes)?;
+    header.decode(pixels, AllZeroAlpha::Opaque, limits)
+}
+
+/// The width and height a `.bmp` file's header gives, read without decoding
+/// a pixel: what [`decode`] would return an image of, its height positive
+/// whichever way its rows run.
+///
+/// The headers, masks and palette are checked as [`decode`] checks them, so
+/// a bitmap [`decode`] refuses as [`ImageError::Unsupported`] is refused here
+/// the same way; pixels cut short are found only by decoding. The size is
+/// not checked against any [`Limits`]: compare it with the caller's, or ask
+/// [`Limits::rgba_bytes`].
+///
+/// # Errors
+///
+/// [`ImageError::Empty`] for a zero side, [`ImageError::Unsupported`] for a
+/// kind of bitmap the [module docs](self) do not list, and
+/// [`ImageError::Malformed`] otherwise.
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), ImageError> {
+    let (header, _) = read_file(bytes)?;
+    crate::non_empty(header.width, header.height)
+}
+
+/// A `.bmp` file's header, and its pixels from where the file header says
+/// they start.
+fn read_file(bytes: &[u8]) -> Result<(Header<'_>, &[u8]), ImageError> {
     if bytes.get(..2) != Some(b"BM") {
         return Err(malformed("no BM signature"));
     }
@@ -82,7 +109,7 @@ pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
     let pixels = bytes
         .get(pixels_at..)
         .ok_or_else(|| malformed("the pixel offset is past the file"))?;
-    header.decode(pixels, AllZeroAlpha::Opaque, limits)
+    Ok((header, pixels))
 }
 
 /// Decodes the bitmap inside an icon: no file header, the pixels straight
@@ -114,7 +141,7 @@ pub(crate) fn decode_icon_dib(dib: &[u8], limits: &Limits) -> Result<Rgba8Image,
 
 /// What a DIB header says.
 #[derive(Debug)]
-struct Header {
+struct Header<'a> {
     width: u32,
     height: u32,
     top_down: bool,
@@ -122,14 +149,18 @@ struct Header {
     compression: u32,
     /// Red, green, blue and alpha masks for a direct-colour bitmap.
     masks: [u32; 4],
-    palette: Vec<[u8; 4]>,
+    /// The palette as stored: each entry blue, green and red, then an unused
+    /// byte unless the header is the core one.
+    palette: &'a [u8],
+    /// The bytes of one palette entry.
+    entry: usize,
 }
 
-impl Header {
+impl<'a> Header<'a> {
     /// Reads the DIB header at the start of `dib`, its masks and its palette,
     /// and says where in `dib` they end: where an icon's pixels start. An
     /// icon's header gives twice the image's height.
-    fn read(dib: &[u8], icon: bool) -> Result<(Self, usize), ImageError> {
+    fn read(dib: &'a [u8], icon: bool) -> Result<(Self, usize), ImageError> {
         let size = u32_at(dib, 0)? as usize;
         let (width, raw_height, planes, bits, compression, colours_used) = match size {
             12 => (
@@ -213,11 +244,8 @@ impl Header {
                 .ok_or_else(|| malformed("a bitmap's palette is cut short"))?;
             after += count * entry;
             table
-                .chunks_exact(entry)
-                .map(|bgr| [bgr[2], bgr[1], bgr[0], u8::MAX])
-                .collect()
         } else {
-            Vec::new()
+            &[]
         };
         let header = Self {
             width,
@@ -227,6 +255,7 @@ impl Header {
             compression,
             masks,
             palette,
+            entry,
         };
         Ok((header, after))
     }
@@ -318,9 +347,10 @@ impl Header {
 
     /// A palette entry, or an error for an index past the palette.
     fn colour(&self, index: u8) -> Result<[u8; 4], ImageError> {
+        let at = usize::from(index) * self.entry;
         self.palette
-            .get(usize::from(index))
-            .copied()
+            .get(at..at + self.entry)
+            .map(|bgr| [bgr[2], bgr[1], bgr[0], u8::MAX])
             .ok_or_else(|| malformed("a pixel indexes past its palette"))
     }
 
@@ -620,6 +650,118 @@ mod tests {
             decode(&huge, &Limits::DEFAULT),
             Err(ImageError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn dimensions_are_the_size_decode_returns() {
+        let mut top_down = info(1, -2, 16, BI_BITFIELDS, 0);
+        for mask in [0xf800u32, 0x07e0, 0x001f] {
+            top_down.extend_from_slice(&mask.to_le_bytes());
+        }
+        let at = top_down.len();
+        top_down.extend_from_slice(&[0; 8]);
+        let mut core = 12u32.to_le_bytes().to_vec();
+        for value in [2u16, 1, 1, 1] {
+            core.extend_from_slice(&value.to_le_bytes());
+        }
+        core.extend_from_slice(&[0, 0, 0, 255, 255, 255]);
+        let core_at = core.len();
+        core.extend_from_slice(&[0; 4]);
+        let hand_built = [file(&top_down, at), file(&core, core_at)];
+        let fixtures = [
+            fixture!("one-bit.bmp"),
+            fixture!("grey.bmp"),
+            fixture!("palette.bmp"),
+            fixture!("rgb.bmp"),
+            fixture!("rgba.bmp"),
+        ];
+        for bytes in fixtures
+            .iter()
+            .map(|(_, bytes, _)| *bytes)
+            .chain(hand_built.iter().map(Vec::as_slice))
+        {
+            let image = decode(bytes, &Limits::DEFAULT).expect("decodes");
+            assert_eq!(dimensions(bytes), Ok((image.width(), image.height())));
+        }
+        assert_eq!(dimensions(&hand_built[0]), Ok((1, 2)));
+        // Past any limit: the caller decides.
+        let huge = file(&info(100_000, -70_000, 24, BI_RGB, 0), 40);
+        assert_eq!(dimensions(&huge), Ok((100_000, 70_000)));
+    }
+
+    #[test]
+    fn dimensions_refuse_what_decode_refuses_in_the_header() {
+        let mut dib = info(2, 1, 8, BI_RGB, 2);
+        dib.extend_from_slice(&PALETTE[..8]);
+        let at = dib.len();
+        dib.extend_from_slice(&[0, 1, 0, 0]);
+        let good = file(&dib, at);
+        assert_eq!(dimensions(&good), Ok((2, 1)));
+        let mut v3 = info(2, 1, 24, BI_RGB, 0);
+        v3[..4].copy_from_slice(&64u32.to_le_bytes());
+        let unsupported = [
+            ("an OS/2 2.x header", file(&v3, 40)),
+            ("PNG inside", file(&info(2, 1, 24, 5, 0), 40)),
+            ("24 bits run-length", file(&info(2, 1, 24, BI_RLE8, 0), 40)),
+        ];
+        for (what, bytes) in unsupported {
+            assert!(
+                matches!(dimensions(&bytes), Err(ImageError::Unsupported(_))),
+                "{what}: {:?}",
+                dimensions(&bytes)
+            );
+            assert_eq!(
+                dimensions(&bytes),
+                decode(&bytes, &Limits::DEFAULT).map(|image| (image.width(), image.height())),
+                "{what}: the same error as decode"
+            );
+        }
+        // Every cut before the pixels: the file header, the DIB header and
+        // the palette.
+        let mut malformed: Vec<(String, Vec<u8>)> = (0..FILE_HEADER + at)
+            .map(|end| (format!("cut at {end}"), good[..end].to_vec()))
+            .collect();
+        let mut planes = good.clone();
+        planes[FILE_HEADER + 12] = 2;
+        malformed.push(("two planes".into(), planes));
+        malformed.push((
+            "a negative width".into(),
+            file(&info(-2, 1, 24, BI_RGB, 0), 40),
+        ));
+        malformed.push((
+            "a top-down run-length bitmap".into(),
+            file(&info(2, -1, 8, BI_RLE8, 0), 40),
+        ));
+        let mut past = good.clone();
+        past[10..14].copy_from_slice(&1000u32.to_le_bytes());
+        malformed.push(("pixels past the file".into(), past));
+        for (what, bytes) in malformed {
+            assert!(
+                matches!(dimensions(&bytes), Err(ImageError::Malformed(_))),
+                "{what}: {:?}",
+                dimensions(&bytes)
+            );
+            assert_eq!(
+                dimensions(&bytes),
+                decode(&bytes, &Limits::DEFAULT).map(|image| (image.width(), image.height())),
+                "{what}: the same error as decode"
+            );
+        }
+        let zero = file(&info(0, 3, 24, BI_RGB, 0), 40);
+        assert_eq!(
+            dimensions(&zero),
+            Err(ImageError::Empty {
+                width: 0,
+                height: 3
+            })
+        );
+        assert_eq!(
+            decode(&zero, &Limits::DEFAULT).map(|image| image.width()),
+            Err(ImageError::Empty {
+                width: 0,
+                height: 3
+            })
+        );
     }
 
     #[test]

@@ -288,75 +288,133 @@ struct Tables {
 /// the [module docs](self), and [`ImageError::Malformed`] for anything that is
 /// not a well-formed JPEG.
 pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+    let mut tables = Tables::default();
+    let (marker, segment, mut pos) = read_to_frame(bytes, &mut tables)?;
+    let mut frame = read_frame(segment, marker == 0xc2, limits)?;
+    let mut eobrun = 0u32;
+    loop {
+        let (marker, segment) = next_marker(bytes, &mut pos)?;
+        match marker {
+            0xd9 => break,
+            0xc0..=0xc2 => return Err(malformed("a second frame")),
+            0xda => pos = read_scan(bytes, pos, segment, &mut frame, &tables, &mut eobrun)?,
+            _ => read_segment(marker, segment, &mut tables)?,
+        }
+    }
+    finish(&frame, &tables, limits)
+}
+
+/// The width and height a JPEG's frame header gives, read without decoding
+/// a pixel: what [`decode`] would return an image of.
+///
+/// The markers are walked to the first frame header as [`decode`] walks
+/// them, reading the tables and settings before it, and that header is
+/// checked as [`decode`] checks it. So a file [`decode`] refuses before its
+/// first scan — a frame of a kind the [module docs](self) list as
+/// [`ImageError::Unsupported`], or a damaged table, restart interval or
+/// frame header — is refused here with the same error. The scans are not
+/// read, so damage there is found only by decoding. Nothing is allocated
+/// for the image; the Huffman tables before the frame are built as
+/// [`decode`] builds them.
+///
+/// The size is not checked against any [`Limits`]. Comparing it with the
+/// caller's, or asking [`Limits::rgba_bytes`], is not quite [`decode`]'s
+/// whole check: [`decode`] also refuses as [`ImageError::TooLarge`] a frame
+/// whose coefficients, every component padded to whole MCUs at two bytes a
+/// coefficient, take more than [`COEFFICIENT_ALLOWANCE`] times
+/// [`Limits::max_bytes`] — a small frame with large sampling factors, whose
+/// padding outweighs its pixels.
+///
+/// # Errors
+///
+/// [`ImageError::Empty`] for a zero width, [`ImageError::Unsupported`] for a
+/// frame [`decode`] does not read, and [`ImageError::Malformed`] if the
+/// bytes do not reach a well-formed frame header.
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), ImageError> {
+    let (_, segment, _) = read_to_frame(bytes, &mut Tables::default())?;
+    let (width, height) = frame_size(segment)?;
+    let size = crate::non_empty(u32::from(width), u32::from(height))?;
+    frame_components(segment)?;
+    Ok(size)
+}
+
+/// Walks from the start-of-image marker to the first frame header, reading
+/// every segment before it into `tables`, and returns that header's marker,
+/// its segment and the position after it.
+fn read_to_frame<'a>(
+    bytes: &'a [u8],
+    tables: &mut Tables,
+) -> Result<(u8, &'a [u8], usize), ImageError> {
     if bytes.get(..2) != Some(&[0xff, 0xd8]) {
         return Err(malformed("no start-of-image marker"));
     }
     let mut pos = 2;
-    let mut tables = Tables::default();
-    let mut frame: Option<Frame> = None;
-    let mut eobrun = 0u32;
     loop {
-        // Fill bytes may come before a marker.
-        while bytes.get(pos) == Some(&0xff) && bytes.get(pos + 1) == Some(&0xff) {
-            pos += 1;
-        }
-        let marker = match (bytes.get(pos), bytes.get(pos + 1)) {
-            (Some(0xff), Some(&marker)) => marker,
-            _ => return Err(malformed("the file ends before its end-of-image marker")),
-        };
-        pos += 2;
-        if marker == 0xd9 {
-            break;
-        }
-        if (0xd0..=0xd7).contains(&marker) || marker == 0x01 {
-            continue;
-        }
-        let length = match bytes.get(pos..pos + 2) {
-            Some(&[high, low]) => usize::from(u16::from_be_bytes([high, low])),
-            _ => return Err(malformed("a marker segment is cut short")),
-        };
-        let segment = bytes
-            .get(pos + 2..pos + length.max(2))
-            .filter(|_| length >= 2)
-            .ok_or_else(|| malformed("a marker segment is cut short"))?;
-        pos += length;
+        let (marker, segment) = next_marker(bytes, &mut pos)?;
         match marker {
-            0xdb => read_quant(segment, &mut tables)?,
-            0xc4 => read_huffman(segment, &mut tables)?,
-            0xdd => {
-                let interval = segment
-                    .get(..2)
-                    .ok_or_else(|| malformed("a restart interval marker is cut short"))?;
-                tables.restart_interval =
-                    usize::from(u16::from_be_bytes([interval[0], interval[1]]));
-            }
-            0xe0 if segment.starts_with(b"JFIF\0") => tables.jfif = true,
-            0xee if segment.starts_with(b"Adobe") => {
-                tables.adobe_transform = segment.get(11).copied()
-            }
-            0xc0..=0xc2 => {
-                if frame.is_some() {
-                    return Err(malformed("a second frame"));
-                }
-                frame = Some(read_frame(segment, marker == 0xc2, limits)?);
-            }
-            0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf => {
-                return Err(unsupported(format!(
-                    "a JPEG frame of type {marker:#04x} (lossless, hierarchical or arithmetic)"
-                )));
-            }
-            0xdc => return Err(unsupported("a JPEG whose height comes in a DNL marker")),
-            0xda => {
-                let frame = frame
-                    .as_mut()
-                    .ok_or_else(|| malformed("a scan before its frame"))?;
-                pos = read_scan(bytes, pos, segment, frame, &tables, &mut eobrun)?;
-            }
-            _ => {}
+            0xd9 => return Err(malformed("no frame")),
+            0xc0..=0xc2 => return Ok((marker, segment, pos)),
+            0xda => return Err(malformed("a scan before its frame")),
+            _ => read_segment(marker, segment, tables)?,
         }
     }
-    let frame = frame.ok_or_else(|| malformed("no frame"))?;
-    finish(&frame, &tables, limits)
+}
+
+/// A segment read the same before the frame and after it: a table or
+/// setting into `tables`, a frame this decoder does not read refused, and
+/// anything else skipped.
+fn read_segment(marker: u8, segment: &[u8], tables: &mut Tables) -> Result<(), ImageError> {
+    match marker {
+        0xdb => read_quant(segment, tables)?,
+        0xc4 => read_huffman(segment, tables)?,
+        0xdd => {
+            let interval = segment
+                .get(..2)
+                .ok_or_else(|| malformed("a restart interval marker is cut short"))?;
+            tables.restart_interval = usize::from(u16::from_be_bytes([interval[0], interval[1]]));
+        }
+        0xe0 if segment.starts_with(b"JFIF\0") => tables.jfif = true,
+        0xee if segment.starts_with(b"Adobe") => tables.adobe_transform = segment.get(11).copied(),
+        0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf => {
+            return Err(unsupported(format!(
+                "a JPEG frame of type {marker:#04x} (lossless, hierarchical or arithmetic)"
+            )));
+        }
+        0xdc => return Err(dnl_height()),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The marker at `pos`, past any fill bytes before it, and its segment
+/// (empty for a marker that has none), with `pos` moved past both.
+fn next_marker<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<(u8, &'a [u8]), ImageError> {
+    // Fill bytes may come before a marker.
+    while bytes.get(*pos) == Some(&0xff) && bytes.get(*pos + 1) == Some(&0xff) {
+        *pos += 1;
+    }
+    let marker = match (bytes.get(*pos), bytes.get(*pos + 1)) {
+        (Some(0xff), Some(&marker)) => marker,
+        _ => return Err(malformed("the file ends before its end-of-image marker")),
+    };
+    *pos += 2;
+    if marker == 0xd9 || (0xd0..=0xd7).contains(&marker) || marker == 0x01 {
+        return Ok((marker, &[]));
+    }
+    let length = match bytes.get(*pos..*pos + 2) {
+        Some(&[high, low]) => usize::from(u16::from_be_bytes([high, low])),
+        _ => return Err(malformed("a marker segment is cut short")),
+    };
+    let segment = bytes
+        .get(*pos + 2..*pos + length.max(2))
+        .filter(|_| length >= 2)
+        .ok_or_else(|| malformed("a marker segment is cut short"))?;
+    *pos += length;
+    Ok((marker, segment))
+}
+
+fn dnl_height() -> ImageError {
+    unsupported("a JPEG whose height comes in a DNL marker")
 }
 
 /// A `DQT` segment: one or more tables, 8 or 16 bits a value, in zigzag
@@ -412,45 +470,16 @@ fn read_huffman(mut segment: &[u8], tables: &mut Tables) -> Result<(), ImageErro
 /// A `SOF0`, `SOF1` or `SOF2` segment, checked against `limits` before
 /// anything is sized from it.
 fn read_frame(segment: &[u8], progressive: bool, limits: &Limits) -> Result<Frame, ImageError> {
-    let &[precision, h0, h1, w0, w1, count, ref rest @ ..] = segment else {
-        return Err(malformed("a frame header is cut short"));
-    };
-    if precision != 8 {
-        return Err(unsupported(format!("{precision}-bit JPEG samples")));
-    }
-    let height = u16::from_be_bytes([h0, h1]);
-    let width = u16::from_be_bytes([w0, w1]);
-    if height == 0 {
-        return Err(unsupported("a JPEG whose height comes in a DNL marker"));
-    }
+    let (width, height) = frame_size(segment)?;
     limits.rgba_bytes(u32::from(width), u32::from(height))?;
-    let count = usize::from(count);
-    match count {
-        1 | 3 => {}
-        4 => return Err(unsupported("a four-component (CMYK or YCCK) JPEG")),
-        _ => return Err(unsupported(format!("a JPEG of {count} components"))),
-    }
-    let specs = rest
-        .get(..count * 3)
-        .ok_or_else(|| malformed("a frame header's components are cut short"))?;
-    let mut components = Vec::with_capacity(count);
-    for spec in specs.as_chunks::<3>().0 {
-        let (h, v) = (usize::from(spec[1] >> 4), usize::from(spec[1] & 0x0f));
-        if !(1..=4).contains(&h) || !(1..=4).contains(&v) || spec[2] > 3 {
-            return Err(malformed("a component's sampling or table is out of range"));
-        }
-        components.push((spec[0], h, v, usize::from(spec[2])));
-    }
-    let h_max = components.iter().map(|c| c.1).max().unwrap_or(1);
-    let v_max = components.iter().map(|c| c.2).max().unwrap_or(1);
-    if components
+    let (specs, h_max, v_max) = frame_components(segment)?;
+    let components: Vec<_> = specs
         .iter()
-        .any(|&(_, h, v, _)| h_max % h != 0 || v_max % v != 0)
-    {
-        return Err(unsupported(
-            "sampling factors that do not divide the largest",
-        ));
-    }
+        .map(|spec| {
+            let (h, v) = sampling(spec);
+            (spec[0], h, v, usize::from(spec[2]))
+        })
+        .collect();
     let (width, height) = (usize::from(width), usize::from(height));
     let mcus_wide = width.div_ceil(8 * h_max);
     let mcus_high = height.div_ceil(8 * v_max);
@@ -491,6 +520,66 @@ fn read_frame(segment: &[u8], progressive: bool, limits: &Limits) -> Result<Fram
         mcus_wide,
         mcus_high,
     })
+}
+
+/// A frame header's width and height, refusing what [`read_frame`] does not
+/// read before its size is known.
+fn frame_size(segment: &[u8]) -> Result<(u16, u16), ImageError> {
+    let &[precision, h0, h1, w0, w1, _count, ..] = segment else {
+        return Err(malformed("a frame header is cut short"));
+    };
+    if precision != 8 {
+        return Err(unsupported(format!("{precision}-bit JPEG samples")));
+    }
+    let height = u16::from_be_bytes([h0, h1]);
+    if height == 0 {
+        return Err(dnl_height());
+    }
+    Ok((u16::from_be_bytes([w0, w1]), height))
+}
+
+/// A frame header's component specifications, three bytes each (id,
+/// sampling factors, quantisation table), and the largest horizontal and
+/// vertical sampling factors among them, refusing a set [`read_frame`] does
+/// not read.
+fn frame_components(segment: &[u8]) -> Result<(&[[u8; 3]], usize, usize), ImageError> {
+    let (&count, rest) = segment
+        .get(5..)
+        .and_then(<[u8]>::split_first)
+        .ok_or_else(|| malformed("a frame header is cut short"))?;
+    let count = usize::from(count);
+    match count {
+        1 | 3 => {}
+        4 => return Err(unsupported("a four-component (CMYK or YCCK) JPEG")),
+        _ => return Err(unsupported(format!("a JPEG of {count} components"))),
+    }
+    let specs = rest
+        .get(..count * 3)
+        .ok_or_else(|| malformed("a frame header's components are cut short"))?
+        .as_chunks::<3>()
+        .0;
+    for spec in specs {
+        let (h, v) = sampling(spec);
+        if !(1..=4).contains(&h) || !(1..=4).contains(&v) || spec[2] > 3 {
+            return Err(malformed("a component's sampling or table is out of range"));
+        }
+    }
+    let h_max = specs.iter().map(|spec| sampling(spec).0).max().unwrap_or(1);
+    let v_max = specs.iter().map(|spec| sampling(spec).1).max().unwrap_or(1);
+    if specs.iter().any(|spec| {
+        let (h, v) = sampling(spec);
+        h_max % h != 0 || v_max % v != 0
+    }) {
+        return Err(unsupported(
+            "sampling factors that do not divide the largest",
+        ));
+    }
+    Ok((specs, h_max, v_max))
+}
+
+/// A component specification's horizontal and vertical sampling factors.
+fn sampling(spec: &[u8; 3]) -> (usize, usize) {
+    (usize::from(spec[1] >> 4), usize::from(spec[1] & 0x0f))
 }
 
 /// What one scan reads, from its `SOS` header.
@@ -1226,6 +1315,162 @@ mod tests {
                 bytes.len()
             );
         }
+    }
+
+    #[test]
+    fn dimensions_are_the_size_decode_returns() {
+        for (name, jpeg, _) in FIXTURES {
+            let image = decode(jpeg, &Limits::DEFAULT).expect(name);
+            assert_eq!(
+                dimensions(jpeg),
+                Ok((image.width(), image.height())),
+                "{name}"
+            );
+        }
+        // Fill bytes before the frame's marker are skipped, as decode skips
+        // them.
+        let (_, jpeg, _) = FIXTURES[0];
+        let sof = jpeg
+            .windows(2)
+            .position(|pair| pair == [0xff, 0xc0])
+            .expect("a baseline frame");
+        let mut filled = jpeg[..sof].to_vec();
+        filled.extend_from_slice(&[0xff; 3]);
+        filled.extend_from_slice(&jpeg[sof..]);
+        let image = decode(&filled, &Limits::DEFAULT).expect("decodes");
+        assert_eq!(dimensions(&filled), Ok((image.width(), image.height())));
+        // Past any limit: the caller decides.
+        let mut bomb = vec![0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0xff, 0xfe, 0xff, 0xfd, 1];
+        bomb.extend_from_slice(&[1, 0x11, 0]);
+        assert_eq!(dimensions(&bomb), Ok((0xfffd, 0xfffe)));
+    }
+
+    #[test]
+    fn dimensions_refuse_what_decode_refuses_in_the_header() {
+        let (_, jpeg, _) = FIXTURES[0];
+        let sof = jpeg
+            .windows(2)
+            .position(|pair| pair == [0xff, 0xc0])
+            .expect("a baseline frame");
+        let changed = |at: usize, byte: u8| {
+            let mut bytes = jpeg.to_vec();
+            bytes[at] = byte;
+            bytes
+        };
+        // The marker, its length, then precision, height, width and the
+        // component count; then each component's id, sampling and table.
+        let mut dnl_marker = jpeg[..sof].to_vec();
+        dnl_marker.extend_from_slice(&[0xff, 0xdc, 0, 4, 0, 1]);
+        dnl_marker.extend_from_slice(&jpeg[sof..]);
+        let mut odd_sampling = jpeg.to_vec();
+        odd_sampling[sof + 11] = 0x31;
+        odd_sampling[sof + 14] = 0x21;
+        for (what, bytes) in [
+            ("lossless", changed(sof + 1, 0xc3)),
+            ("hierarchical", changed(sof + 1, 0xc5)),
+            ("arithmetic", changed(sof + 1, 0xc9)),
+            ("12-bit", changed(sof + 4, 12)),
+            ("a DNL height", {
+                let mut bytes = changed(sof + 5, 0);
+                bytes[sof + 6] = 0;
+                bytes
+            }),
+            ("a DNL marker", dnl_marker),
+            ("four components", changed(sof + 9, 4)),
+            ("two components", changed(sof + 9, 2)),
+            ("sampling that does not divide", odd_sampling),
+        ] {
+            assert!(
+                matches!(dimensions(&bytes), Err(ImageError::Unsupported(_))),
+                "{what}: {:?}",
+                dimensions(&bytes)
+            );
+            assert_eq!(
+                dimensions(&bytes),
+                decode(&bytes, &Limits::DEFAULT).map(|image| (image.width(), image.height())),
+                "{what}: the same error as decode"
+            );
+        }
+        let length = usize::from(u16::from_be_bytes([jpeg[sof + 2], jpeg[sof + 3]]));
+        let mut malformed = (0..sof + 2 + length)
+            .map(|end| (format!("cut at {end}"), jpeg[..end].to_vec()))
+            .collect::<Vec<_>>();
+        malformed.push(("a zero sampling factor".into(), changed(sof + 11, 0x01)));
+        malformed.push((
+            "a quantisation table past three".into(),
+            changed(sof + 12, 4),
+        ));
+        let sos = jpeg
+            .windows(2)
+            .position(|pair| pair == [0xff, 0xda])
+            .expect("a scan");
+        let mut scan_first = jpeg[..sof].to_vec();
+        scan_first.extend_from_slice(&jpeg[sos..]);
+        malformed.push(("a scan before its frame".into(), scan_first));
+        malformed.push(("no frame".into(), vec![0xff, 0xd8, 0xff, 0xd9]));
+        // Segments before the frame that decode reads, each put straight
+        // after the start-of-image marker: a restart interval with no
+        // interval, and a quantisation and a Huffman table misnumbered in
+        // the byte after their lengths.
+        let mut dht = vec![0xff, 0xc4, 0, 19, 0x25];
+        dht.extend_from_slice(&[0; 16]);
+        let mut dqt = vec![0xff, 0xdb, 0, 67, 0x05];
+        dqt.extend_from_slice(&[1; 64]);
+        for (what, segment) in [
+            ("a restart interval cut short", vec![0xff, 0xdd, 0, 2]),
+            ("a quantisation table numbered 5", dqt),
+            ("a Huffman table of class 2", dht),
+        ] {
+            let mut bytes = jpeg[..2].to_vec();
+            bytes.extend_from_slice(&segment);
+            bytes.extend_from_slice(&jpeg[2..]);
+            malformed.push((what.into(), bytes));
+        }
+        for (what, bytes) in malformed {
+            assert!(
+                matches!(dimensions(&bytes), Err(ImageError::Malformed(_))),
+                "{what}: {:?}",
+                dimensions(&bytes)
+            );
+            assert_eq!(
+                dimensions(&bytes),
+                decode(&bytes, &Limits::DEFAULT).map(|image| (image.width(), image.height())),
+                "{what}: the same error as decode"
+            );
+        }
+        let mut zero_width = changed(sof + 7, 0);
+        zero_width[sof + 8] = 0;
+        let empty = |result: Result<(u32, u32), ImageError>| {
+            matches!(result, Err(ImageError::Empty { width: 0, .. }))
+        };
+        assert!(empty(dimensions(&zero_width)));
+        assert!(empty(
+            decode(&zero_width, &Limits::DEFAULT).map(|image| (image.width(), image.height()))
+        ));
+    }
+
+    /// `rgba_bytes` is not decode's whole size check, as the docs on
+    /// `dimensions` say: a 1×1 frame sampled 4×4 pads its coefficients to a
+    /// whole 32×32 MCU.
+    #[test]
+    fn a_frame_within_rgba_bytes_can_still_have_too_many_coefficients() {
+        let mut bytes = vec![0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1];
+        bytes.extend_from_slice(&[1, 0x44, 0, 0xff, 0xd9]);
+        let limits = Limits {
+            max_width: 1,
+            max_height: 1,
+            max_bytes: 4,
+        };
+        assert_eq!(dimensions(&bytes), Ok((1, 1)));
+        assert_eq!(limits.rgba_bytes(1, 1), Ok(4));
+        assert!(matches!(
+            decode(&bytes, &limits),
+            Err(ImageError::TooLarge {
+                width: 1,
+                height: 1,
+                ..
+            })
+        ));
     }
 
     /// A scan's table selectors are four bits each, but only tables 0 to 3
