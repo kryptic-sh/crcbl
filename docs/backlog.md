@@ -8,8 +8,8 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 infr (`infr serve`, Gemma 4 image input) will depend on a published
 `crcbl-image` behind an optional feature, decoding PNG/JPEG/WebP/BMP bytes from
 OpenAI `image_url` data URIs and resizing them for a vision encoder. It needs
-only the version number once 1, 2, 4 and 5 ship; no reply to infr is owed
-otherwise.
+only the version number once 1, 2, 4 and 5 ship (6 and maybe 3 ride along); no
+reply to infr is owed otherwise.
 
 1. **A bicubic filter beside Lanczos-3, Lanczos staying the default.** infr must
    match llama.cpp's Gemma 4 preprocessing, `resize_pillow` in
@@ -66,7 +66,17 @@ otherwise.
    the changelog; pre-1.0 that is a minor bump. Rotation happens under the same
    `Limits` (a quarter turn swaps the sides the caps are checked against).
 
-Not wanted: CMYK JPEG.
+6. **CMYK and YCCK JPEG** (the user, 2026-11-26, though infr does not need it).
+   `jpeg.rs` refuses four-component frames today because decoders disagree on
+   the conversion to RGB. The decision to make and write into the module doc:
+   which decoder's answer to match. The candidate is Pillow's, the one
+   llama.cpp-adjacent tooling sees: an Adobe `APP14` marker means the samples
+   are stored inverted (Photoshop's convention), transform 2 means YCCK (YCbCr
+   to RGB, then treated as CMY), and CMYK goes to RGB with no colour profile as
+   `R = (255 - C)(255 - K) / 255` per channel (Pillow's `cmyk2rgb`, to be read
+   in its source rather than recalled). No ICC profile is applied, and the doc
+   must say so. A fixture made by a reference decoder is needed to hold it.
+   Lands with item 5's decoder work, since both edit `jpeg.rs`.
 
 ## Dependency majors waiting (0.20.0 cut, 2026-11-12)
 
