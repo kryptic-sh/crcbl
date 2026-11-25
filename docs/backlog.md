@@ -78,6 +78,36 @@ reply to infr is owed otherwise.
    must say so. A fixture made by a reference decoder is needed to hold it.
    Lands with item 5's decoder work, since both edit `jpeg.rs`.
 
+## `crcbl-error` replaces `thiserror` workspace-wide (decided 2026-11-26)
+
+The user's call: every error type in the project derives `crcbl_error::Error`,
+our own, and `thiserror` leaves the workspace; taking it on was an oversight.
+**Order:** after the `crcbl-image` infr release and notice, and before the
+`crcbl-image` self-hosting below (which then needs nothing of its own for
+errors).
+
+- **What it must cover**, counted on 2026-11-26 over `crates/` with grep (not
+  re-counted since): `thiserror` in 25 manifests, about 83 derives, 494
+  `#[error(...)]` messages with format arguments, 46 `#[from]`, 29
+  `#[error(transparent)]`, 2 `#[source]`. Nothing else of `thiserror`'s surface.
+  Re-run the grep before scoping; `apps/` was not counted.
+- **Shape:** a `proc-macro = true` crate (working name `crcbl-error-derive`,
+  re-exported from a `crcbl-error` facade crate if a runtime part is needed)
+  built on `syn`, `quote` and `proc-macro2`, as `crcbl-reflect-derive` is. Those
+  are already in every build, so nothing new enters `Cargo.lock`. Keep the
+  attribute syntax `thiserror`'s, so migration is the derive path per crate plus
+  the manifest line. Declined: a `macro_rules!` form, which would rewrite every
+  error definition for no gain.
+- **Verify:** expansion tests (`Display` text, `source()` chains, `From`
+  conversions, `transparent` forwarding both `Display` and `source`), each shown
+  red by sabotage; then the full workspace gates and the wasm32 and cross-target
+  clippy runs, since error types sit in platform-gated code.
+- **What stays:** `thiserror` remains in `Cargo.lock` through third-party
+  crates, `jni` and `ndk` (via `cpal`, Android) and `redox_users` (via `dirs`,
+  Redox). Linux, macOS, Windows and wasm32 builds drop it entirely. Confirm with
+  `cargo tree --all-features --target all -i thiserror@2.0.21` after the
+  migration.
+
 ## `crcbl-image` with no external crates (raised 2026-11-26)
 
 The user asks whether `crcbl-image` can be entirely this project's own code.
