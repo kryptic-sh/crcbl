@@ -81,13 +81,13 @@ reply to infr is owed otherwise.
 ## `crcbl-image` with no external crates (raised 2026-11-26)
 
 The user asks whether `crcbl-image` can be entirely this project's own code.
-**Start only after the infr items above have shipped.** Its external
-dependencies today, from its manifest: `png` (the PNG decoder and `png::encode`,
-shared with `crcbl-sprite`, `crcbl-golden` and `crcbl-scene`), `thiserror`
-(always on), and for the `svg-text` feature `skrifa` (font outlines and
-metrics), `harfrust` (shaping) and `unicode-bidi` (UAX #9). `crcbl-font` is in
-the workspace and does not count. The first step is a feasibility write-up per
-dependency, not code:
+**Start only after the infr items above are released (a published version on
+crates.io) and infr has been told the version.** Its external dependencies
+today, from its manifest: `png` (the PNG decoder and `png::encode`, shared with
+`crcbl-sprite`, `crcbl-golden` and `crcbl-scene`), `thiserror` (always on), and
+for the `svg-text` feature `skrifa` (font outlines and metrics), `harfrust`
+(shaping) and `unicode-bidi` (UAX #9). `crcbl-font` is in the workspace and does
+not count. The first step is a feasibility write-up per dependency, not code:
 
 - `thiserror`: mechanical, hand-written `Display` and `Error` impls.
 - `png`: an inflate (RFC 1951) and zlib wrapper, the five filters, Adam7, every
