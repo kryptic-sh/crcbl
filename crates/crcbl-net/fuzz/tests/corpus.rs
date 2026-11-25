@@ -652,6 +652,20 @@ fn the_lossy_webp_seed_decodes() {
     );
 }
 
+/// **The GIF seed decodes**: an interlaced frame on a local colour table, so
+/// the fuzzer's mutations of it start inside the LZW reader and the
+/// interlaced row order rather than at the header's first refusal.
+#[test]
+fn the_gif_seed_decodes() {
+    let image = crcbl_image::gif::decode(
+        include_bytes!("../corpus/decoder/gif-interlaced"),
+        &crcbl_image::Limits::DEFAULT,
+    )
+    .expect("the GIF seed must decode");
+    assert_eq!((image.width(), image.height()), (9, 13));
+    assert!(image.pixels().chunks_exact(4).any(|pixel| pixel[3] > 0));
+}
+
 /// **The XPM seed decodes**: two characters a pixel, `None`, a named colour,
 /// short and long hex, a comment between strings and an extension after the
 /// rows, so the fuzzer's mutations of it start inside the colour and pixel

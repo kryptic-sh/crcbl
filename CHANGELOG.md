@@ -24,9 +24,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   size is not checked against `Limits`: compare it, or call `Limits::rgba_bytes`
   (a JPEG with large sampling factors can still be refused by `decode` under
   very small limits; `jpeg::dimensions` says when). `format::sniff` names a
-  file's `Format` (PNG, JPEG, WebP, BMP, ICO/CUR) from its first bytes, needs no
-  codec feature, and returns `None` for anything else, so a decoder can be
-  chosen without trusting a file name or a `data:` URL's media type.
+  file's `Format` (PNG, JPEG, WebP, BMP, ICO/CUR, GIF) from its first bytes,
+  needs no codec feature, and returns `None` for anything else, so a decoder can
+  be chosen without trusting a file name or a `data:` URL's media type.
 
 - **`crcbl-image`: `resize::resize_pillow` and `PillowFilter` (`Bilinear`,
   `Bicubic`, `Lanczos`).** llama.cpp's `resize_pillow`, its transcription of
@@ -58,6 +58,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   decode to RGBA8 as Pillow's `convert("RGB")` does: libjpeg's Adobe-transform
   rule for YCCK, samples inverted as Adobe writes them, the naive `cmyk2rgb`,
   and no ICC profile.
+
+- **`crcbl-image`: GIF decoding, behind a new `gif` feature.** `gif::decode`
+  returns a GIF87a or GIF89a file's first image as RGBA8 at the logical screen's
+  size, as stb_image and Pillow do, with the area outside the frame and the
+  transparent index transparent, interlaced rows in order, and 2- to 8-bit LZW
+  including a table that stays full until a late clear. Data that ends before
+  the frame's last pixel keeps what arrived, with the rest transparent;
+  undefined codes and a frame outside the screen are refused. `gif::dimensions`
+  reads the size from the headers, and `format::sniff` names the file
+  `Format::Gif`.
 
 ### Changed
 

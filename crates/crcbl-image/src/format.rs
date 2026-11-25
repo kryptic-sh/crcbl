@@ -24,7 +24,13 @@ pub enum Format {
     Bmp,
     /// A Windows icon or cursor, for `ico::decode`.
     Ico,
+    /// A GIF, for `gif::decode`.
+    Gif,
 }
+
+/// The two GIF signatures.
+const GIF87A: &[u8] = b"GIF87a";
+const GIF89A: &[u8] = b"GIF89a";
 
 /// The PNG signature.
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -59,6 +65,8 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
         Some(Format::Bmp)
     } else if bytes.starts_with(ICO) || bytes.starts_with(CUR) {
         Some(Format::Ico)
+    } else if bytes.starts_with(GIF87A) || bytes.starts_with(GIF89A) {
+        Some(Format::Gif)
     } else {
         None
     }
@@ -79,6 +87,8 @@ mod tests {
             (b"BM\x36\0\0\0", Format::Bmp),
             (b"\0\0\x01\0\x01\0", Format::Ico),
             (b"\0\0\x02\0\x01\0", Format::Ico),
+            (b"GIF87a\x01\0\x01\0", Format::Gif),
+            (b"GIF89a\x01\0\x01\0", Format::Gif),
         ] {
             assert_eq!(sniff(bytes), Some(format), "{bytes:?}");
         }
@@ -103,6 +113,8 @@ mod tests {
                 include_bytes!("../fixtures/bmp/frames-png.ico"),
                 Format::Ico,
             ),
+            (include_bytes!("../fixtures/gif/global.gif"), Format::Gif),
+            (include_bytes!("../fixtures/gif/animated.gif"), Format::Gif),
         ] {
             assert_eq!(sniff(bytes), Some(format), "{format:?}");
         }
@@ -119,7 +131,9 @@ mod tests {
             b"B",
             b"\0\0\x01",
             b"\0\0\x03\0",
-            b"GIF89a",
+            b"GIF89",
+            b"GIF88a",
+            b"gif89a",
             b"/* XPM */",
             b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
             b"not an image at all",

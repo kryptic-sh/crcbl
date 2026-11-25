@@ -17,6 +17,8 @@ rust-version.workspace = true
 [features]
 # Windows bitmaps, decoded by this crate's own code.
 bmp = []
+# GIF87a and GIF89a, the first image only, decoded by this crate's own code.
+gif = []
 # Windows icons and cursors: a directory of frames, each a PNG or a bitmap.
 ico = ["bmp", "png"]
 # Baseline and progressive JPEG, decoded by this crate's own code.

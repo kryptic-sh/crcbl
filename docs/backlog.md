@@ -9,16 +9,10 @@ infr (`infr serve`, Gemma 4 image input) will depend on a published
 `crcbl-image` behind an optional feature, decoding PNG/JPEG/WebP/BMP bytes from
 OpenAI `image_url` data URIs and resizing them for a vision encoder.
 `resize::resize_pillow`, header-only `dimensions` with `format::sniff`, the
-`tensor` float output, EXIF orientation (`decode_stored` for llama.cpp parity)
-and CMYK/YCCK JPEG have landed (unreleased). The release, and the version number
-for infr, wait on the stb_image-compatible JPEG mode below; GIF may ride along.
-No other reply to infr is owed.
-
-- **GIF, first frame, lowest priority.** OpenAI accepts GIF; infr can ship
-  without it. The crate has no GIF decoder (the SVG `<image>` path refuses GIF
-  by name). Do it only if cheap (LZW plus the palette), else record it here as
-  declined with the reason. `format::Format` is `#[non_exhaustive]` so a `Gif`
-  variant can join `sniff`.
+`tensor` float output, EXIF orientation (`decode_stored` for llama.cpp parity),
+CMYK/YCCK JPEG and GIF have landed (unreleased). The release, and the version
+number for infr, wait on the stb_image-compatible JPEG mode below. No other
+reply to infr is owed.
 
 ## `crcbl-image`: an stb_image-compatible JPEG mode (decided 2026-11-26)
 
@@ -57,6 +51,37 @@ items in `crates/crcbl-scene/src/gltf_fixture.rs` and `break_triangle_list` in
 `gltf_import.rs`, items used only under a feature. CI runs clippy with
 `--all-features`, so it stays green. Fix: gate the items on the feature that
 uses them. Not investigated further.
+
+## `crcbl-image` JPEG: pre-existing findings from the stb review (2026-11-26)
+
+- **No cap on the number of scans.** Each extra 10-byte progressive scan costs
+  about 0.7 ms at 4096 by 4096 (measured by the reviewer, load not recorded), so
+  a small hostile file buys a lot of CPU in a server such as infr's.
+  libjpeg-turbo's `djpeg` has `-maxscan` for the same reason. Wanted: a scan cap
+  (a `Limits` field or a documented constant), refused as `TooLarge`, with a
+  test, applying to both `decode` and `decode_as_stb_image`.
+- **The default decoder differs from `djpeg` on some YCbCr files**: 24 of the
+  reviewer's generated files, unchanged since before the stb slice; one has luma
+  sampled 1 by 2. The "same pixels as libjpeg-turbo" claim is therefore too wide
+  for those samplings. Needs a look at which upsampler libjpeg-turbo picks for
+  them. The files were in the session scratchpad (`review-stb/`), not durable;
+  regenerate with cjpeg's `-sample` option.
+- Junk between segments reports "the file ends before its end-of-image marker",
+  which misleads.
+
+## SVG `<image>` still refuses GIF (2026-11-26)
+
+`crates/crcbl-image/src/svg/data_url.rs` maps no `image/gif` media type, so an
+`<image>` with a GIF data URL is refused as unsupported (the
+`external_and_unknown_images_are_refused` test pins it). With the `gif` feature
+it could decode it as it does PNG, JPEG and WebP (first frame). Needs the usual
+feature gating and a test.
+
+## `cargo clippy -p crcbl-image` without `jpeg` fails (2026-11-26)
+
+With every feature except `jpeg`, `assert_drawn_as_decoded` in
+`crates/crcbl-image/src/svg/tests/image.rs` is dead code. CI's `--all-features`
+run does not see it. Fix: gate the helper on the feature its callers need.
 
 ## `resize::resize` does not check its intermediate against `Limits` (2026-11-26)
 
