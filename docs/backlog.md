@@ -119,7 +119,7 @@ for the `svg-text` feature `skrifa` (font outlines and metrics), `harfrust`
 (shaping) and `unicode-bidi` (UAX #9). `crcbl-font` is in the workspace and does
 not count. The first step is a feasibility write-up per dependency, not code:
 
-- `thiserror`: mechanical, hand-written `Display` and `Error` impls.
+- `thiserror`: covered by `crcbl-error` above, not by this crate.
 - `png`: an inflate (RFC 1951) and zlib wrapper, the five filters, Adam7, every
   bit depth and colour type, and `encode` (deflate, even stored-only or a simple
   compressor). Bounded, well specified, and fuzzable against the `png` crate as
