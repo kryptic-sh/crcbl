@@ -23,6 +23,8 @@
 mod entropy;
 mod pixels;
 mod stream;
+#[cfg(test)]
+pub(super) mod tests;
 
 use entropy::{Band, Corrupt, Huffman, dezigzag};
 use stream::{NO_MARKER, Stream};
