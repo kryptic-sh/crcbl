@@ -28,6 +28,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   codec feature, and returns `None` for anything else, so a decoder can be
   chosen without trusting a file name or a `data:` URL's media type.
 
+- **`crcbl-image`: `resize::resize_pillow` and `PillowFilter` (`Bilinear`,
+  `Bicubic`, `Lanczos`).** llama.cpp's `resize_pillow`, its transcription of
+  Pillow's fixed-point resampler, byte-exact with llama.cpp on opaque images and
+  held to its output by a committed fixture, so vision-model preprocessing can
+  match llama.cpp. It always runs the horizontal pass first, so it equals
+  Pillow's `Image.resize` only where Pillow does the same. Alpha is
+  premultiplied as Pillow does for RGBA; to match llama.cpp, which drops alpha
+  at load, make the image opaque first. `resize::resize` (Lanczos-3, `f32`) is
+  unchanged and remains the default.
+
 ### Changed
 
 - **`crcbl-image`: WebP `decode` checks a frame against its canvas before

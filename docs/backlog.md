@@ -7,45 +7,33 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 infr (`infr serve`, Gemma 4 image input) will depend on a published
 `crcbl-image` behind an optional feature, decoding PNG/JPEG/WebP/BMP bytes from
-OpenAI `image_url` data URIs and resizing them for a vision encoder. It needs
-only the version number once 1, 2, 4 and 5 ship (6 and maybe 3 ride along); no
-reply to infr is owed otherwise.
+OpenAI `image_url` data URIs and resizing them for a vision encoder.
+`resize::resize_pillow` and the header-only `dimensions` with `format::sniff`
+have landed (unreleased). The release, and the version number for infr, wait on
+the float output and EXIF orientation below; CMYK and maybe GIF ride along. No
+other reply to infr is owed.
 
-1. **A bicubic filter beside Lanczos-3, Lanczos staying the default.** infr must
-   match llama.cpp's Gemma 4 preprocessing, `resize_pillow` in
-   `tools/mtmd/mtmd-image.cpp` (checkout at `~/Projects/mxaddict/llama.cpp`,
-   read at 57291f2): Pillow's `Resample.c` transcribed, cubic with `a = -0.5`,
-   support 2 widened by the shrink factor. **Matching it numerically is more
-   than a kernel swap**, read in that file: it computes weights in `double`,
-   quantises them to fixed point with 22 fractional bits, runs a horizontal pass
-   then a vertical one, and rounds and clips to `u8` between them.
-   `resize::resize` filters in `f32`, premultiplied, with one rounding at the
-   end. So a Pillow-exact result wants its own integer path (or a mode on
-   `resize`), held to Pillow output on a committed fixture; for opaque RGB the
-   premultiply is a no-op. Not decided: whether Lanczos should also gain the
-   exact path.
-2. **Header-only dimensions per format** (`png`, `jpeg`, `webp`, `bmp`), no
-   pixel decode and no allocation, so infr can refuse an oversized or malformed
-   image before queueing it; plus a magic-byte sniff naming the decoder, since
-   otherwise infr trusts the data URL's media type. JPEG means walking markers
-   to the first SOF.
 3. **GIF, first frame, lowest priority.** OpenAI accepts GIF; infr can ship
    without it. The crate has no GIF decoder (the SVG `<image>` path refuses GIF
    by name). Do it only if cheap (LZW plus the palette), else record it here as
-   declined with the reason.
+   declined with the reason. `format::Format` is `#[non_exhaustive]` so a `Gif`
+   variant can join `sniff`.
 
 4. **Normalised float output** (the user, 2026-11-26: so infr need not convert
    RGBA8 itself; infr had listed it as not needed). The shape to match is
-   llama.cpp's `clip_image_f32` in `tools/mtmd/clip-impl.h`: interleaved RGB,
-   alpha dropped, each channel `u8 as f32 / 255.0` in `f32`, then
-   `(v - mean[c]) / std[c]` with the model's per-channel mean and std
+   llama.cpp's `clip_image_f32` in `llama.cpp/tools/mtmd/clip-impl.h`:
+   interleaved RGB, alpha dropped, each channel `u8 as f32 / 255.0` in `f32`,
+   then `(v - mean[c]) / std[c]` with the model's per-channel mean and std
    (`clip_image_f32::from_u8` and `normalize`). So an entry point taking an
    `Rgba8Image`, `mean: [f32; 3]` and `std: [f32; 3]` and returning `Vec<f32>`
-   of `width * height * 3`; planar (CHW) is not needed for llama.cpp parity. Not
-   verified: how llama.cpp's loader drops alpha (stb_image asked for three
-   channels discards it, it does not composite onto a background); check that
-   before deciding what a transparent pixel becomes. infr is told the version
-   when this ships alongside 1 and 2.
+   of `width * height * 3`; planar (CHW) is not needed for llama.cpp parity.
+   llama.cpp loads with `stbi_load_from_memory(..., 3)`
+   (`llama.cpp/tools/mtmd/mtmd-helper.cpp`), which drops alpha at load rather
+   than compositing it, so a caller matching it makes the image opaque (alpha
+   255, colour kept) before `resize_pillow`, which premultiplies as Pillow does.
+   Ship a helper for that step with this item (on `Rgba8Image`, or beside the
+   float conversion) so infr does not hand-roll it; infr has been told the
+   requirement.
 
 5. **EXIF orientation, applied by default with a way to turn it off** (the user,
    2026-11-26: implement it anyway; infr opts out, since llama.cpp does not
@@ -58,7 +46,7 @@ reply to infr is owed otherwise.
    treated as 1, not an error, as browsers do. Open shape questions: an option
    on decode (a field beside `Limits`, or a decode-options struct) versus a
    separate `orientation()` reader plus an `orient(image, o)` transform the
-   caller applies; and the header-only `dimensions` of item 2 must say whether
+   caller applies; and the header-only `dimensions` functions must say whether
    it reports the stored or the displayed size (orientations 5–8 swap them),
    most simply by returning the orientation with the size. Default-on changes
    what every existing caller gets (album art, icons; the in-workspace callers
@@ -77,6 +65,17 @@ reply to infr is owed otherwise.
    in its source rather than recalled). No ICC profile is applied, and the doc
    must say so. A fixture made by a reference decoder is needed to hold it.
    Lands with item 5's decoder work, since both edit `jpeg.rs`.
+
+## `resize::resize` does not check its intermediate against `Limits` (2026-11-26)
+
+Found while building `resize_pillow`, which does check it: `resize::resize`
+allocates the horizontal pass's intermediate (new width by source height)
+without asking `Limits` (and in `f32`, four times the RGBA8 size), so a very
+lopsided resize (a tall source made much wider) can allocate more than the
+caller's caps allow, although the source and target each passed them. Not fixed
+in that slice because it changes what existing callers get (a `TooLarge` where
+they now get an image). Fix: check the intermediate with `limits.rgba_bytes` as
+`resize_pillow` does, with a test of the lopsided case.
 
 ## `crcbl-error` replaces `thiserror` workspace-wide (decided 2026-11-26)
 
