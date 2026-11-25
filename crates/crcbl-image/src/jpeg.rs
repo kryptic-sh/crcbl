@@ -6,13 +6,42 @@
 //! Eight-bit samples, Huffman coding, sequential (`SOF0`, `SOF1`) and
 //! progressive (`SOF2`) frames with spectral selection and successive
 //! approximation, restart intervals, any sampling factors that divide the
-//! largest evenly, and one component (grey) or three (YCbCr, or RGB when an
-//! Adobe marker or the component ids say so). Refused with
-//! [`ImageError::Unsupported`]: arithmetic coding, lossless and hierarchical
-//! frames, 12-bit samples, a height given only by a `DNL` marker, and four
-//! components — CMYK and YCCK, whose conversion to RGB decoders do not agree
-//! on, and which album art and icons do not use. EXIF orientation is not
-//! applied.
+//! largest evenly, and one component (grey), three (YCbCr, or RGB when an
+//! Adobe marker or the component ids say so) or four (CMYK or YCCK, below).
+//! Refused with [`ImageError::Unsupported`]: arithmetic coding, lossless and
+//! hierarchical frames, 12-bit samples, and a height given only by a `DNL`
+//! marker.
+//!
+//! The orientation an `APP1` segment's EXIF block records is applied by
+//! [`decode`] and left alone by [`decode_stored`], as the [crate
+//! docs](crate) say. The first `APP1` segment that starts `Exif\0\0` before
+//! the first scan is the one read: Pillow's walk of the markers, which
+//! `ImageOps.exif_transpose` reads the tag through, stops at that scan too.
+//! An XMP `APP1`'s `tiff:Orientation`, which Pillow falls back to, is not
+//! read ([EXIF only](crate::orientation#exif-only)).
+//!
+//! # CMYK and YCCK: Pillow's answer
+//!
+//! Decoders do not agree on how four components become RGB, so this one
+//! matches Pillow 13's `Image.open(…).convert("RGB")`, read from its source
+//! (`JpegImagePlugin.py`, and `cmyk2rgb` in `libImaging/Convert.c`):
+//!
+//! * libjpeg's rule picks the colour space: CMYK with no Adobe marker or an
+//!   Adobe transform of 0, and YCCK under any other transform. YCCK becomes
+//!   CMYK as libjpeg's `ycck_cmyk_convert` does it: the YCbCr part through
+//!   the same fixed-point tables as a three-component file, each result
+//!   subtracted from 255, K passed through.
+//! * Every sample is then inverted, the Adobe (Photoshop) convention, which
+//!   Pillow assumes of every four-component JPEG whether or not an Adobe
+//!   marker is there. A decoder that inverts only under the marker draws a
+//!   file without one as the negative of what this one draws.
+//! * Each channel becomes `nk - (((t >> 8) + t) >> 8)`, where `t` is
+//!   `s · nk + 128`, `s` the inverted sample and `nk` 255 less the inverted
+//!   K: `cmyk2rgb`, the naive `(255 - C)(255 - K) / 255` rounded in shifts.
+//!
+//! No ICC profile is applied, here or in Pillow's `convert`: a print
+//! profile embedded in the file is ignored, so the colours are the naive
+//! conversion's, not a colour-managed viewer's.
 //!
 //! # The same pixels as libjpeg-turbo
 //!
@@ -32,25 +61,41 @@
 //!   vertically too, so a 4:4:0 file may differ there by a little.
 //! * YCbCr becomes RGB through the IJG fixed-point tables, 16 fractional bits.
 //!
-//! The tests hold this to exact equality with libjpeg-turbo's output on
-//! committed files.
+//! A four-component frame goes through the same transform and upsampling,
+//! its fourth component like the others. The tests hold this to exact
+//! equality with libjpeg-turbo's output on committed files.
 //!
 //! # Hostile input
 //!
 //! The frame's size passes the caller's [`Limits`] before anything is sized
 //! from it, and the coefficient store is bounded by
-//! [`COEFFICIENT_ALLOWANCE`] times the limit's bytes. Entropy-coded data that
+//! [`coefficient_allowance`], a share of the limit's bytes for each
+//! component. Entropy-coded data that
 //! runs into a marker early is read as zeros, as libjpeg does with a damaged
 //! scan; a file that ends before its end-of-image marker is
 //! [`ImageError::Malformed`].
 
-use crate::{ImageError, Limits, Rgba8Image};
+use crate::orientation::EXIF_IDENTIFIER;
+use crate::{ImageError, Limits, Orientation, Rgba8Image};
 
-/// How many times the caller's [`Limits::max_bytes`] the decoded coefficients
-/// may take. Two bytes per coefficient and three full-resolution components
-/// is six bytes a pixel against RGBA's four; a little over that covers the
-/// padding to whole blocks.
-pub const COEFFICIENT_ALLOWANCE: usize = 2;
+/// The most bytes a frame of `components` components may decode its
+/// coefficients into under `limits`: two thirds of [`Limits::max_bytes`]
+/// for each component.
+///
+/// A coefficient is two bytes, so a full-resolution component takes two
+/// bytes a pixel against RGBA's four, half of `max_bytes`; the third over
+/// that covers the padding to whole blocks. It scales with the components so
+/// a frame of fewer is held tighter: three get twice `max_bytes`, the bound
+/// before four-component frames were read, one gets two thirds of it, and
+/// four (CMYK) eight thirds.
+#[must_use]
+pub fn coefficient_allowance(limits: &Limits, components: usize) -> usize {
+    limits
+        .max_bytes
+        .saturating_mul(components)
+        .saturating_mul(2)
+        / 3
+}
 
 /// Where each zigzag position's coefficient sits in an 8×8 block, row by row.
 const ZIGZAG: [usize; 64] = [
@@ -275,11 +320,34 @@ struct Tables {
     dc: [Option<Huffman>; 4],
     ac: [Option<Huffman>; 4],
     restart_interval: usize,
+    colour: ColourMarkers,
+}
+
+/// What the markers say about the colour space, which libjpeg settles when
+/// the first scan starts: markers after it change nothing.
+#[derive(Clone, Copy, Debug, Default)]
+struct ColourMarkers {
+    /// The last Adobe `APP14` marker's transform.
     adobe_transform: Option<u8>,
+    /// Whether a JFIF `APP0` marker was seen.
     jfif: bool,
 }
 
-/// Decodes a JPEG to straight RGBA8, every pixel opaque.
+/// Decodes a JPEG to straight RGBA8, every pixel opaque, upright:
+/// [`decode_stored`]'s pixels with [`orientation`]'s flip or quarter turn
+/// applied, the upright size checked against `limits` too.
+///
+/// # Errors
+///
+/// As [`decode_stored`], and [`ImageError::TooLarge`] if the upright size
+/// breaks `limits`.
+pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+    let image = decode_stored(bytes, limits)?;
+    orientation(bytes).apply(image, limits)
+}
+
+/// Decodes a JPEG to straight RGBA8, every pixel opaque, as stored: any EXIF
+/// orientation not applied.
 ///
 /// # Errors
 ///
@@ -287,25 +355,30 @@ struct Tables {
 /// breaks `limits`, [`ImageError::Unsupported`] for a kind of JPEG listed in
 /// the [module docs](self), and [`ImageError::Malformed`] for anything that is
 /// not a well-formed JPEG.
-pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+pub fn decode_stored(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
     let mut tables = Tables::default();
     let (marker, segment, mut pos) = read_to_frame(bytes, &mut tables)?;
     let mut frame = read_frame(segment, marker == 0xc2, limits)?;
     let mut eobrun = 0u32;
+    let mut colour = None;
     loop {
         let (marker, segment) = next_marker(bytes, &mut pos)?;
         match marker {
             0xd9 => break,
             0xc0..=0xc2 => return Err(malformed("a second frame")),
-            0xda => pos = read_scan(bytes, pos, segment, &mut frame, &tables, &mut eobrun)?,
+            0xda => {
+                colour.get_or_insert(tables.colour);
+                pos = read_scan(bytes, pos, segment, &mut frame, &tables, &mut eobrun)?;
+            }
             _ => read_segment(marker, segment, &mut tables)?,
         }
     }
-    finish(&frame, &tables, limits)
+    finish(&frame, colour.unwrap_or(tables.colour), limits)
 }
 
 /// The width and height a JPEG's frame header gives, read without decoding
-/// a pixel: what [`decode`] would return an image of.
+/// a pixel: the size [`decode_stored`] returns, and [`decode`] too unless
+/// [`orientation`] swaps its sides ([`Orientation::upright_size`]).
 ///
 /// The markers are walked to the first frame header as [`decode`] walks
 /// them, reading the tables and settings before it, and that header is
@@ -321,9 +394,8 @@ pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
 /// caller's, or asking [`Limits::rgba_bytes`], is not quite [`decode`]'s
 /// whole check: [`decode`] also refuses as [`ImageError::TooLarge`] a frame
 /// whose coefficients, every component padded to whole MCUs at two bytes a
-/// coefficient, take more than [`COEFFICIENT_ALLOWANCE`] times
-/// [`Limits::max_bytes`] — a small frame with large sampling factors, whose
-/// padding outweighs its pixels.
+/// coefficient, take more than [`coefficient_allowance`] — a small frame
+/// with large sampling factors, whose padding outweighs its pixels.
 ///
 /// # Errors
 ///
@@ -336,6 +408,30 @@ pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), ImageError> {
     let size = crate::non_empty(u32::from(width), u32::from(height))?;
     frame_components(segment)?;
     Ok(size)
+}
+
+/// The orientation a JPEG's EXIF `APP1` segment records, read from the
+/// markers before the first scan without decoding a pixel.
+///
+/// Never an error: no segment, a damaged one, damage in the markers before
+/// it, or a file that is not a JPEG is [`Orientation::Normal`], as the
+/// [`orientation`](crate::orientation) module docs say.
+#[must_use]
+pub fn orientation(bytes: &[u8]) -> Orientation {
+    if bytes.get(..2) != Some(&[0xff, 0xd8]) {
+        return Orientation::Normal;
+    }
+    let mut pos = 2;
+    while let Ok((marker, segment)) = next_marker(bytes, &mut pos) {
+        match marker {
+            0xe1 if segment.starts_with(EXIF_IDENTIFIER) => {
+                return Orientation::read_exif(segment);
+            }
+            0xd9 | 0xda => break,
+            _ => {}
+        }
+    }
+    Orientation::Normal
 }
 
 /// Walks from the start-of-image marker to the first frame header, reading
@@ -373,8 +469,10 @@ fn read_segment(marker: u8, segment: &[u8], tables: &mut Tables) -> Result<(), I
                 .ok_or_else(|| malformed("a restart interval marker is cut short"))?;
             tables.restart_interval = usize::from(u16::from_be_bytes([interval[0], interval[1]]));
         }
-        0xe0 if segment.starts_with(b"JFIF\0") => tables.jfif = true,
-        0xee if segment.starts_with(b"Adobe") => tables.adobe_transform = segment.get(11).copied(),
+        0xe0 if segment.starts_with(b"JFIF\0") => tables.colour.jfif = true,
+        0xee if segment.starts_with(b"Adobe") => {
+            tables.colour.adobe_transform = segment.get(11).copied();
+        }
         0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf => {
             return Err(unsupported(format!(
                 "a JPEG frame of type {marker:#04x} (lossless, hierarchical or arithmetic)"
@@ -487,7 +585,7 @@ fn read_frame(segment: &[u8], progressive: bool, limits: &Limits) -> Result<Fram
         .iter()
         .map(|&(_, h, v, _)| mcus_wide * h * mcus_high * v)
         .sum();
-    if blocks * 64 * 2 > limits.max_bytes.saturating_mul(COEFFICIENT_ALLOWANCE) {
+    if blocks.saturating_mul(64 * 2) > coefficient_allowance(limits, components.len()) {
         return Err(ImageError::TooLarge {
             width: width as u32,
             height: height as u32,
@@ -548,10 +646,8 @@ fn frame_components(segment: &[u8]) -> Result<(&[[u8; 3]], usize, usize), ImageE
         .and_then(<[u8]>::split_first)
         .ok_or_else(|| malformed("a frame header is cut short"))?;
     let count = usize::from(count);
-    match count {
-        1 | 3 => {}
-        4 => return Err(unsupported("a four-component (CMYK or YCCK) JPEG")),
-        _ => return Err(unsupported(format!("a JPEG of {count} components"))),
+    if !matches!(count, 1 | 3 | 4) {
+        return Err(unsupported(format!("a JPEG of {count} components")));
     }
     let specs = rest
         .get(..count * 3)
@@ -1088,8 +1184,23 @@ fn ycc_to_rgb(y: u8, cb: u8, cr: u8) -> [u8; 3] {
     [r, g, b].map(|channel| channel.clamp(0, 255) as u8)
 }
 
+/// Four samples as libjpeg gives them, CMYK, turned into RGB as Pillow
+/// turns them (see the [module docs](self)): inverted, then `cmyk2rgb`.
+fn cmyk_to_rgb(samples: [u8; 4]) -> [u8; 3] {
+    let [c, m, y, k] = samples.map(|sample| i32::from(u8::MAX - sample));
+    let nk = 255 - k;
+    // Pillow's `MULDIV255`: `a · b / 255`, rounded, in shifts, exact for
+    // both factors at most 255. So it is at most `nk`, and the difference
+    // is in 0..=255: Pillow's `CLIP8` around it never clips.
+    let muldiv255 = |a: i32| {
+        let product = a * nk + 128;
+        ((product >> 8) + product) >> 8
+    };
+    [c, m, y].map(|channel| (nk - muldiv255(channel)) as u8)
+}
+
 /// The decoded frame as RGBA8.
-fn finish(frame: &Frame, tables: &Tables, limits: &Limits) -> Result<Rgba8Image, ImageError> {
+fn finish(frame: &Frame, colour: ColourMarkers, limits: &Limits) -> Result<Rgba8Image, ImageError> {
     let bytes = limits.rgba_bytes(frame.width as u32, frame.height as u32)?;
     let planes = frame
         .components
@@ -1100,17 +1211,27 @@ fn finish(frame: &Frame, tables: &Tables, limits: &Limits) -> Result<Rgba8Image,
     // marker says, else RGB if the ids spell it, else YCbCr.
     let ids: Vec<u8> = frame.components.iter().map(|c| c.id).collect();
     let rgb = planes.len() == 3
-        && !tables.jfif
-        && match tables.adobe_transform {
+        && !colour.jfif
+        && match colour.adobe_transform {
             Some(transform) => transform == 0,
             None => ids == b"RGB",
         };
+    // libjpeg's rule for four: CMYK unless an Adobe marker's transform says
+    // otherwise, when it is YCCK.
+    let ycck = colour
+        .adobe_transform
+        .is_some_and(|transform| transform != 0);
     let mut pixels = Vec::with_capacity(bytes);
     for i in 0..frame.width * frame.height {
         let [r, g, b] = match planes.as_slice() {
             [grey] => [grey[i]; 3],
             [a, b, c] if rgb => [a[i], b[i], c[i]],
             [y, cb, cr] => ycc_to_rgb(y[i], cb[i], cr[i]),
+            [c, m, y, k] if !ycck => cmyk_to_rgb([c[i], m[i], y[i], k[i]]),
+            [y, cb, cr, k] => {
+                let [c, m, y] = ycc_to_rgb(y[i], cb[i], cr[i]).map(|channel| u8::MAX - channel);
+                cmyk_to_rgb([c, m, y, k[i]])
+            }
             _ => return Err(malformed("a frame of an unexpected component count")),
         };
         pixels.extend_from_slice(&[r, g, b, u8::MAX]);
@@ -1158,6 +1279,25 @@ mod tests {
         fixture!("rgb"),
     ];
 
+    /// Four-component files beside Pillow 13's `convert("RGB")` of each (its
+    /// bundled libjpeg-turbo 3.2.0, then `cmyk2rgb`), all 37 × 23, a seeded
+    /// gradient with noise. Pillow wrote the CMYK ones with Adobe markers
+    /// (transform 0), sequential and progressive; a copy of the first has
+    /// its transform patched to 1, which libjpeg reads as YCCK. A small C
+    /// program against the system's libjpeg-turbo 3.2.1 wrote the rest from
+    /// CMYK samples: CMYK with no Adobe marker, and YCCK (transform 2)
+    /// unsubsampled, with Y and K sampled 2 × 2 over Cb and Cr, and that
+    /// progressive.
+    const FOUR_COMPONENTS: [(&str, &[u8], &[u8]); 7] = [
+        fixture!("cmyk-adobe"),
+        fixture!("cmyk-progressive"),
+        fixture!("cmyk-transform-1"),
+        fixture!("cmyk-plain"),
+        fixture!("ycck-444"),
+        fixture!("ycck-420"),
+        fixture!("ycck-progressive"),
+    ];
+
     /// The first pixel that differs, as `(x, y, ours, theirs)`.
     fn first_difference(image: &Rgba8Image, rgb: &[u8]) -> Option<(u32, u32, [u8; 3], [u8; 3])> {
         let ours = image.pixels().as_chunks::<4>().0.iter();
@@ -1190,6 +1330,121 @@ mod tests {
                 image.height()
             );
             assert_eq!(first_difference(&image, rgb), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_four_component_fixture_decodes_to_exactly_pillows_rgb() {
+        for (name, jpeg, rgb) in FOUR_COMPONENTS {
+            let image =
+                decode(jpeg, &Limits::DEFAULT).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!((image.width(), image.height()), (37, 23), "{name}");
+            assert_eq!(image.pixels().len() / 4, rgb.len() / 3, "{name}");
+            assert_eq!(first_difference(&image, rgb), None, "{name}");
+        }
+    }
+
+    /// libjpeg's CMYK samples beside Pillow 13's RGB for them: each
+    /// inverted into a one-pixel `Image.new("CMYK", …)`, then
+    /// `convert("RGB")`.
+    #[test]
+    fn cmyk_converts_as_pillows_cmyk2rgb() {
+        for (cmyk, rgb) in [
+            ([255, 255, 255, 255], [255, 255, 255]),
+            ([0, 0, 0, 0], [0, 0, 0]),
+            ([0, 255, 255, 255], [0, 255, 255]),
+            ([255, 255, 255, 0], [0, 0, 0]),
+            ([127, 191, 223, 55], [27, 41, 48]),
+            ([254, 253, 1, 128], [127, 127, 1]),
+            ([134, 189, 66, 13], [7, 10, 3]),
+            ([222, 249, 15, 123], [107, 120, 7]),
+            ([136, 157, 15, 12], [6, 7, 1]),
+            ([52, 178, 137, 178], [36, 124, 96]),
+        ] {
+            assert_eq!(cmyk_to_rgb(cmyk), rgb, "{cmyk:?}");
+        }
+    }
+
+    /// Every inverted sample and K through `cmyk2rgb` is `s · k / 255`
+    /// rounded, never past a byte: the shifts are exact and need no clip.
+    #[test]
+    fn cmyk_is_the_rounded_product_for_every_sample_and_k() {
+        for sample in 0..=255u8 {
+            for k in 0..=255u8 {
+                let product = u32::from(sample) * u32::from(k);
+                let rounded = ((product * 2 + 255) / 510) as u8;
+                assert_eq!(
+                    cmyk_to_rgb([sample, sample, sample, k]),
+                    [rounded; 3],
+                    "{sample} {k}"
+                );
+            }
+        }
+    }
+
+    /// libjpeg settles the colour space when the first scan starts, so a
+    /// marker after it changes nothing: an Adobe transform of 2 before a
+    /// progressive CMYK file's second scan, and a JFIF marker before an
+    /// RGB file's end. Pillow 13 decodes both edited files to the same
+    /// pixels as the originals.
+    #[test]
+    fn colour_markers_after_the_first_scan_change_nothing() {
+        let (_, cmyk, cmyk_rgb) = FOUR_COMPONENTS[1];
+        let scans: Vec<usize> = cmyk
+            .windows(2)
+            .enumerate()
+            .filter_map(|(at, pair)| (pair == [0xff, 0xda]).then_some(at))
+            .collect();
+        assert!(scans.len() > 1, "a progressive file");
+        let mut late_adobe = cmyk[..scans[1]].to_vec();
+        late_adobe.extend_from_slice(b"\xff\xee\x00\x0eAdobe\x00\x64\x00\x00\x00\x00\x02");
+        late_adobe.extend_from_slice(&cmyk[scans[1]..]);
+        let image = decode(&late_adobe, &Limits::DEFAULT).expect("decodes");
+        assert_eq!(
+            first_difference(&image, cmyk_rgb),
+            None,
+            "a late Adobe marker"
+        );
+
+        let (_, rgb_jpeg, rgb) = FIXTURES[12];
+        let mut late_jfif = rgb_jpeg[..rgb_jpeg.len() - 2].to_vec();
+        late_jfif
+            .extend_from_slice(b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00");
+        late_jfif.extend_from_slice(&rgb_jpeg[rgb_jpeg.len() - 2..]);
+        let image = decode(&late_jfif, &Limits::DEFAULT).expect("decodes");
+        assert_eq!(first_difference(&image, rgb), None, "a late JFIF marker");
+    }
+
+    /// The coefficient bound sits where [`coefficient_allowance`] puts it,
+    /// for one, three and four components: a 1 × 1 frame whose first
+    /// component is sampled 4 × 4 pads to one 32 × 32 MCU, 16 blocks for
+    /// that component and one for each other, 128 bytes a block. Its RGBA
+    /// is 4 bytes, so only the coefficients decide.
+    #[test]
+    fn the_coefficient_bound_is_two_thirds_of_the_bytes_a_component() {
+        for (components, smallest) in [(1, 3072), (3, 1152), (4, 912)] {
+            let blocks = 16 + (components - 1);
+            assert_eq!(blocks * 128, smallest * 2 * components / 3, "{components}");
+            let mut segment = vec![8, 0, 1, 0, 1, components as u8];
+            for id in 0..components as u8 {
+                segment.extend_from_slice(&[id, if id == 0 { 0x44 } else { 0x11 }, 0]);
+            }
+            let limits = |max_bytes| Limits {
+                max_width: 1,
+                max_height: 1,
+                max_bytes,
+            };
+            assert!(
+                read_frame(&segment, false, &limits(smallest)).is_ok(),
+                "{components} just inside"
+            );
+            assert!(
+                matches!(
+                    read_frame(&segment, false, &limits(smallest - 1)),
+                    Err(ImageError::TooLarge { .. })
+                ),
+                "{components} just outside"
+            );
         }
     }
 
@@ -1319,7 +1574,7 @@ mod tests {
 
     #[test]
     fn dimensions_are_the_size_decode_returns() {
-        for (name, jpeg, _) in FIXTURES {
+        for (name, jpeg, _) in FIXTURES.into_iter().chain(FOUR_COMPONENTS) {
             let image = decode(jpeg, &Limits::DEFAULT).expect(name);
             assert_eq!(
                 dimensions(jpeg),
@@ -1376,8 +1631,8 @@ mod tests {
                 bytes
             }),
             ("a DNL marker", dnl_marker),
-            ("four components", changed(sof + 9, 4)),
             ("two components", changed(sof + 9, 2)),
+            ("five components", changed(sof + 9, 5)),
             ("sampling that does not divide", odd_sampling),
         ] {
             assert!(
@@ -1396,6 +1651,10 @@ mod tests {
             .map(|end| (format!("cut at {end}"), jpeg[..end].to_vec()))
             .collect::<Vec<_>>();
         malformed.push(("a zero sampling factor".into(), changed(sof + 11, 0x01)));
+        malformed.push((
+            "four components, three specified".into(),
+            changed(sof + 9, 4),
+        ));
         malformed.push((
             "a quantisation table past three".into(),
             changed(sof + 12, 4),
@@ -1496,5 +1755,122 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    /// Pillow 13 wrote one 5 × 3 picture at quality 95, 4:4:4, with EXIF
+    /// orientation 1 to 8, and ImageMagick 7.1 rewrote the first with 6 in
+    /// a big-endian block; each `.rgb` is Pillow's decode through
+    /// `ImageOps.exif_transpose`, which ImageMagick's `-auto-orient`
+    /// matched byte for byte.
+    macro_rules! oriented {
+        ($name:literal, $value:literal) => {
+            (
+                $name,
+                $value,
+                include_bytes!(concat!("../fixtures/orientation/", $name, ".jpg")) as &[u8],
+                include_bytes!(concat!("../fixtures/orientation/", $name, ".jpg.rgb")) as &[u8],
+            )
+        };
+    }
+
+    const ORIENTED: [(&str, u16, &[u8], &[u8]); 9] = [
+        oriented!("1", 1),
+        oriented!("2", 2),
+        oriented!("3", 3),
+        oriented!("4", 4),
+        oriented!("5", 5),
+        oriented!("6", 6),
+        oriented!("7", 7),
+        oriented!("8", 8),
+        oriented!("magick-6", 6),
+    ];
+
+    #[test]
+    fn exif_orientation_is_applied_as_pillow_and_imagemagick_apply_it() {
+        for (name, value, jpeg, upright) in ORIENTED {
+            assert_eq!(orientation(jpeg).exif_value(), value, "{name}");
+            let image = decode(jpeg, &Limits::DEFAULT).expect(name);
+            let size = Orientation::from_exif(value).upright_size((5, 3));
+            assert_eq!((image.width(), image.height()), size, "{name}");
+            assert_eq!(first_difference(&image, upright), None, "{name}");
+            let stored = decode_stored(jpeg, &Limits::DEFAULT).expect(name);
+            assert_eq!(dimensions(jpeg), Ok((stored.width(), stored.height())));
+            assert_eq!(
+                Orientation::from_exif(value).apply(stored, &Limits::DEFAULT),
+                Ok(image),
+                "{name}"
+            );
+        }
+    }
+
+    /// Only an `Exif` `APP1` before the first scan counts; anything else,
+    /// damage on the way to it included, is normal, and no cut panics.
+    #[test]
+    fn exif_is_read_before_the_first_scan_and_damage_is_normal() {
+        let (_, _, six, _) = ORIENTED[5];
+        let app1 = six
+            .windows(2)
+            .position(|pair| pair == [0xff, 0xe1])
+            .expect("an APP1");
+        let length = usize::from(u16::from_be_bytes([six[app1 + 2], six[app1 + 3]]));
+        let segment = &six[app1..app1 + 2 + length];
+        let mut without = six[..app1].to_vec();
+        without.extend_from_slice(&six[app1 + 2 + length..]);
+        assert_eq!(orientation(&without), Orientation::Normal);
+        // The segment moved to straight after the first scan's header, where
+        // a walk that did not stop at the scan would read it next.
+        let sos = without
+            .windows(2)
+            .position(|pair| pair == [0xff, 0xda])
+            .expect("a scan");
+        let sos_end =
+            sos + 2 + usize::from(u16::from_be_bytes([without[sos + 2], without[sos + 3]]));
+        let mut late = without[..sos_end].to_vec();
+        late.extend_from_slice(segment);
+        late.extend_from_slice(&without[sos_end..]);
+        assert_eq!(orientation(&late), Orientation::Normal);
+        // Another identifier, and an EXIF block that is not TIFF.
+        let mut other = six.to_vec();
+        other[app1 + 4] = b'X';
+        assert_eq!(orientation(&other), Orientation::Normal);
+        let mut broken = six.to_vec();
+        broken[app1 + 10] = b'Q';
+        assert_eq!(orientation(&broken), Orientation::Normal);
+        assert_eq!(
+            decode(&broken, &Limits::DEFAULT),
+            decode_stored(six, &Limits::DEFAULT)
+        );
+        for cut in 0..six.len() {
+            assert!(matches!(
+                orientation(&six[..cut]),
+                Orientation::Normal | Orientation::Rotate90Clockwise
+            ));
+        }
+        assert_eq!(
+            orientation(b"\xff\xd8\xff\xe1\xff\xff"),
+            Orientation::Normal
+        );
+    }
+
+    /// The upright size passes the limits: a 5 × 3 image turned is 3 × 5,
+    /// past limits 5 wide and 3 high. The bytes are left room for the
+    /// coefficients of the blocks the stored image pads to.
+    #[test]
+    fn a_quarter_turn_is_checked_against_the_limits() {
+        let limits = Limits {
+            max_width: 5,
+            max_height: 3,
+            max_bytes: 1024,
+        };
+        let (_, _, six, _) = ORIENTED[5];
+        assert!(decode_stored(six, &limits).is_ok());
+        assert_eq!(
+            decode(six, &limits),
+            Err(ImageError::TooLarge {
+                width: 3,
+                height: 5,
+                limits
+            })
+        );
     }
 }

@@ -22,6 +22,15 @@
 //! say how, and why it matches libwebp exactly), and its alpha raw or
 //! losslessly coded, with any of the four filters (`alpha`'s docs).
 //!
+//! # Orientation
+//!
+//! An `EXIF` chunk's orientation is applied by [`decode`] and left alone by
+//! [`decode_stored`], as the [crate docs](crate) say, to the whole image: an
+//! animation's canvas. The chunk counts only when the `VP8X` chunk's EXIF
+//! flag says it is there, as libwebp's demuxer (and so Pillow) reads it.
+//! An `XMP ` chunk's `tiff:Orientation`, which Pillow falls back to, is not
+//! read ([EXIF only](crate::orientation#exif-only)).
+//!
 //! # Hostile input
 //!
 //! The image's size passes the caller's [`Limits`] before anything is sized
@@ -35,7 +44,10 @@ mod lossless;
 mod vp8;
 mod yuv;
 
-use crate::{ImageError, Limits, Rgba8Image};
+use crate::{ImageError, Limits, Orientation, Rgba8Image};
+
+/// The `VP8X` flag saying the file has an `EXIF` chunk.
+const EXIF_FLAG: u8 = 0x08;
 
 fn malformed(why: impl Into<String>) -> ImageError {
     ImageError::Malformed(why.into())
@@ -45,7 +57,21 @@ fn unsupported(why: impl Into<String>) -> ImageError {
     ImageError::Unsupported(why.into())
 }
 
-/// Decodes a WebP file to straight RGBA8.
+/// Decodes a WebP file to straight RGBA8, upright: [`decode_stored`]'s
+/// pixels with [`orientation`]'s flip or quarter turn applied, the upright
+/// size checked against `limits` too.
+///
+/// # Errors
+///
+/// As [`decode_stored`], and [`ImageError::TooLarge`] if the upright size
+/// breaks `limits`.
+pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+    let image = decode_stored(bytes, limits)?;
+    orientation(bytes).apply(image, limits)
+}
+
+/// Decodes a WebP file to straight RGBA8 as stored, any EXIF orientation not
+/// applied.
 ///
 /// # Errors
 ///
@@ -53,7 +79,7 @@ fn unsupported(why: impl Into<String>) -> ImageError {
 /// `limits`, [`ImageError::Unsupported`] for a reserved VP8 version or
 /// alpha compression method, and [`ImageError::Malformed`] for anything that
 /// is not a well-formed WebP.
-pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+pub fn decode_stored(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
     match find_image(bytes)? {
         Image::Still {
             fourcc,
@@ -67,9 +93,10 @@ pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
     }
 }
 
-/// The width and height of the image [`decode`] would return, read from the
-/// headers without decoding a pixel: a still image's bitstream header, or
-/// an animation's canvas.
+/// The width and height of the image [`decode_stored`] returns, read from
+/// the headers without decoding a pixel: a still image's bitstream header,
+/// or an animation's canvas. [`decode`] returns it too unless
+/// [`orientation`] swaps its sides ([`Orientation::upright_size`]).
 ///
 /// The container is walked as [`decode`] walks it, a still image's size is
 /// held to its canvas's, and an animation's first frame is found and held
@@ -103,6 +130,46 @@ pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), ImageError> {
     }
 }
 
+/// The orientation a WebP's `EXIF` chunk records, read without decoding a
+/// pixel: the chunk anywhere in the file, if the first chunk is a `VP8X`
+/// whose EXIF flag is set.
+///
+/// Never an error: no chunk, a damaged one, damage in the chunks before it,
+/// or a file that is not a WebP is [`Orientation::Normal`], as the
+/// [`orientation`](crate::orientation) module docs say.
+#[must_use]
+pub fn orientation(bytes: &[u8]) -> Orientation {
+    let Ok(body) = riff_body(bytes) else {
+        return Orientation::Normal;
+    };
+    let mut chunks = Chunks::new(body);
+    match chunks.next() {
+        Some(Ok((fourcc, data)))
+            if &fourcc == b"VP8X" && data.first().is_some_and(|flags| flags & EXIF_FLAG != 0) => {}
+        _ => return Orientation::Normal,
+    }
+    for chunk in chunks {
+        match chunk {
+            Ok((fourcc, data)) if &fourcc == b"EXIF" => return Orientation::read_exif(data),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    Orientation::Normal
+}
+
+/// The chunks of a RIFF WebP file, after its header, to the end its RIFF
+/// size gives or the file's, whichever is first.
+fn riff_body(bytes: &[u8]) -> Result<&[u8], ImageError> {
+    if bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WEBP") {
+        return Err(malformed("not a RIFF WebP file"));
+    }
+    let riff_size = u32_at(bytes, 4)? as usize;
+    bytes
+        .get(12..riff_size.saturating_add(8).min(bytes.len()))
+        .ok_or_else(|| malformed("a RIFF size past the file"))
+}
+
 /// Where a file's image is, as [`find_image`] finds it.
 enum Image<'a> {
     /// A `VP8L` or `VP8 ` chunk's FourCC and data, and the `ALPH` chunk
@@ -121,13 +188,7 @@ enum Image<'a> {
 /// an `ALPH` chunk holding its alpha), whose size its header must match; an
 /// animation's first `ANMF` chunk holds its first frame.
 fn find_image(bytes: &[u8]) -> Result<Image<'_>, ImageError> {
-    if bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WEBP") {
-        return Err(malformed("not a RIFF WebP file"));
-    }
-    let riff_size = u32_at(bytes, 4)? as usize;
-    let body = bytes
-        .get(12..riff_size.saturating_add(8).min(bytes.len()))
-        .ok_or_else(|| malformed("a RIFF size past the file"))?;
+    let body = riff_body(bytes)?;
     let mut canvas = None;
     let mut alpha = None;
     for chunk in Chunks::new(body) {
@@ -652,6 +713,79 @@ mod tests {
             let image = decode(&file, &Limits::DEFAULT).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(image.pixels(), rgba, "{name}");
         }
+    }
+
+    /// Pillow 13 wrote one 5 × 3 picture losslessly with EXIF orientation 1
+    /// to 8; each is held to Pillow's `ImageOps.exif_transpose` of the PNG
+    /// written beside it, which its decode of the WebP matched, as did
+    /// ImageMagick's `-auto-orient`.
+    macro_rules! oriented {
+        ($value:literal) => {
+            (
+                $value,
+                include_bytes!(concat!("../../fixtures/orientation/", $value, ".webp")) as &[u8],
+                include_bytes!(concat!("../../fixtures/orientation/", $value, ".rgba")) as &[u8],
+            )
+        };
+    }
+
+    const ORIENTED: [(u16, &[u8], &[u8]); 8] = [
+        oriented!(1),
+        oriented!(2),
+        oriented!(3),
+        oriented!(4),
+        oriented!(5),
+        oriented!(6),
+        oriented!(7),
+        oriented!(8),
+    ];
+
+    #[test]
+    fn exif_orientation_is_applied_as_pillow_and_imagemagick_apply_it() {
+        let (_, _, stored) = ORIENTED[0];
+        for (value, webp, upright) in ORIENTED {
+            assert_eq!(orientation(webp).exif_value(), value);
+            let image = decode(webp, &Limits::DEFAULT).expect("decodes");
+            let size = Orientation::from_exif(value).upright_size((5, 3));
+            assert_eq!((image.width(), image.height()), size, "{value}");
+            assert_eq!(image.pixels(), upright, "{value}");
+            let as_stored = decode_stored(webp, &Limits::DEFAULT).expect("decodes");
+            assert_eq!(as_stored.pixels(), stored, "{value}: stored");
+            assert_eq!(dimensions(webp), Ok((5, 3)), "{value}");
+        }
+    }
+
+    /// The `EXIF` chunk counts only under the `VP8X` flag, as libwebp's
+    /// demuxer reads it: Pillow reports no EXIF for the file with the flag
+    /// cleared. Damage is normal, and no cut panics.
+    #[test]
+    fn exif_counts_under_its_flag_and_damage_is_normal() {
+        let (_, six, _) = ORIENTED[5];
+        let (_, _, stored) = ORIENTED[0];
+        // The file header, then the VP8X chunk's header, then its flags.
+        let flags = 12 + 8;
+        assert_eq!(six.get(12..16), Some(&b"VP8X"[..]));
+        let mut unflagged = six.to_vec();
+        unflagged[flags] &= !EXIF_FLAG;
+        assert_eq!(orientation(&unflagged), Orientation::Normal);
+        let image = decode(&unflagged, &Limits::DEFAULT).expect("decodes");
+        assert_eq!(image.pixels(), stored);
+        let exif = six
+            .windows(4)
+            .position(|window| window == b"EXIF")
+            .expect("an EXIF chunk");
+        let mut broken = six.to_vec();
+        broken[exif + 8] = b'Q';
+        assert_eq!(orientation(&broken), Orientation::Normal);
+        for cut in 0..six.len() {
+            assert!(matches!(
+                orientation(&six[..cut]),
+                Orientation::Normal | Orientation::Rotate90Clockwise
+            ));
+        }
+        // A simple file has no VP8X chunk, so no EXIF.
+        let (_, lossless, _) = FIXTURES[0];
+        assert_eq!(orientation(lossless), Orientation::Normal);
     }
 
     /// A simple lossy file around `vp8`, its sizes made to fit.

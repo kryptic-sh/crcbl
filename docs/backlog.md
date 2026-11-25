@@ -8,63 +8,55 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 infr (`infr serve`, Gemma 4 image input) will depend on a published
 `crcbl-image` behind an optional feature, decoding PNG/JPEG/WebP/BMP bytes from
 OpenAI `image_url` data URIs and resizing them for a vision encoder.
-`resize::resize_pillow` and the header-only `dimensions` with `format::sniff`
-have landed (unreleased). The release, and the version number for infr, wait on
-the float output and EXIF orientation below; CMYK and maybe GIF ride along. No
-other reply to infr is owed.
+`resize::resize_pillow`, header-only `dimensions` with `format::sniff`, the
+`tensor` float output, EXIF orientation (`decode_stored` for llama.cpp parity)
+and CMYK/YCCK JPEG have landed (unreleased). The release, and the version number
+for infr, wait on the stb_image-compatible JPEG mode below; GIF may ride along.
+No other reply to infr is owed.
 
-3. **GIF, first frame, lowest priority.** OpenAI accepts GIF; infr can ship
-   without it. The crate has no GIF decoder (the SVG `<image>` path refuses GIF
-   by name). Do it only if cheap (LZW plus the palette), else record it here as
-   declined with the reason. `format::Format` is `#[non_exhaustive]` so a `Gif`
-   variant can join `sniff`.
+- **GIF, first frame, lowest priority.** OpenAI accepts GIF; infr can ship
+  without it. The crate has no GIF decoder (the SVG `<image>` path refuses GIF
+  by name). Do it only if cheap (LZW plus the palette), else record it here as
+  declined with the reason. `format::Format` is `#[non_exhaustive]` so a `Gif`
+  variant can join `sniff`.
 
-4. **Normalised float output** (the user, 2026-11-26: so infr need not convert
-   RGBA8 itself; infr had listed it as not needed). The shape to match is
-   llama.cpp's `clip_image_f32` in `llama.cpp/tools/mtmd/clip-impl.h`:
-   interleaved RGB, alpha dropped, each channel `u8 as f32 / 255.0` in `f32`,
-   then `(v - mean[c]) / std[c]` with the model's per-channel mean and std
-   (`clip_image_f32::from_u8` and `normalize`). So an entry point taking an
-   `Rgba8Image`, `mean: [f32; 3]` and `std: [f32; 3]` and returning `Vec<f32>`
-   of `width * height * 3`; planar (CHW) is not needed for llama.cpp parity.
-   llama.cpp loads with `stbi_load_from_memory(..., 3)`
-   (`llama.cpp/tools/mtmd/mtmd-helper.cpp`), which drops alpha at load rather
-   than compositing it, so a caller matching it makes the image opaque (alpha
-   255, colour kept) before `resize_pillow`, which premultiplies as Pillow does.
-   Ship a helper for that step with this item (on `Rgba8Image`, or beside the
-   float conversion) so infr does not hand-roll it; infr has been told the
-   requirement.
+## `crcbl-image`: an stb_image-compatible JPEG mode (decided 2026-11-26)
 
-5. **EXIF orientation, applied by default with a way to turn it off** (the user,
-   2026-11-26: implement it anyway; infr opts out, since llama.cpp does not
-   apply it and parity needs the stored orientation). Today `jpeg.rs`'s module
-   doc says orientation is not applied, and nothing in the crate reads EXIF.
-   Where the tag lives: JPEG `APP1` with an `Exif\0\0` header, PNG's `eXIf`
-   chunk, WebP's `EXIF` chunk (flagged in `VP8X`); BMP has none. Read tag
-   `0x0112` from IFD0 of the TIFF structure (either byte order), values 1–8 as
-   the eight flips and quarter turns; anything else or a malformed block is
-   treated as 1, not an error, as browsers do. Open shape questions: an option
-   on decode (a field beside `Limits`, or a decode-options struct) versus a
-   separate `orientation()` reader plus an `orient(image, o)` transform the
-   caller applies; and the header-only `dimensions` functions must say whether
-   it reports the stored or the displayed size (orientations 5–8 swap them),
-   most simply by returning the orientation with the size. Default-on changes
-   what every existing caller gets (album art, icons; the in-workspace callers
-   of `jpeg::decode`, `png::decode` and `webp::decode`), a breaking change for
-   the changelog; pre-1.0 that is a minor bump. Rotation happens under the same
-   `Limits` (a quarter turn swaps the sides the caps are checked against).
+The user's call, for this release (infr's parity): llama.cpp decodes JPEG with
+stb_image (`stbi_load_from_memory(..., 3)`), and the crate's JPEG decoder
+matches libjpeg-turbo instead. The tensor review measured, with stb v2.30 as
+vendored in llama.cpp at 57291f2, built with g++ -O2: llama.cpp's own
+`llama.cpp/tools/mtmd/test-1.jpeg` differs in about 5% of bytes by up to 3; some
+committed 4:2:2 and 4:2:0 fixtures by up to 115; crcbl matches `djpeg` exactly.
+PNG and BMP already matched stb on every variant tested. Wanted: a second JPEG
+output that reproduces stb's IDCT, chroma upsampling and YCbCr conversion byte
+for byte, held to stb's output on fixtures (stb's SIMD and scalar paths agreed
+on all 21 files tried), with libjpeg-turbo staying the default. Its shape (a
+function beside `decode_stored`, which also ignores EXIF as stb does) is the
+implementer's call. Scratch harnesses that decode through stb are in the session
+scratchpad's `review-tensor/` (not durable).
 
-6. **CMYK and YCCK JPEG** (the user, 2026-11-26, though infr does not need it).
-   `jpeg.rs` refuses four-component frames today because decoders disagree on
-   the conversion to RGB. The decision to make and write into the module doc:
-   which decoder's answer to match. The candidate is Pillow's, the one
-   llama.cpp-adjacent tooling sees: an Adobe `APP14` marker means the samples
-   are stored inverted (Photoshop's convention), transform 2 means YCCK (YCbCr
-   to RGB, then treated as CMY), and CMYK goes to RGB with no colour profile as
-   `R = (255 - C)(255 - K) / 255` per channel (Pillow's `cmyk2rgb`, to be read
-   in its source rather than recalled). No ICC profile is applied, and the doc
-   must say so. A fixture made by a reference decoder is needed to hold it.
-   Lands with item 5's decoder work, since both edit `jpeg.rs`.
+## `crcbl-image` EXIF slice leftovers (2026-11-26)
+
+- No crcbl-ui test holds colour glyph bitmaps (`font/color/bitmap.rs`, which
+  calls `png::decode_stored`) to stored pixels; it needs an sbix or CBDT fixture
+  font with an `eXIf` PNG, and the fixtures are built with fontTools, which is
+  not installed. glTF textures and ICO frames have such tests.
+- Orientation reading is stricter than Pillow's in ways not judged harmful: only
+  the first Exif `APP1` (Pillow joins later ones), PNG `eXIf` only before `IDAT`
+  as the spec orders it (Pillow honours it after), and the tag only as a single
+  `SHORT` (Pillow accepts other integer types).
+- An image must fit the `Limits` both as stored and upright, since the stored
+  buffer is allocated before the turn. A quarter turn holds two full buffers and
+  copies a pixel at a time; not timed.
+
+## `cargo clippy -p crcbl-scene --all-targets` without `--all-features` fails (2026-11-26)
+
+Seen on d9714989, before the EXIF slice: dead-code errors for seven fixture
+items in `crates/crcbl-scene/src/gltf_fixture.rs` and `break_triangle_list` in
+`gltf_import.rs`, items used only under a feature. CI runs clippy with
+`--all-features`, so it stays green. Fix: gate the items on the feature that
+uses them. Not investigated further.
 
 ## `resize::resize` does not check its intermediate against `Limits` (2026-11-26)
 

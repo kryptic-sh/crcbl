@@ -142,7 +142,7 @@ mod tests {
         let skrifa::bitmap::BitmapData::Png(bytes) = bitmap.data else {
             panic!("a PNG");
         };
-        png::decode(bytes, &Limits::DEFAULT).expect("decodes")
+        png::decode_stored(bytes, &Limits::DEFAULT).expect("decodes")
     }
 
     fn pixel(bitmap: &ColorBitmap, x: u32, y: u32) -> [u8; 4] {

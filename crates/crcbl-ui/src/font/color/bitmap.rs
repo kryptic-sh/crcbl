@@ -55,7 +55,11 @@ pub(super) fn rasterize(
     let BitmapData::Png(bytes) = bitmap.data else {
         return None;
     };
-    let decoded = png::decode(bytes, &LIMITS).ok()?;
+    // The stored pixels, any EXIF orientation not applied: CBDT allows only
+    // IHDR, PLTE, tRNS, sRGB, IDAT and IEND in its PNGs and wants each the
+    // size its metrics give, and sbix places a bitmap by its stored left and
+    // bottom edges.
+    let decoded = png::decode_stored(bytes, &LIMITS).ok()?;
     let scale = size / bitmap.ppem_y;
     let width = (decoded.width() as f32 * scale).round().max(1.0) as u32;
     let height = (decoded.height() as f32 * scale).round().max(1.0) as u32;

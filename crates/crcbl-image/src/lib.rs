@@ -33,9 +33,22 @@
 //! none. The `theme` feature adds the
 //! freedesktop.org icon-theme lookup, which finds an icon's file by name;
 //! decoding it is the format's.
+//!
+//! # Upright by default
+//!
+//! A PNG, JPEG or WebP whose EXIF block records an [`Orientation`] other
+//! than normal decodes upright: each of those formats' `decode` applies the
+//! flip or quarter turn, under the same [`Limits`]. Its `decode_stored`
+//! returns the pixels as the file stores them, for a caller that must match
+//! a decoder ignoring EXIF, and its `orientation` reads the tag alone. Each
+//! format's `dimensions` reports the stored size, which
+//! [`Orientation::upright_size`] turns into the size `decode` returns. An
+//! icon's PNG frame is decoded as stored, the size its directory entry
+//! names; a bitmap has no EXIF.
 
 pub mod data_url;
 pub mod format;
+pub mod orientation;
 pub mod raster;
 pub mod raw;
 pub mod resize;
@@ -64,6 +77,8 @@ pub mod xpm;
 
 #[cfg(feature = "theme")]
 pub mod theme;
+
+pub use orientation::Orientation;
 
 /// The most pixels across a side [`Limits::DEFAULT`] accepts: larger than any
 /// icon, notification image or album art a desktop shows, so an image past it

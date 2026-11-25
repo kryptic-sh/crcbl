@@ -10,6 +10,19 @@
 //! image is a document of its own: nothing of the outer one's style
 //! reaches it, and its ids name only its own elements.
 //!
+//! # Orientation, as a browser shows it
+//!
+//! An embedded PNG, JPEG or WebP is decoded with its format's `decode`, so
+//! an EXIF orientation it records is applied ([`crate::orientation`]): the
+//! picture is placed upright, its own size the upright one, as a browser
+//! shows it (CSS's `image-orientation` is `from-image` unless a style says
+//! otherwise). There is no switch for it. This is a deliberate difference
+//! from resvg, whose `resvg/crates/resvg/src/image.rs` (0.45.1, and on its main
+//! branch) decodes each format and draws the pixels as stored, reading no
+//! orientation. So the `svg_corpus` example's comparison with resvg can
+//! differ for it, but only where an embedded picture carries an orientation
+//! tag other than 1.
+//!
 //! # Placement
 //!
 //! As SVG 2 says: `x`, `y`, `width` and `height` are the image's viewport, a

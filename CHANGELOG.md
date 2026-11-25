@@ -48,8 +48,36 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   resize (bicubic), `normalised_rgb`. A model's target size, padding and
   constants stay the caller's.
 
+- **`crcbl-image`: `Orientation`, and `orientation` and `decode_stored` in
+  `png`, `jpeg` and `webp`.** `Orientation` (`from_exif`, `upright_size`,
+  `apply`) is the EXIF tag's eight flips and quarter turns; each format's
+  `orientation(bytes)` reads it from the headers alone and treats a missing or
+  damaged tag as upright; `decode_stored` returns the pixels as stored, as
+  `decode` did before.
+- **`crcbl-image`: CMYK and YCCK JPEG.** Four-component files, refused before,
+  decode to RGBA8 as Pillow's `convert("RGB")` does: libjpeg's Adobe-transform
+  rule for YCCK, samples inverted as Adobe writes them, the naive `cmyk2rgb`,
+  and no ICC profile.
+
 ### Changed
 
+- **Breaking: `crcbl-image`'s `png`, `jpeg` and `webp` `decode` apply the EXIF
+  orientation** (PNG `eXIf` before `IDAT`, JPEG Exif `APP1` before the first
+  scan, WebP `EXIF` under the `VP8X` flag; EXIF only, no XMP fallback). For
+  orientations 5–8 the image comes back with its sides swapped, so its size is
+  `dimensions`' turned by `Orientation::upright_size`, and `decode` may refuse
+  as `TooLarge` an upright size the `Limits` do not fit even when the stored
+  size does. A caller matching a decoder that ignores EXIF, as llama.cpp's does,
+  uses `decode_stored`. glTF JPEG textures, colour glyph bitmaps and ICO frames
+  keep the stored pixels; an SVG `<image>` is oriented, as a browser shows it,
+  unlike resvg.
+- **Breaking: `crcbl-image`'s `jpeg::COEFFICIENT_ALLOWANCE` is replaced by
+  `jpeg::coefficient_allowance(limits, components)`**: two thirds of `max_bytes`
+  per component, the same bound as before for three components, tighter for
+  greyscale, and room for full-size CMYK.
+- **`crcbl-image`: a JPEG's colour space is settled by the markers before its
+  first scan**, as libjpeg settles it; an Adobe or JFIF marker after a scan no
+  longer changes it.
 - **`crcbl-image`: WebP `decode` checks a frame against its canvas before
   decoding it.** A file with two faults may report a different one first, and a
   zero-sized lossy frame inside a `VP8X` canvas is now `Malformed` (it does not

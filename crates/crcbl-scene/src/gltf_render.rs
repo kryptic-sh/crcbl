@@ -774,7 +774,12 @@ fn decode_scene_image(
 /// the decoder said — written to stand beside the image in a list of losses.
 pub fn decode_image(bytes: &[u8], mime: Option<&str>) -> Result<crcbl_sprite::load::Rgba8, String> {
     if bytes.starts_with(&JPEG_MAGIC) {
-        return crcbl_image::jpeg::decode(bytes, &crcbl_image::Limits::DEFAULT)
+        // The stored pixels, any EXIF orientation not applied: glTF 2.0 §2.6
+        // says "Exif chunks MAY be ignored by client implementations" and
+        // notes "Orientation" "may severely impact an asset's portability",
+        // and texture coordinates address the image as stored. The PNG path
+        // below ignores EXIF too.
+        return crcbl_image::jpeg::decode_stored(bytes, &crcbl_image::Limits::DEFAULT)
             .map(|image| crcbl_sprite::load::Rgba8 {
                 width: image.width(),
                 height: image.height(),
@@ -2737,5 +2742,29 @@ mod tests {
             other.contains("neither PNG nor JPEG (mimeType image/gif)"),
             "{other}"
         );
+    }
+
+    /// **A JPEG texture keeps its stored pixels**: the grey fixture (19 × 13)
+    /// with an EXIF block saying "turn a quarter clockwise" put after its
+    /// start-of-image marker decodes to the same 19 × 13 texels, not the
+    /// 13 × 19 an upright decode would give.
+    #[test]
+    fn a_jpeg_texture_ignores_its_exif_orientation() {
+        // APP1: `Exif\0\0`, then a little-endian TIFF header and one
+        // directory entry, Orientation (0x0112), SHORT, count 1, value 6.
+        let mut app1 = vec![0xff, 0xe1, 0, 34];
+        app1.extend_from_slice(b"Exif\0\0II*\0\x08\0\0\0\x01\0");
+        app1.extend_from_slice(b"\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0");
+        let mut tagged = GREY_JPEG[..2].to_vec();
+        tagged.extend_from_slice(&app1);
+        tagged.extend_from_slice(&GREY_JPEG[2..]);
+        assert_eq!(
+            crcbl_image::jpeg::orientation(&tagged),
+            crcbl_image::Orientation::Rotate90Clockwise
+        );
+        let plain = decode_image(GREY_JPEG, None).expect("decodes");
+        let texture = decode_image(&tagged, Some("image/jpeg")).expect("decodes");
+        assert_eq!((texture.width, texture.height), (19, 13));
+        assert_eq!(texture.pixels, plain.pixels);
     }
 }

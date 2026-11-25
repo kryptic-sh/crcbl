@@ -6,6 +6,10 @@
 //! at a size by [`resize::nearest_size`] — the
 //! smallest at least that large, else the largest — and decodes only that
 //! one. A cursor file (`.cur`) has the same layout and is read the same way.
+//!
+//! A PNG frame is decoded as stored, any EXIF orientation it carries left
+//! alone ([`png::decode_stored`]): the directory entry sizes the frame, and
+//! the frame is picked by that size.
 
 use crate::{ImageError, Limits, Rgba8Image, bmp, png, resize};
 
@@ -100,7 +104,7 @@ pub fn decode(bytes: &[u8], size: u32, limits: &Limits) -> Result<Rgba8Image, Im
         .and_then(|end| bytes.get(chosen.offset..end))
         .ok_or_else(|| malformed("an icon frame is not where its entry says"))?;
     if data.starts_with(&PNG_SIGNATURE) {
-        png::decode(data, limits)
+        png::decode_stored(data, limits)
     } else {
         bmp::decode_icon_dib(data, limits)
     }
@@ -150,6 +154,27 @@ mod tests {
                 "{name}: the largest when none is large enough"
             );
         }
+    }
+
+    /// A one-frame icon around a PNG Pillow wrote with EXIF orientation 6:
+    /// the frame comes out as stored, the 5 × 3 its entry names.
+    #[test]
+    fn a_png_frame_is_decoded_as_stored() {
+        let frame = include_bytes!("../fixtures/orientation/6.png");
+        let stored = include_bytes!("../fixtures/orientation/1.rgba");
+        assert_eq!(
+            png::orientation(frame),
+            crate::Orientation::Rotate90Clockwise
+        );
+        let mut icon = vec![0, 0, 1, 0, 1, 0];
+        // Width, height, colours, reserved, planes, bits, size, offset.
+        icon.extend_from_slice(&[5, 3, 0, 0, 1, 0, 32, 0]);
+        icon.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+        icon.extend_from_slice(&((HEADER + ENTRY) as u32).to_le_bytes());
+        icon.extend_from_slice(frame);
+        let image = decode(&icon, 5, &Limits::DEFAULT).expect("decodes");
+        assert_eq!((image.width(), image.height()), (5, 3));
+        assert_eq!(image.pixels(), stored);
     }
 
     #[test]

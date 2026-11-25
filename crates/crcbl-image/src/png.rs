@@ -3,15 +3,41 @@
 //!
 //! An animated PNG decodes to its default image, the first frame a viewer
 //! that does not animate shows.
+//!
+//! # Orientation
+//!
+//! An `eXIf` chunk's orientation is applied by [`decode`] and left alone by
+//! [`decode_stored`], as the [crate docs](crate) say. The chunk is read
+//! where the PNG specification (third edition) orders it, before the first
+//! `IDAT`; one after the image data is not looked for, though Pillow reads
+//! that too. Nor are XMP or a `Raw profile type exif` text chunk, which
+//! Pillow falls back to ([EXIF only](crate::orientation#exif-only)).
 
-use crate::{ImageError, Limits, Rgba8Image};
+use crate::{ImageError, Limits, Orientation, Rgba8Image};
+
+/// The PNG signature.
+const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 /// The decoder's own working allowance beyond the image itself: the zlib
 /// window, a row of filter state and the ancillary chunks a file carries
 /// alongside its pixels.
 const DECODER_OVERHEAD: usize = 1 << 20;
 
-/// Decodes a PNG to straight RGBA8.
+/// Decodes a PNG to straight RGBA8, upright: [`decode_stored`]'s pixels
+/// with [`orientation`]'s flip or quarter turn applied, the upright size
+/// checked against `limits` too.
+///
+/// # Errors
+///
+/// As [`decode_stored`], and [`ImageError::TooLarge`] if the upright size
+/// breaks `limits`.
+pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+    let image = decode_stored(bytes, limits)?;
+    orientation(bytes).apply(image, limits)
+}
+
+/// Decodes a PNG to straight RGBA8 as stored, any EXIF orientation not
+/// applied.
 ///
 /// Palette, grayscale, RGB and every bit depth come out as RGBA8: the decoder
 /// is asked to expand a palette and sub-byte samples, add an opaque alpha to
@@ -27,7 +53,7 @@ const DECODER_OVERHEAD: usize = 1 << 20;
 /// [`ImageError::Empty`] or [`ImageError::TooLarge`] if the header's size
 /// breaks `limits`, and [`ImageError::Malformed`] if the bytes are not a
 /// readable PNG.
-pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+pub fn decode_stored(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
     let malformed = |error: ::png::DecodingError| ImageError::Malformed(error.to_string());
     let decoder_limits = ::png::Limits {
         bytes: limits.max_bytes.saturating_add(DECODER_OVERHEAD),
@@ -79,7 +105,8 @@ pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
 }
 
 /// The width and height a PNG's `IHDR` chunk gives, read without decoding a
-/// pixel: what [`decode`] would return an image of.
+/// pixel: the size [`decode_stored`] returns, and [`decode`] too unless
+/// [`orientation`] swaps its sides ([`Orientation::upright_size`]).
 ///
 /// The header is read by the `png` crate's own parser, the one [`decode`]
 /// goes through, so a signature, an `IHDR` that is not the first chunk, a
@@ -109,6 +136,37 @@ pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), ImageError> {
             .map_err(|error| ImageError::Malformed(error.to_string()))?;
         rest = &rest[consumed..];
     }
+}
+
+/// The orientation a PNG's `eXIf` chunk records, read from the chunks before
+/// the first `IDAT` without decoding a pixel.
+///
+/// Never an error: no chunk, a damaged one or a file that is not a PNG is
+/// [`Orientation::Normal`], as the [`orientation`](crate::orientation) module
+/// docs say. Checksums are not read; a damaged chunk [`decode`] refuses
+/// is refused there.
+#[must_use]
+pub fn orientation(bytes: &[u8]) -> Orientation {
+    let Some(mut rest) = bytes.strip_prefix(SIGNATURE) else {
+        return Orientation::Normal;
+    };
+    // Each chunk is a length, a type, its data and a checksum.
+    while let Some((header, after)) = rest.split_first_chunk::<8>() {
+        let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let Some(data) = after.get(..length) else {
+            break;
+        };
+        match &header[4..] {
+            b"eXIf" => return Orientation::read_exif(data),
+            b"IDAT" | b"IEND" => break,
+            _ => {}
+        }
+        let Some(next) = after.get(length.saturating_add(4)..) else {
+            break;
+        };
+        rest = next;
+    }
+    Orientation::Normal
 }
 
 /// Encodes `image` as an 8-bit RGBA PNG.
@@ -314,6 +372,145 @@ mod tests {
             );
         }
         assert_eq!(dimensions(&good[..ihdr_end]), Ok((2, 2)));
+    }
+
+    macro_rules! oriented {
+        ($value:literal) => {
+            (
+                stringify!($value),
+                $value,
+                include_bytes!(concat!("../fixtures/orientation/", $value, ".png")),
+                include_bytes!(concat!("../fixtures/orientation/", $value, ".rgba")),
+            )
+        };
+    }
+    /// Pillow 13 wrote one 5 × 3 picture with EXIF orientation 1 to 8 (and
+    /// ImageMagick 7.1 one with 8, its block big-endian, before `IDAT`);
+    /// each `.rgba` is Pillow's `ImageOps.exif_transpose` of it, which
+    /// ImageMagick's `-auto-orient` matched byte for byte.
+    const ORIENTED: [(&str, u16, &[u8], &[u8]); 9] = [
+        oriented!(1),
+        oriented!(2),
+        oriented!(3),
+        oriented!(4),
+        oriented!(5),
+        oriented!(6),
+        oriented!(7),
+        oriented!(8),
+        (
+            "magick-8",
+            8,
+            include_bytes!("../fixtures/orientation/magick-8.png"),
+            include_bytes!("../fixtures/orientation/8.rgba"),
+        ),
+    ];
+
+    #[test]
+    fn exif_orientation_is_applied_as_pillow_and_imagemagick_apply_it() {
+        let (_, _, _, stored) = ORIENTED[0];
+        for (name, value, bytes, upright) in ORIENTED {
+            assert_eq!(orientation(bytes).exif_value(), value, "{name}");
+            let image = decode(bytes, &Limits::DEFAULT).expect(name);
+            assert_eq!(image.pixels(), upright, "{name}");
+            let (width, height) = Orientation::from_exif(value).upright_size((5, 3));
+            assert_eq!((image.width(), image.height()), (width, height), "{name}");
+            let as_stored = decode_stored(bytes, &Limits::DEFAULT).expect(name);
+            assert_eq!(as_stored.pixels(), stored, "{name}: stored");
+            assert_eq!(dimensions(bytes), Ok((5, 3)), "{name}: the stored size");
+        }
+    }
+
+    /// `good` with `chunk` put in before its first `IDAT` (`before`), or
+    /// else just before its `IEND`, after the image data.
+    fn with_chunk(good: &[u8], chunk: &[u8], before: bool) -> Vec<u8> {
+        let idat = good
+            .windows(4)
+            .position(|window| window == b"IDAT")
+            .expect("an IDAT")
+            - 4;
+        let iend = good.len() - 12;
+        let at = if before { idat } else { iend };
+        let mut bytes = good[..at].to_vec();
+        bytes.extend_from_slice(chunk);
+        bytes.extend_from_slice(&good[at..]);
+        bytes
+    }
+
+    /// A PNG chunk of `kind` around `data`, its checksum as the `png` crate
+    /// writes it.
+    fn chunk_of(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = ::png::Encoder::new(&mut bytes, 1, 1);
+        encoder.set_color(::png::ColorType::Rgba);
+        let mut writer = encoder.write_header().expect("header");
+        writer
+            .write_chunk(::png::chunk::ChunkType(*kind), data)
+            .expect("chunk");
+        drop(writer);
+        // The signature and IHDR, then the chunk: length, type, data and
+        // checksum.
+        bytes[8 + 25..8 + 25 + 12 + data.len()].to_vec()
+    }
+
+    /// The `eXIf` chunk is read before `IDAT` only, where the PNG
+    /// specification orders it; a damaged one is upright as stored.
+    #[test]
+    fn exif_is_read_before_idat_and_damage_is_normal() {
+        let (_, _, six, _) = ORIENTED[5];
+        let stored = decode_stored(six, &Limits::DEFAULT).expect("decodes");
+        let (_, _, normal, _) = ORIENTED[0];
+        let exif = |big_endian: bool| {
+            let block: &[u8] = if big_endian {
+                b"MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0"
+            } else {
+                b"II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0"
+            };
+            chunk_of(b"eXIf", block)
+        };
+        // A stored-upright file without the chunk, the chunk added.
+        let without = encode(&stored).expect("encodes");
+        for big_endian in [false, true] {
+            let before = with_chunk(&without, &exif(big_endian), true);
+            assert_eq!(orientation(&before), Orientation::Rotate90Clockwise);
+            let after = with_chunk(&without, &exif(big_endian), false);
+            assert_eq!(orientation(&after), Orientation::Normal);
+            assert_eq!(decode(&after, &Limits::DEFAULT).as_ref(), Ok(&stored));
+        }
+        let damaged = with_chunk(&without, &chunk_of(b"eXIf", b"II*\0\xff\xff"), true);
+        assert_eq!(orientation(&damaged), Orientation::Normal);
+        assert_eq!(decode(&damaged, &Limits::DEFAULT).as_ref(), Ok(&stored));
+        for cut in 0..normal.len() {
+            assert_eq!(orientation(&normal[..cut]), Orientation::Normal);
+        }
+        // Cut before the chunk ends: normal; after: turned. Never a panic.
+        for cut in 0..six.len() {
+            assert!(matches!(
+                orientation(&six[..cut]),
+                Orientation::Normal | Orientation::Rotate90Clockwise
+            ));
+        }
+        assert_eq!(orientation(b"not a png"), Orientation::Normal);
+    }
+
+    /// The upright size passes the limits: a 5 × 3 image turned is 3 × 5,
+    /// past limits 5 wide and 3 high.
+    #[test]
+    fn a_quarter_turn_is_checked_against_the_limits() {
+        let limits = Limits {
+            max_width: 5,
+            max_height: 3,
+            max_bytes: 60,
+        };
+        let (_, _, six, _) = ORIENTED[5];
+        assert!(decode_stored(six, &limits).is_ok());
+        assert_eq!(
+            decode(six, &limits),
+            Err(ImageError::TooLarge {
+                width: 3,
+                height: 5,
+                limits
+            })
+        );
     }
 
     #[test]
