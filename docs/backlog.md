@@ -8,7 +8,8 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 infr (`infr serve`, Gemma 4 image input) will depend on a published
 `crcbl-image` behind an optional feature, decoding PNG/JPEG/WebP/BMP bytes from
 OpenAI `image_url` data URIs and resizing them for a vision encoder. It needs
-only the version number once 1 and 2 ship; no reply to infr is owed otherwise.
+only the version number once 1, 2 and 4 ship; no reply to infr is owed
+otherwise.
 
 1. **A bicubic filter beside Lanczos-3, Lanczos staying the default.** infr must
    match llama.cpp's Gemma 4 preprocessing, `resize_pillow` in
@@ -33,7 +34,20 @@ only the version number once 1 and 2 ship; no reply to infr is owed otherwise.
    by name). Do it only if cheap (LZW plus the palette), else record it here as
    declined with the reason.
 
-Not wanted: float output, EXIF orientation, CMYK JPEG.
+4. **Normalised float output** (the user, 2026-11-26: so infr need not convert
+   RGBA8 itself; infr had listed it as not needed). The shape to match is
+   llama.cpp's `clip_image_f32` in `tools/mtmd/clip-impl.h`: interleaved RGB,
+   alpha dropped, each channel `u8 as f32 / 255.0` in `f32`, then
+   `(v - mean[c]) / std[c]` with the model's per-channel mean and std
+   (`clip_image_f32::from_u8` and `normalize`). So an entry point taking an
+   `Rgba8Image`, `mean: [f32; 3]` and `std: [f32; 3]` and returning `Vec<f32>`
+   of `width * height * 3`; planar (CHW) is not needed for llama.cpp parity. Not
+   verified: how llama.cpp's loader drops alpha (stb_image asked for three
+   channels discards it, it does not composite onto a background); check that
+   before deciding what a transparent pixel becomes. infr is told the version
+   when this ships alongside 1 and 2.
+
+Not wanted: EXIF orientation, CMYK JPEG.
 
 ## Dependency majors waiting (0.20.0 cut, 2026-11-12)
 
