@@ -8,7 +8,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 infr (`infr serve`, Gemma 4 image input) will depend on a published
 `crcbl-image` behind an optional feature, decoding PNG/JPEG/WebP/BMP bytes from
 OpenAI `image_url` data URIs and resizing them for a vision encoder. It needs
-only the version number once 1, 2 and 4 ship; no reply to infr is owed
+only the version number once 1, 2, 4 and 5 ship; no reply to infr is owed
 otherwise.
 
 1. **A bicubic filter beside Lanczos-3, Lanczos staying the default.** infr must
@@ -47,7 +47,26 @@ otherwise.
    before deciding what a transparent pixel becomes. infr is told the version
    when this ships alongside 1 and 2.
 
-Not wanted: EXIF orientation, CMYK JPEG.
+5. **EXIF orientation, applied by default with a way to turn it off** (the user,
+   2026-11-26: implement it anyway; infr opts out, since llama.cpp does not
+   apply it and parity needs the stored orientation). Today `jpeg.rs`'s module
+   doc says orientation is not applied, and nothing in the crate reads EXIF.
+   Where the tag lives: JPEG `APP1` with an `Exif\0\0` header, PNG's `eXIf`
+   chunk, WebP's `EXIF` chunk (flagged in `VP8X`); BMP has none. Read tag
+   `0x0112` from IFD0 of the TIFF structure (either byte order), values 1–8 as
+   the eight flips and quarter turns; anything else or a malformed block is
+   treated as 1, not an error, as browsers do. Open shape questions: an option
+   on decode (a field beside `Limits`, or a decode-options struct) versus a
+   separate `orientation()` reader plus an `orient(image, o)` transform the
+   caller applies; and the header-only `dimensions` of item 2 must say whether
+   it reports the stored or the displayed size (orientations 5–8 swap them),
+   most simply by returning the orientation with the size. Default-on changes
+   what every existing caller gets (album art, icons; the in-workspace callers
+   of `jpeg::decode`, `png::decode` and `webp::decode`), a breaking change for
+   the changelog; pre-1.0 that is a minor bump. Rotation happens under the same
+   `Limits` (a quarter turn swaps the sides the caps are checked against).
+
+Not wanted: CMYK JPEG.
 
 ## Dependency majors waiting (0.20.0 cut, 2026-11-12)
 
