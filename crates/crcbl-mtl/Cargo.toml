@@ -246,7 +246,7 @@ crcbl-shaders = { path = "../crcbl-shaders" }
 # through another consumer of `objc2-metal`, and the lock gained only this
 # crate's edge to it.
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }
-objc2 = "0.6.4"
+objc2 = "0.6.5"
 # `CGSize`, and only `CGSize`: `CAMetalLayer::setDrawableSize:` is how the seam's
 # extent obligation is discharged, and `drawableSize` is how `current_extent` is
 # answered. `CFCGTypes` is the feature the geometry types live behind; `objc2` is

@@ -39,7 +39,7 @@ crcbl-core = { workspace = true }
 # rules in `docs/notes/backends.md` reject for the shell. Gating it keeps the wasm
 # build graph at *zero* third-party crates.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-cpal = "0.18.1"
+cpal = "0.18.2"
 
 # The listener tests build a camera with `glam::camera::rh`, the construction the
 # renderer's `Camera::view` uses, to prove the ears match the eyes. `glam` is

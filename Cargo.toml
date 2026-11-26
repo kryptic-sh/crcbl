@@ -23,7 +23,7 @@ rust-version = "1.98"
 # a dependency of the `crcbl-shell` backend that speaks to it. Behind the
 # `accesskit` feature of `crcbl-shell` and `crcbl-ui`, approved by the owner
 # on 2026-10-16.
-accesskit = "0.25.1"
+accesskit = "0.25.2"
 # The one sanctioned binding, per the HAL rules in `docs/notes/backends.md`:
 # `crcbl-vk` is the only crate that may name it. Default features keep
 # `loaded`, which is `Entry::load()` — a `dlopen` of `libvulkan.so.1` at
@@ -31,7 +31,7 @@ accesskit = "0.25.1"
 # NOT enabled; see `crates/crcbl-vk/src/lib.rs` for the argument, which is the
 # same one `crcbl-shell` makes for libwayland-client and libxcb.
 ash = "0.38"
-bitflags = "2.9"
+bitflags = "2.13"
 glam = "0.34"
 # glTF 2.0 import (`crcbl-scene`). `default-features = false` is load-bearing,
 # and is the shape `bevy_gltf` uses for the same crate: the default `import`
@@ -83,13 +83,13 @@ getrandom = "0.4.3"
 # `rand_core` 0.10 unconditionally, which `deny.toml` skips by exact version.
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
 hmac = { version = "0.13.0", features = ["zeroize"] }
-sha2 = { version = "0.11.0", default-features = false }
+sha2 = { version = "0.11.2", default-features = false }
 x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
 log = "0.4"
 # Golden-image I/O for `crcbl-golden`; see that crate's manifest for why it is
 # a dependency rather than a hand-rolled encoder.
 png = "0.18"
-proptest = "1.9"
+proptest = "1.12"
 # The proc-macro trio, behind `crcbl-reflect-derive` and nothing else. Added by
 # the slice that first needs to read a type's fields at compile time —
 # `#[derive(Reflect)]`, for `docs/plan/08-editor.md`'s property panel — and every
@@ -101,7 +101,7 @@ proptest = "1.9"
 # writes an impl and nothing else.
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
-syn = "3.0.5"
+syn = "3.0.10"
 # Randomness seam (`crcbl-rand`). `rand_chacha` is the portable ChaCha PRNG
 # (ChaCha8 for the deterministic `Rng`, ChaCha20 for the wasm entropy CSPRNG);
 # `rand_core` is the `RngCore`/`SeedableRng` traits it plugs into. Pinned to the
@@ -120,7 +120,7 @@ rand_core = { version = "0.9", default-features = false }
 # writer needs — `ron::ser::PrettyConfig` with a fixed struct order and stable
 # float formatting — is in the base crate, which is why nothing here is hand
 # rolled.
-ron = "0.12.2"
+ron = "0.12.3"
 thiserror = "2.0"
 # Font tables. `crcbl-ui` parses and hints faces with it and `crcbl-font` reads
 # their names and weights, through this one entry so the two always read a face
@@ -130,7 +130,7 @@ skrifa = { version = "0.50.0", default-features = false, features = ["std"] }
 # OpenType shaping, HarfBuzz's Rust port: `crcbl-ui` shapes its parsed text
 # with it. Default features are `std` alone, kept explicit beside `skrifa`'s so
 # the two agree on the float backend; `icu` and `libm` stay off.
-harfrust = { version = "0.16.0", default-features = false, features = ["std"] }
+harfrust = { version = "0.16.1", default-features = false, features = ["std"] }
 # Unicode text segmentation for `crcbl-ui`'s text, approved by the owner on
 # 2026-10-19: line break opportunities (UAX #14), extended grapheme clusters
 # and word boundaries (UAX #29), and the bidirectional algorithm (UAX #9).
@@ -141,8 +141,8 @@ unicode-segmentation = "1.13.3"
 # files, dirs for platform-standard config/data paths.
 serde = { version = "1", features = ["derive"] }
 # Vulkan ICD manifests, which `crcbl-vk` reads to load a driver directly.
-serde_json = "1.0.151"
-toml = "1.1"
+serde_json = "1.0.154"
+toml = "1.2"
 dirs = "7.0"
 
 # Internal crates are pinned here too, so a member never spells out a path more
