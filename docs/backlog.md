@@ -3,18 +3,6 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## `crcbl-image` for infr's vision input (requested 2026-11-26)
-
-infr (`infr serve`, Gemma 4 image input) will depend on a published
-`crcbl-image` behind an optional feature, decoding PNG/JPEG/WebP/BMP bytes from
-OpenAI `image_url` data URIs and resizing them for a vision encoder.
-`resize::resize_pillow`, header-only `dimensions` with `format::sniff`, the
-`tensor` float output, EXIF orientation (`decode_stored` for llama.cpp parity),
-CMYK/YCCK JPEG, GIF and `jpeg::decode_as_stb_image` have landed (unreleased).
-Bounding JPEG's work by input size (the user's call, 2026-11-26) has landed too,
-and all of it ships in 0.21.0; infr is told the version when it is published.
-Delete this entry then.
-
 ## `decode_as_stb_image` pays for its work accounting on noisy files (2026-11-26)
 
 Quiet-window A/B, 2026-11-26 (load 1.3, other sessions paused, minimum of 7
@@ -105,9 +93,9 @@ they now get an image). Fix: check the intermediate with `limits.rgba_bytes` as
 
 The user's call: every error type in the project derives `crcbl_error::Error`,
 our own, and `thiserror` leaves the workspace; taking it on was an oversight.
-**Order:** after the `crcbl-image` infr release and notice, and before the
-`crcbl-image` self-hosting below (which then needs nothing of its own for
-errors).
+**Order:** next (0.21.0 shipped infr's `crcbl-image` work and infr was told on
+2026-11-26), and before the `crcbl-image` self-hosting below (which then needs
+nothing of its own for errors).
 
 - **What it must cover**, counted on 2026-11-26 over `crates/` with grep (not
   re-counted since): `thiserror` in 25 manifests, about 83 derives, 494
@@ -134,13 +122,13 @@ errors).
 ## `crcbl-image` with no external crates (raised 2026-11-26)
 
 The user asks whether `crcbl-image` can be entirely this project's own code.
-**Start only after the infr items above are released (a published version on
-crates.io) and infr has been told the version.** Its external dependencies
-today, from its manifest: `png` (the PNG decoder and `png::encode`, shared with
-`crcbl-sprite`, `crcbl-golden` and `crcbl-scene`), `thiserror` (always on), and
-for the `svg-text` feature `skrifa` (font outlines and metrics), `harfrust`
-(shaping) and `unicode-bidi` (UAX #9). `crcbl-font` is in the workspace and does
-not count. The first step is a feasibility write-up per dependency, not code:
+**Start after the `crcbl-error` work above** (infr's items shipped in 0.21.0 and
+infr was told on 2026-11-26). Its external dependencies today, from its
+manifest: `png` (the PNG decoder and `png::encode`, shared with `crcbl-sprite`,
+`crcbl-golden` and `crcbl-scene`), `thiserror` (always on), and for the
+`svg-text` feature `skrifa` (font outlines and metrics), `harfrust` (shaping)
+and `unicode-bidi` (UAX #9). `crcbl-font` is in the workspace and does not
+count. The first step is a feasibility write-up per dependency, not code:
 
 - `thiserror`: covered by `crcbl-error` above, not by this crate.
 - `png`: an inflate (RFC 1951) and zlib wrapper, the five filters, Adam7, every
