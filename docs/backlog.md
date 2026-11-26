@@ -154,6 +154,20 @@ also resolves `windows-core` 0.62. Moving `crcbl-mixer` alone would put two
 copies in the tree, which `cargo deny` refuses, and would mix 0.62 interfaces
 with 0.100 traits. Move it when `windows` (and `cpal`) do.
 
+## The sway e2e F11 step fails intermittently on CI (2026-11-27)
+
+`wayland e2e (nested sway)` failed with "F11 did not leave the sandbox
+borderless at 1920x1080" on `1320d71fd` (run 45794429002, a docs-only commit)
+and on `989a30dd3` (run 45906490550, a taffy and rand dependency bump that
+touches no shell code); `x11 e2e (Xvfb)` failed beside it on the first run, with
+"timed out after 20s waiting for a reconfigure at 640x360". In the sway run the
+sandbox's own log shows the window going borderless with a 1920x1080 swapchain,
+yet its exit summary reports 1280x720, so the size the harness checks lagged the
+mode change. **Suspect, unverified:** the configure-ordering race described
+under _Sway loses a `resize set` sent while it waits for the commit of the one
+before_, here between F11's borderless configure and the window's close. Not
+investigated beyond the two logs.
+
 ## `a_second_guard_on_one_thread_nests_instead_of_waiting` failed once (2026-11-18)
 
 `crcbl`'s
