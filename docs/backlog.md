@@ -11,8 +11,23 @@ OpenAI `image_url` data URIs and resizing them for a vision encoder.
 `resize::resize_pillow`, header-only `dimensions` with `format::sniff`, the
 `tensor` float output, EXIF orientation (`decode_stored` for llama.cpp parity),
 CMYK/YCCK JPEG, GIF and `jpeg::decode_as_stb_image` have landed (unreleased).
-Bounding JPEG's work by input size (the user's call, 2026-11-26) has landed too.
-What is left is the release and telling infr its version number.
+Bounding JPEG's work by input size (the user's call, 2026-11-26) has landed too,
+and all of it ships in 0.21.0; infr is told the version when it is published.
+Delete this entry then.
+
+## `decode_as_stb_image` pays for its work accounting on noisy files (2026-11-26)
+
+Quiet-window A/B, 2026-11-26 (load 1.3, other sessions paused, minimum of 7
+decodes over 4 interleaved rounds, release builds, against c236024d before the
+work bound): the default decoder is faster or level on every file tried, but the
+stb flavour is 2–3% slower on baseline files and 6–10% slower on noisy
+restart-heavy and 100-scan files (`r_noise`, `s_noise`), while progressive files
+are 14–24% faster. The work-bound implementer's elimination test put about half
+of the noisy-file cost in the per-take made-up-bit counting in
+`jpeg/stb/stream.rs` and the rest in the nonzero masks and code shape. The
+c5e0f64e commit message's "no slower than before" is wrong for these files (stb
+mode had not been released, so no released caller regressed). Worth a profile
+when the stb path matters for speed.
 
 ## `crcbl-image` EXIF slice leftovers (2026-11-26)
 
@@ -141,12 +156,13 @@ not count. The first step is a feasibility write-up per dependency, not code:
   workspace's text stack in-house, which is its own project. This needs the
   user's call.
 
-## Dependency majors waiting (0.20.0 cut, 2026-11-12)
+## Dependency majors waiting (0.21.0 cut, 2026-11-26)
 
 `cargo update` stays within each requirement, so these newer majors were left
-for their own change: `harfrust` 0.16, `skrifa` 0.50, `taffy` 0.15 and
-`rand_core`/`rand_chacha` 0.10 (pinned on purpose; see the workspace manifest's
-randomness comment). `windows-core` 0.100 is transitive, through `cpal`.
+for their own change: `harfrust` 0.16, `skrifa` 0.50, `taffy` 0.16 (0.15 at the
+0.20.0 cut) and `rand_core`/`rand_chacha` 0.10 (pinned on purpose; see the
+workspace manifest's randomness comment). `windows-core` 0.100 is transitive,
+through `cpal`.
 
 **`taffy` 0.15 (Dependabot PR #32, left open 2026-11-18)** changes the layout
 traits, so `crcbl-ui` stops compiling (CI on the PR: 4 errors, all in
