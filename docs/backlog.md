@@ -11,9 +11,8 @@ OpenAI `image_url` data URIs and resizing them for a vision encoder.
 `resize::resize_pillow`, header-only `dimensions` with `format::sniff`, the
 `tensor` float output, EXIF orientation (`decode_stored` for llama.cpp parity),
 CMYK/YCCK JPEG, GIF and `jpeg::decode_as_stb_image` have landed (unreleased).
-The release, and the version number for infr, wait on bounding JPEG's work by
-input size (the user's call, 2026-11-26; see "JPEG work is not bounded by input
-size" below). No other reply to infr is owed.
+Bounding JPEG's work by input size (the user's call, 2026-11-26) has landed too.
+What is left is the release and telling infr its version number.
 
 ## `crcbl-image` EXIF slice leftovers (2026-11-26)
 
@@ -39,18 +38,20 @@ uses them. Not investigated further.
 
 ## `crcbl-image` JPEG: pre-existing findings from the stb review (2026-11-26)
 
-- **JPEG work is not bounded by input size: every scan walks every MCU.**
-  Measured by the stb re-review (2026-11-26, load not recorded): an 8192 by 8192
-  three-component frame under `Limits::DEFAULT` with 100 empty scans is a 1.5 KB
-  file that costs 6.5 s in `decode` and 4.8 s in `decode_as_stb_image` (real
-  stb_image: 8.8 s), about 45 ms per 14-byte scan, so roughly 3 s of CPU per KB,
-  linear in the file. A server such as infr's is exposed; until this is fixed,
-  infr should pass `Limits` sized to the largest image it accepts, since cost
-  scales with frame area. Options: a cap on scans (libjpeg-turbo's
-  `djpeg -maxscan`), a budget on scans times blocks, or ending a scan once its
-  entropy data is exhausted (harder for the stb flavour, whose reads past the
-  end are defined as zeros). Pick one that keeps stb parity on real files, and
-  test both decoders.
+- **The default decoder reads zeros to the end of a truncated scan**, where
+  libjpeg-turbo sets `insufficient_data` and leaves the rest of the restart
+  interval undecoded. On 43 scans cut short with an EOI appended, which both
+  decode, 36 differed from `djpeg` (measured 2026-11-26 by the work-bound
+  implementer; files not kept). Fix: stop decoding the interval once the data
+  runs out, as libjpeg-turbo does, and test against `djpeg`.
+- **Files damaged in several scans are refused** by the JPEG work bound
+  (`TooMuchWork`, made-up reads): the user chose the strict allowance on
+  2026-11-26, one frame's made-up reads plus a share per real byte, since a file
+  damaged in many scans is indistinguishable from the attack. Measured on the
+  review's synthetic set (real files with k scans shortened): about 8.5% refused
+  that decoded before, 20 of them stb-determined. A file cut short at one point
+  was never refused (0 of 1440). The knob is `PADDED_READS_PER_ENTROPY_BYTE` in
+  `crates/crcbl-image/src/jpeg/work.rs`.
 - **The default decoder differs from `djpeg` on some YCbCr files**: 24 of the
   reviewer's generated files, unchanged since before the stb slice; one has luma
   sampled 1 by 2. The "same pixels as libjpeg-turbo" claim is therefore too wide

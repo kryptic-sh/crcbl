@@ -42,7 +42,10 @@ use crate::{ImageError, Limits};
 /// repeating the height; a baseline file cut short, which reads on as
 /// zeros; bytes, an unknown marker, and a Huffman table of more than 256
 /// codes (from the review), each after the last scan of a baseline file,
-/// where stb_image stops with every block written.
+/// where stb_image stops with every block written; and a mutation from the
+/// second review's corpus, a 9 × 9 progressive file damaged in more than
+/// one scan, each reading the rest of itself from made-up bits, which only
+/// the work bound's allowance for each entropy-coded byte lets through.
 macro_rules! stb_fixture {
     ($name:literal) => {
         (
@@ -60,7 +63,7 @@ macro_rules! stb_fixture {
     };
 }
 
-const STB_FIXTURES: [(&str, &[u8], &[u8]); 42] = [
+const STB_FIXTURES: [(&str, &[u8], &[u8]); 43] = [
     stb_fixture!("baseline-444-17x9"),
     stb_fixture!("baseline-422-33x7"),
     stb_fixture!("baseline-420-17x9"),
@@ -98,6 +101,7 @@ const STB_FIXTURES: [(&str, &[u8], &[u8]); 42] = [
     stb_fixture!("junk-after-last-scan"),
     stb_fixture!("marker-after-last-scan"),
     stb_fixture!("huffman-past-256-after-scans"),
+    stb_fixture!("damaged-in-several-scans"),
     stb_fixture!("narrow-420", shared),
     stb_fixture!("baseline-422", shared),
     stb_fixture!("cmyk-adobe", shared),

@@ -77,6 +77,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stb output would depend on memory stb never wrote is refused as `Unsupported`.
   It is the JPEG step of `tensor`'s llama.cpp recipe.
 
+- **`crcbl-image`: JPEG decoding work is bounded by the data present.** Both
+  JPEG decoders charge their entropy-decoding work as they go and refuse, as the
+  new `ImageError::TooMuchWork { width, height, bound }` naming the `WorkBound`
+  crossed, a file with more than `jpeg::MAX_SCANS` scans, whose scans would walk
+  more blocks than its entropy-coded bytes account for, or that would read more
+  made-up bits past the end of its data than a file cut short needs. A few KB of
+  empty or EOB-only scans claiming a large frame no longer buys seconds to
+  minutes of CPU. Every real encoder's output measured still decodes; a file
+  damaged in several scans can be refused.
+
 ### Changed
 
 - **Breaking: `crcbl-image`'s `png`, `jpeg` and `webp` `decode` apply the EXIF
@@ -100,6 +110,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   decoding it.** A file with two faults may report a different one first, and a
   zero-sized lossy frame inside a `VP8X` canvas is now `Malformed` (it does not
   match the canvas) rather than `Empty`.
+
+- **`crcbl-image`: progressive JPEG refinement visits only nonzero coefficients
+  in its end-of-band runs**, so a run no longer walks every coefficient of every
+  block. Progressive frames keep 8 bytes a block for this, a sixteenth more,
+  counted against the same `jpeg::coefficient_allowance`.
 
 ### Fixed
 

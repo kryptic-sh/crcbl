@@ -19,6 +19,11 @@
 //! held: a block it returns uncleared, an AC refinement reading one (the
 //! coefficients it finds nonzero decide how many bits it reads), and a
 //! progressive file it stops decoding early, which it never transforms.
+//!
+//! Apart from that, a file whose scans would do more work than their data
+//! allows is refused as [`ImageError::TooMuchWork`], whether stb_image's
+//! output for it is determined or not: a resource limit, counted as the
+//! scans are walked (see the [work bound](super#work-bounded-by-the-input)).
 
 mod entropy;
 mod pixels;
@@ -29,7 +34,7 @@ pub(super) mod tests;
 use entropy::{Band, Corrupt, Huffman, dezigzag};
 use stream::{NO_MARKER, Stream};
 
-use super::{Frame, malformed, read_frame, unsupported};
+use super::{Frame, Work, malformed, read_frame, unsupported};
 use crate::{ImageError, Limits, Rgba8Image};
 
 /// The colour markers `load_jpeg_image` converts by, as stb_image leaves
@@ -53,8 +58,13 @@ fn uncleared(why: &str) -> ImageError {
     ))
 }
 
-/// Decodes a JPEG as stb_image does; see [`super::decode_as_stb_image`].
-pub(super) fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+/// Decodes a JPEG as stb_image does, its entropy decoding accounted in
+/// `work`; see [`super::decode_as_stb_image`].
+pub(super) fn decode(
+    bytes: &[u8],
+    limits: &Limits,
+    work: &mut Work,
+) -> Result<Rgba8Image, ImageError> {
     let mut jpeg = Jpeg::new(bytes);
     let mut frame = jpeg.decode_header(limits)?;
     jpeg.cleared = frame
@@ -62,7 +72,7 @@ pub(super) fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageE
         .iter()
         .map(|c| vec![false; c.blocks_wide * c.blocks_high])
         .collect();
-    let ending = jpeg.decode_image(&mut frame)?;
+    let ending = jpeg.decode_image(&mut frame, work)?;
     if frame.progressive && ending == Ending::Stopped {
         return Err(unsupported(
             "a progressive JPEG stb_image stops decoding before its end, so never transforms",
@@ -318,12 +328,12 @@ impl<'a> Jpeg<'a> {
     /// `stbi__decode_jpeg_image` after the header: scans, `DNL` markers and
     /// other segments to the end-of-image marker, or to the first marker
     /// stb_image stops at.
-    fn decode_image(&mut self, frame: &mut Frame) -> Result<Ending, ImageError> {
+    fn decode_image(&mut self, frame: &mut Frame, work: &mut Work) -> Result<Ending, ImageError> {
         let mut m = self.stream.get_marker();
         while m != 0xd9 {
             if m == 0xda {
                 let scan = self.process_scan_header(frame).map_err(refused)?;
-                self.parse_entropy_coded_data(frame, &scan)?;
+                self.parse_entropy_coded_data(frame, &scan, work)?;
                 if self.stream.marker == NO_MARKER {
                     self.stream.marker = self.stream.skip_junk_at_end();
                 }
@@ -436,15 +446,39 @@ impl<'a> Jpeg<'a> {
         &mut self,
         frame: &mut Frame,
         scan: &Scan,
+        work: &mut Work,
     ) -> Result<(), ImageError> {
-        self.reset();
         // A scan of one component goes block by block over its own
         // samples; an interleaved one over the MCU grid.
-        if let [n] = scan.order[..] {
+        let one = if let [n] = scan.order[..] {
             let component = &frame.components[n];
-            let (w, h) = (component.width.div_ceil(8), component.height.div_ceil(8));
+            Some((n, component.width.div_ceil(8), component.height.div_ceil(8)))
+        } else {
+            None
+        };
+        let blocks = match one {
+            Some((_, w, h)) => w * h,
+            None => {
+                let per_mcu: usize = scan
+                    .order
+                    .iter()
+                    .map(|&n| frame.components[n].h * frame.components[n].v)
+                    .sum();
+                frame.mcus_wide * frame.mcus_high * per_mcu
+            }
+        };
+        work.begin_scan(frame, self.stream.scan_data(), blocks as u64)?;
+        self.reset();
+        // The blocks walked: all of them, unless a restart interval with no
+        // marker after it stops the scan early.
+        let mut walked = 0u64;
+        if let Some((n, w, h)) = one {
             'blocks: for j in 0..h {
                 for i in 0..w {
+                    if work.needs_block(self.stream.past_data()) {
+                        work.block(self.stream.past_data(), self.stream.made_up_reads())?;
+                    }
+                    walked += 1;
                     self.decode_unit_block(frame, n, (i, j), scan.band, false)?;
                     if self.stops_here() {
                         break 'blocks;
@@ -460,6 +494,10 @@ impl<'a> Jpeg<'a> {
                     for y in 0..v {
                         for x in 0..h {
                             let at = (i * h + x, j * v + y);
+                            if work.needs_block(self.stream.past_data()) {
+                                work.block(self.stream.past_data(), self.stream.made_up_reads())?;
+                            }
+                            walked += 1;
                             self.decode_unit_block(frame, n, at, scan.band, true)?;
                         }
                     }
@@ -469,7 +507,7 @@ impl<'a> Jpeg<'a> {
                 }
             }
         }
-        Ok(())
+        work.end_scan(walked, self.stream.made_up_reads())
     }
 
     /// One block of component `n` at `(bx, by)` in its blocks, as the scan
@@ -485,11 +523,32 @@ impl<'a> Jpeg<'a> {
         band: Band,
         interleaved: bool,
     ) -> Result<(), ImageError> {
+        // A band's first pass inside an end-of-band run touches nothing in
+        // the block, as `decode_block_prog_ac` would find: the commonest
+        // block of a progressive file, so it is passed before the block is
+        // found.
+        let first_pass = frame.progressive && !interleaved && band.start != 0 && band.high == 0;
+        if first_pass && self.eob_run != 0 {
+            self.eob_run -= 1;
+            return Ok(());
+        }
         let component = &mut frame.components[n];
         let block = by * component.blocks_wide + bx;
         let data: &mut [i16; 64] = (&mut component.coefficients[block * 64..block * 64 + 64])
             .try_into()
             .map_err(|_| malformed("a block outside its component"))?;
+        // A sequential frame keeps no masks and never refines; its scratch
+        // mask is written and dropped. A progressive one always has one a
+        // block.
+        let mut sequential_mask = 0;
+        let nonzero = if frame.progressive {
+            component
+                .nonzero
+                .get_mut(block)
+                .ok_or_else(|| malformed("a progressive block without its nonzero mask"))?
+        } else {
+            &mut sequential_mask
+        };
         let state = &mut self.components[n];
         let cleared = &mut self.cleared[n][block];
         if !frame.progressive {
@@ -500,16 +559,30 @@ impl<'a> Jpeg<'a> {
             *cleared = true;
         } else if interleaved || band.start == 0 {
             let table = &self.huff_dc[state.hd];
-            entropy::decode_block_prog_dc(&mut self.stream, data, table, &mut state.dc_pred, band)
-                .map_err(refused)?;
+            let coefficients = (data, nonzero);
+            entropy::decode_block_prog_dc(
+                &mut self.stream,
+                coefficients,
+                table,
+                &mut state.dc_pred,
+                band,
+            )
+            .map_err(refused)?;
             *cleared |= band.high == 0;
         } else {
             if band.high != 0 && !*cleared {
                 return Err(uncleared("an AC refinement reading"));
             }
             let table = &self.huff_ac[state.ha];
-            entropy::decode_block_prog_ac(&mut self.stream, data, table, band, &mut self.eob_run)
-                .map_err(refused)?;
+            let coefficients = (data, nonzero);
+            entropy::decode_block_prog_ac(
+                &mut self.stream,
+                coefficients,
+                table,
+                band,
+                &mut self.eob_run,
+            )
+            .map_err(refused)?;
         }
         Ok(())
     }

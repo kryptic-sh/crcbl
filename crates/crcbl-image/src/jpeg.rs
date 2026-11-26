@@ -137,21 +137,92 @@
 //!   refinement wrote, but nothing short of every start proves it, so they
 //!   are refused too.
 //!
+//! Apart from that, a file whose scans would do more work than their data
+//! allows is refused as [`ImageError::TooMuchWork`], determined or not, as
+//! the [work bound](#work-bounded-by-the-input) below says: a resource
+//! limit, like the frame's [`Limits`].
+//!
 //! # Hostile input
 //!
 //! The frame's size passes the caller's [`Limits`] before anything is sized
 //! from it, and the coefficient store is bounded by
 //! [`coefficient_allowance`], a share of the limit's bytes for each
 //! component. Entropy-coded data that
-//! runs into a marker early is read as zeros, as libjpeg does with a damaged
-//! scan; a file that ends before its end-of-image marker is
-//! [`ImageError::Malformed`].
+//! runs into a marker early is read as zeros to the end of the scan.
+//! libjpeg-turbo reads zeros only to the end of the MCU it is in and leaves
+//! the rest of the scan (to its next restart marker) undecoded, so such a
+//! file's pixels can differ from its. A file that ends before its
+//! end-of-image marker is [`ImageError::Malformed`] here.
+//!
+//! ## Work bounded by the input
+//!
+//! A scan can cover every block of the frame in a few bytes, or in none:
+//! both decoders read zeros past the end of a scan's data, so a scan with
+//! no data still decodes a whole frame, and a progressive one can skip any
+//! number of blocks with end-of-band runs. Work done from real data bounds
+//! itself, since each Huffman code, magnitude bit and correction bit read
+//! is at least one bit of the file. What does not is work done without
+//! bits, so both decoders count it as they go, block by block, and refuse
+//! the file as [`ImageError::TooMuchWork`] the moment it passes:
+//!
+//! * the blocks the scans walk, beyond one walk over the frame, against
+//!   800 for each entropy-coded byte they brought. In its end-of-band
+//!   tails a refinement visits only the coefficients it corrects, and
+//!   elsewhere at most a run's zeros between reads, so a block costs about
+//!   as much to walk in every kind of scan;
+//! * the reads of bits made up past the end of the scans' data, over the
+//!   whole file, against 128 for each block of the frame and 64 for each
+//!   byte. A read is a Huffman code with the magnitude or run bits after
+//!   it, or a lone sign, correction or refinement bit. The most one pass
+//!   reads in a block is 127, in a refinement (a code and a sign for each
+//!   new coefficient, a correction for each nonzero one, and an end of
+//!   band), so the share for each block lets every block be read once
+//!   from made-up bits, which is what a file cut short needs; the share
+//!   for each byte is for a file damaged in more than one scan. In a scan
+//!   charged at its end, reads are checked while the reader is past the
+//!   data; a restart starts it on the next interval's data, so reads made
+//!   up at the end of an interval may be refused only when the scan ends;
+//! * the scans, against [`MAX_SCANS`].
+//!
+//! Each counts what is done, not what a scan could do, so a scan stb_image
+//! stops early is charged for the blocks it walked. A file is refused
+//! when its scans would do more work than its data allows, whether or not
+//! its pixels are otherwise determined, and the refusal names the bound
+//! ([`WorkBound`](crate::WorkBound)).
+//!
+//! A real file stays under all three. Each component's first DC pass, or
+//! its sequential scan, codes every block it covers in at least one bit, so
+//! the bytes are at least an eighth of the frame's blocks, and with at most
+//! [`MAX_SCANS`] scans the walk past one frame is at most 99 frames: 792
+//! blocks a byte at the most. The closest a real encoder comes is
+//! jpegtran with a script of 100 scans, its own limit, one AC coefficient a
+//! scan, over a flat 8192 × 8192 grey frame (one bit a DC block, end-of-band
+//! runs for the rest): 742 blocks a byte. The same over flat colour comes
+//! to 367 at 4:2:0 and 248 at 4:4:4 (96 scans), libjpeg-turbo's own
+//! progressive script to 15 to 24, and baseline and restart-heavy files to
+//! under 1. A complete file reads no made-up bits. A file cut short reads
+//! what decoding the rest of its scan from zeros takes, at most a pass of
+//! reads for each block left. A file damaged in more than one scan takes
+//! that for each damaged scan, and each brought bytes; one whose damage
+//! would cost more than its bytes and one frame allow is refused.
+//!
+//! Other decoders cap the count of scans, which bounds passes but not the
+//! bytes behind them: Chrome's (Blink's `ProgressMonitor` in
+//! `jpeg_image_decoder.cc` aborts at scan 100), zune-jpeg's `max_scans`
+//! (100 by default), libjpeg-turbo's `djpeg -maxscans` and
+//! `TJPARAM_SCANLIMIT` (off by default; its fuzz targets set 100 for lossy
+//! images), and jpegtran's scan scripts (`MAX_SCANS`, 100). jpeg-decoder has
+//! no such cap, and Pillow bounds pixels only (`MAX_IMAGE_PIXELS`).
 
 mod libjpeg;
 mod stb;
+mod work;
+
+pub use work::MAX_SCANS;
 
 use crate::orientation::EXIF_IDENTIFIER;
 use crate::{ImageError, Limits, Orientation, Rgba8Image};
+use work::Work;
 
 /// The most bytes a frame of `components` components may decode its
 /// coefficients into under `limits`: two thirds of [`Limits::max_bytes`]
@@ -162,7 +233,9 @@ use crate::{ImageError, Limits, Orientation, Rgba8Image};
 /// that covers the padding to whole blocks. It scales with the components so
 /// a frame of fewer is held tighter: three get twice `max_bytes`, the bound
 /// before four-component frames were read, one gets two thirds of it, and
-/// four (CMYK) eight thirds.
+/// four (CMYK) eight thirds. A progressive frame also keeps eight bytes a
+/// block (a sixteenth more) for which of its coefficients are nonzero, and
+/// they count against the same allowance.
 #[must_use]
 pub fn coefficient_allowance(limits: &Limits, components: usize) -> usize {
     limits
@@ -250,6 +323,11 @@ struct Bits<'a> {
     acc: u32,
     count: u32,
     at_marker: bool,
+    /// Whether `acc` holds a byte made up past the marker or the end.
+    made_up_byte: bool,
+    /// The reads before it that used a made-up bit, for the [work
+    /// bound](Work).
+    padded_reads: u64,
 }
 
 impl<'a> Bits<'a> {
@@ -260,6 +338,8 @@ impl<'a> Bits<'a> {
             acc: 0,
             count: 0,
             at_marker: false,
+            made_up_byte: false,
+            padded_reads: 0,
         }
     }
 
@@ -296,6 +376,7 @@ impl<'a> Bits<'a> {
                     }
                 }
             };
+            self.made_up_byte = self.at_marker;
             self.acc = u32::from(byte);
             self.count = 8;
         }
@@ -303,12 +384,40 @@ impl<'a> Bits<'a> {
         (self.acc >> self.count) & 1
     }
 
+    /// Starts a read: a Huffman code, with the magnitude or run bits read
+    /// after it, or a lone bit. The read before it is counted in
+    /// `padded_reads` if any of its bits was made up: if its last bit was,
+    /// since within a restart interval every real byte comes before every
+    /// made-up one, and a read does not span a restart. A restart leaves
+    /// `made_up_byte` as it was, so the read before it is counted rightly.
+    fn begin_read(&mut self) {
+        // False for every read of real data, so the branch is all but free.
+        if self.made_up_byte {
+            self.padded_reads += 1;
+        }
+    }
+
+    /// The made-up reads so far, the one in progress (the last, between
+    /// blocks) included.
+    fn made_up_reads(&self) -> u64 {
+        self.padded_reads + u64::from(self.made_up_byte)
+    }
+
+    /// A lone bit, as one read.
+    fn read_bit(&mut self) -> u32 {
+        self.begin_read();
+        self.bit()
+    }
+
     fn bits(&mut self, n: u32) -> u32 {
         (0..n).fold(0, |value, _| (value << 1) | self.bit())
     }
 
-    /// T.81 F.2.2.3's `DECODE`.
+    /// T.81 F.2.2.3's `DECODE`, as one read. Inlined into the block
+    /// decoders, which call it for every symbol.
+    #[inline(always)]
     fn decode(&mut self, table: &Huffman) -> Result<u8, ImageError> {
+        self.begin_read();
         let mut code = self.bit() as i32;
         for length in 1..=16 {
             if code <= table.maxcode[length] {
@@ -400,7 +509,41 @@ struct Component {
     width: usize,
     height: usize,
     coefficients: Vec<i16>,
+    /// For a progressive frame, a mask for each block of which AC
+    /// coefficients are nonzero, bit `k` for zigzag position `k`: what lets
+    /// a refinement pass straight to the coefficients it corrects, rather
+    /// than walking every position of its band in every block. Empty for a
+    /// sequential frame, which never refines.
+    nonzero: Vec<u64>,
     dc_prediction: i32,
+}
+
+/// Records in a block's `nonzero` mask whether the coefficient at zigzag
+/// position `k` is now nonzero.
+fn mark(nonzero: &mut u64, k: usize, value: i16) {
+    let bit = 1 << k;
+    if value == 0 {
+        *nonzero &= !bit;
+    } else {
+        *nonzero |= bit;
+    }
+}
+
+/// The zigzag positions from `start` to `end` that a block's `nonzero` mask
+/// has set, in order: the coefficients a refinement corrects there.
+fn nonzero_between(nonzero: u64, start: usize, end: usize) -> impl Iterator<Item = usize> {
+    let mut left = if start > end {
+        0
+    } else {
+        nonzero & (u64::MAX >> (63 - end)) & (u64::MAX << start)
+    };
+    core::iter::from_fn(move || {
+        (left != 0).then(|| {
+            let k = left.trailing_zeros() as usize;
+            left &= left - 1;
+            k
+        })
+    })
 }
 
 /// What the markers before the first scan said.
@@ -455,10 +598,21 @@ pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
 /// # Errors
 ///
 /// [`ImageError::Empty`] or [`ImageError::TooLarge`] if the frame's size
-/// breaks `limits`, [`ImageError::Unsupported`] for a kind of JPEG listed in
-/// the [module docs](self), and [`ImageError::Malformed`] for anything that is
-/// not a well-formed JPEG.
+/// breaks `limits`, [`ImageError::TooMuchWork`] for scans that would do
+/// more work than their data allows (see [the module
+/// docs](self#work-bounded-by-the-input)), [`ImageError::Unsupported`] for
+/// a kind of JPEG listed in the [module docs](self), and
+/// [`ImageError::Malformed`] for anything that is not a well-formed JPEG.
 pub fn decode_stored(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
+    decode_stored_with(bytes, limits, &mut Work::default())
+}
+
+/// [`decode_stored`], its entropy decoding accounted in `work`.
+fn decode_stored_with(
+    bytes: &[u8],
+    limits: &Limits,
+    work: &mut Work,
+) -> Result<Rgba8Image, ImageError> {
     let mut tables = Tables::default();
     let (marker, segment, mut pos) = read_to_frame(bytes, &mut tables)?;
     let mut frame = read_frame(segment, marker == 0xc2, limits)?;
@@ -471,7 +625,7 @@ pub fn decode_stored(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageE
             0xc0..=0xc2 => return Err(malformed("a second frame")),
             0xda => {
                 colour.get_or_insert(tables.colour);
-                pos = read_scan(bytes, pos, segment, &mut frame, &tables, &mut eobrun)?;
+                pos = read_scan(bytes, pos, segment, &mut frame, &tables, &mut eobrun, work)?;
             }
             _ => read_segment(marker, segment, &mut tables)?,
         }
@@ -493,7 +647,10 @@ pub fn decode_stored(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageE
 /// # Errors
 ///
 /// [`ImageError::Empty`] or [`ImageError::TooLarge`] if the frame's size
-/// breaks `limits`, [`ImageError::Malformed`] for a file stb_image refuses,
+/// breaks `limits`, [`ImageError::TooMuchWork`] for scans that would do
+/// more work than their data allows, determined or not, as for
+/// [`decode_stored`],
+/// [`ImageError::Malformed`] for a file stb_image refuses,
 /// and [`ImageError::Unsupported`] for one whose stb_image result depends on
 /// memory it never wrote: one it stops decoding before every block it
 /// returns was decoded (at a marker it cannot read, at the end of a file
@@ -503,7 +660,7 @@ pub fn decode_stored(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageE
 /// first pass cleared. The [module docs](self#the-same-pixels-as-stb_image)
 /// say more.
 pub fn decode_as_stb_image(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
-    stb::decode(bytes, limits)
+    stb::decode(bytes, limits, &mut Work::default())
 }
 
 /// The width and height a JPEG's frame header gives, read without decoding
@@ -524,7 +681,8 @@ pub fn decode_as_stb_image(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, 
 /// caller's, or asking [`Limits::rgba_bytes`], is not quite [`decode`]'s
 /// whole check: [`decode`] also refuses as [`ImageError::TooLarge`] a frame
 /// whose coefficients, every component padded to whole MCUs at two bytes a
-/// coefficient, take more than [`coefficient_allowance`] — a small frame
+/// coefficient (and eight bytes a block more for a progressive one), take
+/// more than [`coefficient_allowance`] — a small frame
 /// with large sampling factors, whose padding outweighs its pixels.
 ///
 /// # Errors
@@ -715,7 +873,10 @@ fn read_frame(segment: &[u8], progressive: bool, limits: &Limits) -> Result<Fram
         .iter()
         .map(|&(_, h, v, _)| mcus_wide * h * mcus_high * v)
         .sum();
-    if blocks.saturating_mul(64 * 2) > coefficient_allowance(limits, components.len()) {
+    // Two bytes a coefficient, and for a progressive frame a nonzero mask of
+    // eight bytes a block.
+    let block_bytes = if progressive { 64 * 2 + 8 } else { 64 * 2 };
+    if blocks.saturating_mul(block_bytes) > coefficient_allowance(limits, components.len()) {
         return Err(ImageError::TooLarge {
             width: width as u32,
             height: height as u32,
@@ -735,6 +896,11 @@ fn read_frame(segment: &[u8], progressive: bool, limits: &Limits) -> Result<Fram
             width: (width * h).div_ceil(h_max),
             height: (height * v).div_ceil(v_max),
             coefficients: vec![0; mcus_wide * h * mcus_high * v * 64],
+            nonzero: if progressive {
+                vec![0; mcus_wide * h * mcus_high * v]
+            } else {
+                Vec::new()
+            },
             dc_prediction: 0,
         })
         .collect();
@@ -829,6 +995,7 @@ fn read_scan(
     frame: &mut Frame,
     tables: &Tables,
     eobrun: &mut u32,
+    work: &mut Work,
 ) -> Result<usize, ImageError> {
     let count = usize::from(
         *segment
@@ -913,6 +1080,13 @@ fn read_scan(
     } else {
         frame.mcus_wide * frame.mcus_high
     };
+    let scan_blocks = if count == 1 {
+        mcu_count
+    } else {
+        mcu_count * blocks_per_mcu
+    } as u64;
+    work.begin_scan(frame, (bytes, data_start), scan_blocks)?;
+    let reads_before = work.padded_reads();
     let contexts: Vec<BlockContext<'_>> = scan
         .components
         .iter()
@@ -921,6 +1095,7 @@ fn read_scan(
             index,
             dc: tables.dc[dc].as_ref(),
             ac: tables.ac[ac].as_ref(),
+            first_pass: frame.progressive && scan.start > 0 && scan.high == 0,
         })
         .collect();
     for mcu in 0..mcu_count {
@@ -933,6 +1108,9 @@ fn read_scan(
         }
         if count == 1 {
             let (x, y) = (mcu % own_blocks_wide, mcu / own_blocks_wide);
+            if work.needs_block(bits.at_marker) {
+                work.block(bits.at_marker, reads_before + bits.made_up_reads())?;
+            }
             decode_block(&mut bits, frame, &contexts[0], (x, y), eobrun)?;
         } else {
             let (mcu_x, mcu_y) = (mcu % frame.mcus_wide, mcu / frame.mcus_wide);
@@ -942,12 +1120,17 @@ fn read_scan(
                 for by in 0..v {
                     for bx in 0..h {
                         let at = (mcu_x * h + bx, mcu_y * v + by);
+                        if work.needs_block(bits.at_marker) {
+                            work.block(bits.at_marker, reads_before + bits.made_up_reads())?;
+                        }
                         decode_block(&mut bits, frame, context, at, eobrun)?;
                     }
                 }
             }
         }
     }
+    // A scan is walked whole here; its last block's reads count too.
+    work.end_scan(scan_blocks, reads_before + bits.made_up_reads())?;
     Ok(bits.end())
 }
 
@@ -959,6 +1142,9 @@ struct BlockContext<'a> {
     index: usize,
     dc: Option<&'a Huffman>,
     ac: Option<&'a Huffman>,
+    /// Whether the scan is a progressive band's first pass, whose blocks
+    /// inside an end-of-band run are passed untouched.
+    first_pass: bool,
 }
 
 /// One block's share of a scan, the block at `(x, y)` in its component.
@@ -970,6 +1156,13 @@ fn decode_block(
     eobrun: &mut u32,
 ) -> Result<(), ImageError> {
     let scan = context.scan;
+    // A band's first pass inside an end-of-band run touches nothing in the
+    // block: the commonest block of a progressive file, so it is passed
+    // before the block is found.
+    if context.first_pass && *eobrun > 0 {
+        *eobrun -= 1;
+        return Ok(());
+    }
     let component = &mut frame.components[context.index];
     let offset = (y * component.blocks_wide + x) * 64;
     let block: &mut [i16; 64] = (&mut component.coefficients[offset..offset + 64])
@@ -984,7 +1177,7 @@ fn decode_block(
             }
             component.dc_prediction = component.dc_prediction.wrapping_add(bits.signed(size));
             block[0] = (component.dc_prediction << scan.low) as i16;
-        } else if bits.bit() == 1 {
+        } else if bits.read_bit() == 1 {
             block[0] |= 1 << scan.low;
         }
         if frame.progressive {
@@ -993,11 +1186,38 @@ fn decode_block(
     }
     let table = context.ac.ok_or_else(|| malformed("no AC table"))?;
     let start = scan.start.max(1);
+    // A sequential frame keeps no masks and never refines. A progressive
+    // one always has one a block; only its AC passes touch it.
+    let nonzero = if frame.progressive {
+        Some(
+            component
+                .nonzero
+                .get_mut(offset / 64)
+                .ok_or_else(|| malformed("a progressive block without its nonzero mask"))?,
+        )
+    } else {
+        None
+    };
     if scan.high == 0 {
         let eobrun = frame.progressive.then_some(eobrun);
-        decode_ac_first(bits, table, block, start, scan.end, scan.low, eobrun)
+        decode_ac_first(
+            bits,
+            table,
+            (block, nonzero),
+            (start, scan.end),
+            scan.low,
+            eobrun,
+        )
     } else {
-        decode_ac_refine(bits, table, block, start, scan.end, scan.low, eobrun)
+        let nonzero = nonzero.ok_or_else(|| malformed("a refinement in a sequential frame"))?;
+        decode_ac_refine(
+            bits,
+            table,
+            (block, nonzero),
+            (start, scan.end),
+            scan.low,
+            eobrun,
+        )
     }
 }
 
@@ -1008,17 +1228,40 @@ fn decode_block(
 fn decode_ac_first(
     bits: &mut Bits<'_>,
     table: &Huffman,
+    (block, nonzero): (&mut [i16; 64], Option<&mut u64>),
+    band: (usize, usize),
+    low: u32,
+    eobrun: Option<&mut u32>,
+) -> Result<(), ImageError> {
+    match nonzero {
+        None => ac_first_pass::<false>(bits, table, block, band, low, eobrun).map(|_| ()),
+        Some(nonzero) => {
+            let (written, set) = ac_first_pass::<true>(bits, table, block, band, low, eobrun)?;
+            *nonzero = (*nonzero & !written) | set;
+            Ok(())
+        }
+    }
+}
+
+/// [`decode_ac_first`]'s band, for a progressive frame (keeping its mask)
+/// or a sequential one (which has none) as `PROGRESSIVE` says, so the
+/// sequential pass carries no mask work. Returns the zigzag positions it
+/// wrote and those of them now nonzero, gathered in registers and put in
+/// the block's mask once.
+fn ac_first_pass<const PROGRESSIVE: bool>(
+    bits: &mut Bits<'_>,
+    table: &Huffman,
     block: &mut [i16; 64],
-    start: usize,
-    end: usize,
+    (start, end): (usize, usize),
     low: u32,
     mut eobrun: Option<&mut u32>,
-) -> Result<(), ImageError> {
+) -> Result<(u64, u64), ImageError> {
+    let (mut written, mut set) = (0u64, 0u64);
     if let Some(eobrun) = eobrun.as_deref_mut()
         && *eobrun > 0
     {
         *eobrun -= 1;
-        return Ok(());
+        return Ok((written, set));
     }
     let mut k = start;
     while k <= end {
@@ -1041,19 +1284,23 @@ fn decode_ac_first(
         if k > end {
             return Err(malformed("a coefficient past its band"));
         }
-        block[ZIGZAG[k]] = (bits.signed(size) << low) as i16;
+        let value = (bits.signed(size) << low) as i16;
+        block[ZIGZAG[k]] = value;
+        if PROGRESSIVE {
+            written |= 1 << k;
+            set |= u64::from(value != 0) << k;
+        }
         k += 1;
     }
-    Ok(())
+    Ok((written, set))
 }
 
 /// A band's refinement pass: T.81 G.1.2.3, in the order libjpeg reads it.
 fn decode_ac_refine(
     bits: &mut Bits<'_>,
     table: &Huffman,
-    block: &mut [i16; 64],
-    start: usize,
-    end: usize,
+    (block, nonzero): (&mut [i16; 64], &mut u64),
+    (start, end): (usize, usize),
     low: u32,
     eobrun: &mut u32,
 ) -> Result<(), ImageError> {
@@ -1062,7 +1309,7 @@ fn decode_ac_refine(
     // A coefficient already nonzero takes one correction bit wherever the
     // scan passes it.
     let refine = |bits: &mut Bits<'_>, coefficient: &mut i16| {
-        if bits.bit() == 1 && *coefficient & plus == 0 {
+        if bits.read_bit() == 1 && *coefficient & plus == 0 {
             *coefficient = coefficient.wrapping_add(if *coefficient >= 0 { plus } else { minus });
         }
     };
@@ -1078,7 +1325,7 @@ fn decode_ac_refine(
                         "a refinement coefficient that is not a single bit",
                     ));
                 }
-                value = if bits.bit() == 1 { plus } else { minus };
+                value = if bits.read_bit() == 1 { plus } else { minus };
             } else if run != 15 {
                 *eobrun = 1 << run;
                 if run > 0 {
@@ -1102,17 +1349,16 @@ fn decode_ac_refine(
             }
             if value != 0 && k <= end {
                 block[ZIGZAG[k]] = value;
+                mark(nonzero, k, value);
             }
             k += 1;
         }
     }
     if *eobrun > 0 {
-        while k <= end {
-            let coefficient = &mut block[ZIGZAG[k]];
-            if *coefficient != 0 {
-                refine(bits, coefficient);
-            }
-            k += 1;
+        // The rest of the band's nonzero coefficients, from the mask: a
+        // correction keeps a coefficient nonzero, so the mask holds.
+        for k in nonzero_between(*nonzero, k, end) {
+            refine(bits, &mut block[ZIGZAG[k]]);
         }
         *eobrun -= 1;
     }
@@ -1124,6 +1370,7 @@ mod tests {
     use super::libjpeg::{cmyk_to_rgb, idct, ycc_to_rgb};
     use super::stb::tests::stb_fixture;
     use super::*;
+    use crate::WorkBound;
 
     /// Each fixture beside libjpeg-turbo's decode of it (through Pillow 12.3,
     /// `Image.open(…).convert("RGB")`), written by a script that draws a
@@ -1325,9 +1572,23 @@ mod tests {
     /// is 4 bytes, so only the coefficients decide.
     #[test]
     fn the_coefficient_bound_is_two_thirds_of_the_bytes_a_component() {
-        for (components, smallest) in [(1, 3072), (3, 1152), (4, 912)] {
+        // Sequential at 128 bytes a block, progressive at 136 with its
+        // nonzero mask.
+        for (progressive, components, smallest) in [
+            (false, 1, 3072),
+            (false, 3, 1152),
+            (false, 4, 912),
+            (true, 1, 3264),
+            (true, 3, 1224),
+            (true, 4, 969),
+        ] {
             let blocks = 16 + (components - 1);
-            assert_eq!(blocks * 128, smallest * 2 * components / 3, "{components}");
+            let block_bytes = if progressive { 136 } else { 128 };
+            assert_eq!(
+                blocks * block_bytes,
+                smallest * 2 * components / 3,
+                "{components}"
+            );
             let mut segment = vec![8, 0, 1, 0, 1, components as u8];
             for id in 0..components as u8 {
                 segment.extend_from_slice(&[id, if id == 0 { 0x44 } else { 0x11 }, 0]);
@@ -1338,12 +1599,12 @@ mod tests {
                 max_bytes,
             };
             assert!(
-                read_frame(&segment, false, &limits(smallest)).is_ok(),
+                read_frame(&segment, progressive, &limits(smallest)).is_ok(),
                 "{components} just inside"
             );
             assert!(
                 matches!(
-                    read_frame(&segment, false, &limits(smallest - 1)),
+                    read_frame(&segment, progressive, &limits(smallest - 1)),
                     Err(ImageError::TooLarge { .. })
                 ),
                 "{components} just outside"
@@ -1774,6 +2035,292 @@ mod tests {
                 height: 5,
                 limits
             })
+        );
+    }
+
+    /// FNV-1a over `bytes`: how the oracle harness and the generator script
+    /// fingerprint a file or its pixels.
+    fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
+        bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, byte| {
+            (h ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// The work-bound test files, built as the review's generators and the
+    /// scratch `gen.py` that checked them against stb_image build them;
+    /// each test pins its file's FNV-1a to that script's, so the oracle
+    /// results quoted are for these bytes.
+    mod work_files {
+        fn segment(marker: u8, body: &[u8]) -> Vec<u8> {
+            let mut bytes = vec![0xff, marker];
+            bytes.extend_from_slice(&(body.len() as u16 + 2).to_be_bytes());
+            bytes.extend_from_slice(body);
+            bytes
+        }
+
+        /// The start of a frame `side` square of `components` sampled
+        /// 1 × 1, every quantiser 1: sequential or progressive by `marker`.
+        fn head(side: u16, components: u8, marker: u8) -> Vec<u8> {
+            let mut bytes = vec![0xff, 0xd8];
+            bytes.extend(segment(0xdb, &[[0].as_slice(), &[1; 64]].concat()));
+            let [high, low] = side.to_be_bytes();
+            let mut frame = vec![8, high, low, high, low, components];
+            for c in 1..=components {
+                frame.extend_from_slice(&[c, 0x11, 0]);
+            }
+            bytes.extend(segment(marker, &frame));
+            // DC table 0: the one-bit code 0 is a difference of size 0.
+            bytes.extend(segment(
+                0xc4,
+                &[[0x00, 1].as_slice(), &[0; 15], &[0]].concat(),
+            ));
+            bytes
+        }
+
+        /// AC table 0 of one symbol, its code one bit, or sixteen to force
+        /// the slow lookup.
+        fn ac_table(symbol: u8, slow: bool) -> Vec<u8> {
+            let mut counts = [0u8; 16];
+            counts[if slow { 15 } else { 0 }] = 1;
+            segment(0xc4, &[[0x10].as_slice(), &counts, &[symbol]].concat())
+        }
+
+        /// `scans` interleaved progressive DC scans of three components
+        /// with no data.
+        pub(super) fn empty_scans(side: u16, scans: usize) -> Vec<u8> {
+            let mut bytes = head(side, 3, 0xc2);
+            for _ in 0..scans {
+                bytes.extend(segment(0xda, &[3, 1, 0, 2, 0, 3, 0, 0, 0, 0]));
+            }
+            bytes.extend_from_slice(&[0xff, 0xd9]);
+            bytes
+        }
+
+        /// Grey: one DC scan of real data, a bit a block, then `scans` AC
+        /// first scans of a byte for every 800 blocks, whose zero bits past
+        /// it decode as (run 0, size 1), 63 coefficients a block.
+        pub(super) fn ac_scans(side: u16, scans: usize, slow: bool) -> Vec<u8> {
+            let blocks = (usize::from(side) / 8).pow(2);
+            let mut bytes = head(side, 1, 0xc2);
+            bytes.extend(ac_table(0x01, slow));
+            bytes.extend(segment(0xda, &[1, 1, 0, 0, 0, 0]));
+            bytes.extend(vec![0; blocks.div_ceil(8)]);
+            for _ in 0..scans {
+                bytes.extend(segment(0xda, &[1, 1, 0, 1, 63, 0]));
+                bytes.extend(vec![0; blocks / 800 + 1]);
+            }
+            bytes.extend_from_slice(&[0xff, 0xd9]);
+            bytes
+        }
+
+        /// Grey: a DC scan of one real byte, the rest read past it, then a
+        /// restart interval of one MCU row and `scans` AC scans of one byte
+        /// whose zero bits are an end of band. stb_image stops each AC scan
+        /// at its first interval, which has no restart marker after it.
+        pub(super) fn walked_not_whole(side: u16, scans: usize) -> Vec<u8> {
+            let mut bytes = head(side, 1, 0xc2);
+            bytes.extend(ac_table(0x00, false));
+            bytes.extend(segment(0xda, &[1, 1, 0, 0, 0, 0]));
+            bytes.push(0);
+            bytes.extend(segment(0xdd, &(side / 8).to_be_bytes()));
+            for _ in 0..scans {
+                bytes.extend(segment(0xda, &[1, 1, 0, 1, 63, 0]));
+                bytes.push(0);
+            }
+            bytes.extend_from_slice(&[0xff, 0xd9]);
+            bytes
+        }
+    }
+
+    /// The scans of the review's hostile files, at sizes a test can walk;
+    /// the 8192 × 8192 versions were timed outside the tests. A file of 100
+    /// empty scans walks its frame once from padding, then is refused at
+    /// the first block of its second scan, in both decoders.
+    #[test]
+    fn empty_scans_walk_the_frame_once_then_are_refused() {
+        let bytes = work_files::empty_scans(1024, 100);
+        assert_eq!(fnv(bytes.iter().copied()), 0xffac_78c9_3b56_cb07);
+        let frame_blocks = 3 * 128 * 128;
+        for (name, result, work) in decode_both(&bytes) {
+            assert!(
+                matches!(
+                    result,
+                    Err(ImageError::TooMuchWork {
+                        bound: WorkBound::BlocksWalked { entropy_bytes: 0 },
+                        ..
+                    })
+                ),
+                "{name}: {result:?}"
+            );
+            assert_eq!((work.scans, work.walked), (2, frame_blocks + 1), "{name}");
+        }
+    }
+
+    /// The review's `ac2` and `slow2`: AC scans each decoding 63
+    /// coefficients a block from bits past one byte of data per 800 blocks,
+    /// by a one-bit code and by a sixteen-bit one. The blocks walked stay
+    /// within the bytes; the codes read from made-up bits do not, and refuse
+    /// the third AC scan (the fourth scan): 63 codes a block each, against
+    /// 128 a block for the frame. The same for either code length and in
+    /// both decoders.
+    #[test]
+    fn coefficients_decoded_past_the_data_are_bounded() {
+        for (slow, file_fnv) in [
+            (false, 0xaf5f_ed8d_96ae_238d),
+            (true, 0x17f4_d805_c5f0_4d1f),
+        ] {
+            let bytes = work_files::ac_scans(256, 99, slow);
+            assert_eq!(fnv(bytes.iter().copied()), file_fnv, "slow {slow}");
+            for (name, result, work) in decode_both(&bytes) {
+                assert!(
+                    matches!(
+                        result,
+                        Err(ImageError::TooMuchWork {
+                            bound: WorkBound::MadeUpReads { .. },
+                            ..
+                        })
+                    ),
+                    "{name}, slow {slow}: {result:?}"
+                );
+                // Refused in the course of the fourth scan, not at its end:
+                // the three before it are charged their blocks, it is not.
+                assert_eq!(
+                    (work.scans, work.walked),
+                    (4, 3 * 1024),
+                    "{name}, slow {slow}"
+                );
+                assert!(
+                    work.padded_reads > work::PADDED_READS_PER_BLOCK * 1024,
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    /// Blocks are charged as they are walked, not a whole scan up front:
+    /// stb_image stops each AC scan of this file after one MCU row, so it
+    /// walks 2624 blocks against an allowance of 1024 plus 800 for each of
+    /// its 51 bytes, where whole scans would be 52224. The three builds of
+    /// the oracle harness that fill stb_image's buffers with 0x00, 0x37 and
+    /// 0xc8 all gave the pixels pinned here, so the file is determined. The
+    /// default decoder refuses it for its missing restart markers. With one
+    /// scan more than [`MAX_SCANS`] it is refused for that.
+    #[test]
+    fn blocks_are_charged_as_they_are_walked() {
+        for (scans, file_fnv) in [(50, 0x510a_5519_bb0c_f421), (99, 0x8b8d_9045_f50e_185a)] {
+            let bytes = work_files::walked_not_whole(256, scans);
+            assert_eq!(fnv(bytes.iter().copied()), file_fnv, "{scans}");
+            let mut work = Work::default();
+            let image = stb::decode(&bytes, &Limits::DEFAULT, &mut work).expect("decodes");
+            let rgb = image.pixels().chunks(4).flat_map(|p| [p[0], p[1], p[2]]);
+            assert_eq!(fnv(rgb), 0x141c_0b68_88de_2325, "{scans}");
+            assert_eq!(work.walked, 1024 + 32 * scans as u64, "{scans}");
+            assert!(matches!(
+                decode_stored(&bytes, &Limits::DEFAULT),
+                Err(ImageError::Malformed(_))
+            ));
+        }
+        let bytes = work_files::walked_not_whole(256, 100);
+        assert_eq!(fnv(bytes.iter().copied()), 0x70e6_a7f6_d6ad_8d4f);
+        assert!(matches!(
+            decode_as_stb_image(&bytes, &Limits::DEFAULT),
+            Err(ImageError::TooMuchWork {
+                bound: WorkBound::Scans { scans: 101 },
+                ..
+            })
+        ));
+    }
+
+    /// Both decoders count alike on a damaged file too, made-up reads
+    /// included: each progressive fixture cut short in each of its scans,
+    /// with an end-of-image marker put back, as Pillow's
+    /// `LOAD_TRUNCATED_IMAGES` puts it back.
+    #[test]
+    fn both_decoders_charge_a_damaged_file_alike() {
+        let mut compared = 0;
+        let mut made_up = 0;
+        for (name, jpeg, _) in FIXTURES {
+            if !name.starts_with("progressive") {
+                continue;
+            }
+            let scans: Vec<usize> = jpeg
+                .windows(2)
+                .enumerate()
+                .filter_map(|(at, pair)| (pair == [0xff, 0xda]).then_some(at))
+                .collect();
+            for &scan in &scans {
+                let mut cut = jpeg[..scan + 20].to_vec();
+                cut.extend_from_slice(&[0xff, 0xd9]);
+                let [(_, stored, libjpeg), (_, stb_result, stb)] = decode_both(&cut);
+                if stored.is_err() || stb_result.is_err() {
+                    continue;
+                }
+                let count = |work: &Work| {
+                    (
+                        work.scans,
+                        work.walked,
+                        work.entropy_bytes,
+                        work.padded_reads,
+                    )
+                };
+                assert_eq!(count(&libjpeg), count(&stb), "{name} cut at {scan}");
+                compared += 1;
+                made_up += u64::from(libjpeg.padded_reads > 0);
+            }
+        }
+        assert!(
+            compared > 0 && made_up > 0,
+            "{compared} compared, {made_up} made up"
+        );
+    }
+
+    /// Both decoders, with their work.
+    fn decode_both(bytes: &[u8]) -> [(&str, Result<Rgba8Image, ImageError>, Work); 2] {
+        let mut libjpeg = Work::default();
+        let stored = decode_stored_with(bytes, &Limits::DEFAULT, &mut libjpeg);
+        let mut stb = Work::default();
+        let stb_result = stb::decode(bytes, &Limits::DEFAULT, &mut stb);
+        [("decode_stored", stored, libjpeg), ("stb", stb_result, stb)]
+    }
+
+    /// Both decoders charge real files alike: an interleaved 4:2:0
+    /// baseline scan walks six blocks an MCU and brings its data from the
+    /// header to the end-of-image marker, with nothing made up; a
+    /// progressive file walks more than one pass, alike in both.
+    #[test]
+    fn both_decoders_charge_a_real_file_alike() {
+        let (_, baseline, _) = FIXTURES[2];
+        let (width, height) = dimensions(baseline).expect("a frame");
+        let mcus = u64::from(width.div_ceil(16)) * u64::from(height.div_ceil(16));
+        let sos = baseline
+            .windows(2)
+            .position(|pair| pair == [0xff, 0xda])
+            .expect("a scan");
+        let header = usize::from(u16::from_be_bytes([baseline[sos + 2], baseline[sos + 3]]));
+        let data = (baseline.len() - 2 - (sos + 2 + header)) as u64;
+        for (name, result, work) in decode_both(baseline) {
+            assert!(result.is_ok(), "{name}");
+            let counted = (
+                work.scans,
+                work.walked,
+                work.entropy_bytes,
+                work.padded_reads,
+            );
+            assert_eq!(counted, (1, mcus * 6, data, 0), "{name}");
+        }
+        let (_, progressive, _) = FIXTURES[6];
+        let [(_, _, libjpeg), (_, _, stb)] = decode_both(progressive);
+        let (width, height) = dimensions(progressive).expect("a frame");
+        let one_pass = u64::from(width.div_ceil(16)) * u64::from(height.div_ceil(16)) * 6;
+        assert!(libjpeg.walked > one_pass);
+        assert_eq!(
+            (
+                libjpeg.scans,
+                libjpeg.walked,
+                libjpeg.entropy_bytes,
+                libjpeg.padded_reads
+            ),
+            (stb.scans, stb.walked, stb.entropy_bytes, stb.padded_reads)
         );
     }
 }

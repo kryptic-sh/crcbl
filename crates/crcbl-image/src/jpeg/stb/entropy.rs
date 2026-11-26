@@ -7,6 +7,7 @@
 //! Each failure here is one of stb_image's, and it refuses the file for it.
 
 use super::stream::{FAST_BITS, Stream};
+use crate::jpeg::{mark, nonzero_between};
 
 const FAST_SIZE: usize = 1 << FAST_BITS;
 
@@ -264,7 +265,7 @@ pub(super) struct Band {
 /// sets the DC; a refinement adds its bit.
 pub(super) fn decode_block_prog_dc(
     stream: &mut Stream<'_>,
-    data: &mut [i16; 64],
+    (data, nonzero): (&mut [i16; 64], &mut u64),
     hdc: &Huffman,
     dc_pred: &mut i32,
     band: Band,
@@ -277,6 +278,7 @@ pub(super) fn decode_block_prog_dc(
     }
     if band.high == 0 {
         *data = [0; 64];
+        *nonzero = 0;
         let t = hdc
             .decode(stream)
             .filter(|&t| t <= 15)
@@ -298,7 +300,7 @@ pub(super) fn decode_block_prog_dc(
 /// with the end-of-band run carried in `eob_run`.
 pub(super) fn decode_block_prog_ac(
     stream: &mut Stream<'_>,
-    data: &mut [i16; 64],
+    (data, nonzero): (&mut [i16; 64], &mut u64),
     hac: &Huffman,
     band: Band,
     eob_run: &mut i32,
@@ -325,8 +327,10 @@ pub(super) fn decode_block_prog_ac(
                 }
                 stream.consume(s as u32);
                 let zig = DEZIGZAG[k];
-                k += 1;
                 data[zig] = ((r >> 8) * (1 << band.low)) as i16;
+                // Past the end of the block, the last position again.
+                mark(nonzero, k.min(63), data[zig]);
+                k += 1;
             } else {
                 let rs = hac.decode(stream).ok_or(Corrupt("bad huffman code"))?;
                 let (r, s) = (u32::from(rs >> 4), u32::from(rs & 15));
@@ -343,8 +347,9 @@ pub(super) fn decode_block_prog_ac(
                 } else {
                     k += r as usize;
                     let zig = DEZIGZAG[k];
-                    k += 1;
                     data[zig] = (stream.extend_receive(s) * (1 << band.low)) as i16;
+                    mark(nonzero, k.min(63), data[zig]);
+                    k += 1;
                 }
             }
             if k > band.end {
@@ -355,23 +360,12 @@ pub(super) fn decode_block_prog_ac(
     }
 
     let bit = 1i16 << band.low;
-    // A nonzero coefficient takes a correction bit wherever the band passes
-    // it, unless it already has that bit.
-    let refine = |stream: &mut Stream<'_>, p: &mut i16| {
-        if stream.get_bit() && *p & bit == 0 {
-            *p = if *p > 0 {
-                p.wrapping_add(bit)
-            } else {
-                p.wrapping_sub(bit)
-            };
-        }
-    };
+    // The nonzero coefficients come from the block's mask, in order: a
+    // correction keeps a coefficient nonzero, so the mask holds.
     if *eob_run != 0 {
         *eob_run -= 1;
-        for &zig in &DEZIGZAG[band.start..=band.end] {
-            if data[zig] != 0 {
-                refine(stream, &mut data[zig]);
-            }
+        for k in nonzero_between(*nonzero, band.start, band.end) {
+            refine(stream, &mut data[DEZIGZAG[k]], bit);
         }
         return Ok(());
     }
@@ -387,7 +381,10 @@ pub(super) fn decode_block_prog_ac(
                     *eob_run += stream.get_bits(r as u32) as i32;
                 }
                 // Past every coefficient: the rest of the band is refined.
-                r = 64;
+                for k in nonzero_between(*nonzero, k, band.end) {
+                    refine(stream, &mut data[DEZIGZAG[k]], bit);
+                }
+                break;
             }
         } else {
             if s != 1 {
@@ -399,10 +396,11 @@ pub(super) fn decode_block_prog_ac(
             let zig = DEZIGZAG[k];
             k += 1;
             if data[zig] != 0 {
-                refine(stream, &mut data[zig]);
+                refine(stream, &mut data[zig], bit);
             } else {
                 if r == 0 {
                     data[zig] = value;
+                    mark(nonzero, k - 1, value);
                     break;
                 }
                 r -= 1;
@@ -413,4 +411,48 @@ pub(super) fn decode_block_prog_ac(
         }
     }
     Ok(())
+}
+
+/// A nonzero coefficient's share of a refinement: a correction bit, added
+/// with `bit` unless the coefficient already has it. Inlined at each place
+/// a band passes one, as stb_image's loop has it.
+#[inline(always)]
+fn refine(stream: &mut Stream<'_>, p: &mut i16, bit: i16) {
+    if stream.get_bit() && *p & bit == 0 {
+        *p = if *p > 0 {
+            p.wrapping_add(bit)
+        } else {
+            p.wrapping_sub(bit)
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A DC first pass clears the block, and its nonzero mask with it, so a
+    /// refinement after it passes no coefficient an earlier scan set.
+    #[test]
+    fn a_dc_first_pass_clears_the_nonzero_mask() {
+        let mut data = [5i16; 64];
+        let mut nonzero = 0b110;
+        let band = Band {
+            start: 0,
+            end: 0,
+            high: 0,
+            low: 0,
+        };
+        // A table no marker defined reads every symbol as 0 from no bits: a
+        // DC difference of size 0.
+        decode_block_prog_dc(
+            &mut Stream::new(&[0; 4]),
+            (&mut data, &mut nonzero),
+            &Huffman::default(),
+            &mut 0,
+            band,
+        )
+        .expect("decodes");
+        assert_eq!((data, nonzero), ([0; 64], 0));
+    }
 }

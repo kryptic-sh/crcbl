@@ -183,6 +183,18 @@ pub enum ImageError {
         /// The limits it broke.
         limits: Limits,
     },
+    /// Decoding would take more work than the input's data can account for,
+    /// by the bound named: a resource limit, like [`ImageError::TooLarge`],
+    /// whether or not the file is well formed.
+    #[error("a {width}x{height} JPEG is too much work to decode: {bound}")]
+    TooMuchWork {
+        /// The frame's width.
+        width: u32,
+        /// The frame's height.
+        height: u32,
+        /// Which bound the work passed.
+        bound: WorkBound,
+    },
     /// A buffer is shorter than its own size fields say it must be, or a
     /// pixel buffer is not exactly the size its image needs.
     #[error("the buffer is {actual} bytes and needs {needed}")]
@@ -199,6 +211,39 @@ pub enum ImageError {
     /// reason.
     #[error("malformed: {0}")]
     Malformed(String),
+}
+
+/// Which bound on decoding work a JPEG passed, for
+/// [`ImageError::TooMuchWork`]; the `jpeg` module's docs say how each is
+/// counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum WorkBound {
+    /// More scans than an encoder writes.
+    #[error("it has {scans} scans, more than an encoder writes")]
+    Scans {
+        /// The scans read, the refused one included.
+        scans: u32,
+    },
+    /// More blocks walked than the scans' data accounts for.
+    #[error(
+        "its scans would walk more blocks than their {entropy_bytes} bytes of \
+         entropy-coded data account for"
+    )]
+    BlocksWalked {
+        /// The entropy-coded bytes the scans brought.
+        entropy_bytes: u64,
+    },
+    /// More reads of bits made up past the end of the scans' data than the
+    /// frame and those data allow.
+    #[error(
+        "its scans would make more reads of bits from past the end of their data than \
+         its frame and their {entropy_bytes} bytes of entropy-coded data allow"
+    )]
+    MadeUpReads {
+        /// The entropy-coded bytes the scans brought.
+        entropy_bytes: u64,
+    },
 }
 
 /// A straight-alpha RGBA8 image: rows top to bottom, each pixel four bytes
