@@ -144,39 +144,15 @@ count. The first step is a feasibility write-up per dependency, not code:
   workspace's text stack in-house, which is its own project. This needs the
   user's call.
 
-## Dependency majors waiting (2026-11-27)
+## `windows-core` 0.100 waits for `windows` (2026-11-27)
 
-`skrifa` 0.50, `harfrust` 0.16 and `rand_core`/`rand_chacha` 0.10 are in. Still
-waiting:
-
-- `taffy` 0.16 (0.15 at the 0.20.0 cut): see the entry below.
-- `windows-core` 0.100. `crcbl-mixer` names it beside `windows` because
-  `#[implement]` and `#[interface]` expand to paths in it, so it has to stay on
-  the line `windows` itself uses, and `windows` 0.62.2 is still the newest
-  release (checked 2026-11-27). `cpal` 0.18.2 also resolves `windows-core` 0.62.
-  Moving `crcbl-mixer` alone would put two copies in the tree, which
-  `cargo deny` refuses, and would mix 0.62 interfaces with 0.100 traits. Move it
-  when `windows` (and `cpal`) do.
-
-**`taffy` 0.15 (Dependabot PR #32, left open 2026-11-18)** changes the layout
-traits, so `crcbl-ui` stops compiling (CI on the PR: 4 errors, all in
-`crcbl-ui`, which every other job then inherits):
-
-- `impl RoundTree for LayoutTree` (`tree/layout.rs`) is missing three new items,
-  `is_out_of_flow`, `hoisted_child_count` and `get_hoisted_child_id`: 0.15
-  hoists out-of-flow (absolutely positioned) children to their containing block.
-- `compute_root_layout` (`tree/mod.rs`) now requires `LayoutTree` to implement
-  `LayoutContainingBlock`, the same feature.
-- `FlexboxContainerStyle::align_items` and `justify_content` (`tree/style.rs`)
-  return a bare `AlignItems` / `AlignContent` where they returned `Option`; the
-  `None` our style maps to has to become whatever 0.15 calls `normal`.
-
-What it would take: read 0.15's changelog for the hoisting semantics, implement
-the containing-block traits so an absolute child resolves against the same box
-it does today, map our unset alignment to 0.15's default, then hold the result
-against `crates/crcbl-ui/tests/taffy_fixtures.rs` and the browser pixel goldens
-(Pages workflow) — a layout change shows there, not in the compiler. Not
-attempted: only the compile errors above were read, from the PR's CI log.
+Every other dependency is on its newest release. `crcbl-mixer` names
+`windows-core` beside `windows` because `#[implement]` and `#[interface]` expand
+to paths in it, so it has to stay on the line `windows` itself uses, and
+`windows` 0.62.2 is still the newest release (checked 2026-11-27). `cpal` 0.18.2
+also resolves `windows-core` 0.62. Moving `crcbl-mixer` alone would put two
+copies in the tree, which `cargo deny` refuses, and would mix 0.62 interfaces
+with 0.100 traits. Move it when `windows` (and `cpal`) do.
 
 ## `a_second_guard_on_one_thread_nests_instead_of_waiting` failed once (2026-11-18)
 

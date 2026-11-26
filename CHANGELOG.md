@@ -18,6 +18,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **Font parsing and shaping move to skrifa 0.50 and harfrust 0.16**, together,
   so both read faces through one `read-fonts` 0.47 instead of two copies. No
   crcbl API changes; feature selections are unchanged.
+- **`crcbl-ui` lays out with taffy 0.16.** Taffy now places absolutely
+  positioned boxes in a pass of their own, run by their containing block, so
+  `crcbl-ui`'s layout tree runs that pass and reports each node's absolute
+  children as hoisted to it. Every node in the style subset is positioned, so an
+  absolute box still resolves against its parent; unset `align-items` and
+  `justify-content` map to taffy's `normal`, which a flex container treats as
+  before. No crcbl API changes.
 
 ### Breaking
 

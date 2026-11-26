@@ -9,21 +9,33 @@
 //! The dispatch in [`LayoutPartialTree::compute_child_layout`] is the one
 //! `taffy::TaffyTree` makes for the same two layout modes: a hidden run hides,
 //! `display: none` hides, a node with children is a flex container and a node
-//! without is a leaf measured by its content.
+//! without is a leaf measured by its content. A full layout pass then places
+//! the node's absolutely positioned children, as `taffy::TaffyTree` does.
+//!
+//! # Out-of-flow children
+//!
+//! Every node in the subset is positioned (`relative` or `absolute`; there is
+//! no `static`), so every node is the containing block of its own absolutely
+//! positioned children and none further down. A node's hoisted children are
+//! therefore exactly its children that are `absolute` and displayed, read off
+//! the frame rather than recorded: a cache hit skips the pass that records
+//! them, and a frame's node ids are not stable across rebuilds for a stored
+//! list to survive one.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use taffy::{
-    AvailableSpace, Cache, CacheTree, Layout, LayoutFlexboxContainer, LayoutInput, LayoutOutput,
-    LayoutPartialTree, NodeId, RoundTree, RunMode, Size, TraversePartialTree, TraverseTree,
-    compute_cached_layout, compute_flexbox_layout, compute_hidden_layout, compute_leaf_layout,
+    AvailableSpace, Cache, CacheTree, Layout, LayoutContainingBlock, LayoutFlexboxContainer,
+    LayoutInput, LayoutOutput, LayoutPartialTree, NodeId, RoundTree, RunMode, Size,
+    TraversePartialTree, TraverseTree, compute_cached_layout, compute_flexbox_layout,
+    compute_hidden_layout, compute_leaf_layout, compute_oof_layout,
 };
 
 use super::ellipsis::KeptCut;
 use super::paragraph::{inline_runs, measure_runs};
 use super::store::NodeStore;
-use super::style::{Display, NodeStyle, WhiteSpace};
+use super::style::{Display, NodeStyle, Position, WhiteSpace};
 use super::{Content, FrameNode};
 use crate::font::Font;
 use crate::font::layout::{TextLayout, wrap_width};
@@ -566,6 +578,20 @@ impl LayoutTree<'_> {
         let slot = self.nodes[usize::from(id)].slot;
         &mut self.store.get_mut(slot).cache
     }
+
+    /// Whether `id` is laid out by its containing block rather than its flex
+    /// container: `absolute` and displayed, as `taffy::TaffyTree` decides.
+    fn out_of_flow(&self, id: NodeId) -> bool {
+        let style = &self.node(id).style;
+        style.position == Position::Absolute && style.display != Display::None
+    }
+
+    /// `parent`'s out-of-flow children, in order: its hoisted children, since
+    /// every node is a containing block (see the module docs).
+    fn hoisted(&self, parent: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.child_ids(parent)
+            .filter(|&child| self.out_of_flow(child))
+    }
 }
 
 impl TraversePartialTree for LayoutTree<'_> {
@@ -615,7 +641,7 @@ impl LayoutPartialTree for LayoutTree<'_> {
         }
         compute_cached_layout(self, node, inputs, |tree, node, inputs| {
             let index = usize::from(node);
-            match (
+            let mut output = match (
                 tree.nodes[index].style.display,
                 tree.nodes[index].child_count,
             ) {
@@ -670,14 +696,46 @@ impl LayoutPartialTree for LayoutTree<'_> {
                         },
                     )
                 }
+            };
+            // Inside the cached closure so a hit carries the placed children,
+            // and only on a full pass: a measure pass must not write their
+            // layouts, which a later cache hit would then not rewrite.
+            if inputs.run_mode == RunMode::PerformLayout {
+                compute_oof_layout(tree, node, &mut output);
             }
+            output
         })
     }
 }
 
+impl LayoutContainingBlock for LayoutTree<'_> {
+    type OofItemStyle<'a>
+        = &'a NodeStyle
+    where
+        Self: 'a;
+
+    fn get_oof_item_style(&self, node: NodeId) -> Self::OofItemStyle<'_> {
+        &self.node(node).style
+    }
+
+    /// Nothing to clear: the hoisted children are read off the frame.
+    fn clear_hoisted_children(&mut self, _node: NodeId) {}
+
+    /// Nothing to record, only to check: what Taffy hoists to `node` must be
+    /// what [`LayoutTree::hoisted`] reads back for it.
+    fn add_hoisted_children(&mut self, node: NodeId, hoisted: &[NodeId]) {
+        debug_assert!(
+            hoisted.iter().all(|&child| {
+                self.out_of_flow(child) && self.node(child).parent == Some(usize::from(node))
+            }),
+            "only a node's own out-of-flow children are hoisted to it"
+        );
+    }
+}
+
 impl CacheTree for LayoutTree<'_> {
-    fn cache_get(&mut self, node: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
-        self.cache(node).get(input)
+    fn cache_get(&self, node: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
+        self.store.get(self.node(node).slot).cache.get(input)
     }
 
     fn cache_store(&mut self, node: NodeId, input: &LayoutInput, output: LayoutOutput) {
@@ -716,5 +774,19 @@ impl RoundTree for LayoutTree<'_> {
 
     fn set_final_layout(&mut self, node: NodeId, layout: &Layout) {
         self.nodes[usize::from(node)].layout = *layout;
+    }
+
+    fn is_out_of_flow(&self, node: NodeId) -> bool {
+        self.out_of_flow(node)
+    }
+
+    fn hoisted_child_count(&self, node: NodeId) -> usize {
+        self.hoisted(node).count()
+    }
+
+    fn get_hoisted_child_id(&self, node: NodeId, index: usize) -> NodeId {
+        self.hoisted(node)
+            .nth(index)
+            .expect("Taffy asks only for an index below hoisted_child_count")
     }
 }

@@ -23,7 +23,7 @@ use crcbl_core::input::CursorIcon;
 
 use taffy::{
     AlignContent, AlignItems, BoxGenerationMode, CoreStyle, Dimension, FlexboxContainerStyle,
-    FlexboxItemStyle, LengthPercentage, LengthPercentageAuto, Point, Rect, Size,
+    FlexboxItemStyle, LengthPercentage, LengthPercentageAuto, OofItemStyle, Point, Rect, Size,
 };
 
 use super::focus::Direction;
@@ -879,12 +879,23 @@ impl FlexboxContainerStyle for NodeStyle {
         }
     }
 
-    fn align_items(&self) -> Option<AlignItems> {
-        self.align_items.map(align_items)
+    /// Unset is `normal`, which a flex container treats as `stretch`.
+    fn align_items(&self) -> AlignItems {
+        self.align_items.map_or(AlignItems::NORMAL, align_items)
     }
 
-    fn justify_content(&self) -> Option<AlignContent> {
-        self.justify_content.map(justify_content)
+    /// Unset is `normal`, which a flex container treats as `flex-start`.
+    fn justify_content(&self) -> AlignContent {
+        self.justify_content
+            .map_or(AlignContent::NORMAL, justify_content)
+    }
+}
+
+/// An `absolute` node's alignment in its containing block: its `align-self`,
+/// as for a flex item; the subset has no `justify-self`.
+impl OofItemStyle for NodeStyle {
+    fn align_self(&self) -> Option<AlignItems> {
+        self.align_self.map(align_items)
     }
 }
 
