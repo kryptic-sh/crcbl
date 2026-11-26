@@ -19,6 +19,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   so both read faces through one `read-fonts` 0.47 instead of two copies. No
   crcbl API changes; feature selections are unchanged.
 
+### Breaking
+
+- **`crcbl-rand` moves to `rand_core`/`rand_chacha` 0.10.** `crcbl_rand::Rng`
+  now implements `rand_core` 0.10's `TryRng` (with `Error = Infallible`), and so
+  its blanket `Rng`, in place of 0.9's `RngCore`; `SeedableRng` is unchanged.
+  Code that names `rand_core::RngCore` for it moves to `rand_core::Rng`. The
+  ChaCha8 stream is unchanged: the same seed gives the same bytes as before.
+
 ## [0.21.0] - 2026-11-26
 
 ### Added

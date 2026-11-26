@@ -24,12 +24,10 @@
 //! bridge because *there* it is the security-critical link and gets the full
 //! margin.
 //!
-//! [`Rng`] implements [`rand_core::RngCore`] and [`rand_core::SeedableRng`], so
-//! it plugs into the wider `rand` ecosystem. Range and distribution helpers are
-//! intentionally not provided until a consumer needs them; [`RngCore`] is the
-//! surface for now.
-//!
-//! [`RngCore`]: rand_core::RngCore
+//! [`Rng`] implements [`rand_core::Rng`] and [`rand_core::SeedableRng`], so it
+//! plugs into the wider `rand` ecosystem. Range and distribution helpers are
+//! intentionally not provided until a consumer needs them; [`rand_core::Rng`]
+//! is the surface for now.
 
 mod entropy;
 mod error;

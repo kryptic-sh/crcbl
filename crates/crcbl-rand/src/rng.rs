@@ -1,7 +1,9 @@
 //! The deterministic, portable generator.
 
+use core::convert::Infallible;
+
 use rand_chacha::ChaCha8Rng;
-use rand_core::{RngCore, SeedableRng};
+use rand_core::{Rng as _, SeedableRng, TryRng};
 
 use crate::Error;
 use crate::entropy::entropy;
@@ -15,9 +17,9 @@ use crate::entropy::entropy;
 /// and therefore **not** a source of secrets; for those, seed it from
 /// [`entropy`] via [`Rng::from_entropy`] or use [`entropy`] directly.
 ///
-/// It implements [`RngCore`] and [`SeedableRng`], so `rand`'s distributions and
-/// adapters accept it. Convenience range/distribution helpers are deliberately
-/// omitted until a consumer needs them.
+/// It implements [`rand_core::Rng`] and [`SeedableRng`], so `rand`'s
+/// distributions and adapters accept it. Convenience range/distribution helpers
+/// are deliberately omitted until a consumer needs them.
 #[derive(Clone, Debug)]
 pub struct Rng(ChaCha8Rng);
 
@@ -63,17 +65,21 @@ impl Rng {
     }
 }
 
-impl RngCore for Rng {
-    fn next_u32(&mut self) -> u32 {
-        self.0.next_u32()
+/// Infallible, so `rand_core`'s blanket impl makes it a [`rand_core::Rng`].
+impl TryRng for Rng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        Ok(self.0.next_u32())
     }
 
-    fn next_u64(&mut self) -> u64 {
-        self.0.next_u64()
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        Ok(self.0.next_u64())
     }
 
-    fn fill_bytes(&mut self, dst: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
         self.0.fill_bytes(dst);
+        Ok(())
     }
 }
 

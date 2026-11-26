@@ -144,13 +144,19 @@ count. The first step is a feasibility write-up per dependency, not code:
   workspace's text stack in-house, which is its own project. This needs the
   user's call.
 
-## Dependency majors waiting (0.21.0 cut, 2026-11-26)
+## Dependency majors waiting (2026-11-27)
 
-`cargo update` stays within each requirement, so these newer majors were left
-for their own change: `harfrust` 0.16, `skrifa` 0.50, `taffy` 0.16 (0.15 at the
-0.20.0 cut) and `rand_core`/`rand_chacha` 0.10 (pinned on purpose; see the
-workspace manifest's randomness comment). `windows-core` 0.100 is transitive,
-through `cpal`.
+`skrifa` 0.50, `harfrust` 0.16 and `rand_core`/`rand_chacha` 0.10 are in. Still
+waiting:
+
+- `taffy` 0.16 (0.15 at the 0.20.0 cut): see the entry below.
+- `windows-core` 0.100. `crcbl-mixer` names it beside `windows` because
+  `#[implement]` and `#[interface]` expand to paths in it, so it has to stay on
+  the line `windows` itself uses, and `windows` 0.62.2 is still the newest
+  release (checked 2026-11-27). `cpal` 0.18.2 also resolves `windows-core` 0.62.
+  Moving `crcbl-mixer` alone would put two copies in the tree, which
+  `cargo deny` refuses, and would mix 0.62 interfaces with 0.100 traits. Move it
+  when `windows` (and `cpal`) do.
 
 **`taffy` 0.15 (Dependabot PR #32, left open 2026-11-18)** changes the layout
 traits, so `crcbl-ui` stops compiling (CI on the PR: 4 errors, all in
@@ -22724,13 +22730,10 @@ run there (both cross-clippy clean).
   `getrandom` directly, as the slice's brief said, because the module is native
   only and `crcbl-rand` would bring its PRNG dependencies into `crcbl-net`.
 
-**DECIDED 2026-09-30: option (a), with the removal condition.** `x25519-dalek`
-3.0 names `rand_core` 0.10 unconditionally (as 2.x names 0.6), beside the 0.9
-`proptest` 1.11 holds; `deny.toml` skips `rand_core@0.10.1` by exact version,
-since it comes in traits only, with no features and no RNG. **When `proptest`
-moves to rand 0.10, drop the skip and move the workspace's
-`rand_core`/`rand_chacha` pins to 0.10 in the same change** — the entry on the
-rand 0.10 migration has the rest of that job.
+**Resolved 2026-11-27:** `x25519-dalek` 3.0's `rand_core` 0.10 sat in
+`deny.toml` as a skip beside the 0.9 that `proptest` held (decided 2026-09-30).
+`proptest` 1.12 moved to rand 0.10, the workspace's `rand_core`/`rand_chacha`
+pins moved with it, and the skip is gone.
 
 **Not run locally:** the fuzz target with the opener in it, and since D2 with
 the handshake decoders and `TokenKey::verify` — `cargo check --bins` passes, but
@@ -26117,49 +26120,6 @@ before the pause left the status wait to spend its whole 90-second timeout and
 took the run to 197 s, and this machine's own measured slowdown moved between
 4.1× and 5.0× across three runs of the same build, so a 20 % difference in these
 numbers is noise rather than a regression.
-
-### The rand 0.10 migration is written and blocked upstream (2026-08-26)
-
-Dependabot proposed `rand_core` 0.9.5 → 0.10.1 and `rand_chacha` 0.9.0 → 0.10.0
-(PRs #12 and #13, both **closed** rather than merged — the reasoning is on them
-so it is not only in a chat log).
-
-**The migration itself is small and understood.** `rand_core` 0.10 renames
-`RngCore` to `TryRng` (fallible, with an associated `Error`) and makes `Rng` a
-blanket-implemented alias for `TryRng<Error = Infallible>`. So an implementor
-writes `TryRng` with `type Error = Infallible` and gets `next_u32`/`next_u64`/
-`fill_bytes` free — which is why the PR showed
-`E0407: method next_u32 is not a member of trait RngCore`. `SeedableRng` is
-unchanged, and every `from_seed` error in that build was the
-`use rand_core::{RngCore, SeedableRng}` line failing as a whole and taking
-`SeedableRng` out of scope with it. The change is confined to `crcbl-rand`:
-`rng.rs`, three `use` sites in `entropy.rs`, the module docs in `lib.rs`, and
-`tests/determinism.rs`. `crcbl-webgpu`'s `probe.rs` and `crcbl-net`'s
-`condition.rs` have `fill_bytes`/`next_u64` of their own and do not touch the
-traits.
-
-**The ChaCha8 stream does not change, which was the thing worth knowing first.**
-Built against `rand_chacha` 0.10 in a throwaway crate outside the workspace, the
-all-`0x42` seed's first `next_u64` draws are byte-identical to
-`tests/determinism.rs`'s `SEED42_GOLDEN`. So the goldens must **not** be
-regenerated on this upgrade — if they move, that is a defect and not expected
-churn, which is exactly what that file's header says.
-
-**What blocks it is not in this repo.** `proptest` 1.11.0 — the newest release —
-pins `rand` 0.9 and `rand_chacha` 0.9, and it is a dev-dependency of
-`crcbl-core`. Upgrading `crcbl-rand` therefore puts two copies of both
-`rand_core` and `rand_chacha` in the lock, and `deny.toml` sets
-`multiple-versions = "deny"`, which CI checks with `--all-features`.
-
-**Deliberately not solved with a skip.** That file's own comment says the ban
-was tightened from `warn` to `deny` so a new duplicate fails rather than joining
-a warning nobody reads, and that the skips are for duplicates that cannot be
-resolved from here. This one can be — by not upgrading — so skipping it would be
-papering over a self-inflicted duplicate, and it would ship two ChaCha
-implementations in every binary.
-
-**When `proptest` ships a release on `rand` 0.10, this becomes a short job.**
-Check that before assuming it is still blocked; nothing else stands in the way.
 
 ### `apps/breach` has milestone 0's two maps, and the rest is not built
 

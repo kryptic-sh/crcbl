@@ -104,13 +104,13 @@ quote = "1.0.47"
 syn = "3.0.10"
 # Randomness seam (`crcbl-rand`). `rand_chacha` is the portable ChaCha PRNG
 # (ChaCha8 for the deterministic `Rng`, ChaCha20 for the wasm entropy CSPRNG);
-# `rand_core` is the `RngCore`/`SeedableRng` traits it plugs into. Pinned to the
-# 0.9 line the workspace already resolves transitively (via `rand`/`proptest`),
-# so this adds no second copy for `cargo deny`'s multiple-versions ban. Featured
-# minimally: `rand_core` keeps `os_rng` OFF so nothing drags `getrandom` onto
-# wasm32, which is the whole point of the seam.
-rand_chacha = { version = "0.9", default-features = false }
-rand_core = { version = "0.9", default-features = false }
+# `rand_core` is the `Rng`/`SeedableRng` traits it plugs into. On the line
+# `proptest` and `x25519-dalek` already resolve, so this adds no second copy for
+# `cargo deny`'s multiple-versions ban. `rand_chacha` drops its `std` default;
+# `rand_core` has no features, so nothing here can drag `getrandom` onto wasm32,
+# which is the whole point of the seam.
+rand_chacha = { version = "0.10", default-features = false }
+rand_core = { version = "0.10", default-features = false }
 # RON, the format stage 6's scene rules (`docs/notes/tooling.md`) and the
 # camera-stack rules (`docs/notes/rendering.md`, _What the deleted
 # 48-post-processing plan left behind_) write entity and render-stack data in.

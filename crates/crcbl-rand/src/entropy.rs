@@ -56,7 +56,7 @@ use rand_chacha::ChaCha20Rng;
 /// Draw `dest.len()` bytes from `state`, or fail closed if it is unseeded.
 #[cfg(any(target_arch = "wasm32", test))]
 fn fill_from(state: &mut Option<ChaCha20Rng>, dest: &mut [u8]) -> Result<(), Error> {
-    use rand_core::RngCore;
+    use rand_core::Rng as _;
 
     match state {
         Some(rng) => {
@@ -144,7 +144,7 @@ pub use wasm::{__crcbl_web_seed_entropy, __crcbl_web_seed_entropy_ptr, seed_entr
 mod tests {
     use super::{entropy, fill_from, seed_into};
     use rand_chacha::ChaCha20Rng;
-    use rand_core::{RngCore, SeedableRng};
+    use rand_core::{Rng as _, SeedableRng};
 
     // Native OS entropy fills, and two successive draws differ (probabilistic,
     // as any randomness test is — a fixed collision here is astronomically

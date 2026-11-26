@@ -74,16 +74,6 @@ skip = [
   # second copy that only `crcbl-wgpu`'s dependency tree pulled in, so deleting
   # that crate resolved them upstream-of-us rather than by a skip. `cargo deny`
   # reports an unmatched skip as a warning, which is what caught all five.
-  # `getrandom` 0.4 is the workspace's own pin (crcbl-rand's native entropy).
-  # 0.3 arrives under `rand_core`'s `os_rng` feature — which `--all-features`
-  # turns on and cargo's feature unification then applies to the copy of
-  # `rand_core` that crcbl-rand's `rand_chacha` shares, even though crcbl-rand
-  # keeps `os_rng` off. It cannot be resolved from here, so it is skipped and
-  # 0.4 stands. (0.2 left the tree with the 2026-09-25 `cargo update`.)
-  { crate = "getrandom@0.3.4", reason = "rand_core's os_rng under --all-features; the workspace pins 0.4" },
-  # `r-efi` is getrandom's UEFI backend: 5.x under getrandom 0.3, 6.x under 0.4.
-  # The duplicate follows the getrandom one above; skip the older with it.
-  { crate = "r-efi@5.3.0", reason = "getrandom 0.3's UEFI backend; 6.x comes from getrandom 0.4" },
   # `thiserror` 1.x survives only under third-party crates; every crate in this
   # workspace uses the 2.0 pin from `[workspace.dependencies]`.
   { crate = "thiserror@1.0.69", reason = "transitive; the workspace pins 2.0" },
@@ -93,14 +83,6 @@ skip = [
   # `png` 0.18.1 names `miniz_oxide` 0.8 itself and also reaches it through
   # `flate2`, which moved to 0.9 in 1.1.10; the older copy is png's to drop.
   { crate = "miniz_oxide@0.8.9", reason = "png 0.18.1's own pin; its flate2 is on 0.9" },
-  # `rand_core` 0.10 is `x25519-dalek` 3.0's, named unconditionally rather than
-  # behind a feature, and pulled in with no features of its own: the traits and
-  # nothing else — no RNG, no `getrandom`, no second ChaCha. The workspace's
-  # 0.9 is held by `proptest` 1.11 (`docs/backlog.md`, _The rand 0.10
-  # migration is written and blocked upstream_). Decided 2026-09-30. **Remove
-  # it when proptest moves to rand 0.10**, and move the workspace's
-  # `rand_core`/`rand_chacha` pins to 0.10 in the same change.
-  { crate = "rand_core@0.10.1", reason = "x25519-dalek 3.0's, traits only; the workspace's 0.9 is held by proptest 1.11" },
 ]
 
 [sources]
