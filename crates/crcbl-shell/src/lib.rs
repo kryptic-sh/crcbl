@@ -583,6 +583,17 @@ pub trait Shell: core::fmt::Debug {
     /// [`ShellEvent::Resized`], as its first one did, and none arrives when
     /// the size did not change.
     ///
+    /// **Draw a panel on screen at its new size straight away, without
+    /// waiting for that `Resized`.** On Wayland, a new size of the panel's
+    /// own (along no axis anchored to both opposite edges) is applied with
+    /// the window's next presented frame rather than at once, so the
+    /// compositor never shows the old frame in the new rectangle; until a
+    /// frame is presented (or another request commits the surface, as
+    /// [`set_input_region`](Self::set_input_region) does), nothing changes
+    /// on screen and no `Resized` comes. A size along a stretched axis is the compositor's to assign,
+    /// so there the change is applied at once and the frame waits for
+    /// `Resized`, as before.
+    ///
     /// **The namespace and the monitor cannot change.** `wlr-layer-shell`
     /// fixes both when the surface is made, and every backend refuses a
     /// change to either alike; close the panel and open another for that.

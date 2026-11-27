@@ -1750,6 +1750,16 @@ that is not a panel, are `InvalidDescriptor` everywhere
   test now asserts the size after one roundtrip and one pump; not yet re-run.
   Locally verified: the headless test, the Win32 `Panel::desc`/`rect_on` unit
   test, and mutants of `check_set_panel` and of headless `set_panel`.
+- **A panel on screen takes a new size of its own with its next frame**
+  (`layer::reconfigure_layer_surface`). The e2e
+  `a_panel_on_screen_takes_its_new_size_with_its_next_frame` was compiled and
+  not run: sway was not installed, and `run-wayland-e2e-hyprland.sh` failed
+  every case on the machine it was tried on, the panel tests with no configure
+  at all and a tiling test waiting for two tiles, so the harness, not the
+  change. Verified instead with `WAYLAND_DEBUG=1` on lyr against Hyprland
+  0.56.2: `set_size` and `set_destination` go out with no commit, and the next
+  commit attaches a buffer created at the new size. Still open: an input region
+  set between `set_panel` and the frame commits the new size alone, as before.
 - **Not covered by any test:** the trait default (X11, the web), which an X11
   e2e asserting `Unsupported` would cover; the Wayland refusal of a new layer on
   `zwlr_layer_shell_v1` 1, since sway offers 4; a Win32 appbar moving to another

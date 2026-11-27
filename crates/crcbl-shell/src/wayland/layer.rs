@@ -9,8 +9,11 @@
 //!
 //! [`Shell::set_panel`] sends the same requests again, `set_layer` with them,
 //! and commits: the compositor answers with a configure, which reports the
-//! new size as the first one did. The namespace and the output are arguments
-//! of `get_layer_surface` and nothing changes them afterwards.
+//! new size as the first one did. A panel on screen given a new size of its
+//! own is the exception: its commit is left to its next frame, drawn at that
+//! size; see [`WaylandShell::reconfigure_layer_surface`]. The namespace and
+//! the output are arguments of `get_layer_surface` and nothing changes them
+//! afterwards.
 //!
 //! What the compositor decides is the size along an axis anchored at both
 //! ends. [`layer_size`] sends zero there, which is the protocol's "you assign
@@ -25,7 +28,7 @@ use crate::{
 use super::ffi::{self, WlProxy};
 use super::protocol::layer_shell::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use super::protocol::wayland::wl_surface;
-use super::{WaylandShell, round_logical};
+use super::{WaylandShell, round_logical, set_viewport};
 
 /// `zwlr_layer_shell_v1` 4 is the lowest version with
 /// [`PanelKeyboard::OnDemand`]'s `on_demand` interactivity. 5 adds only
@@ -209,6 +212,17 @@ impl WaylandShell {
     /// [`Shell::set_panel`]. The compositor answers with a configure, which
     /// [`layer_configured`](Self::layer_configured) takes as it took the first.
     ///
+    /// **A panel on screen given a new size of its own is not committed
+    /// here.** Its buffer is the old size, and Hyprland 0.56.2 stretches a layer
+    /// surface's buffer over its new rectangle from the commit that changes
+    /// it, so a menu shrinking from a full frame to a short one showed every
+    /// old row squeezed for a frame. Its viewport destination is set to the
+    /// new size instead, and the state waits for the window's next present,
+    /// which the caller draws at that size: one commit carries both. A
+    /// stretched axis has no size until the compositor assigns one, so a
+    /// panel with one, as a bar has, is committed at once as before, and so
+    /// is a panel not yet on screen, with no buffer to stretch.
+    ///
     /// # Errors
     ///
     /// What [`crate::role::check_set_panel`] refuses, and
@@ -226,8 +240,11 @@ impl WaylandShell {
         crate::role::check_set_panel(window, was, desc, self.caps, self.backend(), |monitor| {
             self.monitor(monitor).is_some()
         })?;
-        let (layer, surface) = (state.layer_surface, state.surface);
+        let (layer, surface, viewport) = (state.layer_surface, state.surface, state.viewport);
         let was_layer = was.map(|was| was.layer);
+        let (width, height) = layer_size(desc.anchor, size);
+        let with_frame =
+            !state.outputs.is_empty() && width > 0 && height > 0 && state.requested_size != size;
         if layer.is_null() {
             return Err(ShellError::Backend(format!(
                 "set_panel: {window:?} has no layer surface"
@@ -243,14 +260,23 @@ impl WaylandShell {
                 "changing a panel's layer (needs zwlr_layer_shell_v1 version 2)",
             ));
         }
-        // SAFETY: the window's own live layer surface and `wl_surface`; the
-        // commit applies the double-buffered state just sent.
+        // SAFETY: the window's own live layer surface, `wl_surface` and
+        // viewport (null without one, which `set_viewport` allows); the
+        // commit, here or the next present's, applies the double-buffered
+        // state just sent.
         unsafe {
             send_state(layer, desc, size);
             if set_layer {
                 zwlr_layer_surface_v1::set_layer(layer, layer_of(desc.layer));
             }
-            wl_surface::commit(surface);
+            if with_frame {
+                set_viewport(
+                    viewport,
+                    LogicalSize::new(f64::from(width), f64::from(height)),
+                );
+            } else {
+                wl_surface::commit(surface);
+            }
         }
         self.conn.flush();
         let state = self.window_mut(window)?;

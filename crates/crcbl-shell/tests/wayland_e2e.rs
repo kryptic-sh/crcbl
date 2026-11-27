@@ -4183,6 +4183,55 @@ fn a_reconfigured_panel_is_configured_at_its_new_height_and_reserves_it() {
     session.shell.destroy_window(window).expect("destroy");
 }
 
+/// lyr's menu shrinking: a panel on screen given a new size of its own takes
+/// it with the frame drawn at that size, not before it, so the compositor
+/// never has the old frame to stretch over the new rectangle.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_panel_on_screen_takes_its_new_size_with_its_next_frame() {
+    const BIG: PhysicalSize = PhysicalSize::new(200, 150);
+    const SMALL: PhysicalSize = PhysicalSize::new(100, 50);
+    let logical =
+        |size: PhysicalSize| LogicalSize::new(f64::from(size.width), f64::from(size.height));
+    let mut session = Session::open();
+    let desc = PanelDesc {
+        namespace: "crcbl-e2e-shrinking-menu",
+        monitor: Some(session.monitor_named(OUTPUT_NAME).id),
+        anchor: PanelAnchor::TOP | PanelAnchor::LEFT,
+        layer: PanelLayer::Overlay,
+        ..PanelDesc::default()
+    };
+    let menu = session.create(&panel("crcbl e2e shrinking menu", logical(BIG), desc));
+    session.pump_until("the panel's first configure", |session| {
+        session.size(menu) == Some(BIG)
+    });
+    session.map(menu);
+    // The `wl_surface.enter` that puts it on screen, read before set_panel.
+    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, menu).expect("roundtrip");
+    session.pump();
+
+    session
+        .shell
+        .set_panel(menu, logical(SMALL), &desc)
+        .expect("set_panel");
+    // As in the growing bar's test: a configure answering a commit is queued
+    // by one roundtrip and applied by one pump, so none here means nothing
+    // committed the new size.
+    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, menu).expect("roundtrip");
+    session.pump();
+    assert_eq!(
+        session.size(menu),
+        Some(BIG),
+        "the new size waits for a frame drawn at it"
+    );
+
+    crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, SMALL).expect("present");
+    session.pump_until("the size the frame was drawn at", |session| {
+        session.size(menu) == Some(SMALL)
+    });
+    session.shell.destroy_window(menu).expect("destroy");
+}
+
 /// The launcher pikr is: an unanchored overlay that takes the keyboard when it
 /// maps, so the keys typed the moment it appears are its own.
 #[test]

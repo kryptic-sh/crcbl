@@ -190,6 +190,26 @@ unsafe extern "C" fn ignore(
 ///
 /// Never; every fallible step is reported as an error.
 pub fn map_window(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError> {
+    let size = shell
+        .window_state(window)?
+        .size()
+        .ok_or_else(|| ShellError::Backend("map_window before the first configure".to_string()))?;
+    present_at(shell, window, size)
+}
+
+/// Attaches and commits a zero-filled buffer of `size` to `window`'s surface:
+/// [`map_window`] at a size the caller chooses, which stands in for a frame a
+/// caller drew at a size it asked for and the compositor has not yet
+/// configured.
+///
+/// # Errors
+///
+/// As [`map_window`], but for the configure, which it does not need.
+pub fn present_at(
+    shell: &dyn Shell,
+    window: WindowId,
+    size: crate::PhysicalSize,
+) -> Result<(), ShellError> {
     let SurfaceTarget::Wayland {
         display, surface, ..
     } = shell.surface_target(window)?
@@ -198,10 +218,6 @@ pub fn map_window(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError>
             "not a Wayland window; this helper is only for the Wayland backend".to_string(),
         ));
     };
-    let size = shell
-        .window_state(window)?
-        .size()
-        .ok_or_else(|| ShellError::Backend("map_window before the first configure".to_string()))?;
 
     let lib = ffi::load().map_err(|detail| ShellError::Backend(detail.to_string()))?;
     let display: *mut WlDisplay = display.as_ptr().cast();
