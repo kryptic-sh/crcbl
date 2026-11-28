@@ -585,17 +585,20 @@ pub trait Shell: core::fmt::Debug {
     /// [`ShellEvent::Resized`], as its first one did, and none arrives when
     /// the size did not change.
     ///
-    /// **Draw a panel on screen at its new size straight away, without
-    /// waiting for that `Resized`.** On Wayland, a new size of the panel's
-    /// own (along no axis anchored to both opposite edges) is applied with
-    /// the window's next presented frame rather than at once, so the
-    /// compositor never shows the old frame in the new rectangle; until a
-    /// frame is presented (or another request commits the surface, as
-    /// [`set_input_region`](Self::set_input_region) does), nothing changes
-    /// on screen and no `Resized` comes. A size along a stretched axis is
-    /// the compositor's to assign, so there the change is applied at once
-    /// and the frame waits for `Resized`, as before. A later `set_panel`
-    /// made before that frame replaces the request waiting for it.
+    /// **Draw at the size of the last `Resized`**, as for any window. On
+    /// Wayland, a new size of the panel's own (along no axis anchored to both
+    /// opposite edges) is announced at once, since the panel chooses it, and
+    /// applied on screen with the first frame presented at it through the
+    /// window's [`present_hook`](Self::present_hook) — `crcbl-app`'s
+    /// `Presenter` does that — so the compositor never shows the old frame in
+    /// the new rectangle; a frame still at the old size carries none of it. A
+    /// later `set_panel` made before that frame replaces the request waiting
+    /// for it. A size along a stretched axis is the compositor's to assign,
+    /// so there the change is committed at once and `Resized` follows its
+    /// configure, and so is any change to a window whose frames do not come
+    /// through its hook. A program that keeps presenting at the old size gets
+    /// the new one with its first frame after the pump that handed out the
+    /// `Resized`, its old frame scaled into it.
     ///
     /// **The namespace and the monitor cannot change.** `wlr-layer-shell`
     /// fixes both when the surface is made, and every backend refuses a
@@ -1169,7 +1172,17 @@ pub trait Shell: core::fmt::Debug {
     /// `crcbl-app`'s `Presenter` asks for it when it opens on the window and
     /// keeps it; a program presenting through a swapchain of its own asks
     /// once and calls it the same way. `None` means the window needs nothing
-    /// told about its presents.
+    /// told about its presents. Drop it when presenting to the window stops:
+    /// on Wayland a window with no hook left is sent what it owed and from
+    /// then on treated as one whose frames never came through a hook, until a
+    /// new hook presents.
+    ///
+    /// **Call the hook on the thread that runs the shell**, the one the
+    /// present is made on. The hook is `Send`, so a presenter holding one can
+    /// move, but on Wayland what it sends has to reach the wire between the
+    /// shell's own requests and the present's commit, which only one thread
+    /// can promise. A call from any other thread there sends nothing and gives
+    /// the window up the same way, from the next [`pump`](Self::pump) on.
     ///
     /// # A provided method
     ///

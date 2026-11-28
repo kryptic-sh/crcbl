@@ -37,12 +37,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   a window's shell about its presents.** `crcbl-app`'s `Presenter` takes the
   hook when it opens on a window, through `open`, `request_open`,
   `request_open_on` or `SharedGpu::open`, and calls `will_present` with the
-  acquired extent just before each present and `presented` after one that went
-  through. No call site changes, and `Presenter` stays `Send` and `Sync`. The
-  provided default answers `None`, which every backend but Wayland and headless
-  keeps; `HeadlessShell::last_presented` reads back what a window's hook was
-  told. A null device presenting to a real window takes no hook. On Wayland the
-  hook only records the size so far: what the shell sends is unchanged.
+  acquired extent just before each present, then `presented` after one that went
+  through or `present_failed` after one that did not. No call site changes, and
+  `Presenter` stays `Send` and `Sync`. The hook is called on the thread that
+  runs the shell; on Wayland a call from another thread sends nothing, logs an
+  error once, and the window is treated from then on as one whose frames never
+  come through a hook, as it is once its last hook is dropped, until a new
+  presenter presents through one. The provided default answers `None`, which
+  every backend but Wayland and headless keeps; `HeadlessShell::last_presented`
+  and `failed_presents` read back what a window's hook was told. A null device
+  presenting to a real window takes no hook. `wayland_test_support::present_at`
+  presents through the hook, and `present_raw` and `last_configure` test the
+  rest.
 
 ### Changed
 
@@ -56,21 +62,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   absolute box still resolves against its parent; unset `align-items` and
   `justify-content` map to taffy's `normal`, which a flex container treats as
   before. No crcbl API changes.
+- **`crcbl-shell`: on Wayland, `Shell::set_panel` announces a panel's own new
+  size at once.** A panel on screen whose frames come through its present hook
+  is sent its `Resized` from the call itself, since the size is the panel's to
+  choose, rather than from the compositor's configure, and draws at it as at any
+  `Resized`. A size along an axis anchored to both opposite edges, as a bar's
+  width is, a panel not on screen, and a panel whose frames do not come through
+  its hook still hear their size from the configure.
 
 ### Breaking
 
-- **`crcbl-shell`'s `Shell::set_panel` on Wayland gives a panel on screen a new
-  size of its own with its next presented frame, not at once.** Committing the
-  size alone left the compositor the old frame for the new rectangle, and
-  Hyprland 0.56.2 stretches it there, so a shrinking menu showed its old rows
-  squeezed for a frame. The size and the viewport now wait for the next present,
-  which carries them with the frame drawn at that size. A caller that waited for
-  `Resized` before drawing at the new size now waits for ever: draw at the size
-  asked for straight away, and take the `Resized` that follows as confirmation.
-  A size along an axis anchored to both opposite edges, as a bar's width is, and
-  a panel not yet on screen are committed at once as before.
-  `wayland_test_support::present_at` attaches a buffer of a chosen size, for
-  testing it.
 - **`crcbl-rand` moves to `rand_core`/`rand_chacha` 0.10.** `crcbl_rand::Rng`
   now implements `rand_core` 0.10's `TryRng` (with `Error = Infallible`), and so
   its blanket `Rng`, in place of 0.9's `RngCore`; `SeedableRng` is unchanged.
@@ -79,6 +80,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-shell`: on Wayland, a frame carries its own geometry.** Surface state
+  that belongs with a new size — a panel's own new size from `set_panel`, the
+  acknowledgement and viewport of a configure that resizes a window on screen, a
+  new integer buffer scale, and an input region set while the size waits — is
+  now sent by the window's present hook just before the present of the frame
+  drawn at that size, and applied by that present's commit. It used to be sent
+  when it came and committed by whatever came next: a frame still at the old
+  size, or `set_input_region`'s own commit, which showed the old frame stretched
+  into the new rectangle on Hyprland (a shrinking menu's old rows squeezed for a
+  frame) and could apply a new buffer scale to a buffer of the old size. A frame
+  at any other size carries none of it: one at the old size shows as drawn, and
+  one at another size is scaled to the old viewport destination where the
+  compositor offers `wp_viewporter`, or shown at its own size where it does not,
+  never squeezed into a rectangle by a size it does not have. A program that
+  keeps presenting at the old size after it was handed `Resized` gets the new
+  geometry with its next frame, scaled into it as before; an integer buffer
+  scale still waits for a frame whose size it divides, since any other is a
+  fatal protocol error. A present that fails puts its frame's geometry back to
+  wait for the next one, so nothing the shell commits in between lands it on the
+  old buffer. A window whose frames never come through its hook behaves as
+  before.
 - **`crcbl-notify`: one unreadable toast no longer fails the whole `list`.** A
   toast Windows would not fully describe made `Notifications::list` return an
   error, so a panel built on it showed nothing; it is now left out and the rest

@@ -10,25 +10,30 @@
 //! [`Shell::set_panel`] sends the same requests again, `set_layer` with them,
 //! and commits: the compositor answers with a configure, which reports the
 //! new size as the first one did. A panel on screen given a new size of its
-//! own is the exception: its commit is left to its next frame, drawn at that
-//! size; see [`WaylandShell::reconfigure_layer_surface`]. The namespace and
-//! the output are arguments of `get_layer_surface` and nothing changes them
-//! afterwards.
+//! own is the exception: the caller is told the size at once, and the
+//! requests go out with the frame drawn at it; see
+//! [`WaylandShell::reconfigure_layer_surface`]. The namespace and the output
+//! are arguments of `get_layer_surface` and nothing changes them afterwards.
 //!
 //! What the compositor decides is the size along an axis anchored at both
 //! ends. [`layer_size`] sends zero there, which is the protocol's "you assign
 //! it", and the configure carries the answer; see
 //! [`WaylandShell::layer_configured`].
 
+use std::sync::Arc;
+
+use crate::role::KeptPanel;
 use crate::{
-    LogicalSize, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, Reserve, Shell, ShellError,
-    WindowId,
+    DisplayMode, LogicalSize, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, Reserve, Shell,
+    ShellError, ShellEvent, WindowConfiguration, WindowId,
 };
 
 use super::ffi::{self, WlProxy};
+use super::owed::{Geometry, OwedPanel, PanelReply, WindowFacts};
+use super::present::{self, Region};
 use super::protocol::layer_shell::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
-use super::protocol::wayland::wl_surface;
-use super::{WaylandShell, round_logical, set_viewport};
+use super::protocol::wayland::{wl_region, wl_surface};
+use super::{WaylandShell, round_logical};
 
 /// `zwlr_layer_shell_v1` 4 is the lowest version with
 /// [`PanelKeyboard::OnDemand`]'s `on_demand` interactivity. 5 adds only
@@ -46,7 +51,7 @@ const ON_DEMAND_SINCE: u32 = 4;
 const SET_LAYER_SINCE: u32 = 2;
 
 /// The layer-shell `layer` enum for a [`PanelLayer`].
-const fn layer_of(layer: PanelLayer) -> u32 {
+pub(super) const fn layer_of(layer: PanelLayer) -> u32 {
     match layer {
         PanelLayer::Background => zwlr_layer_shell_v1::layer::BACKGROUND,
         PanelLayer::Bottom => zwlr_layer_shell_v1::layer::BOTTOM,
@@ -99,20 +104,6 @@ fn layer_size(anchor: PanelAnchor, size: LogicalSize) -> (u32, u32) {
     )
 }
 
-/// Whether [`WaylandShell::reconfigure_layer_surface`] leaves its commit to
-/// the window's next present: a panel on screen `shown` at the size last
-/// configured, asked for `asked` as [`layer_size`] sends it.
-///
-/// Only a new size of the panel's own (no zero axis) waits, for the frame
-/// drawn at it. The request is decided against the size shown, not the last
-/// one asked for, so asking again for a size still waiting, or changing only
-/// a margin while it waits, waits too. Every request sends the whole state
-/// again, so whatever waited before is replaced, not carried: a request that
-/// does not wait commits at once.
-fn waits_for_frame(on_screen: bool, shown: (u32, u32), asked: (u32, u32)) -> bool {
-    on_screen && asked.0 > 0 && asked.1 > 0 && asked != shown
-}
-
 /// The exclusive zone for a [`Reserve`].
 ///
 /// [`Reserve::OwnExtent`] is the panel's extent across the edge it reserves.
@@ -152,7 +143,7 @@ fn check_keyboard(keyboard: PanelKeyboard, version: u32) -> Result<(), ShellErro
 /// # Safety
 ///
 /// `layer` must be a live `zwlr_layer_surface_v1`.
-unsafe fn send_state(layer: *mut WlProxy, desc: &PanelDesc<'_>, size: LogicalSize) {
+pub(super) unsafe fn send_state(layer: *mut WlProxy, desc: &PanelDesc<'_>, size: LogicalSize) {
     let (width, height) = layer_size(desc.anchor, size);
     let margins = desc.margins;
     // SAFETY: the caller guarantees a live layer surface, and each request
@@ -226,21 +217,22 @@ impl WaylandShell {
     /// [`Shell::set_panel`]. The compositor answers with a configure, which
     /// [`layer_configured`](Self::layer_configured) takes as it took the first.
     ///
-    /// **A panel on screen given a new size of its own is not committed
-    /// here.** Its buffer is the old size, and Hyprland 0.56.2 stretches a layer
-    /// surface's buffer over its new rectangle from the commit that changes
-    /// it, so a menu shrinking from a full frame to a short one showed every
-    /// old row squeezed for a frame. Its viewport destination is set to the
-    /// new size instead, and the state waits for the window's next present,
-    /// which the caller draws at that size: one commit carries both. A
-    /// stretched axis has no size until the compositor assigns one, so a
-    /// panel with one, as a bar has, is committed at once as before, and so
-    /// is a panel not yet on screen, with no buffer to stretch. Every request
-    /// sends the whole state again, so one made while a new size waits
-    /// replaces it; the viewport destination that size set is the only state
-    /// a commit could carry over, so a request committed at once first sets
-    /// the destination back to the size last configured. See
-    /// [`waits_for_frame`].
+    /// **A panel on screen given a new size of its own is not sent it here,**
+    /// when it presents through its hook. Its buffer is the old size, and
+    /// Hyprland 0.56.2 stretches a layer surface's buffer over its new
+    /// rectangle from the commit that changes it, so a menu shrinking from a
+    /// full frame to a short one showed every old row squeezed for a frame.
+    /// The size is the client's own to choose, so the caller is told it at
+    /// once, as a [`ShellEvent::Resized`], and the request is owed to the
+    /// frame drawn at it (see [`owed`](super::owed)): a frame still at the old
+    /// size carries nothing of it. A later request replaces it, and one at the
+    /// size on screen with nothing else waiting — a margin moved, say — is
+    /// committed at once.
+    ///
+    /// Committed at once as before: a size along a stretched axis, which is
+    /// the compositor's to assign and so withdraws a request waiting; a panel
+    /// not on screen, with no buffer to stretch; and a panel whose presents do
+    /// not come through its hook, which is told its size by the configure.
     ///
     /// # Errors
     ///
@@ -259,13 +251,8 @@ impl WaylandShell {
         crate::role::check_set_panel(window, was, desc, self.caps, self.backend(), |monitor| {
             self.monitor(monitor).is_some()
         })?;
-        let (layer, surface, viewport) = (state.layer_surface, state.surface, state.viewport);
+        let (layer, surface) = (state.layer_surface, state.surface);
         let was_layer = was.map(|was| was.layer);
-        let (width, height) = layer_size(desc.anchor, size);
-        // The size last configured, which the frame on screen was drawn at.
-        let configured = state.logical_size();
-        let shown = layer_size(PanelAnchor::empty(), configured);
-        let with_frame = waits_for_frame(!state.outputs.is_empty(), shown, (width, height));
         if layer.is_null() {
             return Err(ShellError::Backend(format!(
                 "set_panel: {window:?} has no layer surface"
@@ -281,31 +268,84 @@ impl WaylandShell {
                 "changing a panel's layer (needs zwlr_layer_shell_v1 version 2)",
             ));
         }
-        // SAFETY: the window's own live layer surface, `wl_surface` and
-        // viewport (null without one, which `set_viewport` allows); the
-        // commit, here or the next present's, applies the double-buffered
-        // state just sent.
-        unsafe {
-            send_state(layer, desc, size);
-            if set_layer {
-                zwlr_layer_surface_v1::set_layer(layer, layer_of(desc.layer));
-            }
-            if with_frame {
-                set_viewport(
-                    viewport,
-                    LogicalSize::new(f64::from(width), f64::from(height)),
-                );
-            } else {
-                // A request before it may have left the destination at a size
-                // still waiting for its frame.
-                set_viewport(viewport, configured);
+
+        let (width, height) = layer_size(desc.anchor, size);
+        let scale_factor = state.scale_factor();
+        let logical = LogicalSize::new(f64::from(width), f64::from(height));
+        let physical = state
+            .requested_constraints
+            .apply(logical.to_physical(scale_factor), scale_factor);
+        let present = Arc::clone(&state.present);
+        let proxies = state.proxies();
+        let mut shared = present.lock();
+        // A given-up window cannot wait, so this request is committed at once;
+        // what it still owed goes ahead of it, never after.
+        let settled = shared.settle_given_up();
+        let presenting = shared.presenting();
+        let reply = shared.owed.set_panel(
+            OwedPanel {
+                size: logical,
+                desc: KeptPanel::new(desc),
+                set_layer,
+            },
+            Geometry {
+                size: physical,
+                logical,
+            },
+            width > 0 && height > 0,
+            WindowFacts {
+                presenting,
+                on_screen: !state.outputs.is_empty(),
+                ..WindowFacts::default()
+            },
+        );
+        let (at_once, region) = match reply {
+            PanelReply::Owed => (false, None),
+            PanelReply::AtOnce { input_region } => (true, input_region),
+        };
+        drop(shared);
+
+        if at_once {
+            // SAFETY: the window's own live layer surface and `wl_surface`; the
+            // region is null or one `set_input_region` made, destroyed once
+            // set; the commit applies the double-buffered state just sent.
+            unsafe {
+                present::send_settled(&proxies, settled);
+                send_state(layer, desc, size);
+                if set_layer {
+                    zwlr_layer_surface_v1::set_layer(layer, layer_of(desc.layer));
+                }
+                if let Some(Region(region)) = region {
+                    wl_surface::set_input_region(surface, region);
+                    if !region.is_null() {
+                        wl_region::destroy(region);
+                    }
+                }
                 wl_surface::commit(surface);
             }
+            self.conn.flush();
         }
-        self.conn.flush();
         let state = self.window_mut(window)?;
-        state.panel = Some(crate::role::KeptPanel::new(desc));
+        state.panel = Some(KeptPanel::new(desc));
         state.requested_size = size;
+        if !at_once {
+            // The size the caller draws at from here, which the frame that
+            // lands the request is drawn at.
+            state.pending.size = Some(logical);
+            let config = WindowConfiguration {
+                size: physical,
+                scale_factor,
+                mode: DisplayMode::Windowed,
+            };
+            if state.configuration != Some(config) {
+                state.configuration = Some(config);
+                self.queue.push_back(ShellEvent::Resized {
+                    window,
+                    size: physical,
+                    scale_factor,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -339,7 +379,7 @@ impl WaylandShell {
 
 #[cfg(test)]
 mod tests {
-    use super::{anchor_of, exclusive_zone, keyboard_of, layer_of, layer_size, waits_for_frame};
+    use super::{anchor_of, exclusive_zone, keyboard_of, layer_of, layer_size};
     use crate::{LogicalSize, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, Reserve};
 
     const BAR: LogicalSize = LogicalSize::new(0.0, 30.0);
@@ -404,22 +444,5 @@ mod tests {
             exclusive_zone(&panel(PanelAnchor::RIGHT, Reserve::OwnExtent), dock),
             64
         );
-    }
-
-    #[test]
-    fn only_a_new_size_of_the_panels_own_waits_for_its_frame() {
-        const SHOWN: (u32, u32) = (400, 300);
-        const SHRUNK: (u32, u32) = (400, 120);
-        const BAR_WIDE: (u32, u32) = (0, 30);
-        // A new size of its own waits, whatever was asked before it: asked
-        // again while it waits, or with only a margin changed, it still is
-        // not the size shown.
-        assert!(waits_for_frame(true, SHOWN, SHRUNK));
-        // The size shown, or a stretched axis, is committed at once, which
-        // also replaces a size still waiting.
-        assert!(!waits_for_frame(true, SHOWN, SHOWN));
-        assert!(!waits_for_frame(true, SHOWN, BAR_WIDE));
-        // A panel on no output has no frame to wait for.
-        assert!(!waits_for_frame(false, SHOWN, SHRUNK));
     }
 }

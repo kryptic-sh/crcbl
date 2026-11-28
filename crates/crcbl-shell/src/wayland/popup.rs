@@ -31,6 +31,7 @@ use crate::{
 use core::ptr;
 
 use super::ffi::WlProxy;
+use super::present::WlPresent;
 use super::protocol::layer_shell::zwlr_layer_surface_v1;
 use super::protocol::wayland::{wl_compositor, wl_region, wl_surface};
 use super::protocol::xdg_shell::{xdg_popup, xdg_positioner, xdg_surface, xdg_wm_base};
@@ -255,7 +256,7 @@ impl WaylandShell {
                 fractional_scale,
                 viewport,
                 frame_callback: ptr::null_mut(),
-                present: std::sync::Arc::default(),
+                present: std::sync::Arc::new(WlPresent::new()),
                 title: desc.title.to_string(),
                 requested_size: desc.size,
                 requested_mode: desc.mode,

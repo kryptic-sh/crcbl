@@ -51,8 +51,8 @@ use crcbl_hal::{
     ImageSubresourceRange, LoadOp, Rect2d, RenderPassDesc, ResourceState, StoreOp,
 };
 use crcbl_shell::{
-    LogicalSize, PanelAnchor, PanelDesc, PanelLayer, Shell, ShellBackend, ShellCaps, WindowDesc,
-    WindowId, WindowRole,
+    LogicalSize, PanelAnchor, PanelDesc, PanelLayer, Shell, ShellBackend, ShellCaps, ShellEvent,
+    WindowDesc, WindowId, WindowRole,
 };
 
 /// The app id the e2e sway config floats, so the window sits at the centre.
@@ -74,6 +74,9 @@ struct Solid {
     window: WindowId,
     presenter: Presenter,
     colour: [f32; 4],
+    /// A size the colour stops at, and the colour drawn beyond it: what tells
+    /// a frame drawn at that size from a bigger one scaled down to it.
+    marker: Option<((u32, u32), [f32; 4])>,
 }
 
 impl Solid {
@@ -105,6 +108,21 @@ impl Solid {
             window,
             presenter,
             colour,
+            marker: None,
+        }
+    }
+
+    /// Reads one shell event as a program presenting to the window does:
+    /// the presenter's frame pacing, and a `Resized` for this window, which
+    /// rebuilds the swapchain at the size the next frame is drawn at.
+    fn observe(&mut self, event: &ShellEvent) {
+        self.presenter.observe(event);
+        if let ShellEvent::Resized { window, size, .. } = *event
+            && window == self.window
+        {
+            self.presenter
+                .resize((size.width, size.height))
+                .expect("resize");
         }
     }
 
@@ -131,21 +149,40 @@ impl Solid {
             images: &barrier(ResourceState::Undefined, ResourceState::ColorAttachment),
             ..Barriers::default()
         });
-        encoder.begin_render_pass(&RenderPassDesc {
-            label: Some("solid"),
-            color_attachments: &[ColorAttachment {
-                view: frame.view,
-                resolve: None,
-                load: LoadOp::Clear,
-                store: StoreOp::Store,
-                clear: ClearValue::color(self.colour),
-            }],
-            depth_stencil_attachment: None,
-            render_area: Rect2d::from_size(frame.extent.0, frame.extent.1),
-            timestamp_writes: None,
-            statistics_writes: None,
-        });
-        encoder.end_render_pass();
+        let clear = |encoder: &mut dyn crcbl_hal::CommandEncoder, colour, (width, height)| {
+            encoder.begin_render_pass(&RenderPassDesc {
+                label: Some("solid"),
+                color_attachments: &[ColorAttachment {
+                    view: frame.view,
+                    resolve: None,
+                    load: LoadOp::Clear,
+                    store: StoreOp::Store,
+                    clear: ClearValue::color(colour),
+                }],
+                depth_stencil_attachment: None,
+                // A clear covers the render area alone, so a second pass over
+                // a smaller one leaves the first's colour around it.
+                render_area: Rect2d::from_size(width, height),
+                timestamp_writes: None,
+                statistics_writes: None,
+            });
+            encoder.end_render_pass();
+        };
+        match self.marker {
+            None => clear(encoder.as_mut(), self.colour, frame.extent),
+            Some(((width, height), marker)) => {
+                clear(encoder.as_mut(), marker, frame.extent);
+                encoder.pipeline_barrier(&Barriers {
+                    images: &barrier(
+                        ResourceState::ColorAttachment,
+                        ResourceState::ColorAttachment,
+                    ),
+                    ..Barriers::default()
+                });
+                let inner = (width.min(frame.extent.0), height.min(frame.extent.1));
+                clear(encoder.as_mut(), self.colour, inner);
+            }
+        }
         encoder.pipeline_barrier(&Barriers {
             images: &barrier(ResourceState::ColorAttachment, ResourceState::Present),
             ..Barriers::default()
@@ -384,14 +421,32 @@ fn a_window_under_an_x_compositing_manager_is_blended_premultiplied() {
 /// until the frame at the new size arrives — never that frame squeezed into the
 /// new rectangle. A blue panel over the red backdrop is shrunk with
 /// `set_panel` and not presented again; a pixel the old panel covered and the
-/// new one does not must still be blue. Presenting again must then show the
-/// new size, which the deferred acknowledgement rides in on. Committing the new viewport
-/// destination with the configure's acknowledgement applied it to the buffer
-/// already shown, which the compositor then scaled into the new size: lyr's
-/// menu panel showed squeezed for up to 1.6 s on a nested Hyprland.
+/// new one does not must still be blue. The program resizes its presenter on
+/// the `Resized` that tells it the new size, as every program does, and
+/// presenting again at that size must then show it: the new size rides in
+/// with that frame. Sending the new size ahead of its frame applied it to the
+/// buffer already shown, which the compositor then scaled into the new size:
+/// lyr's menu panel showed squeezed for up to 1.6 s on a nested Hyprland.
 #[test]
 #[ignore = "needs headless sway, grim and a Vulkan driver; see the module docs"]
 fn a_shrinking_panel_is_not_squeezed_before_its_next_frame() {
+    shrink(true);
+}
+
+/// **A program that never reads `Resized` still gets its panel's new size**,
+/// one pump late: it keeps presenting at the old size, and its first frame
+/// after the pump that handed out the `Resized` carries the new size anyway,
+/// so the frame that lands it is the old one scaled into it. The pixel given
+/// up shows the backdrop all the same.
+#[test]
+#[ignore = "needs headless sway, grim and a Vulkan driver; see the module docs"]
+fn a_panel_whose_program_ignores_resized_still_shrinks() {
+    shrink(false);
+}
+
+/// The shrinking panel, presented by a program that resizes on `Resized`
+/// when `resizes`, and by one that never does otherwise.
+fn shrink(resizes: bool) {
     let mut shell = crcbl_shell::open_backend(ShellBackend::Wayland).expect("a Wayland session");
     let shell = shell.as_mut();
     let mut backdrop = Solid::open(shell, &sway_backdrop(), [1.0, 0.0, 0.0, 1.0], None);
@@ -412,14 +467,21 @@ fn a_shrinking_panel_is_not_squeezed_before_its_next_frame() {
     // Inside the 800x600 panel and outside the 400x300 one it shrinks to.
     let given_up = (600, 450);
     let blue = |pixel: [u8; 3]| pixel[2] > 200 && pixel[0] < 50;
+    let pump = |shell: &mut dyn Shell, backdrop: &mut Solid, shrinking: &mut Solid| {
+        shell.pump(&mut |event| {
+            backdrop.observe(&event);
+            if resizes {
+                shrinking.observe(&event);
+            } else {
+                shrinking.presenter.observe(&event);
+            }
+        });
+    };
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while !blue(grim_pixel(given_up)) {
         assert!(Instant::now() < deadline, "the panel never showed");
-        shell.pump(&mut |event| {
-            backdrop.presenter.observe(&event);
-            shrinking.presenter.observe(&event);
-        });
+        pump(shell, &mut backdrop, &mut shrinking);
         backdrop.present();
         shrinking.present();
         std::thread::sleep(Duration::from_millis(50));
@@ -428,10 +490,19 @@ fn a_shrinking_panel_is_not_squeezed_before_its_next_frame() {
     shell
         .set_panel(shrinking.window, LogicalSize::new(400.0, 300.0), &panel)
         .expect("set_panel");
-    // The configure arrives and is answered; nothing is presented.
+    // From here each frame is blue to 400x300 and green beyond: a frame drawn
+    // at the new size is all blue, and a bigger one scaled into it shows its
+    // green inside the shrunk panel.
+    let green = |pixel: [u8; 3]| pixel[1] > 200 && pixel[0] < 50 && pixel[2] < 50;
+    shrinking.marker = Some(((400, 300), [0.0, 1.0, 0.0, 1.0]));
+    // Inside the shrunk panel, where an 800x600 frame scaled into it shows
+    // what it drew at the pixel given up.
+    let scaled = (300, 225);
+    // The new size is told, and taken by a program that resizes; nothing is
+    // presented, so nothing on screen may change yet.
     let until = Instant::now() + Duration::from_millis(500);
     while Instant::now() < until {
-        shell.pump(&mut |_| {});
+        pump(shell, &mut backdrop, &mut shrinking);
         std::thread::sleep(Duration::from_millis(20));
     }
     let pixel = grim_pixel(given_up);
@@ -450,16 +521,34 @@ fn a_shrinking_panel_is_not_squeezed_before_its_next_frame() {
             Instant::now() < deadline,
             "the panel never took its new size once it presented again"
         );
-        shell.pump(&mut |event| {
-            backdrop.presenter.observe(&event);
-            shrinking.presenter.observe(&event);
-        });
+        pump(shell, &mut backdrop, &mut shrinking);
         backdrop.present();
         shrinking.present();
+        if resizes {
+            let pixel = grim_pixel(scaled);
+            assert!(
+                !green(pixel),
+                "a frame of the old size was scaled into the new one, as if the program had \
+                 not resized: {pixel:?}"
+            );
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
+    let pixel = grim_pixel(scaled);
+    if resizes {
+        assert!(
+            blue(pixel),
+            "the shrunk panel is not its own frame at its own size: {pixel:?}"
+        );
+    } else {
+        // What a program that ignores `Resized` gets: its old frame, scaled.
+        assert!(
+            green(pixel),
+            "the frame that landed the size was not the old one scaled: {pixel:?}"
+        );
+    }
     assert!(
-        blue(grim_pixel((200, 150))),
+        blue(grim_pixel((100, 75))),
         "the shrunk panel is not where it was"
     );
 

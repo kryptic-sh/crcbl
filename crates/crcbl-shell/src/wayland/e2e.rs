@@ -60,6 +60,8 @@
 
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::ptr;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::CString;
 
 use crcbl_core::SurfaceTarget;
@@ -180,6 +182,9 @@ unsafe extern "C" fn ignore(
 /// Call it *after* the first configure, which is when `xdg-shell` first permits
 /// a buffer. The next `pump` will see the compositor's real geometry.
 ///
+/// The buffer is the size the window was last told, presented as a presenter
+/// would, through the window's hook; see [`present_at`].
+///
 /// # Errors
 ///
 /// [`ShellError::InvalidWindow`] for a stale handle, or
@@ -197,10 +202,15 @@ pub fn map_window(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError>
     present_at(shell, window, size)
 }
 
-/// Attaches and commits a zero-filled buffer of `size` to `window`'s surface:
-/// [`map_window`] at a size the caller chooses, which stands in for a frame a
-/// caller drew at a size it asked for and the compositor has not yet
-/// configured.
+/// Attaches and commits a zero-filled buffer of `size` to `window`'s surface,
+/// as a presenter does: [`will_present`](crate::PresentHook::will_present) on
+/// the window's hook just before the commit, and
+/// [`presented`](crate::PresentHook::presented) after it. The hook is kept for
+/// the window's next frames, on this thread, as a presenter keeps its own.
+///
+/// [`map_window`] at a size the caller chooses, which stands in for a frame
+/// drawn at any size: the one the caller was told, or one it drew before it
+/// heard.
 ///
 /// # Errors
 ///
@@ -209,6 +219,114 @@ pub fn present_at(
     shell: &dyn Shell,
     window: WindowId,
     size: crate::PhysicalSize,
+) -> Result<(), ShellError> {
+    let hook = kept_hook(shell, window)?;
+    attach(shell, window, size, hook.as_ref())?;
+    if let Some(hook) = hook {
+        hook.presented();
+    }
+    Ok(())
+}
+
+thread_local! {
+    /// The hook [`present_at`] presents each window through, kept as a
+    /// presenter keeps its own: a window whose last hook is dropped stops
+    /// waiting for frames, which a hook taken and dropped around each frame
+    /// would make of every window here.
+    ///
+    /// Keyed by the surface as well as the handle: handles start at the same
+    /// value in every shell, and a test with a second session would otherwise
+    /// present its window through the first session's hook. An entry goes
+    /// with its window, in [`forget`].
+    static HOOKS: RefCell<HashMap<(usize, WindowId), crate::PresentHook>> =
+        RefCell::new(HashMap::new());
+
+    /// The size of each surface's last configure, recorded by the backend as
+    /// it applies one: what [`last_configure`] reads. Kept here, by surface,
+    /// rather than in the shell, so reading it needs nothing of the shell but
+    /// its surface target. An entry goes with its window, in [`forget`].
+    static CONFIGURES: RefCell<HashMap<usize, PhysicalSize>> = RefCell::new(HashMap::new());
+}
+
+/// `window`'s kept hook, taken from the shell the first time.
+fn kept_hook(
+    shell: &dyn Shell,
+    window: WindowId,
+) -> Result<Option<crate::PresentHook>, ShellError> {
+    let key = (surface_key(shell, window)?, window);
+    if let Some(hook) = HOOKS.with_borrow(|hooks| hooks.get(&key).cloned()) {
+        return Ok(Some(hook));
+    }
+    let hook = shell.present_hook(window)?;
+    if let Some(hook) = &hook {
+        HOOKS.with_borrow_mut(|hooks| hooks.insert(key, hook.clone()));
+    }
+    Ok(hook)
+}
+
+/// [`present_at`] without the hook: a frame committed by a client that
+/// presents through its own swapchain and never tells the shell, which is
+/// what keeps the window committing everything as it comes.
+///
+/// # Errors
+///
+/// As [`present_at`].
+pub fn present_raw(
+    shell: &dyn Shell,
+    window: WindowId,
+    size: crate::PhysicalSize,
+) -> Result<(), ShellError> {
+    attach(shell, window, size, None)
+}
+
+/// The size of the compositor's last configure of `window`, before anything
+/// waiting for a frame is laid over it, as the window state is: what the
+/// compositor has applied, where [`Shell::window_state`] says what the caller
+/// was told. `None` before the first configure.
+///
+/// # Errors
+///
+/// [`ShellError::InvalidWindow`] for a stale handle.
+pub fn last_configure(
+    shell: &dyn Shell,
+    window: WindowId,
+) -> Result<Option<crate::PhysicalSize>, ShellError> {
+    let surface = surface_key(shell, window)?;
+    Ok(CONFIGURES.with_borrow(|configures| configures.get(&surface).copied()))
+}
+
+/// What the backend tells this module of a configure: the size the
+/// compositor configured `surface` at, for [`last_configure`].
+pub(super) fn record_configure(surface: *mut WlProxy, size: PhysicalSize) {
+    CONFIGURES.with_borrow_mut(|configures| configures.insert(surface as usize, size));
+}
+
+/// What the backend tells this module as it destroys a window: what it kept
+/// for the window goes, so a later surface at the same address starts clean.
+pub(super) fn forget(surface: *mut WlProxy, window: WindowId) {
+    let key = surface as usize;
+    CONFIGURES.with_borrow_mut(|configures| configures.remove(&key));
+    let hook = HOOKS.with_borrow_mut(|hooks| hooks.remove(&(key, window)));
+    drop(hook);
+}
+
+/// `window`'s surface as a key into this module's maps.
+fn surface_key(shell: &dyn Shell, window: WindowId) -> Result<usize, ShellError> {
+    let SurfaceTarget::Wayland { surface, .. } = shell.surface_target(window)? else {
+        return Err(ShellError::Backend(
+            "not a Wayland window; this helper is only for the Wayland backend".to_string(),
+        ));
+    };
+    Ok(surface.as_ptr() as usize)
+}
+
+/// Attaches and commits the buffer [`present_at`] and [`present_raw`] stand
+/// in for a frame with, telling `hook` first if there is one.
+fn attach(
+    shell: &dyn Shell,
+    window: WindowId,
+    size: crate::PhysicalSize,
+    hook: Option<&crate::PresentHook>,
 ) -> Result<(), ShellError> {
     let SurfaceTarget::Wayland {
         display, surface, ..
@@ -270,6 +388,11 @@ pub fn present_at(
     }
     // SAFETY: `shm` was just bound on this connection.
     unsafe { (lib.proxy_add_dispatcher)(shm, ignore, ptr::null(), ptr::null_mut()) };
+    // Last before the commit, as a presenter tells it, and after the
+    // roundtrips above, which dispatch the shell's events.
+    if let Some(hook) = hook {
+        hook.will_present(size);
+    }
     let result = attach_shm_buffer(lib, display, surface, size, shm);
     // SAFETY: `shm` is live and unused from here; the pool created from it is a
     // separate object that deliberately outlives it. `wl_shm.release` only

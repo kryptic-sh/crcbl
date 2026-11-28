@@ -57,8 +57,9 @@ fn every_present_tells_the_hook_the_extent_it_was_drawn_at() {
     shell.destroy_window(window).expect("the window goes away");
 }
 
-/// **A present that went out of date is announced and never confirmed**, so
-/// the last present the shell knows of is still the one before it.
+/// **A present that went out of date is announced, reported failed, and never
+/// confirmed**, so the last present the shell knows of is still the one
+/// before it, and nothing waits on the one that failed.
 #[test]
 fn an_out_of_date_present_is_not_confirmed() {
     let (mut shell, window, recorder, mut gpu) =
@@ -77,6 +78,44 @@ fn an_out_of_date_present_is_not_confirmed() {
         shell.last_presented(window).expect("live"),
         Some(size_of(first.extent)),
         "the out-of-date present is not one the shell is told went through"
+    );
+    assert_eq!(
+        shell.failed_presents(window).expect("live"),
+        1,
+        "the shell is told it failed"
+    );
+
+    gpu.destroy().expect("teardown");
+    shell.destroy_window(window).expect("the window goes away");
+}
+
+/// **A present that fails outright is reported too**, not only one that
+/// went out of date: presenting a frame a second time, with no acquire
+/// behind it, is refused by the null device in the words `crcbl-vk`,
+/// `crcbl-dx12` and `crcbl-mtl` refuse it with.
+#[test]
+fn a_present_that_is_refused_is_reported_failed() {
+    let (mut shell, window, _recorder, mut gpu) =
+        null_context("present hook refused present test", Pacing::Vsync);
+    let frame = acquired(&mut gpu);
+    assert_eq!(present(&mut gpu, &frame), FrameOutcome::Presented);
+    let commands = gpu
+        .device()
+        .create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+            label: Some("present hook refused present test"),
+            queue: gpu.queue(),
+        })
+        .finish()
+        .expect("an empty command buffer");
+    assert!(
+        gpu.submit_and_present(&frame, commands).is_err(),
+        "a second present of one acquire is refused"
+    );
+    assert_eq!(shell.failed_presents(window).expect("live"), 1);
+    assert_eq!(
+        shell.last_presented(window).expect("live"),
+        Some(size_of(frame.extent)),
+        "the refused present is not confirmed"
     );
 
     gpu.destroy().expect("teardown");

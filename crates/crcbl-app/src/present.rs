@@ -2306,7 +2306,9 @@ impl Presenter {
     ///
     /// The window's [`Shell::present_hook`], if it has one, is told just
     /// before the present that a frame of [`AcquiredFrame::extent`] is
-    /// coming, and after it that the present went through.
+    /// coming, and after it whether the present went through. Present on the
+    /// thread that runs the window's shell, as the hook requires: on Wayland a
+    /// present from another thread loses the window its frame-matched sizes.
     ///
     /// # Errors
     ///
@@ -2422,11 +2424,19 @@ impl Presenter {
             Ok(()) => {}
             // **Present is the usual place a resize is noticed**, not acquire.
             Err(SurfaceError::OutOfDate) => {
+                if let Some(hook) = &self.present_hook {
+                    hook.present_failed();
+                }
                 after_present(self.device.as_ref(), FrameOutcome::Reconfigured)?;
                 self.reconfigure()?;
                 return Ok(FrameOutcome::Reconfigured);
             }
-            Err(error) => return Err(PresentError::from(error).into()),
+            Err(error) => {
+                if let Some(hook) = &self.present_hook {
+                    hook.present_failed();
+                }
+                return Err(PresentError::from(error).into());
+            }
         }
 
         // The present committed, so a request made for this frame is now owed

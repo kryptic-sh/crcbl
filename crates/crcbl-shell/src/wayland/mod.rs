@@ -183,6 +183,7 @@ pub mod ffi;
 mod frame;
 mod input;
 mod layer;
+mod owed;
 mod popup;
 mod present;
 pub mod protocol;
@@ -237,7 +238,8 @@ use protocol::text_input::zwp_text_input_manager_v3;
 use protocol::viewporter::{wp_viewport, wp_viewporter};
 use protocol::wayland::{
     wl_callback, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer,
-    wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
+    wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_region, wl_registry, wl_seat,
+    wl_surface,
 };
 use protocol::xdg_activation::{xdg_activation_token_v1, xdg_activation_v1};
 use protocol::xdg_decoration::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1};
@@ -2086,8 +2088,8 @@ struct WlWindow {
     /// The `wl_callback` of a [`Shell::request_frame`] not yet answered, or
     /// null; see [`frame`].
     frame_callback: *mut WlProxy,
-    /// What the window's [`Shell::present_hook`] has been told; see
-    /// [`present`].
+    /// What the window owes its next frames, shared with its
+    /// [`Shell::present_hook`]; see [`present`] and [`owed`].
     present: Arc<present::WlPresent>,
     title: String,
     requested_size: LogicalSize,
@@ -2147,6 +2149,29 @@ impl WlWindow {
                 )
             })
         })
+    }
+
+    /// For a request the shell would commit at once that owes nothing to a
+    /// frame: what a given-up window still owed, to send ahead of it (see
+    /// [`present::Shared::settle_given_up`]), and whether to commit now. Not
+    /// while a frame owes the window a new size: the commit could carry what
+    /// a failed present left on the wire onto the old buffer, and the
+    /// request's state rides that frame's commit instead.
+    fn settle_for_commit(&self) -> (Option<owed::Batch<present::Region>>, bool) {
+        let mut shared = self.present.lock();
+        let settled = shared.settle_given_up();
+        let waits = shared.presenting() && shared.owed.resizing();
+        (settled, !waits)
+    }
+
+    /// The proxies [`present::send`] sends a batch on.
+    const fn proxies(&self) -> present::Proxies {
+        present::Proxies {
+            surface: self.surface,
+            xdg_surface: self.xdg_surface,
+            layer_surface: self.layer_surface,
+            viewport: self.viewport,
+        }
     }
 
     /// Device pixels per logical unit for this window.
@@ -3306,12 +3331,35 @@ impl WaylandShell {
         // `preferred_scale` has arrived: a buffer scale set before it stayed
         // set, and a strict compositor refuses a buffer whose size is not a
         // multiple of it, which an odd width at 1.5 is.
+        //
+        // A window presenting through its hook sends it with the frame drawn at
+        // the new scale, which `rescale` owes it: sent now, the next commit —
+        // perhaps a frame still at the old scale — would apply it to a buffer
+        // of the old size, the wrong size on screen and, at an odd size, one a
+        // strict compositor refuses.
+        let mut buffer_scale = None;
         if !window.is_fractional() {
-            let surface_proxy = window.surface;
-            // SAFETY: the surface is live and `set_buffer_scale` takes one int.
-            unsafe { wl_surface::set_buffer_scale(surface_proxy, scale) };
+            let mut shared = window.present.lock();
+            // What a given-up window owed goes first, its older buffer scale
+            // among it, so the one set here is the one in effect. It is
+            // committed with the next commit, which `rescale` below makes or
+            // leaves to the window's next frame.
+            let settled = shared.settle_given_up();
+            let owe = window.configuration.is_some() && shared.presenting();
+            drop(shared);
+            // SAFETY: the window's own live proxies, on the shell's thread.
+            unsafe { present::send_settled(&window.proxies(), settled) };
+            if owe {
+                buffer_scale = Some(scale);
+            } else {
+                window.present.lock().owed.scale_sent(scale);
+                let surface_proxy = window.surface;
+                // SAFETY: the surface is live and `set_buffer_scale` takes one
+                // int.
+                unsafe { wl_surface::set_buffer_scale(surface_proxy, scale) };
+            }
         }
-        self.rescale(id);
+        self.rescale(id, buffer_scale);
     }
 
     /// A `wp_fractional_scale_v1.preferred_scale`.
@@ -3326,41 +3374,74 @@ impl WaylandShell {
             return;
         }
         window.preferred_scale = Some(scale);
-        self.rescale(id);
+        self.rescale(id, None);
     }
 
     /// Republishes a window's configuration after its scale changed.
-    fn rescale(&mut self, id: WindowId) {
+    ///
+    /// `buffer_scale` is the integer scale [`surface_output_changed`] left for
+    /// this to owe, which only a window presenting through its hook has.
+    ///
+    /// [`surface_output_changed`]: Self::surface_output_changed
+    fn rescale(&mut self, id: WindowId, buffer_scale: Option<i32>) {
         let Ok(window) = self.window_mut(id) else {
             return;
         };
-        let Some(config) = window.configuration else {
-            // Not configured yet: the scale folds into the first configure
-            // rather than being announced on its own.
+        let surface = window.surface;
+        let Some(config) = window
+            .configuration
+            .filter(|config| (config.scale_factor - window.scale_factor()).abs() >= f64::EPSILON)
+        else {
+            // Not configured yet, where the scale folds into the first
+            // configure rather than being announced on its own, or no change.
+            // A buffer scale left for this goes now: nothing waits to carry it.
+            // Reached with one when the compositor offers fractional scaling
+            // but no viewporter: the factor follows `preferred_scale` there,
+            // so an integer scale change alone does not move it.
+            if let Some(scale) = buffer_scale {
+                window.present.lock().owed.scale_sent(scale);
+                // SAFETY: the surface is live and `set_buffer_scale` takes one
+                // int.
+                unsafe { wl_surface::set_buffer_scale(surface, scale) };
+            }
             return;
         };
         let scale_factor = window.scale_factor();
-        if (config.scale_factor - scale_factor).abs() < f64::EPSILON {
-            return;
-        }
-        let logical = window.logical_size();
+        let present = Arc::clone(&window.present);
+        let mut shared = present.lock();
+        let settled = shared.settle_given_up();
+        // A panel request waiting for its frame is the size the caller was
+        // told, and stays it at the new scale.
+        let logical = shared.owed.logical_for(window.logical_size());
         let size = logical.to_physical(scale_factor);
         window.configuration = Some(WindowConfiguration {
             size,
             scale_factor,
             mode: config.mode,
         });
-        let (surface, viewport) = (window.surface, window.viewport);
-        // On screen already, the commit is left to the next present, for
-        // `apply_configure`'s reason: the buffer shown is the old scale's.
-        let defer_commit = !window.outputs.is_empty();
-        // SAFETY: both proxies are live; a scale change is only in effect after
-        // a commit, and the viewport destination is what tells the compositor
-        // how large the (physical) buffer should appear.
+        // Presenting through its hook on screen, the destination and the
+        // buffer scale go with the frame drawn at the new scale, for
+        // `apply_configure`'s reason; otherwise they go now, with whatever was
+        // owed, and on screen the commit is left to the caller's next frame.
+        let presenting = shared.presenting();
+        let now = shared.owed.rescale(
+            owed::Geometry { size, logical },
+            buffer_scale,
+            owed::WindowFacts {
+                presenting,
+                on_screen: !window.outputs.is_empty(),
+                ..owed::WindowFacts::default()
+            },
+        );
+        drop(shared);
+        // SAFETY: the window's own live proxies, on the shell's thread; what
+        // a given-up window owed goes ahead of what supersedes it, and rides
+        // the same commit, or the window's next frame where this leaves it
+        // to one.
         unsafe {
-            set_viewport(viewport, logical);
-            if !defer_commit {
-                wl_surface::commit(surface);
+            present::send_settled(&window.proxies(), settled);
+            if let Some(now) = now {
+                present::send_now(&window.proxies(), now);
             }
         }
         self.queue.push_back(ShellEvent::ScaleFactorChanged {
@@ -3377,6 +3458,19 @@ impl WaylandShell {
     /// For either role. A layer surface has no states, so it is always
     /// [`DisplayMode::Windowed`], and its focus comes from `wl_keyboard`
     /// alone.
+    ///
+    /// **A configure that resizes a surface on screen is not committed here.**
+    /// Its buffer is the old size, and a commit now would apply the new
+    /// viewport destination to it, so the compositor would show the last frame
+    /// squeezed or stretched into the new rectangle until a frame of that size
+    /// arrived — lyr's shrinking menu, for up to 1.6 s on a nested Hyprland.
+    /// For a window presenting through its hook, the acknowledgement and the
+    /// destination are not even sent: they are owed to the frame drawn at the
+    /// new size (see [`owed`]), so a frame still at the old size cannot carry
+    /// them. For any other window they are sent and left uncommitted, for the
+    /// caller's own next commit. A surface on no output has no buffer to
+    /// distort, and a configure that fits the buffer on screen changes no
+    /// geometry, so both are committed at once.
     fn apply_configure(&mut self, id: WindowId, serial: u32) {
         // **Which monitor a fullscreen surface ended up on is observable, even
         // though asking for one is only a hint.** `wl_surface.enter` names the
@@ -3411,11 +3505,28 @@ impl WaylandShell {
             DisplayMode::Windowed
         };
         let scale_factor = window.scale_factor();
-        let logical = window.logical_size();
+        let present = Arc::clone(&window.present);
+        let mut shared = present.lock();
+        let settled = shared.settle_given_up();
+        let on_screen = !window.outputs.is_empty();
+        let presenting = shared.presenting();
         // Constraints are hints the compositor may ignore, so they are applied
         // here too — the same thing `SizeConstraints::apply` does for
         // `HeadlessShell`, and the reason the seam has no "effective
         // constraints".
+        let configured = window.logical_size();
+        #[cfg(feature = "wayland-e2e")]
+        e2e::record_configure(
+            window.surface,
+            window
+                .requested_constraints
+                .apply(configured.to_physical(scale_factor), scale_factor),
+        );
+        let logical = if presenting && on_screen {
+            shared.owed.logical_for(configured)
+        } else {
+            configured
+        };
         let size = window
             .requested_constraints
             .apply(logical.to_physical(scale_factor), scale_factor);
@@ -3428,20 +3539,9 @@ impl WaylandShell {
         let scale_changed = window
             .configuration
             .is_some_and(|previous| previous.scale_factor != scale_factor);
-        // **A surface already on screen is not committed at a new size here.**
-        // Its buffer is the old size, and a commit now would apply the new
-        // viewport destination to it, so the compositor would show the last
-        // frame squeezed or stretched into the new rectangle until a frame of
-        // that size arrived — lyr's shrinking menu, for up to 1.6 s on a nested
-        // Hyprland. The destination and the acknowledgement are left pending
-        // instead, and the next present commits them with the buffer drawn at
-        // that size, which the protocol allows. A surface on no output has no
-        // buffer to distort, and a configure that keeps the size changes no
-        // destination, so both are committed at once as before.
         let resized = window
             .configuration
             .is_some_and(|previous| previous.size != size || previous.scale_factor != scale_factor);
-        let defer_commit = resized && !window.outputs.is_empty();
         window.configuration = Some(config);
         // `xdg_toplevel.state.activated` is a focus signal a compositor sets
         // even before a `wl_seat` has a keyboard. Compare against the previous
@@ -3451,31 +3551,35 @@ impl WaylandShell {
             .pending
             .states
             .contains(&xdg_toplevel::state::ACTIVATED);
-        let xdg = window.xdg_surface;
-        let layer = window.layer_surface;
         let toplevel = window.toplevel;
-        let surface = window.surface;
-        let viewport = window.viewport;
+        let proxies = window.proxies();
 
-        // SAFETY: every proxy is live, and the configure came from whichever
-        // of the two role objects is not null. `ack_configure` must precede
-        // the commit, and the commit is what makes the acknowledged state
-        // current — this one, or for a resized surface on screen the next
-        // present's (see `defer_commit`). The viewport destination is the
-        // logical size the compositor just asked for, which is exactly what
-        // `wp_viewport` wants.
-        unsafe {
-            set_viewport(viewport, logical);
-            if layer.is_null() {
-                xdg_surface::ack_configure(xdg, serial);
-            } else {
-                zwlr_layer_surface_v1::ack_configure(layer, serial);
-            }
-            if !defer_commit {
-                wl_surface::commit(surface);
-            }
+        // What this configure does on the wire: nothing yet, owed to the frame
+        // at its size, or acknowledged now with everything older; see
+        // `Owed::configure`.
+        let now = shared.owed.configure(
+            serial,
+            owed::Geometry { size, logical },
+            owed::WindowFacts {
+                presenting,
+                on_screen,
+                scale_changed,
+                resized,
+            },
+        );
+        drop(shared);
+        // SAFETY: the window's own live proxies, on the shell's thread; the
+        // configure came from whichever of the two role objects is not null,
+        // which is the one `send_now` acknowledges on. What a given-up window
+        // owed goes ahead of this configure's acknowledgement, which a
+        // given-up window always has, and rides its commit, or the window's
+        // next frame where a resize on screen leaves the commit to one.
+        unsafe { present::send_settled(&proxies, settled) };
+        if let Some(now) = now {
+            // SAFETY: as above.
+            unsafe { present::send_now(&proxies, now) };
+            self.conn.flush();
         }
-        self.conn.flush();
 
         if changed {
             if scale_changed {
@@ -3497,6 +3601,26 @@ impl WaylandShell {
         if !toplevel.is_null() {
             self.set_focus(id, focused);
         }
+    }
+
+    /// Sends what a window given up as presenting through its hook — called
+    /// off the shell's thread, or with no hook left — still owed, committed;
+    /// see [`present`].
+    fn settle_given_up_windows(&mut self) {
+        let settled: Vec<*mut WlProxy> = self
+            .windows
+            .iter()
+            .filter(|(_, window)| window.present.settle_given_up())
+            .map(|(_, window)| window.surface)
+            .collect();
+        if settled.is_empty() {
+            return;
+        }
+        for surface in settled {
+            // SAFETY: the surface of a live window.
+            unsafe { wl_surface::commit(surface) };
+        }
+        self.conn.flush();
     }
 
     /// Sends the cursor a window asked for on a seat that has just entered it.
@@ -3688,6 +3812,10 @@ impl WaylandShell {
 
     /// Tears one window's objects down, innermost first.
     fn destroy_objects(&mut self, id: WindowId, window: &WlWindow) {
+        // First, so no hook sends on a proxy released below.
+        retire_present(window);
+        #[cfg(feature = "wayland-e2e")]
+        e2e::forget(window.surface, id);
         for (_, proxy) in &window.constraints {
             // SAFETY: each is a live constraint object; see `rebuild_constraint`.
             unsafe { self.conn.release(*proxy, constraint_destructor()) };
@@ -3809,6 +3937,18 @@ fn round_logical(value: f64) -> i32 {
     value.round().clamp(0.0, f64::from(i32::MAX)) as i32
 }
 
+/// Ends a window's hooks before its objects go, and frees the input region it
+/// still owed.
+fn retire_present(window: &WlWindow) {
+    if let Some(present::Region(region)) = window.present.retire().input_region
+        && !region.is_null()
+    {
+        // SAFETY: a region `set_input_region` made on this connection and
+        // nothing else holds, now that the hooks are retired.
+        unsafe { wl_region::destroy(region) };
+    }
+}
+
 /// Sets a viewport's destination to a logical size, if there is a viewport.
 ///
 /// # Safety
@@ -3845,6 +3985,8 @@ impl WaylandShell {
             .collect();
         for id in windows {
             if let Some(window) = self.windows.remove(id.cast()) {
+                // Nothing a hook sends reaches the compositor any more.
+                retire_present(&window);
                 self.orphans.push((id, window));
                 #[cfg(feature = "accesskit")]
                 self.access.close(id);
@@ -4121,7 +4263,7 @@ impl Shell for WaylandShell {
                 fractional_scale,
                 viewport,
                 frame_callback: ptr::null_mut(),
-                present: Arc::default(),
+                present: Arc::new(present::WlPresent::new()),
                 title: desc.title.to_string(),
                 requested_size: desc.size,
                 requested_mode: desc.mode,
@@ -4250,14 +4392,20 @@ impl Shell for WaylandShell {
         if toplevel.is_null() {
             return Ok(());
         }
+        let (settled, commit) = state.settle_for_commit();
+        let proxies = state.proxies();
         // SAFETY: both proxies are live; a null output means "the compositor
         // chooses", which is the only thing a Wayland client may ask for.
+        // What a given-up window owed goes ahead, committed with it.
         unsafe {
+            present::send_settled(&proxies, settled);
             match output {
                 Some(output) => xdg_toplevel::set_fullscreen(toplevel, output),
                 None => xdg_toplevel::unset_fullscreen(toplevel),
             }
-            wl_surface::commit(surface);
+            if commit {
+                wl_surface::commit(surface);
+            }
         }
         self.conn.flush();
         Ok(())
@@ -4279,10 +4427,16 @@ impl Shell for WaylandShell {
         if toplevel.is_null() {
             return Ok(());
         }
-        // SAFETY: both proxies are live; the sizes are plain integers.
+        let (settled, commit) = state.settle_for_commit();
+        let proxies = state.proxies();
+        // SAFETY: both proxies are live; the sizes are plain integers. What a
+        // given-up window owed goes ahead, committed with it.
         unsafe {
+            present::send_settled(&proxies, settled);
             apply_constraints(toplevel, constraints, resizable, requested);
-            wl_surface::commit(surface);
+            if commit {
+                wl_surface::commit(surface);
+            }
         }
         self.conn.flush();
         Ok(())
@@ -4352,8 +4506,21 @@ impl Shell for WaylandShell {
     /// The window's own; see [`present`] for what it does with what it is
     /// told.
     fn present_hook(&self, window: WindowId) -> Result<Option<crate::PresentHook>, ShellError> {
-        let present = Arc::clone(&self.window(window)?.present);
-        Ok(Some(crate::PresentHook::new(present)))
+        let state = self.window(window)?;
+        // The proxies go to the hook state only now, from the window: nothing
+        // sends on them before a hook exists.
+        state.present.attach(state.proxies());
+        // A window given up off the thread is settled before the new hook
+        // trusts its frames again, as the pump would settle it.
+        if state.present.settle_foreign() {
+            // SAFETY: the window's live surface, on the shell's thread.
+            unsafe { wl_surface::commit(state.surface) };
+            self.conn.flush();
+        }
+        let present = Arc::clone(&state.present);
+        Ok(Some(crate::PresentHook::new(Arc::new(
+            present::WlHook::new(present),
+        ))))
     }
 
     fn monitors(&self) -> &[MonitorInfo] {
@@ -4383,6 +4550,14 @@ impl Shell for WaylandShell {
             let Some(event) = self.queue.pop_front() else {
                 break;
             };
+            // From here the caller has heard the size: the next frame carries
+            // what waits for it, whatever its size; see `owed`.
+            if let ShellEvent::Resized { window, size, .. }
+            | ShellEvent::ScaleFactorChanged { window, size, .. } = event
+                && let Ok(state) = self.window(window)
+            {
+                state.present.lock().owed.told(size);
+            }
             sink(event);
         }
     }
@@ -4399,6 +4574,11 @@ impl Shell for WaylandShell {
         {
             self.lose(&error);
         }
+        // Before the events, for a given-up window that is idle: every
+        // request and configure handled at once settles one first itself
+        // (`Shared::settle_given_up`), so the order against the events is not
+        // what keeps an older serial from following a newer one.
+        self.settle_given_up_windows();
         self.process_raw();
         // After the socket, because a `wl_data_source.send` that arrived in
         // this batch is what a read of our own selection is waiting for, and
@@ -5583,7 +5763,7 @@ mod tests {
             fractional_scale: ptr::null_mut(),
             viewport: ptr::null_mut(),
             frame_callback: ptr::null_mut(),
-            present: Arc::default(),
+            present: Arc::new(present::WlPresent::new()),
             title: String::new(),
             requested_size: LogicalSize::new(640.0, 480.0),
             requested_mode: DisplayMode::Windowed,

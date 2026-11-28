@@ -143,15 +143,16 @@ fi
 # compositor blends what the swapchain asked for (premultiplied) rather than
 # what the cap says, once for a Wayland window and once for an X11 window on
 # Xwayland — and a shrinking panel read back between its configure and its next
-# frame, which must not be its last frame squeezed. Lives in `crcbl-app`, which
-# has the presenter. The run must report exactly three tests, or a renamed test
-# would pass this step by matching nothing.
+# frame, which must not be its last frame squeezed, once for a program that
+# resizes on `Resized` and once for one that ignores it. Lives in `crcbl-app`,
+# which has the presenter. The run must report exactly four tests, or a renamed
+# test would pass this step by matching nothing.
 echo "crcbl e2e: reading a transparent window back through sway with grim"
 TRANSPARENCY_LOG="${SWAY_RUNTIME_DIR}/transparency.log"
 set +e
 # The second test puts the window on sway's Xwayland, whose `DISPLAY` only sway
-# knows: a command it runs inherits it, so one writes it down. The third needs a
-# plain X server with a compositing manager, which this session is not;
+# knows: a command it runs inherits it, so one writes it down. The skipped one
+# needs a plain X server with a compositing manager, which this session is not;
 # `run-x11-e2e.sh` runs it.
 DISPLAY_FILE="${SWAY_RUNTIME_DIR}/xwayland-display"
 swaymsg exec "printenv DISPLAY > ${DISPLAY_FILE}" >/dev/null
@@ -173,7 +174,7 @@ STATUS=${PIPESTATUS[0]}
 set -e
 TRANSPARENCY_PLAIN="${SWAY_RUNTIME_DIR}/transparency.plain.log"
 crcbl_nextest_plain "$TRANSPARENCY_LOG" "$TRANSPARENCY_PLAIN"
-if [ "$STATUS" -ne 0 ] || ! grep -q "test result: ok. 3 passed" "$TRANSPARENCY_PLAIN"; then
+if [ "$STATUS" -ne 0 ] || ! grep -q "test result: ok. 4 passed" "$TRANSPARENCY_PLAIN"; then
     echo "crcbl e2e: the transparency read-back failed or ran no test" >&2
     sway_log_tail
     exit 1

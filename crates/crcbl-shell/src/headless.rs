@@ -338,6 +338,8 @@ struct PresentSizes {
     announced: Option<PhysicalSize>,
     /// The size of the last present that went through.
     presented: Option<PhysicalSize>,
+    /// Presents announced and reported failed.
+    failed: u32,
 }
 
 impl PresentSignal for HeadlessPresents {
@@ -352,6 +354,13 @@ impl PresentSignal for HeadlessPresents {
         let mut sizes = self.sizes.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(size) = sizes.announced.take() {
             sizes.presented = Some(size);
+        }
+    }
+
+    fn present_failed(&self) {
+        let mut sizes = self.sizes.lock().unwrap_or_else(PoisonError::into_inner);
+        if sizes.announced.take().is_some() {
+            sizes.failed += 1;
         }
     }
 }
@@ -1281,6 +1290,23 @@ impl HeadlessShell {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .presented)
+    }
+
+    /// How many presents to the window its [`Shell::present_hook`] was told
+    /// failed, each after its [`will_present`](PresentHook::will_present).
+    ///
+    /// Headless-only, for the same reason as [`title`](Self::title).
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    pub fn failed_presents(&self, window: WindowId) -> Result<u32, ShellError> {
+        let presents = &self.window(window)?.presents;
+        Ok(presents
+            .sizes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .failed)
     }
 
     /// Whether the window is asking, with [`Shell::set_idle_inhibit`], for
@@ -3853,6 +3879,30 @@ mod tests {
             shell.last_presented(window).expect("live"),
             Some(PhysicalSize::new(200, 150)),
             "the failed present's announcement was replaced, not confirmed"
+        );
+    }
+
+    #[test]
+    fn the_present_hook_counts_the_presents_that_failed() {
+        let (shell, window) = shell_with_configured_window();
+        let hook = shell
+            .present_hook(window)
+            .expect("live")
+            .expect("headless hands out a hook");
+        hook.present_failed();
+        assert_eq!(
+            shell.failed_presents(window).expect("live"),
+            0,
+            "nothing was announced, so nothing failed"
+        );
+        hook.will_present(PhysicalSize::new(320, 240));
+        hook.present_failed();
+        assert_eq!(shell.failed_presents(window).expect("live"), 1);
+        hook.presented();
+        assert_eq!(
+            shell.last_presented(window).expect("live"),
+            None,
+            "the failed present's announcement is not confirmed afterwards"
         );
     }
 

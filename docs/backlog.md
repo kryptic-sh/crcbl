@@ -1772,35 +1772,70 @@ that is not a panel, are `InvalidDescriptor` everywhere
   test now asserts the size after one roundtrip and one pump; not yet re-run.
   Locally verified: the headless test, the Win32 `Panel::desc`/`rect_on` unit
   test, and mutants of `check_set_panel` and of headless `set_panel`.
-- **A panel on screen takes a new size of its own with its next frame**
-  (`layer::reconfigure_layer_surface`). The e2e
-  `a_panel_on_screen_takes_its_new_size_with_its_next_frame` was compiled and
-  not run: sway was not installed, and `run-wayland-e2e-hyprland.sh` failed
-  every case on the machine it was tried on, the panel tests with no configure
-  at all and a tiling test waiting for two tiles, so the harness, not the
-  change. Verified instead with `WAYLAND_DEBUG=1` on lyr against Hyprland
-  0.56.2: `set_size` and `set_destination` go out with no commit, and the next
-  commit attaches a buffer created at the new size. Still open: an input region
-  set between `set_panel` and the frame commits the new size alone, as before.
-- **Other commits that can land a panel's waiting size, or undo its viewport**
-  (`layer::reconfigure_layer_surface`, `WaylandShell::apply_configure` and
-  `WaylandShell::rescale` in `wayland/mod.rs`). Found reviewing the change
-  above; pre-existing paths, not fixed there. While a new size of a panel's own
-  waits for its frame: `apply_configure` and `rescale` set the viewport
-  destination back to the configured size, so the next present can show the
-  small buffer stretched to the big size; and a configure that does not resize
-  commits at once, carrying the waiting `set_size` onto the old buffer. Also,
-  `reconfigure_layer_surface` decides against `WlWindow::logical_size`, which
-  after a resizing configure is already the new size while `apply_configure` has
-  left its commit to the next present and the old buffer is still up: a
-  `set_panel` asking that size then commits the acknowledgement and viewport
-  onto the old buffer. Nothing records that a commit is owed. The backend sees
-  no present, so a flag has nothing to clear it but a `wl_surface.frame` done,
-  which a compositor withholds while the output is not drawn; a flag that sticks
-  there turns a one-frame distortion into a `set_panel` that never lands for an
-  idle panel. Needs a decision: a backend-owned frame callback (new object kind,
-  dispatch and teardown) cleared on `done`, or accepting the one-frame
-  distortion. Reasoned from the code, not reproduced.
+- **A frame carries its own geometry on Wayland: what is not verified**
+  (`wayland/owed.rs`, `wayland/present.rs`, `layer::reconfigure_layer_surface`,
+  `WaylandShell::apply_configure` and `WaylandShell::rescale`). The rules are
+  unit-tested in `owed.rs` and `present.rs`. The e2e cases
+  (`a_panel_on_screen_takes_its_new_size_with_its_next_frame`, an old-size
+  frame, an input region while a size waits, a later `set_panel`, a panel
+  presented without its hook) run in CI on sway and Hyprland, and the two
+  `wayland_transparency` shrink tests on sway only, the transparency suite being
+  sway's.
+
+  CI runs: green on sway (both shrink tests included), Hyprland and Linux in
+  runs 46159024624 and 46160058478, on the reviewed tree.
+
+  Covered by e2e only, with no pure seam: how `surface_output_changed` and
+  `rescale` feed `Owed` on a real scale change. Not verified at all:
+  - **The ordering on NVIDIA.** The hook's requests must reach the wire ahead of
+    the swapchain's commit, which holds when the WSI commits on the calling
+    thread inside `vkQueuePresentKHR`, on the app's `wl_display`. Read from
+    Mesa's WSI, not observed anywhere; NVIDIA's WSI not read. Check with
+    `WAYLAND_DEBUG=1` on lyr: `set_size`, `ack_configure` and `set_destination`
+    immediately before the `attach` and `commit` of a buffer at that size.
+  - **Holding a resizing configure's acknowledgement for its frame.** No e2e:
+    neither compositor says when it applied an acknowledgement, and sway applies
+    a transaction on its timeout anyway, so a test could not tell a held
+    acknowledgement from a sent one. A frame that lags a resize storm
+    acknowledges only the configure at its own size, so sway may wait out its
+    transaction timeout more often while one runs; not measured.
+  - **A present that fails after its batch went out**: the presenter reports it
+    (`PresentHook::present_failed`); the size shown goes back to the buffer
+    before, the frame's target waits again so the shell owes what it would
+    commit at once, and a buffer scale the frame sent, due or not, is set back
+    to the one in effect. A stretched `set_panel` in between still commits at
+    once, the compositor's size being its own to assign, and lands the rest of
+    the failed batch (a panel's `set_size`, a viewport) on the old buffer:
+    squeezed for a frame, not fatal. Unit-tested only.
+  - **A presenter on another thread, or none left** gives its window up
+    (`present.rs`'s `foreign` and `hooks`): what it owed is sent ahead of the
+    next request sent to it at once and rides that request's commit, or the
+    window's next frame where the request leaves its commit to one, or at the
+    next pump, committed there; from then on it is a window whose frames never
+    came through a hook. Nothing in crcbl presents off the shell's thread; both
+    tested with null proxies only.
+  - **A stale configure can bounce a panel's size after its request lands**
+    (`WaylandShell::apply_configure`): SMALL, then BIG, then SMALL. A configure
+    answering a commit made before the frame that sent the new `set_size` (an
+    input region committed at once, a margin change) carries the old size; with
+    the new frame up it does not fit the buffer, so it is owed and told as
+    `Resized` back to the old size, and the configure answering the new request
+    then tells the new size again. Not fixed: telling the stale one apart needs
+    the size in flight remembered and configures at another size held until its
+    answer comes, and a compositor that clamps the request never answers at the
+    size asked, so the hold needs a bound the protocol does not give. Reasoned
+    from the code, not reproduced.
+  - **A program that ignores `Resized`** gets the owed state with its first
+    frame after the pump that handed out the size, scaled as before the seam; an
+    owed integer buffer scale waits, holding nothing else up, for the first
+    frame whose size it divides, and is dropped when the window is given up with
+    a buffer it does not divide, or off the shell's thread.
+    `wayland_transparency`'s
+    `a_panel_whose_program_ignores_resized_still_shrinks` covers it on sway
+    only.
+  - **A panel request withdrawn while a rescale waits behind it** falls back to
+    the rescale's geometry (`Owed::abandon_panel`); reasoned, not reproduced.
+
 - **Not covered by any test:** the trait default (X11, the web), which an X11
   e2e asserting `Unsupported` would cover; the Wayland refusal of a new layer on
   `zwlr_layer_shell_v1` 1, since sway offers 4; a Win32 appbar moving to another
@@ -4088,7 +4123,10 @@ an Arch container pinned to an Arch Linux Archive date (`hyprland-ci.sh`). Its
 first full run passed 61 tests with the 5 sway-only ones left out. One earlier
 run timed out in `caps_lock_changes_the_keysym_and_not_the_shortcut_keysym`
 (three key events, none the A, in 10 s; run 46141777119) and the next passed it
-in under a second: watch it for a flake. The sandbox passes stay sway-only.
+in under a second. It failed the same way in run 46156480195, a branch run whose
+other 65 tests passed: a flake, twice in about six Hyprland runs, not yet
+diagnosed. It needs a look before the job is trusted as a gate. The sandbox
+passes stay sway-only.
 
 **The Wayland e2e harness on the office laptop** passes whole with
 `vulkan-validation-layers` installed (1.4.363; run on 2026-10-24 with

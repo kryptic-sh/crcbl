@@ -4183,83 +4183,153 @@ fn a_reconfigured_panel_is_configured_at_its_new_height_and_reserves_it() {
     session.shell.destroy_window(window).expect("destroy");
 }
 
-/// lyr's menu shrinking: a panel on screen given a new size of its own takes
-/// it with the frame drawn at that size, not before it, so the compositor
-/// never has the old frame to stretch over the new rectangle.
-#[test]
-#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
-fn a_panel_on_screen_takes_its_new_size_with_its_next_frame() {
-    const BIG: PhysicalSize = PhysicalSize::new(200, 150);
-    const SMALL: PhysicalSize = PhysicalSize::new(100, 50);
-    let logical =
-        |size: PhysicalSize| LogicalSize::new(f64::from(size.width), f64::from(size.height));
-    let mut session = Session::open();
+/// The size the panel-size tests' menu starts at.
+const MENU_BIG: PhysicalSize = PhysicalSize::new(200, 150);
+/// What they shrink it to.
+const MENU_SMALL: PhysicalSize = PhysicalSize::new(100, 50);
+
+/// `size` at scale 1, as `set_panel` takes it.
+fn logical_of(size: PhysicalSize) -> LogicalSize {
+    LogicalSize::new(f64::from(size.width), f64::from(size.height))
+}
+
+/// An overlay menu of its own size on the first output, configured at
+/// [`MENU_BIG`] and given a buffer by `present`, so it is on screen.
+///
+/// Not [`Session::map`]: that draws a window again at every `Resized`, and
+/// these tests choose which frame comes when.
+fn shrinking_menu(
+    session: &mut Session,
+    namespace: &'static str,
+    present: fn(&dyn Shell, WindowId, PhysicalSize) -> Result<(), ShellError>,
+) -> (WindowId, PanelDesc<'static>) {
     let desc = PanelDesc {
-        namespace: "crcbl-e2e-shrinking-menu",
+        namespace,
         monitor: Some(session.monitor_named(OUTPUT_NAME).id),
         anchor: PanelAnchor::TOP | PanelAnchor::LEFT,
         layer: PanelLayer::Overlay,
         ..PanelDesc::default()
     };
-    let menu = session.create(&panel("crcbl e2e shrinking menu", logical(BIG), desc));
+    let menu = session.create(&panel(namespace, logical_of(MENU_BIG), desc));
     session.pump_until("the panel's first configure", |session| {
-        session.size(menu) == Some(BIG)
+        session.size(menu) == Some(MENU_BIG)
     });
-    session.map(menu);
+    present(&*session.shell, menu, MENU_BIG).expect("the first frame");
     // The `wl_surface.enter` that puts it on screen, read before set_panel.
-    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, menu).expect("roundtrip");
+    answered(session, menu);
+    (menu, desc)
+}
+
+/// Everything the compositor has answered so far, applied: as in the growing
+/// bar's test, a configure answering a commit is queued by one roundtrip and
+/// applied by one pump, so none after this means nothing committed for one.
+fn answered(session: &mut Session, window: WindowId) {
+    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, window).expect("roundtrip");
     session.pump();
+}
+
+/// The size the compositor last configured `window` at: what it has applied,
+/// where [`Session::size`] is what the window was told.
+fn compositor_size(session: &Session, window: WindowId) -> Option<PhysicalSize> {
+    crcbl_shell::wayland_test_support::last_configure(&*session.shell, window).expect("live")
+}
+
+/// Whether the window was told `size` by a `Resized` since the events were
+/// last taken.
+fn told(session: &Session, window: WindowId, size: PhysicalSize) -> bool {
+    session.events.iter().any(|event| {
+        matches!(event, ShellEvent::Resized { window: resized, size: new, .. }
+            if *resized == window && *new == size)
+    })
+}
+
+/// lyr's menu shrinking: a panel on screen given a new size of its own is
+/// told it at once, and takes it with the frame drawn at that size, not
+/// before, so the compositor never has the old frame to stretch over the new
+/// rectangle.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_panel_on_screen_takes_its_new_size_with_its_next_frame() {
+    let mut session = Session::open();
+    let (menu, desc) = shrinking_menu(
+        &mut session,
+        "crcbl-e2e-shrinking-menu",
+        crcbl_shell::wayland_test_support::present_at,
+    );
+    session.events.clear();
 
     session
         .shell
-        .set_panel(menu, logical(SMALL), &desc)
+        .set_panel(menu, logical_of(MENU_SMALL), &desc)
         .expect("set_panel");
-    // As in the growing bar's test: a configure answering a commit is queued
-    // by one roundtrip and applied by one pump, so none here means nothing
-    // committed the new size.
-    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, menu).expect("roundtrip");
-    session.pump();
+    answered(&mut session, menu);
+    assert!(
+        told(&session, menu, MENU_SMALL),
+        "the size is the panel's own, so it is told at once: {:?}",
+        session.names()
+    );
+    assert_eq!(session.size(menu), Some(MENU_SMALL));
     assert_eq!(
-        session.size(menu),
-        Some(BIG),
+        compositor_size(&session, menu),
+        Some(MENU_BIG),
         "the new size waits for a frame drawn at it"
     );
 
-    crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, SMALL).expect("present");
-    session.pump_until("the size the frame was drawn at", |session| {
-        session.size(menu) == Some(SMALL)
+    crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, MENU_SMALL)
+        .expect("present");
+    session.pump_until("the compositor to configure the frame's size", |session| {
+        compositor_size(session, menu) == Some(MENU_SMALL)
     });
     session.shell.destroy_window(menu).expect("destroy");
 }
 
-/// A later `set_panel` decides against the size on screen, not the one still
-/// waiting for its frame: asking for that size again, or changing only a
-/// margin while it waits, waits too, and a stretched request replaces it and
-/// is committed at once, with its configure.
+/// **A frame drawn before the caller heard of the new size carries none of
+/// it.** The loop's frame in flight when `set_panel` is made is at the old
+/// size; presented, it keeps the old geometry, and the frame at the new size
+/// still lands it after.
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
-fn a_later_set_panel_is_decided_against_the_size_on_screen() {
-    const BIG: PhysicalSize = PhysicalSize::new(200, 150);
-    const SMALL: PhysicalSize = PhysicalSize::new(100, 50);
-    let logical =
-        |size: PhysicalSize| LogicalSize::new(f64::from(size.width), f64::from(size.height));
+fn a_frame_at_the_old_size_carries_nothing_of_a_new_one() {
     let mut session = Session::open();
-    let desc = PanelDesc {
-        namespace: "crcbl-e2e-twice-shrunk-menu",
-        monitor: Some(session.monitor_named(OUTPUT_NAME).id),
-        anchor: PanelAnchor::TOP | PanelAnchor::LEFT,
-        layer: PanelLayer::Overlay,
-        ..PanelDesc::default()
-    };
-    let menu = session.create(&panel("crcbl e2e twice shrunk menu", logical(BIG), desc));
-    session.pump_until("the panel's first configure", |session| {
-        session.size(menu) == Some(BIG)
-    });
-    session.map(menu);
-    // The `wl_surface.enter` that puts it on screen, read before set_panel.
-    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, menu).expect("roundtrip");
-    session.pump();
+    let (menu, desc) = shrinking_menu(
+        &mut session,
+        "crcbl-e2e-old-frame-menu",
+        crcbl_shell::wayland_test_support::present_at,
+    );
+    session
+        .shell
+        .set_panel(menu, logical_of(MENU_SMALL), &desc)
+        .expect("set_panel");
+    crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, MENU_BIG)
+        .expect("a frame at the old size");
+    answered(&mut session, menu);
+    assert_eq!(
+        compositor_size(&session, menu),
+        Some(MENU_BIG),
+        "the old frame's commit did not carry the new size"
+    );
 
+    crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, MENU_SMALL)
+        .expect("a frame at the new size");
+    session.pump_until("the compositor to configure the frame's size", |session| {
+        compositor_size(session, menu) == Some(MENU_SMALL)
+    });
+    session.shell.destroy_window(menu).expect("destroy");
+}
+
+/// A later `set_panel` replaces the request waiting for its frame: asking
+/// for that size again, or changing only a margin while it waits, waits too,
+/// and a stretched request replaces it and is committed at once, with its
+/// configure.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_later_set_panel_replaces_the_one_waiting() {
+    let mut session = Session::open();
+    let (menu, desc) = shrinking_menu(
+        &mut session,
+        "crcbl-e2e-twice-shrunk-menu",
+        crcbl_shell::wayland_test_support::present_at,
+    );
     let moved = PanelDesc {
         margins: Margins {
             top: 10.0,
@@ -4271,41 +4341,39 @@ fn a_later_set_panel_is_decided_against_the_size_on_screen() {
     for (what, again) in [("the same size again", desc), ("a new margin", moved)] {
         session
             .shell
-            .set_panel(menu, logical(SMALL), &desc)
+            .set_panel(menu, logical_of(MENU_SMALL), &desc)
             .expect("set_panel");
         session
             .shell
-            .set_panel(menu, logical(SMALL), &again)
+            .set_panel(menu, logical_of(MENU_SMALL), &again)
             .expect("set_panel again");
-        // As in the shrinking menu's test: no configure after one roundtrip
-        // and one pump means nothing committed the new size.
-        crcbl_shell::wayland_test_support::roundtrip(&*session.shell, menu).expect("roundtrip");
-        session.pump();
+        answered(&mut session, menu);
         assert_eq!(
-            session.size(menu),
-            Some(BIG),
+            compositor_size(&session, menu),
+            Some(MENU_BIG),
             "{what} leaves the new size waiting for a frame drawn at it"
         );
 
-        crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, SMALL)
+        crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, MENU_SMALL)
             .expect("present");
         session.pump_until("the size the frame was drawn at", |session| {
-            session.size(menu) == Some(SMALL)
+            compositor_size(session, menu) == Some(MENU_SMALL)
         });
         // Back to the big size for the next case, the frame with it.
         session
             .shell
-            .set_panel(menu, logical(BIG), &desc)
+            .set_panel(menu, logical_of(MENU_BIG), &desc)
             .expect("set_panel back");
-        crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, BIG).expect("present");
+        crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, MENU_BIG)
+            .expect("present");
         session.pump_until("the big size again", |session| {
-            session.size(menu) == Some(BIG)
+            compositor_size(session, menu) == Some(MENU_BIG)
         });
     }
 
     session
         .shell
-        .set_panel(menu, logical(SMALL), &desc)
+        .set_panel(menu, logical_of(MENU_SMALL), &desc)
         .expect("set_panel");
     let across_the_top = PanelDesc {
         anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
@@ -4315,18 +4383,176 @@ fn a_later_set_panel_is_decided_against_the_size_on_screen() {
         .shell
         .set_panel(
             menu,
-            LogicalSize::new(0.0, f64::from(SMALL.height)),
+            LogicalSize::new(0.0, f64::from(MENU_SMALL.height)),
             &across_the_top,
         )
         .expect("set_panel stretched");
-    // As in the growing bar's test: the configure answering set_panel's own
-    // commit is queued by one roundtrip and applied by one pump.
-    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, menu).expect("roundtrip");
-    session.pump();
+    answered(&mut session, menu);
+    let stretched = PhysicalSize::new(OUTPUT_SIZE.width, MENU_SMALL.height);
+    assert_eq!(
+        compositor_size(&session, menu),
+        Some(stretched),
+        "a stretched request is committed at once, the waiting size with it gone"
+    );
     assert_eq!(
         session.size(menu),
-        Some(PhysicalSize::new(OUTPUT_SIZE.width, SMALL.height)),
-        "a stretched request is committed at once, the waiting size with it gone"
+        Some(stretched),
+        "and told by its configure"
+    );
+    session.shell.destroy_window(menu).expect("destroy");
+}
+
+/// Moves `input`'s pointer to `(x, y)` on the first output until `seen`
+/// holds, or fails naming `what`.
+///
+/// The pointer is moved again each round, a pixel apart, rather than once:
+/// the seat gains its pointer asynchronously after `VirtualInput::attach`, so
+/// a first motion can come before the backend has a `wl_pointer` to hear it,
+/// and Hyprland sends no `enter` for a motion to where the cursor already is.
+fn point_until(
+    session: &mut Session,
+    input: &VirtualInput,
+    (x, y): (u32, u32),
+    what: &str,
+    seen: impl Fn(&Session) -> bool,
+) {
+    let deadline = Instant::now() + WAIT;
+    for round in 0u32.. {
+        input.move_to(x + round % 2, y, LAYOUT_SIZE);
+        session.pump();
+        if seen(session) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {WAIT:?} waiting for {what}; events so far: {:?}",
+            session.names()
+        );
+        session.shell.wait_events(Some(Duration::from_millis(20)));
+    }
+}
+
+/// Whether the pointer entered `window` near surface-local `x`.
+fn entered_at(session: &Session, window: WindowId, x: u32) -> bool {
+    session.events.iter().any(|event| match event {
+        ShellEvent::PointerFocus {
+            window: w,
+            entered: true,
+            position,
+            ..
+        }
+        | ShellEvent::PointerMotion {
+            window: w,
+            abs: position,
+            ..
+        } => *w == window && position.is_some_and(|at| (at.x - f64::from(x)).abs() < 2.0),
+        _ => false,
+    })
+}
+
+/// **An input region set while a new size waits goes with its frame**, as
+/// the pointer shows: before the frame, a point on the old menu outside the
+/// new region is still the menu's; after it, a point inside the small menu but
+/// outside the region is not. Committing the region at once would make the
+/// first point not the menu's, and used to commit the waiting size with it,
+/// onto the old buffer.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn an_input_region_set_while_a_size_waits_rides_with_its_frame() {
+    let mut session = Session::open();
+    let (menu, desc) = shrinking_menu(
+        &mut session,
+        "crcbl-e2e-region-menu",
+        crcbl_shell::wayland_test_support::present_at,
+    );
+    let input = VirtualInput::attach(&*session.shell, menu).expect("virtual devices");
+    session
+        .shell
+        .set_panel(menu, logical_of(MENU_SMALL), &desc)
+        .expect("set_panel");
+    // The left half of the small menu.
+    let half = MENU_SMALL.width / 2;
+    let region = [PhysicalRect::new(0, 0, half, MENU_SMALL.height)];
+    session
+        .shell
+        .set_input_region(menu, Some(&region))
+        .expect("set_input_region");
+    answered(&mut session, menu);
+    session.take_names();
+
+    // On the big menu still up, outside the region waiting for its frame.
+    let beyond = (MENU_BIG.width - 20, MENU_BIG.height - 20);
+    point_until(
+        &mut session,
+        &input,
+        beyond,
+        "the pointer on the old menu, its whole surface still taking it",
+        |session| entered_at(session, menu, beyond.0),
+    );
+    assert_eq!(
+        compositor_size(&session, menu),
+        Some(MENU_BIG),
+        "the region's commit did not carry the new size"
+    );
+
+    crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, MENU_SMALL)
+        .expect("present");
+    session.pump_until("the size the frame was drawn at", |session| {
+        compositor_size(session, menu) == Some(MENU_SMALL)
+    });
+
+    session.take_names();
+    let inside = (half / 2, MENU_SMALL.height / 2);
+    point_until(
+        &mut session,
+        &input,
+        inside,
+        "the pointer in the region",
+        |session| entered_at(session, menu, inside.0),
+    );
+    session.take_names();
+    point_until(
+        &mut session,
+        &input,
+        (half + half / 2, MENU_SMALL.height / 2),
+        "the pointer to leave the small menu outside its region",
+        |session| {
+            session.events.iter().any(|event| {
+                matches!(event, ShellEvent::PointerFocus { window, entered: false, .. }
+                    if *window == menu)
+            })
+        },
+    );
+    drop(input);
+    session.shell.destroy_window(menu).expect("destroy");
+}
+
+/// **A panel whose frames never come through its hook takes a new size at
+/// once**, as it did before frames carried their geometry: nothing would
+/// ever send a size left waiting for one, and the configure is what tells it.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_panel_presented_without_its_hook_takes_a_new_size_at_once() {
+    let mut session = Session::open();
+    let (menu, desc) = shrinking_menu(
+        &mut session,
+        "crcbl-e2e-raw-menu",
+        crcbl_shell::wayland_test_support::present_raw,
+    );
+    session
+        .shell
+        .set_panel(menu, logical_of(MENU_SMALL), &desc)
+        .expect("set_panel");
+    answered(&mut session, menu);
+    assert_eq!(
+        compositor_size(&session, menu),
+        Some(MENU_SMALL),
+        "committed at once, with no frame"
+    );
+    assert_eq!(
+        session.size(menu),
+        Some(MENU_SMALL),
+        "told by the configure"
     );
     session.shell.destroy_window(menu).expect("destroy");
 }

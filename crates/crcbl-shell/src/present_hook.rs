@@ -8,7 +8,12 @@
 //! of the one before it. A [`PresentHook`] is how the presenter says when that
 //! moment is: [`will_present`](PresentHook::will_present) with the size the
 //! frame was drawn at, just before the present, and
-//! [`presented`](PresentHook::presented) once the present went through.
+//! [`presented`](PresentHook::presented) once the present went through or
+//! [`present_failed`](PresentHook::present_failed) if it did not.
+//!
+//! A presenter keeps its hook for as long as it presents to the window, and
+//! drops it when it stops: on Wayland, the window is then sent what it owed,
+//! and treated from there as one whose frames never came through a hook.
 //!
 //! The presenter calls it, not the program: `crcbl-app`'s `Presenter` takes
 //! the hook when it opens on a window and calls it around every present. A
@@ -17,6 +22,9 @@
 //!
 //! A hook holds no borrow of the shell, so the presenter keeps it for as long
 //! as it lives. Calling it after the window or the shell is gone does nothing.
+//! It is `Send` and `Sync`, so a presenter holding one may move, but it is
+//! called on the thread that runs the shell; see
+//! [`Shell::present_hook`](crate::Shell::present_hook).
 
 use core::fmt;
 use std::sync::Arc;
@@ -31,6 +39,10 @@ pub(crate) trait PresentSignal: Send + Sync + fmt::Debug {
 
     /// The present announced by the last `will_present` reached the window.
     fn presented(&self);
+
+    /// The present announced by the last `will_present` failed, and nothing
+    /// it carried reached the window with it.
+    fn present_failed(&self);
 }
 
 /// The calls a presenter makes around each present to one window — see the
@@ -50,16 +62,23 @@ impl PresentHook {
 
     /// Says a frame drawn at `size`, in device pixels, is about to be
     /// presented: call it after the frame's submit and immediately before the
-    /// present, on the thread that presents.
+    /// present, on the thread that runs the shell — see
+    /// [`Shell::present_hook`](crate::Shell::present_hook).
     pub fn will_present(&self, size: PhysicalSize) {
         self.signal.will_present(size);
     }
 
     /// Says the present [`will_present`](Self::will_present) announced went
-    /// through. A present that failed — a swapchain out of date — is not
-    /// followed by this.
+    /// through.
     pub fn presented(&self) {
         self.signal.presented();
+    }
+
+    /// Says the present [`will_present`](Self::will_present) announced
+    /// failed — a swapchain out of date, a lost device — so nothing waits for
+    /// it to go through.
+    pub fn present_failed(&self) {
+        self.signal.present_failed();
     }
 }
 

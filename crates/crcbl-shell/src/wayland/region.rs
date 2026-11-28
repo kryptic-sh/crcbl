@@ -8,14 +8,22 @@
 //! once rather than waiting for the renderer's next present: a window that is
 //! idle, drawing nothing, would otherwise keep its old region.
 //!
+//! **Except while a new size waits for its frame.** The region is then the
+//! new layout's, and a commit now would also be a commit of whatever else the
+//! surface has pending; it is owed to the frame drawn at that size instead,
+//! with the rest (see [`owed`](super::owed)), and the frame the caller draws
+//! after hearing the size carries it.
+//!
 //! A null region is the protocol's own "the whole surface", which is what
 //! `None` asks for. A passthrough popup's empty region is set at creation (see
 //! [`popup`](super::popup)) and is left alone.
 
 use crate::{PhysicalRect, PopupInput, ShellError, WindowId};
 use core::ptr;
+use std::sync::Arc;
 
 use super::WaylandShell;
+use super::present::{self, Region};
 use super::protocol::wayland::{wl_compositor, wl_region, wl_surface};
 use super::text_input::logical_rect;
 
@@ -31,6 +39,7 @@ impl WaylandShell {
             return Ok(());
         }
         let (surface, scale) = (state.surface, state.scale_factor());
+        let present = Arc::clone(&state.present);
         let compositor = self.conn.compositor;
         let built = match region {
             None => ptr::null_mut(),
@@ -59,10 +68,29 @@ impl WaylandShell {
                 built
             }
         };
+        let proxies = state.proxies();
+        let mut shared = present.lock();
+        // A given-up window's owed region would otherwise follow this one.
+        let settled = shared.settle_given_up();
+        if shared.presenting() && shared.owed.resizing() {
+            let replaced = shared.owed.owe_input_region(Region(built));
+            drop(shared);
+            if let Some(Region(replaced)) = replaced
+                && !replaced.is_null()
+            {
+                // SAFETY: a region made here earlier, never set, and held by
+                // nothing else now that it is replaced.
+                unsafe { wl_region::destroy(replaced) };
+            }
+            return Ok(());
+        }
+        drop(shared);
         // SAFETY: the surface is live, and the region is null or the one made
         // above. The surface keeps a copy of a region, so it is destroyed
-        // straight after; the commit is what makes it current.
+        // straight after; the commit is what makes it current. What a given-up
+        // window owed goes first, so this region is the one in effect.
         unsafe {
+            present::send_settled(&proxies, settled);
             wl_surface::set_input_region(surface, built);
             if !built.is_null() {
                 wl_region::destroy(built);
