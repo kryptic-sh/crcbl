@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# The Wayland e2e suite against Hyprland, from inside a running Hyprland.
+# The Wayland e2e suite against Hyprland, nested in a running one or, in CI,
+# on its own.
 #
 #   crates/crcbl-shell/tests/run-wayland-e2e-hyprland.sh [extra nextest args…]
 #
-# `run-wayland-e2e.sh` is the suite against headless sway, and the one CI
-# runs. This runs the same `tests/wayland_e2e.rs` against a nested Hyprland
-# that `hyprland-session.sh` starts on a hidden special workspace, so a
+# `run-wayland-e2e.sh` is the suite against headless sway. This runs the same
+# `tests/wayland_e2e.rs` against the Hyprland `hyprland-session.sh` starts: on
+# a developer's machine a nested one on a hidden special workspace, so a
 # developer on Hyprland can see what that compositor does with every case the
-# suite asserts. The tests drive either compositor through their `wm_`
-# functions, which `CRCBL_E2E_COMPOSITOR=hyprland` points at `hyprctl`.
+# suite asserts, and in CI's `hyprland-e2e` job a standalone one that
+# `hyprland-ci.sh` sets up. The tests drive either compositor through their
+# `wm_` functions, which `CRCBL_E2E_COMPOSITOR=hyprland` points at `hyprctl`.
 #
 # What it does not run, and why:
 #
@@ -101,5 +103,5 @@ if [ "$STATUS" -ne 0 ] || ! crcbl_nextest_summary "$PLAIN" "crcbl e2e"; then
     hyprland_log_tail
     exit 1
 fi
-echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN tests ran against a nested Hyprland; ${#SWAY_ONLY[@]} assert sway's behaviour and were not run"
+echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN tests ran against Hyprland; ${#SWAY_ONLY[@]} assert sway's behaviour and were not run"
 echo "crcbl e2e: the sandbox passes are sway-only; run tests/run-wayland-e2e.sh for them"

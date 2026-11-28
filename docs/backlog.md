@@ -2060,27 +2060,26 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    red without picom), and in CI since 2026-10-25: `run-x11-e2e.sh`'s pass with
    no window manager starts picom, waits for its window, pins lavapipe and runs
    the test (red with picom stopped before it).
-4. **Implemented, untested:** S17 panel focus on Win32 and AppKit, and on
-   Hyprland in CI (a job of its own, M to L; on the office laptop's nested
-   Hyprland 0.56.2, 2026-10-21, an exclusive panel took the keyboard as on sway,
-   and an OnDemand panel took it **on map**, where sway waits for a click, kept
-   it on a click and gave it back on a click in a tiled window); S7 monitor
-   hot-plug on Win32 and AppKit; AppKit dead keys, and AppKit's input method
-   against a real one — whether one in its native mode gives way to the
-   Roman-only restriction `appkit::view::allow_input_methods` sets for a window
-   with no field or a sensitive one, the pre-edit an input method sends, and
-   where its candidate window opens (`appkit_session`'s `text_input` plays the
-   input method itself, through the view's `NSTextInputClient` methods); S3
-   popup repositioning on Wayland **in CI** (CI's sway offers `xdg_wm_base`
-   below 3, so CI holds only the refusal; the office laptop's sway 1.12 ran the
-   real path green on 2026-10-20); S22 a colour glyph in a GPU golden — needs
-   the owner's call on where the font comes from: a `crcbl::screenshot` scene
-   ships in the published `crcbl` crate, which cannot `include_bytes!`
-   `crcbl-ui`'s `tests/fixtures/emoji` fonts from outside its package, so it
-   takes a second copy of one (about 1.2 KB, two copies to drift) or a public
-   `crcbl-ui` constant for it (`SANS_TTF`'s shape, test data in the public API);
-   the GPU path itself is `crcbl-frame`'s `DrawList::to_triangles_with_colors`,
-   which nothing on a GPU has drawn yet; S18 FreeBSD beyond `check (freebsd)`'s
+4. **Implemented, untested:** S17 panel focus on Win32 and AppKit (on Hyprland
+   it runs in CI's `hyprland-e2e` job; on the office laptop's nested Hyprland
+   0.56.2, 2026-10-21, an OnDemand panel took the keyboard **on map**, where
+   sway waits for a click); S7 monitor hot-plug on Win32 and AppKit; AppKit dead
+   keys, and AppKit's input method against a real one — whether one in its
+   native mode gives way to the Roman-only restriction
+   `appkit::view::allow_input_methods` sets for a window with no field or a
+   sensitive one, the pre-edit an input method sends, and where its candidate
+   window opens (`appkit_session`'s `text_input` plays the input method itself,
+   through the view's `NSTextInputClient` methods); S3 popup repositioning on
+   Wayland **in CI** (CI's sway offers `xdg_wm_base` below 3, so CI holds only
+   the refusal; the office laptop's sway 1.12 ran the real path green on
+   2026-10-20); S22 a colour glyph in a GPU golden — needs the owner's call on
+   where the font comes from: a `crcbl::screenshot` scene ships in the published
+   `crcbl` crate, which cannot `include_bytes!` `crcbl-ui`'s
+   `tests/fixtures/emoji` fonts from outside its package, so it takes a second
+   copy of one (about 1.2 KB, two copies to drift) or a public `crcbl-ui`
+   constant for it (`SANS_TTF`'s shape, test data in the public API); the GPU
+   path itself is `crcbl-frame`'s `DrawList::to_triangles_with_colors`, which
+   nothing on a GPU has drawn yet; S18 FreeBSD beyond `check (freebsd)`'s
    clippy, in a VM job; S13 cold start to the first presented frame on Win32 +
    D3D12 since adapters are probed lazily (Linux and Vulkan is measured end to
    end; see 11).
@@ -4007,9 +4006,8 @@ owner's call (it would be a new dependency for crcbl).
 
 **2. Linux and Vulkan parity for what 0.6–0.8 built on the Windows machine.**
 Each feature needs its Wayland, X11 and Vulkan status listed, and the untested
-cells tested on Linux, not just compiled. That includes the Hyprland CI job
-named under S-rows above. lyr's observations from its first Hyprland runs
-(Vulkan on Intel RPL-U, crcbl 0.7.0):
+cells tested on Linux, not just compiled. lyr's observations from its first
+Hyprland runs (Vulkan on Intel RPL-U, crcbl 0.7.0):
 
 - `set_panel` resizes a layer panel in place on Wayland (154x73 to 362x961, no
   new window): **seen working**.
@@ -4061,6 +4059,14 @@ named under S-rows above. lyr's observations from its first Hyprland runs
 
 Tip from pikr for GUI tests here: a nested Hyprland on a hidden special
 workspace with a headless output never touches the live desktop.
+
+**CI's Hyprland job** (`hyprland-e2e`, since 2026-11-28) runs the shell suite
+under a standalone Hyprland 0.57.2 on vkms with Mesa's software rasteriser, in
+an Arch container pinned to an Arch Linux Archive date (`hyprland-ci.sh`). Its
+first full run passed 61 tests with the 5 sway-only ones left out. One earlier
+run timed out in `caps_lock_changes_the_keysym_and_not_the_shortcut_keysym`
+(three key events, none the A, in 10 s; run 46141777119) and the next passed it
+in under a second: watch it for a flake. The sandbox passes stay sway-only.
 
 **The Wayland e2e harness on the office laptop** passes whole with
 `vulkan-validation-layers` installed (1.4.363; run on 2026-10-24 with

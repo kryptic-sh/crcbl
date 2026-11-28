@@ -1171,6 +1171,78 @@ jobs:
       - name: Run the suite under headless sway
         run: crates/crcbl-shell/tests/run-wayland-e2e.sh
 
+  # The Wayland suite against Hyprland, beside sway's run above. A runner has
+  # no GPU and Hyprland no headless start, so `vkms` gives it a virtual display
+  # and Mesa's software rasteriser draws; Ubuntu packages no Hyprland new
+  # enough, so it runs in an Arch container, pinned to an Arch Linux Archive
+  # date in `hyprland-ci.sh`. The toolchain, nextest and the cargo caches are
+  # the runner's, mounted at their own paths so the target directory's
+  # fingerprints hold. The tests that assert sway's answer where Hyprland's
+  # differs are listed, printed and counted by `run-wayland-e2e-hyprland.sh`,
+  # never silently passed.
+  # `--no-fail-fast`, because Hyprland's differences from sway are what this
+  # job finds, and a run that stops at the first one hides the rest.
+  hyprland-e2e:
+    name: wayland e2e (hyprland)
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',hyprland-e2e,')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: hyprland-e2e
+      - uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-nextest@0.9.146
+      # The runner's kernel builds vkms as a module, in the `-extra` package
+      # on some images.
+      - name: Load vkms
+        timeout-minutes: 5
+        run: |
+          sudo modprobe vkms || {
+            sudo apt-get update -q
+            sudo apt-get install -yq "linux-modules-extra-$(uname -r)"
+            sudo modprobe vkms
+          }
+          ls -l /dev/dri
+      # The Arch packages, kept between runs: the Archive is the only source
+      # for a dated snapshot and it is slow, so each date is fetched from it
+      # once. Keyed on the harness, which holds the date, and saved even when
+      # the suite fails, since the packages were fetched all the same.
+      - name: Restore the Arch packages
+        id: pacman-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/pacman-pkg
+          key:
+            hyprland-pacman-${{
+            hashFiles('crates/crcbl-shell/tests/hyprland-ci.sh') }}
+      - name: Run the suite under Hyprland
+        run: |
+          docker run --rm --privileged \
+            -v /dev/dri:/dev/dri \
+            -v "$RUNNER_TEMP/pacman-pkg:/var/cache/pacman/pkg" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -v "$HOME/.cargo:$HOME/.cargo" \
+            -v "$HOME/.rustup:$HOME/.rustup" \
+            -w "$GITHUB_WORKSPACE" \
+            -e CI_USER_UID="$(id -u)" -e CI_USER_HOME="$HOME" -e RUSTFLAGS \
+            archlinux:latest crates/crcbl-shell/tests/hyprland-ci.sh \
+            --no-fail-fast
+      - name: Save the Arch packages
+        if: always() && steps.pacman-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/pacman-pkg
+          key: ${{ steps.pacman-cache.outputs.cache-primary-key }}
+
   # The only job that runs the X11 backend against a real X server.
   # The windowing rules in `docs/notes/backends.md` schedule
   # "scripted resize/mode-switch/input
@@ -3983,6 +4055,7 @@ jobs:
         test-linux,
         test-cross-platform,
         wayland-e2e,
+        hyprland-e2e,
         x11-e2e,
         samples-windowed,
         windowed-e2e,
