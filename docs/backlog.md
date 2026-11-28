@@ -138,6 +138,28 @@ also resolves `windows-core` 0.62. Moving `crcbl-mixer` alone would put two
 copies in the tree, which `cargo deny` refuses, and would mix 0.62 interfaces
 with 0.100 traits. Move it when `windows` (and `cpal`) do.
 
+## Scope PR CI runs to the jobs a change needs (asked by the owner, 2026-11-28)
+
+A pull request runs every CI job whatever it touches: a changelog fix builds
+every backend, runs every e2e job and the GPU suites. Run only the jobs whose
+inputs changed, judged from the PR's changed files. Not started.
+
+- **What exists:** `pages.yml` already skips markdown-only pushes with
+  `paths-ignore`, and `ci.yml`'s `workflow_dispatch` takes a `jobs` list, which
+  every job's `if:` reads. A changes job could feed the same `if:`s.
+- **How, without a new dependency:** a first job diffs the PR against its base
+  (`git diff --name-only`) and maps paths to job ids. Changed crates expand to
+  their reverse dependencies through `cargo metadata`, since an edit to a core
+  crate reaches every backend. `.github/`, `Cargo.lock`, `rust-toolchain.toml`
+  and `tools/` select everything. A path action such as `dorny/paths-filter`
+  would be a new dependency, which is the owner's call.
+- **Keep:** pushes to `main`, tags and the cron run everything, since they are
+  what EW pins and releases build from. A skipped job must say why in the run
+  summary: `docs/notes/process.md` calls a silently skipped job a known trap. A
+  job that is skipped by `if:` reports as skipped, not failed, so the release
+  job's `needs` list has to tolerate that, or the PR gate needs one summary job
+  to require instead of each job.
+
 ## The sway e2e F11 step fails intermittently on CI (2026-11-27)
 
 `wayland e2e (nested sway)` failed with "F11 did not leave the sandbox
