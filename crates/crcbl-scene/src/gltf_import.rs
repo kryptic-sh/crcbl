@@ -1929,7 +1929,7 @@ fn flatten(document: &gltf::Document, key: &Path) -> Result<Vec<GltfInstance>, S
 }
 
 /// A test-only way past the importer's own checks.
-#[cfg(test)]
+#[cfg(all(test, feature = "render"))]
 impl GltfScene {
     /// Drop the last index of one primitive, leaving it a partial triangle.
     ///

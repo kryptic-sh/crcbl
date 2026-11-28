@@ -31,14 +31,6 @@ when the stb path matters for speed.
   buffer is allocated before the turn. A quarter turn holds two full buffers and
   copies a pixel at a time; not timed.
 
-## `cargo clippy -p crcbl-scene --all-targets` without `--all-features` fails (2026-11-26)
-
-Seen on d9714989, before the EXIF slice: dead-code errors for seven fixture
-items in `crates/crcbl-scene/src/gltf_fixture.rs` and `break_triangle_list` in
-`gltf_import.rs`, items used only under a feature. CI runs clippy with
-`--all-features`, so it stays green. Fix: gate the items on the feature that
-uses them. Not investigated further.
-
 ## `crcbl-image` JPEG: pre-existing findings from the stb review (2026-11-26)
 
 - **The default decoder reads zeros to the end of a truncated scan**, where
@@ -71,12 +63,6 @@ uses them. Not investigated further.
 `external_and_unknown_images_are_refused` test pins it). With the `gif` feature
 it could decode it as it does PNG, JPEG and WebP (first frame). Needs the usual
 feature gating and a test.
-
-## `cargo clippy -p crcbl-image` without `jpeg` fails (2026-11-26)
-
-With every feature except `jpeg`, `assert_drawn_as_decoded` in
-`crates/crcbl-image/src/svg/tests/image.rs` is dead code. CI's `--all-features`
-run does not see it. Fix: gate the helper on the feature its callers need.
 
 ## `resize::resize` does not check its intermediate against `Limits` (2026-11-26)
 

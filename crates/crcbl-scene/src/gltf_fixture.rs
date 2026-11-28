@@ -701,7 +701,7 @@ pub fn rigged_json(buffer: &str) -> String {
 
 /// The four corners of [`skinned_pair_json`]'s skinned quad, counter-clockwise
 /// seen from `+Z`.
-#[cfg(test)]
+#[cfg(all(test, feature = "render"))]
 pub(crate) const QUAD_POSITIONS: [[f32; 3]; 4] = [
     [0.0, 0.0, 0.0],
     [1.0, 0.0, 0.0],
@@ -716,7 +716,7 @@ pub(crate) const QUAD_POSITIONS: [[f32; 3]; 4] = [
 /// step took in *position* order instead of in emitted order comes out both the
 /// wrong length and the wrong values. An index list of `[0, 1, 2, 3, ...]`
 /// would let that mistake pass on the first three vertices.
-#[cfg(test)]
+#[cfg(all(test, feature = "render"))]
 pub(crate) const QUAD_INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
 
 /// Which joint each corner of the quad is bound to.
@@ -725,7 +725,7 @@ pub(crate) const QUAD_INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
 /// that a binding which arrived from the wrong corner names a different joint,
 /// which the rigged triangle's `JOINTS` cannot show because two of its three
 /// vertices are bound alike.
-#[cfg(test)]
+#[cfg(all(test, feature = "render"))]
 pub(crate) const QUAD_JOINTS: [[u16; 4]; 4] =
     [[0, 1, 0, 0], [1, 2, 0, 0], [2, 3, 0, 0], [3, 0, 0, 0]];
 
@@ -734,7 +734,7 @@ pub(crate) const QUAD_JOINTS: [[u16; 4]; 4] =
 /// Each pair sums to one, as the specification asks, and no two corners share a
 /// split — so a run that lost its order is a different set of floats rather
 /// than the same one.
-#[cfg(test)]
+#[cfg(all(test, feature = "render"))]
 pub(crate) const QUAD_WEIGHTS: [[f32; 4]; 4] = [
     [0.25, 0.75, 0.0, 0.0],
     [0.5, 0.5, 0.0, 0.0],
@@ -757,7 +757,7 @@ pub(crate) const QUAD_WEIGHTS: [[f32; 4]; 4] = [
 /// Every accessor begins on a multiple of four, which is stricter than the
 /// specification's rule that an offset be a multiple of its component size and
 /// costs two of these nothing.
-#[cfg(test)]
+#[cfg(all(test, feature = "render"))]
 pub(crate) fn skinned_pair_bin() -> Vec<u8> {
     let mut bytes = Vec::new();
     for position in QUAD_POSITIONS {
@@ -814,7 +814,7 @@ pub(crate) fn skinned_pair_bin() -> Vec<u8> {
 /// defines a skin without them as binding at identity. The buffer's
 /// `byteLength` is measured off [`skinned_pair_bin`] rather than written out,
 /// so the two cannot drift.
-#[cfg(test)]
+#[cfg(all(test, feature = "render"))]
 pub(crate) fn skinned_pair_json() -> String {
     format!(
         r#"{{
@@ -881,7 +881,7 @@ pub(crate) fn skinned_pair_json() -> String {
 /// Takes the JSON rather than building it so that a case which mutates the
 /// document with [`replacing`] — a primitive made unusable, say — imports
 /// through the same path as the intact one.
-#[cfg(test)]
+#[cfg(all(test, feature = "render"))]
 pub(crate) fn import_skinned_pair_glb(json: &str) -> Result<GltfScene, StorageError> {
     import_glb_bytes(&glb(json, Some(&skinned_pair_bin())))
 }

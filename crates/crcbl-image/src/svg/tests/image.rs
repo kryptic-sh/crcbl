@@ -509,7 +509,7 @@ fn svg_images_share_the_instance_cap() {
 /// decoder as `decoded`, and checks every pixel against that decode:
 /// colour within a step where alpha is partial (the canvas holds it
 /// premultiplied), exact otherwise.
-#[cfg(any(feature = "png", feature = "jpeg", feature = "webp"))]
+#[cfg(all(feature = "png", feature = "jpeg", feature = "webp"))]
 fn assert_drawn_as_decoded(media_type: &str, bytes: &[u8], decoded: &Rgba8Image) {
     let side = decoded.width().max(decoded.height());
     let image = render(
