@@ -490,6 +490,27 @@ jobs:
       - name: Neither the UI nor the server crate reaches the renderer
         run: ./tools/check-no-renderer-deps.sh
 
+  # RustSec's own client over both lockfiles, beside `cargo-deny`'s advisories
+  # check: every kryptic-sh repo runs the two (the owner's rule, 2026-11-28).
+  # Plain `cargo audit` fails only on a vulnerability; an unmaintained or
+  # yanked crate is a warning, and `deny.toml` is where those are judged. The
+  # fuzz target is its own workspace with its own lockfile, which the first
+  # line does not read.
+  audit:
+    name: cargo-audit
+    if:
+      github.event_name != 'workflow_dispatch' || inputs.jobs == '' ||
+      contains(format(',{0},', inputs.jobs), ',audit,')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-audit@0.23.0
+      - run: cargo audit
+      - run: cargo audit --file crates/crcbl-net/fuzz/Cargo.lock
+
   # The only job that compiles the `cfg(target_arch = "wasm32")` code at all.
   #
   # `crcbl-shell` (the Web/canvas backend, P5), `crcbl-webgpu` (the WebGPU
@@ -3953,6 +3974,7 @@ jobs:
         machete,
         prettier,
         deny,
+        audit,
         wasm32,
         freebsd,
         miri-jobs,

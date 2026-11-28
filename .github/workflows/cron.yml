@@ -13,10 +13,10 @@ env:
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
-# The PR-triggered `deny` job in ci.yml checks against whatever advisory DB was
-# current when the PR ran; the one here re-checks a quiet repo against a freshly
-# fetched DB, so a new RustSec advisory does not wait for the next commit to be
-# noticed.
+# The PR-triggered `deny` and `audit` jobs in ci.yml check against whatever
+# advisory DB was current when the PR ran; the ones here re-check a quiet repo
+# against a freshly fetched DB, so a new RustSec advisory does not wait for the
+# next commit to be noticed.
 #
 # One job still to land: cargo-fuzz beyond the bounded `decoder-fuzz` leg in
 # ci.yml (P13). Like miri below, it needs `RUSTUP_TOOLCHAIN: nightly` set at job
@@ -35,6 +35,20 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny --all-features check
+
+  # The same re-check for `ci.yml`'s `audit` job, which fetches RustSec's DB as
+  # it runs but only runs on a push.
+  audit:
+    name: cargo-audit (fresh advisory DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-audit@0.23.0
+      - run: cargo audit
+      - run: cargo audit --file crates/crcbl-net/fuzz/Cargo.lock
 
   # Miri: the undefined-behaviour interpreter, over the crates it can run.
   #
