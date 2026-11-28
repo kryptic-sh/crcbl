@@ -323,7 +323,10 @@ mod tests {
     ///
     /// It also holds the release to the *outermost* drop: the inner guard going
     /// must not hand the lock to another thread while this one is still driving
-    /// a loop.
+    /// a loop. And it holds a dropped guard to putting the view back, read after
+    /// the *inner* drop: that is the only point where the view is still this
+    /// thread's, and the outermost drop resets it through the same `Drop` code
+    /// before it touches [`HELD`], so the inner drop speaks for both.
     #[test]
     fn a_second_guard_on_one_thread_nests_instead_of_waiting() {
         let outer = for_test();
@@ -337,6 +340,16 @@ mod tests {
 
         set(DebugView::Normals);
         drop(inner);
+        // Read while `outer` still holds the lock, so nobody else can have
+        // moved the view since. Once `outer` drops, any other test thread may
+        // take the lock and set its own view before a read runs, so the
+        // outermost drop's reset cannot be observed from here at all — it is
+        // the same `set` in the same `Drop`, which is what this one checks.
+        assert_eq!(
+            current(),
+            DebugView::Shaded,
+            "the dropped guard did not put the view back to the shaded frame"
+        );
         assert!(
             VIEW_LOCK.try_lock().is_err(),
             "the inner guard gave the lock back while the outer one still holds it"
@@ -359,7 +372,6 @@ mod tests {
             HELD.with_borrow(Option::is_none),
             "the outermost guard dropped without giving the lock back"
         );
-        assert_eq!(current(), DebugView::Shaded);
     }
 
     /// **The default is the shaded picture**, which is what every golden in the

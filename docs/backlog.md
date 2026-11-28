@@ -154,19 +154,6 @@ under _Sway loses a `resize set` sent while it waits for the commit of the one
 before_, here between F11's borderless configure and the window's close. Not
 investigated beyond the two logs.
 
-## `a_second_guard_on_one_thread_nests_instead_of_waiting` failed once (2026-11-18)
-
-`crcbl`'s
-`debug_view::tests::a_second_guard_on_one_thread_nests_instead_of_waiting`
-panicked at its final `assert_eq!(current(), DebugView::Shaded)` in one local
-`cargo test --workspace` on Windows, with the skrifa 0.50 / harfrust 0.16 bump
-in the tree (nothing in `debug_view` touches fonts). Three reruns of
-`cargo test -p crcbl --lib debug_view` all passed. Suspect, unverified: the
-assertion reads the process-wide view cell after the lock is released, so
-another test thread that took the lock and set a different view can make it fail
-— the race the comment above the `HELD` assertion already describes for
-`VIEW_LOCK`. Asserting `current()` before `drop(outer)` would close it.
-
 ## A horde test hung once on Windows CI (2026-11-10)
 
 `horde`'s `game::tests::two_games_with_one_seed_agree_about_every_run` timed out
