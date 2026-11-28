@@ -84,16 +84,6 @@ compile (`thiserror` goes through `as_dyn_error`); `#[error("{self}")]` gets no
 recursion warning and overflows at run time; and a refused attribute brings
 extra "doesn't implement Display" errors, since no fallback impl is written.
 
-## `docs/plan/27-auth.md` describes `crcbl-net`'s dependencies wrongly (2026-11-28)
-
-Its "None of that inventory has been taken on yet" paragraph says
-`crates/crcbl-net/Cargo.toml` depends on `crcbl-core`, `crcbl-shaders` and
-`thiserror`, with no RustCrypto crate and no AEAD. That was already stale before
-the `crcbl-error` move: `crcbl-net` takes `chacha20poly1305`, `hmac`, `sha2` and
-`x25519-dalek` (`crcbl_net::seal`), and no longer `crcbl-shaders`. The section
-needs rewriting against the transport as built, which is a plan edit rather than
-a wording fix.
-
 ## `crcbl-image` with no external crates (raised 2026-11-26)
 
 The user asks whether `crcbl-image` can be entirely this project's own code.

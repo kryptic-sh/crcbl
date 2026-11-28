@@ -101,24 +101,31 @@ hash — audited RustCrypto crates behind the existing seam; the _protocols_
 property-tested. No TLS stack in the engine (browsers bring their own; native
 uses the token/PSK constructions).
 
-**None of that inventory has been taken on yet, and what shipped instead is
-narrower.** `crates/crcbl-net/Cargo.toml` depends on `crcbl-core`,
-`crcbl-shaders` and `thiserror` — no RustCrypto crate, no signature scheme, no
-key agreement, no AEAD. `crates/crcbl-net/src/auth.rs` is what exists:
-per-session **message authentication**, keying HMAC-SHA256 with the 32-byte
-`ResumeToken` the handshake already exchanges, transmitting the MAC truncated
-beside a replay counter, and rejecting a replayed counter through a sliding
-`ReplayWindow`. The SHA-256 under it is the workspace's own, which is why the
-only dependency added was `crcbl-shaders`.
+**Part of that inventory has been taken on, for confidentiality rather than for
+trust.** `crates/crcbl-net/Cargo.toml` takes RustCrypto's `chacha20poly1305`,
+`hmac`, `sha2` and `x25519-dalek`, and they serve three modules:
 
-**It authenticates and orders; it does not encrypt**, and its own header says so
-in as many words. Every payload — snapshots, inputs, acks — stays readable on
-the wire. So the opening sentence of this document is written against a topic 23
-that does not exist yet: there is no "private against snooping" baseline for
-tokens to upgrade, and confidentiality is a separate decision nobody has taken.
-Adding it is where the AEAD and the key agreement above arrive, and that is the
-point at which taking on the RustCrypto dependencies becomes a real question
-rather than a plan.
+- `crates/crcbl-net/src/seal.rs` puts every datagram on a network transport
+  under XChaCha20-Poly1305, with nonces derived from a per-direction counter
+  rather than drawn. Its keys come from HKDF-SHA256 over an X25519 exchange
+  (`agree_channel`).
+- `crates/crcbl-net/src/auth.rs` is per-session **message authentication**:
+  HMAC-SHA256 keyed with the 32-byte `ResumeToken` the handshake exchanges,
+  truncated, beside a replay counter that a sliding `ReplayWindow` checks. It
+  authenticates and orders, and leaves confidentiality to the transport.
+- `crates/crcbl-net/src/udp/token.rs` holds the connect tokens in their
+  direct-connect form: the listener mints HMAC-SHA256 tokens bound to the
+  client's address and answers a tokenless hello with a challenge, so a spoofed
+  hello costs it one MAC and no state.
+
+**What is still missing is the part that makes trust strong.** There is no
+signature scheme: no Ed25519, so no token minted by a third party, no signed
+match result, and no tier 3. The X25519 exchange is unauthenticated, which
+defeats a passive observer and is open to anyone who can sit in the middle of
+the handshake; `seal.rs` says so in its own header. There is no BLAKE3-class
+hash either: SHA-256 is the only one. Adding a signature crate is where tier 3
+and signed results would begin, and the correction below explains why neither
+has a consumer yet.
 
 ## Reference mint (`crcbl-mint`, dev tool not product)
 
