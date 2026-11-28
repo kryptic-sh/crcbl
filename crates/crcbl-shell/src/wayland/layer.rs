@@ -99,6 +99,20 @@ fn layer_size(anchor: PanelAnchor, size: LogicalSize) -> (u32, u32) {
     )
 }
 
+/// Whether [`WaylandShell::reconfigure_layer_surface`] leaves its commit to
+/// the window's next present: a panel on screen `shown` at the size last
+/// configured, asked for `asked` as [`layer_size`] sends it.
+///
+/// Only a new size of the panel's own (no zero axis) waits, for the frame
+/// drawn at it. The request is decided against the size shown, not the last
+/// one asked for, so asking again for a size still waiting, or changing only
+/// a margin while it waits, waits too. Every request sends the whole state
+/// again, so whatever waited before is replaced, not carried: a request that
+/// does not wait commits at once.
+fn waits_for_frame(on_screen: bool, shown: (u32, u32), asked: (u32, u32)) -> bool {
+    on_screen && asked.0 > 0 && asked.1 > 0 && asked != shown
+}
+
 /// The exclusive zone for a [`Reserve`].
 ///
 /// [`Reserve::OwnExtent`] is the panel's extent across the edge it reserves.
@@ -221,7 +235,12 @@ impl WaylandShell {
     /// which the caller draws at that size: one commit carries both. A
     /// stretched axis has no size until the compositor assigns one, so a
     /// panel with one, as a bar has, is committed at once as before, and so
-    /// is a panel not yet on screen, with no buffer to stretch.
+    /// is a panel not yet on screen, with no buffer to stretch. Every request
+    /// sends the whole state again, so one made while a new size waits
+    /// replaces it; the viewport destination that size set is the only state
+    /// a commit could carry over, so a request committed at once first sets
+    /// the destination back to the size last configured. See
+    /// [`waits_for_frame`].
     ///
     /// # Errors
     ///
@@ -243,8 +262,10 @@ impl WaylandShell {
         let (layer, surface, viewport) = (state.layer_surface, state.surface, state.viewport);
         let was_layer = was.map(|was| was.layer);
         let (width, height) = layer_size(desc.anchor, size);
-        let with_frame =
-            !state.outputs.is_empty() && width > 0 && height > 0 && state.requested_size != size;
+        // The size last configured, which the frame on screen was drawn at.
+        let configured = state.logical_size();
+        let shown = layer_size(PanelAnchor::empty(), configured);
+        let with_frame = waits_for_frame(!state.outputs.is_empty(), shown, (width, height));
         if layer.is_null() {
             return Err(ShellError::Backend(format!(
                 "set_panel: {window:?} has no layer surface"
@@ -275,6 +296,9 @@ impl WaylandShell {
                     LogicalSize::new(f64::from(width), f64::from(height)),
                 );
             } else {
+                // A request before it may have left the destination at a size
+                // still waiting for its frame.
+                set_viewport(viewport, configured);
                 wl_surface::commit(surface);
             }
         }
@@ -315,7 +339,7 @@ impl WaylandShell {
 
 #[cfg(test)]
 mod tests {
-    use super::{anchor_of, exclusive_zone, keyboard_of, layer_of, layer_size};
+    use super::{anchor_of, exclusive_zone, keyboard_of, layer_of, layer_size, waits_for_frame};
     use crate::{LogicalSize, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, Reserve};
 
     const BAR: LogicalSize = LogicalSize::new(0.0, 30.0);
@@ -380,5 +404,22 @@ mod tests {
             exclusive_zone(&panel(PanelAnchor::RIGHT, Reserve::OwnExtent), dock),
             64
         );
+    }
+
+    #[test]
+    fn only_a_new_size_of_the_panels_own_waits_for_its_frame() {
+        const SHOWN: (u32, u32) = (400, 300);
+        const SHRUNK: (u32, u32) = (400, 120);
+        const BAR_WIDE: (u32, u32) = (0, 30);
+        // A new size of its own waits, whatever was asked before it: asked
+        // again while it waits, or with only a margin changed, it still is
+        // not the size shown.
+        assert!(waits_for_frame(true, SHOWN, SHRUNK));
+        // The size shown, or a stretched axis, is committed at once, which
+        // also replaces a size still waiting.
+        assert!(!waits_for_frame(true, SHOWN, SHOWN));
+        assert!(!waits_for_frame(true, SHOWN, BAR_WIDE));
+        // A panel on no output has no frame to wait for.
+        assert!(!waits_for_frame(false, SHOWN, SHRUNK));
     }
 }

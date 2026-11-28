@@ -1760,6 +1760,25 @@ that is not a panel, are `InvalidDescriptor` everywhere
   0.56.2: `set_size` and `set_destination` go out with no commit, and the next
   commit attaches a buffer created at the new size. Still open: an input region
   set between `set_panel` and the frame commits the new size alone, as before.
+- **Other commits that can land a panel's waiting size, or undo its viewport**
+  (`layer::reconfigure_layer_surface`, `WaylandShell::apply_configure` and
+  `WaylandShell::rescale` in `wayland/mod.rs`). Found reviewing the change
+  above; pre-existing paths, not fixed there. While a new size of a panel's own
+  waits for its frame: `apply_configure` and `rescale` set the viewport
+  destination back to the configured size, so the next present can show the
+  small buffer stretched to the big size; and a configure that does not resize
+  commits at once, carrying the waiting `set_size` onto the old buffer. Also,
+  `reconfigure_layer_surface` decides against `WlWindow::logical_size`, which
+  after a resizing configure is already the new size while `apply_configure` has
+  left its commit to the next present and the old buffer is still up: a
+  `set_panel` asking that size then commits the acknowledgement and viewport
+  onto the old buffer. Nothing records that a commit is owed. The backend sees
+  no present, so a flag has nothing to clear it but a `wl_surface.frame` done,
+  which a compositor withholds while the output is not drawn; a flag that sticks
+  there turns a one-frame distortion into a `set_panel` that never lands for an
+  idle panel. Needs a decision: a backend-owned frame callback (new object kind,
+  dispatch and teardown) cleared on `done`, or accepting the one-frame
+  distortion. Reasoned from the code, not reproduced.
 - **Not covered by any test:** the trait default (X11, the web), which an X11
   e2e asserting `Unsupported` would cover; the Wayland refusal of a new layer on
   `zwlr_layer_shell_v1` 1, since sway offers 4; a Win32 appbar moving to another

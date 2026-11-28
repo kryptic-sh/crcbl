@@ -24,10 +24,10 @@ use crcbl_shell::wayland_test_support::{
 };
 use crcbl_shell::{
     ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalPoint, LogicalRect,
-    LogicalSize, Modifiers, MonitorInfo, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer,
-    PhysicalRect, PhysicalSize, PointerButton, PointerMode, PopupDesc, PopupInput, PopupPlacement,
-    Reserve, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
-    SurfaceTarget, TextPurpose, WindowDesc, WindowId, WindowRole,
+    LogicalSize, Margins, Modifiers, MonitorInfo, PanelAnchor, PanelDesc, PanelKeyboard,
+    PanelLayer, PhysicalRect, PhysicalSize, PointerButton, PointerMode, PopupDesc, PopupInput,
+    PopupPlacement, Reserve, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
+    SizeConstraints, SurfaceTarget, TextPurpose, WindowDesc, WindowId, WindowRole,
 };
 
 /// evdev codes, from `linux/input-event-codes.h`. Spelled out rather than
@@ -4229,6 +4229,105 @@ fn a_panel_on_screen_takes_its_new_size_with_its_next_frame() {
     session.pump_until("the size the frame was drawn at", |session| {
         session.size(menu) == Some(SMALL)
     });
+    session.shell.destroy_window(menu).expect("destroy");
+}
+
+/// A later `set_panel` decides against the size on screen, not the one still
+/// waiting for its frame: asking for that size again, or changing only a
+/// margin while it waits, waits too, and a stretched request replaces it and
+/// is committed at once, with its configure.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_later_set_panel_is_decided_against_the_size_on_screen() {
+    const BIG: PhysicalSize = PhysicalSize::new(200, 150);
+    const SMALL: PhysicalSize = PhysicalSize::new(100, 50);
+    let logical =
+        |size: PhysicalSize| LogicalSize::new(f64::from(size.width), f64::from(size.height));
+    let mut session = Session::open();
+    let desc = PanelDesc {
+        namespace: "crcbl-e2e-twice-shrunk-menu",
+        monitor: Some(session.monitor_named(OUTPUT_NAME).id),
+        anchor: PanelAnchor::TOP | PanelAnchor::LEFT,
+        layer: PanelLayer::Overlay,
+        ..PanelDesc::default()
+    };
+    let menu = session.create(&panel("crcbl e2e twice shrunk menu", logical(BIG), desc));
+    session.pump_until("the panel's first configure", |session| {
+        session.size(menu) == Some(BIG)
+    });
+    session.map(menu);
+    // The `wl_surface.enter` that puts it on screen, read before set_panel.
+    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, menu).expect("roundtrip");
+    session.pump();
+
+    let moved = PanelDesc {
+        margins: Margins {
+            top: 10.0,
+            left: 10.0,
+            ..Margins::default()
+        },
+        ..desc
+    };
+    for (what, again) in [("the same size again", desc), ("a new margin", moved)] {
+        session
+            .shell
+            .set_panel(menu, logical(SMALL), &desc)
+            .expect("set_panel");
+        session
+            .shell
+            .set_panel(menu, logical(SMALL), &again)
+            .expect("set_panel again");
+        // As in the shrinking menu's test: no configure after one roundtrip
+        // and one pump means nothing committed the new size.
+        crcbl_shell::wayland_test_support::roundtrip(&*session.shell, menu).expect("roundtrip");
+        session.pump();
+        assert_eq!(
+            session.size(menu),
+            Some(BIG),
+            "{what} leaves the new size waiting for a frame drawn at it"
+        );
+
+        crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, SMALL)
+            .expect("present");
+        session.pump_until("the size the frame was drawn at", |session| {
+            session.size(menu) == Some(SMALL)
+        });
+        // Back to the big size for the next case, the frame with it.
+        session
+            .shell
+            .set_panel(menu, logical(BIG), &desc)
+            .expect("set_panel back");
+        crcbl_shell::wayland_test_support::present_at(&*session.shell, menu, BIG).expect("present");
+        session.pump_until("the big size again", |session| {
+            session.size(menu) == Some(BIG)
+        });
+    }
+
+    session
+        .shell
+        .set_panel(menu, logical(SMALL), &desc)
+        .expect("set_panel");
+    let across_the_top = PanelDesc {
+        anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+        ..desc
+    };
+    session
+        .shell
+        .set_panel(
+            menu,
+            LogicalSize::new(0.0, f64::from(SMALL.height)),
+            &across_the_top,
+        )
+        .expect("set_panel stretched");
+    // As in the growing bar's test: the configure answering set_panel's own
+    // commit is queued by one roundtrip and applied by one pump.
+    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, menu).expect("roundtrip");
+    session.pump();
+    assert_eq!(
+        session.size(menu),
+        Some(PhysicalSize::new(OUTPUT_SIZE.width, SMALL.height)),
+        "a stretched request is committed at once, the waiting size with it gone"
+    );
     session.shell.destroy_window(menu).expect("destroy");
 }
 

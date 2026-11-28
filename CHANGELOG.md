@@ -46,21 +46,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   absolute box still resolves against its parent; unset `align-items` and
   `justify-content` map to taffy's `normal`, which a flex container treats as
   before. No crcbl API changes.
-- **Breaking: `crcbl-shell`'s `Shell::set_panel` on Wayland gives a panel on
-  screen a new size of its own with its next presented frame, not at once.**
-  Committing the size alone left the compositor the old frame for the new
-  rectangle, and Hyprland 0.56.2 stretches it there, so a shrinking menu showed
-  its old rows squeezed for a frame. The size and the viewport now wait for the
-  next present, which carries them with the frame drawn at that size. A caller
-  that waited for `Resized` before drawing at the new size now waits for ever:
-  draw at the size asked for straight away, and take the `Resized` that follows
-  as confirmation. A size along an axis anchored to both opposite edges, as a
-  bar's width is, and a panel not yet on screen are committed at once as before.
-  `wayland_test_support::present_at` attaches a buffer of a chosen size, for
-  testing it.
 
 ### Breaking
 
+- **`crcbl-shell`'s `Shell::set_panel` on Wayland gives a panel on screen a new
+  size of its own with its next presented frame, not at once.** Committing the
+  size alone left the compositor the old frame for the new rectangle, and
+  Hyprland 0.56.2 stretches it there, so a shrinking menu showed its old rows
+  squeezed for a frame. The size and the viewport now wait for the next present,
+  which carries them with the frame drawn at that size. A caller that waited for
+  `Resized` before drawing at the new size now waits for ever: draw at the size
+  asked for straight away, and take the `Resized` that follows as confirmation.
+  A size along an axis anchored to both opposite edges, as a bar's width is, and
+  a panel not yet on screen are committed at once as before.
+  `wayland_test_support::present_at` attaches a buffer of a chosen size, for
+  testing it.
 - **`crcbl-rand` moves to `rand_core`/`rand_chacha` 0.10.** `crcbl_rand::Rng`
   now implements `rand_core` 0.10's `TryRng` (with `Error = Infallible`), and so
   its blanket `Rng`, in place of 0.9's `RngCore`; `SeedableRng` is unchanged.

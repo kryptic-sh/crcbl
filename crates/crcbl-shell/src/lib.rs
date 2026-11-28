@@ -590,9 +590,10 @@ pub trait Shell: core::fmt::Debug {
     /// compositor never shows the old frame in the new rectangle; until a
     /// frame is presented (or another request commits the surface, as
     /// [`set_input_region`](Self::set_input_region) does), nothing changes
-    /// on screen and no `Resized` comes. A size along a stretched axis is the compositor's to assign,
-    /// so there the change is applied at once and the frame waits for
-    /// `Resized`, as before.
+    /// on screen and no `Resized` comes. A size along a stretched axis is
+    /// the compositor's to assign, so there the change is applied at once
+    /// and the frame waits for `Resized`, as before. A later `set_panel`
+    /// made before that frame replaces the request waiting for it.
     ///
     /// **The namespace and the monitor cannot change.** `wlr-layer-shell`
     /// fixes both when the surface is made, and every backend refuses a
