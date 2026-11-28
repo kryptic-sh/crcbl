@@ -86,28 +86,13 @@ extra "doesn't implement Display" errors, since no fallback impl is written.
 
 ## `crcbl-image` with no external crates (raised 2026-11-26)
 
-The user asks whether `crcbl-image` can be entirely this project's own code.
-**Next, now that `crcbl-error` has shipped** (infr's items shipped in 0.21.0 and
-infr was told on 2026-11-26). Its external dependencies today, from its
-manifest: `png` (the PNG decoder and `png::encode`, shared with `crcbl-sprite`,
-`crcbl-golden` and `crcbl-scene`), and for the `svg-text` feature `skrifa` (font
-outlines and metrics), `harfrust` (shaping) and `unicode-bidi` (UAX #9).
-`crcbl-font` is in the workspace and does not count. The first step is a
-feasibility write-up per dependency, not code:
-
-- `thiserror`: gone; the crate derives its errors with `crcbl-error`.
-- `png`: an inflate (RFC 1951) and zlib wrapper, the five filters, Adam7, every
-  bit depth and colour type, and `encode` (deflate, even stored-only or a simple
-  compressor). Bounded, well specified, and fuzzable against the `png` crate as
-  an oracle. The other workspace users of `png` are a separate decision: they
-  can keep the crate or move to this decoder.
-- `skrifa`, `harfrust`, `unicode-bidi`: a TrueType/CFF outline reader, an
-  OpenType shaper (GSUB/GPOS) and the bidi algorithm. These are large, and
-  `crcbl-ui` uses the same three, so replacing them only inside `crcbl-image`
-  would leave two text stacks. Options: keep them behind `svg-text` (the crate
-  is then self-implemented in its default and codec features), or move the whole
-  workspace's text stack in-house, which is its own project. This needs the
-  user's call.
+The user asks whether `crcbl-image` can be entirely this project's own code. The
+feasibility write-up is [topic 61](plan/61-image-without-crates.md)
+(2026-11-28): `png` is feasible and next, and the text crates (`skrifa`,
+`harfrust`, `unicode-bidi`) are a workspace-wide question, not one for
+`crcbl-image` alone. Nothing is built. It waits on the user's call on the plan's
+three `png` decisions (where CRC-32 lives, whether the other `png` users move,
+and the encoder's quality bar) and on the text stack.
 
 ## `windows-core` 0.100 waits for `windows` (2026-11-27)
 
