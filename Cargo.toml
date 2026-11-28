@@ -90,15 +90,15 @@ log = "0.4"
 # a dependency rather than a hand-rolled encoder.
 png = "0.18"
 proptest = "1.12"
-# The proc-macro trio, behind `crcbl-reflect-derive` and nothing else. Added by
+# The proc-macro trio, behind `crcbl-reflect-derive` and `crcbl-error`. Added by
 # the slice that first needs to read a type's fields at compile time —
 # `#[derive(Reflect)]`, for `docs/plan/08-editor.md`'s property panel — and every
 # one of them was already in `Cargo.lock` transitively, under `thiserror`,
 # `serde` and `bytemuck`. `syn` is pinned to the 3.x line the workspace already
 # resolves rather than the 2.x `deny.toml` skips as a transitive leftover, so no
 # second copy joins the tree. Default features throughout: `syn`'s `full` — the
-# expression grammar — is not on, because the derive parses attributes and
-# writes an impl and nothing else.
+# expression grammar — is not on, because each derive parses attributes and
+# writes impls and nothing else.
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
 syn = "3.0.10"
@@ -258,6 +258,11 @@ crcbl-console = { path = "crates/crcbl-console", version = "0.21.0" }
 # UI rung 8's inspector (`crcbl_ui::tree::widgets::inspector`) for what reads it.
 crcbl-reflect = { path = "crates/crcbl-reflect", version = "0.21.0" }
 crcbl-reflect-derive = { path = "crates/crcbl-reflect-derive", version = "0.21.0" }
+# `#[derive(Error)]`, the workspace's own, with `thiserror`'s attribute syntax:
+# every error type moves onto it and `thiserror` leaves the workspace (the
+# `docs/backlog.md` entry says in what order). A `proc-macro = true` crate on
+# the trio above and nothing else, so depending on it adds no crate to a build.
+crcbl-error = { path = "crates/crcbl-error", version = "0.21.0" }
 # The golden suites' shared fixture, `apps/crcbl-sample-test`. A path-only
 # workspace member like every crate above, and a `[dev-dependencies]` entry
 # wherever it is named — see that crate's own manifest for why it is under

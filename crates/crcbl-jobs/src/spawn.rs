@@ -50,7 +50,7 @@ pub trait Spawn: Send + Sync + fmt::Debug {
 }
 
 /// Why a thread did not start.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum SpawnError {
     /// This runtime has no threads, so `{0}` has to run on the caller's own.
     ///

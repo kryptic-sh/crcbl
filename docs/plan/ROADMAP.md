@@ -86,11 +86,18 @@ browser's own gate and the demo site's deploy.
 - **`crcbl-reflect`** — what an editor's property panel needs to know about a
   component: each field's name, label, type, optional range and step, and a way
   to read and write it. `#[derive(Reflect)]` is the one annotation a component
-  carries, in the companion `crcbl-reflect-derive`, the workspace's only
-  proc-macro crate. Not general-purpose reflection: there is no type registry
-  and no construction, because a panel shows a value, edits it and reports the
-  change as a command. [08-editor.md](08-editor.md) feature 3 and the UI's rung
-  8 inspector (`Ui::inspector`) are what read it.
+  carries, in the companion proc-macro crate `crcbl-reflect-derive`. Not
+  general-purpose reflection: there is no type registry and no construction,
+  because a panel shows a value, edits it and reports the change as a command.
+  [08-editor.md](08-editor.md) feature 3 and the UI's rung 8 inspector
+  (`Ui::inspector`) are what read it.
+
+- **`crcbl-error`** — `#[derive(Error)]`, the workspace's own, with
+  `thiserror`'s attribute syntax: `Display` from each `#[error("…")]`,
+  `source()` from `#[source]`, `#[from]` or a field named `source`, `From` for
+  `#[from]`, and `transparent`. A proc-macro crate with nothing outside `core`
+  in its expansion. The crates move off `thiserror` onto it one at a time
+  (`docs/backlog.md`).
 
 - **`crcbl-core`** — `Handle`/`Pool`, sector-tiled `WorldPos` (`I64Vec3`
   sectors, 2^20 m cells), `FrameArena`, `FrameClock` with an injected

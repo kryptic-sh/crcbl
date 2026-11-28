@@ -307,6 +307,7 @@ crates/crcbl-water      water bodies, their media, and the surface mesh a pass d
 crates/crcbl-wind       the wind field: two authored layers, a weather state, one gust offset
 crates/crcbl-steam      Steamworks over the SDK's flat C API, loaded at runtime
 crates/crcbl-reflect    a component's editable fields, and the derive that writes them
+crates/crcbl-error      `#[derive(Error)]`: Display, Error and From for every error type
 crates/crcbl-greybox    greybox prototyping primitives, sized in real-world metres
 crates/crcbl-golden     golden-image comparison for the render tests
 crates/crcbl-profile    profiler captures: the `.crcblprof` file a run writes and every viewer reads

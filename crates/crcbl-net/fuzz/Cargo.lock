@@ -154,6 +154,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-error"
+version = "0.21.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
 name = "crcbl-image"
 version = "0.21.0"
 dependencies = [
@@ -165,7 +174,7 @@ dependencies = [
 name = "crcbl-jobs"
 version = "0.21.0"
 dependencies = [
- "thiserror",
+ "crcbl-error",
 ]
 
 [[package]]

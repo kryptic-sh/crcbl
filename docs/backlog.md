@@ -73,29 +73,40 @@ for the second.
 
 The user's call: every error type in the project derives `crcbl_error::Error`,
 our own, and `thiserror` leaves the workspace; taking it on was an oversight.
-**Order:** next (0.21.0 shipped infr's `crcbl-image` work and infr was told on
-2026-11-26), and before the `crcbl-image` self-hosting below (which then needs
-nothing of its own for errors).
+Before the `crcbl-image` self-hosting below.
 
-- **What it must cover**, counted on 2026-11-26 over `crates/` with grep (not
-  re-counted since): `thiserror` in 25 manifests, about 83 derives, 494
-  `#[error(...)]` messages with format arguments, 46 `#[from]`, 29
-  `#[error(transparent)]`, 2 `#[source]`. Nothing else of `thiserror`'s surface.
-  Re-run the grep before scoping; `apps/` was not counted.
-- **Shape:** a `proc-macro = true` crate (working name `crcbl-error-derive`,
-  re-exported from a `crcbl-error` facade crate if a runtime part is needed)
-  built on `syn`, `quote` and `proc-macro2`, as `crcbl-reflect-derive` is. Those
-  are already in every build, so nothing new enters `Cargo.lock`. Keep the
-  attribute syntax `thiserror`'s, so migration is the derive path per crate plus
-  the manifest line. Declined: a `macro_rules!` form, which would rewrite every
-  error definition for no gain.
-- **Verify:** expansion tests (`Display` text, `source()` chains, `From`
-  conversions, `transparent` forwarding both `Display` and `source`), each shown
-  red by sabotage; then the full workspace gates and the wasm32 and cross-target
-  clippy runs, since error types sit in platform-gated code.
+**Built 2026-11-28:** `crates/crcbl-error`, with `crcbl-jobs` as its first user.
+Left: the other 21 crates whose manifests name `thiserror` (83 derives), then
+the `thiserror` line in the workspace manifest. A crate moves by swapping
+`thiserror::Error` for `crcbl_error::Error` in its derives and its manifest
+line; nothing else changes.
+
+- **Evidence that the swap is safe:** a review on 2026-11-28 pointed `thiserror`
+  at a shim re-exporting `crcbl_error::Error` and built the whole workspace
+  through it (check and clippy on Windows, clippy on linux-gnu, apple-darwin and
+  wasm32), and ran 1789 tests of 14 crates under it, all passing; a 55-case
+  differential against `thiserror` 2.0.21 found no message, `source()` or `From`
+  difference. Not run under the shim: tests of the GPU crates (render, vk,
+  webgpu, app, crcbl, shell, water, hal), miri, FreeBSD. So each migration slice
+  still runs its crates' tests.
+- **Two `thiserror` behaviours the migration relies on, both implemented:** a
+  field named `source` is the source without an attribute (`crcbl-scene`'s
+  `ScnError`, `crcbl-vk`'s `DriverError`, `crcbl-wind`'s `WindError`), and a
+  bare `{path}` of a `Path`/`PathBuf` field prints through `display()` (7 uses,
+  in `crcbl-store`).
+- **Known gaps against `thiserror`, none used here:** an `x=-1` or turbofish
+  `name = value` argument beside `{0}` is refused as ambiguous (`fmt.rs`'s
+  `scan` splits on every top-level comma and reads `name =` only off an
+  `Alone`-spaced `=`); a `Box<Path>`/`Cow<Path>` field in a bare `{0}`, and a
+  `Box<dyn Error + Send + Sync>` source or transparent field, fail to compile
+  (`thiserror` goes through `as_dyn_error`); `#[error("{self}")]` gets no
+  recursion warning and overflows at run time; and a refused attribute brings
+  extra "doesn't implement Display" errors, since no fallback impl is written.
+  Each is a compile error or a missing warning, never different output.
 - **What stays:** `thiserror` remains in `Cargo.lock` through third-party
-  crates, `jni` and `ndk` (via `cpal`, Android) and `redox_users` (via `dirs`,
-  Redox). Linux, macOS, Windows and wasm32 builds drop it entirely. Confirm with
+  crates. On Linux, macOS, Windows and wasm32 that is `naga` and `naga-types`,
+  under `crcbl-shaders`' dev-dependencies; elsewhere also `jni` and `ndk` (via
+  `cpal`, Android) and `redox_users` (via `dirs`, Redox). Confirm with
   `cargo tree --all-features --target all -i thiserror@2.0.21` after the
   migration.
 

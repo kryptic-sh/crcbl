@@ -22,6 +22,7 @@
 set -euo pipefail
 
 ORDER=(
+crcbl-error
 crcbl-rand
 crcbl-profile
 crcbl-console
