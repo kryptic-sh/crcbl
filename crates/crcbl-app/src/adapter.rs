@@ -148,7 +148,7 @@ pub fn pin() -> Option<String> {
 /// The second half is [`crate::present`]'s: a windowed open that pinned an adapter
 /// which then cannot present to the window refuses with one of these rather
 /// than walking on to an adapter nobody named.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 #[error("{0}")]
 pub struct PinMiss(String);
 

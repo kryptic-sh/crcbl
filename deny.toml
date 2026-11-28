@@ -74,9 +74,9 @@ skip = [
   # second copy that only `crcbl-wgpu`'s dependency tree pulled in, so deleting
   # that crate resolved them upstream-of-us rather than by a skip. `cargo deny`
   # reports an unmatched skip as a warning, which is what caught all five.
-  # `thiserror` 1.x survives only under third-party crates; every crate in this
-  # workspace uses the 2.0 pin from `[workspace.dependencies]`.
-  { crate = "thiserror@1.0.69", reason = "transitive; the workspace pins 2.0" },
+  # `thiserror` 1.x survives only under third-party crates, beside the 2.x
+  # other third-party crates take; no crate in this workspace depends on either.
+  { crate = "thiserror@1.0.69", reason = "transitive; third-party crates take 2.x" },
   { crate = "thiserror-impl@1.0.69", reason = "transitive; follows thiserror 1.x" },
   { crate = "jni-sys@0.3.1", reason = "transitive; the android backends of cpal/ndk" },
   { crate = "syn@2.0.119", reason = "transitive; proc-macro crates mid-migration to syn 3" },

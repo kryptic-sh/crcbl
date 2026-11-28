@@ -33,10 +33,10 @@ crcbl-font = { workspace = true, optional = true }
 # because the panel is a widget and a widget needs `Ui`; the reverse would put
 # blocks, spans and a stylesheet inside a crate whose whole charter is that a
 # component can depend on it for free. It costs a browser build nothing new:
-# `crcbl-reflect` takes `glam` (already here), `thiserror`, and a proc-macro
-# crate built for the host. The exit criterion this crate is checked against is
-# that it names no **renderer** (`docs/notes/tooling.md`'s UI rules say so in
-# as many words), and `crcbl-reflect` sits below everything.
+# `crcbl-reflect` takes `glam` (already here) and two proc-macro crates built
+# for the host, its derive and `crcbl-error`. The exit criterion this crate is
+# checked against is that it names no **renderer** (`docs/notes/tooling.md`'s
+# UI rules say so in as many words), and `crcbl-reflect` sits below everything.
 crcbl-reflect = { workspace = true }
 # Flexbox layout for `tree`, through Taffy's low-level traits rather than its
 # `TaffyTree` — UI section 2 in `docs/notes/tooling.md`, the user's decision of

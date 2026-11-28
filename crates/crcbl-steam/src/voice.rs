@@ -47,7 +47,7 @@ mod result {
 }
 
 /// Why a voice call failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum VoiceError {
     /// Steam's voice system is not initialised

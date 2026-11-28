@@ -58,7 +58,7 @@ pub struct Loopback<T: Transport = InMemoryTransport> {
 /// One variant, and it is not this crate's: [`Server`](crcbl_server::Server)
 /// reads operating-system entropy for its resume credential rather than
 /// issuing a predictable one, and that read can fail.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum SessionError {
     /// The operating system would not supply entropy for the resume token.
     #[error("the session's resume token needs OS entropy: {0}")]

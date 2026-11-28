@@ -96,8 +96,8 @@ browser's own gate and the demo site's deploy.
   `thiserror`'s attribute syntax: `Display` from each `#[error("…")]`,
   `source()` from `#[source]`, `#[from]` or a field named `source`, `From` for
   `#[from]`, and `transparent`. A proc-macro crate with nothing outside `core`
-  in its expansion. The crates move off `thiserror` onto it one at a time
-  (`docs/backlog.md`).
+  in its expansion. Every crate in the workspace derives its errors with it;
+  none depends on `thiserror`.
 
 - **`crcbl-core`** — `Handle`/`Pool`, sector-tiled `WorldPos` (`I64Vec3`
   sectors, 2^20 m cells), `FrameArena`, `FrameClock` with an injected

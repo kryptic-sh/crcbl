@@ -13,7 +13,7 @@ use std::fmt;
 /// One type for every refusal — a bad coercion, a value outside its range, a
 /// read-only variable, an unterminated quote, a command's own complaint —
 /// because every one of them has exactly the same fate: it is printed and the
-/// state is left alone. A hand-written `Display` rather than a `thiserror`
+/// state is left alone. A hand-written `Display` rather than a `crcbl-error`
 /// derive, because this crate has no dependencies at all.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fault(String);

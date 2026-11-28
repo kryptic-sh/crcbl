@@ -356,7 +356,7 @@ impl SkinnedMesh {
 }
 
 /// What a [`Skinning`] refuses to do.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum SkinningError {
     /// A skin binding names a joint the range's palette has not got.
     ///

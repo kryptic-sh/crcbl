@@ -38,7 +38,7 @@ use crcbl_shaders::mesh::VERTEX_STRIDE;
 /// Why [`SceneDesc::instance_bounds`] or [`SceneDesc::instance_parts`] refused
 /// a set of instances. Each variant that concerns one instance names its index
 /// in the slice the call was given.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum SceneBoundsError {
     /// The instance names a mesh past the end of [`SceneDesc::meshes`].
     #[error("instance {instance} names mesh {mesh}, which the scene does not have")]

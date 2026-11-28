@@ -280,7 +280,7 @@ impl core::fmt::Display for GpuBackend {
 pub const BACKEND_ENV_VAR: &str = "CRCBL_GPU";
 
 /// Why no backend could be opened.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum GpuError {
     /// Nothing auto-selectable could be opened.
     #[error("no GPU backend available (tried: {tried}); last error: {last}")]

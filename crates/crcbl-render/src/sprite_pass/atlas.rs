@@ -238,7 +238,7 @@ pub struct SlotCopy {
 
 /// What an atlas operation refuses to do. Every variant is a bounded failure
 /// the caller can recover from; nothing on this path panics or aborts.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum SheetError {
     /// Every cell is in use. Free one and ask again, or create a larger atlas —
     /// the image is created once, at its full size, and never grows.

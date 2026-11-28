@@ -162,7 +162,7 @@ const fn kind_of(input_type: i32) -> PadKind {
 }
 
 /// Why [`SteamPads::open`] failed.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum InputError {
     /// A [`SteamPads`] is already open: `ISteamInput` has one `Init` and one

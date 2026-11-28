@@ -6,7 +6,7 @@ use crate::client::AppId;
 
 /// Why `Steam::init` failed. Every variant is a distinct failure a game may
 /// want to report differently; all of them mean "run without Steam".
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum InitError {
     /// No Steam library could be opened. `tried` is every path, in search
@@ -130,7 +130,7 @@ impl core::fmt::Display for EResult {
 /// Why a Steam call made through an initialised [`Steam`](crate::Steam)
 /// failed. Each variant names the argument or the call, so a log line says
 /// which.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum SteamError {
     /// A string argument contains a NUL, which would silently cut it short at

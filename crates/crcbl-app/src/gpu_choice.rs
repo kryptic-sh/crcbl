@@ -194,7 +194,7 @@ impl fmt::Display for GpuChoice {
 /// Why a saved [`GpuChoice`]'s text could not be read: not one, a version
 /// this build does not read, or a field missing or malformed. A program
 /// treats it as no saved choice.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, crcbl_error::Error)]
 #[error("not a saved GPU choice: {0}")]
 pub struct BadGpuChoice(String);
 

@@ -121,7 +121,6 @@ rand_core = { version = "0.10", default-features = false }
 # float formatting — is in the base crate, which is why nothing here is hand
 # rolled.
 ron = "0.12.3"
-thiserror = "2.0"
 # Font tables. `crcbl-ui` parses and hints faces with it and `crcbl-font` reads
 # their names and weights, through this one entry so the two always read a face
 # alike. Default features off: `autohint_shaping` feeds the automatic hinter,
@@ -225,8 +224,8 @@ crcbl-spawn = { path = "crates/crcbl-spawn", version = "0.21.0" }
 # no shader and no asset parser in it, by design.
 crcbl-vfx = { path = "crates/crcbl-vfx", version = "0.21.0" }
 # Bodies of water and their medium, as data: `docs/plan/55-water.md`'s first
-# decision. Depends on `thiserror` alone, so the renderer, the physics world and
-# a server that draws nothing can all read one body.
+# decision. Depends on `crcbl-error` alone, so the renderer, the physics world
+# and a server that draws nothing can all read one body.
 crcbl-water = { path = "crates/crcbl-water", version = "0.21.0" }
 # The wind field: `docs/plan/56-wind.md`'s two authored layers, the weather over
 # them and the one formula every consumer samples with. The arrow into
@@ -236,15 +235,15 @@ crcbl-water = { path = "crates/crcbl-water", version = "0.21.0" }
 crcbl-wind = { path = "crates/crcbl-wind", version = "0.21.0" }
 # The grid-inventory kit: the container primitive, the item catalogue, the
 # placement rules and the move protocol with its server-side stash, headless.
-# `serde`, `ron` and `thiserror`, plus `crcbl-core` for the `PlayerId` a stash
+# `serde`, `ron` and `crcbl-error`, plus `crcbl-core` for the `PlayerId` a stash
 # is keyed by and `crcbl-store` for the storage it is written through — no
 # renderer — so the server and the client can link the same placement code
 # without agreeing on one.
 crcbl-inventory = { path = "crates/crcbl-inventory", version = "0.21.0" }
 # Ground navigation: the grid router EW proved before the engine had one, and
-# the rung below `docs/plan/24-navigation.md`'s navmesh. `glam` and `thiserror`
-# and nothing else, so the arrow into it costs a browser build the router and
-# no more — see that crate's own manifest.
+# the rung below `docs/plan/24-navigation.md`'s navmesh. `glam` and
+# `crcbl-error` and nothing else, so the arrow into it costs a browser build
+# the router and no more — see that crate's own manifest.
 crcbl-nav = { path = "crates/crcbl-nav", version = "0.21.0" }
 # The console registry: the variable and command vocabulary the UI, the engine
 # and the CLI all speak. It depends on nothing but `core`/`std`, so the arrow
@@ -252,16 +251,16 @@ crcbl-nav = { path = "crates/crcbl-nav", version = "0.21.0" }
 crcbl-console = { path = "crates/crcbl-console", version = "0.21.0" }
 # The field description an editor's property panel reads, and the derive that
 # writes it. Two crates because a `proc-macro = true` crate can export nothing
-# but macros; the trait half depends on `glam` and `thiserror` alone, so the
+# but macros; the trait half depends on `glam` and `crcbl-error` alone, so the
 # arrow into it from a component costs a browser build the description and no
 # more, and the macro half is host-compiled and reaches no target at all. See
 # UI rung 8's inspector (`crcbl_ui::tree::widgets::inspector`) for what reads it.
 crcbl-reflect = { path = "crates/crcbl-reflect", version = "0.21.0" }
 crcbl-reflect-derive = { path = "crates/crcbl-reflect-derive", version = "0.21.0" }
 # `#[derive(Error)]`, the workspace's own, with `thiserror`'s attribute syntax:
-# every error type moves onto it and `thiserror` leaves the workspace (the
-# `docs/backlog.md` entry says in what order). A `proc-macro = true` crate on
-# the trio above and nothing else, so depending on it adds no crate to a build.
+# every error type in the workspace derives it, and `thiserror` is no longer a
+# dependency of any crate here. A `proc-macro = true` crate on the trio above
+# and nothing else, so depending on it adds no crate to a build.
 crcbl-error = { path = "crates/crcbl-error", version = "0.21.0" }
 # The golden suites' shared fixture, `apps/crcbl-sample-test`. A path-only
 # workspace member like every crate above, and a `[dev-dependencies]` entry

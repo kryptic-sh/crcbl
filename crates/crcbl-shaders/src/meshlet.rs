@@ -357,7 +357,7 @@ impl ClusterBounds {
 ///
 /// One variant, because there is one way for the conversion to fail: a number
 /// the host counted in `usize` that a `uint` cannot hold. A hand-written
-/// `Display` rather than a `thiserror` derive, because this crate has no
+/// `Display` rather than a `crcbl-error` derive, because this crate has no
 /// dependencies at all — see its manifest, and `crate::sha256`, which is the
 /// same decision taken about something far more dangerous to hand-roll.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

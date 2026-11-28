@@ -109,7 +109,7 @@ impl AuthResponse {
 
 /// Why [`Auth::begin_session`] would not take a ticket
 /// (`EBeginAuthSessionResult`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum BeginAuthError {
     /// `k_EBeginAuthSessionResultInvalidTicket`.

@@ -22,7 +22,7 @@ crcbl-ui = { workspace = true }
 # The caret area `TextPump::place` takes, in the tree's own `Vec2`s.
 glam = { workspace = true }
 log = { workspace = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 # The browser's GPU backend, and only where a browser is. Per-target for the
 # reason `crcbl-vk` below is: the target already says whether a browser is the

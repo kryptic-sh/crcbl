@@ -698,8 +698,8 @@ impl ClusterDag {
 
 /// Why a committed DAG could not be decoded.
 ///
-/// A hand-written `Display` rather than a `thiserror` derive, because this crate
-/// has no dependencies at all — the same decision `crate::sha256` and
+/// A hand-written `Display` rather than a `crcbl-error` derive, because this
+/// crate has no dependencies at all — the same decision `crate::sha256` and
 /// [`MeshletTooLarge`](crate::meshlet::MeshletTooLarge) record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DagDecodeError {
@@ -1147,8 +1147,9 @@ fn base_border(level: &DagLevel) -> BTreeSet<SharedEdge> {
 
 /// Why a set of clusters is not a crack-free cover of the surface.
 ///
-/// A hand-written `Display` rather than a `thiserror` derive, because this crate
-/// has no dependencies at all — the same decision [`DagDecodeError`] records.
+/// A hand-written `Display` rather than a `crcbl-error` derive, because this
+/// crate has no dependencies at all — the same decision [`DagDecodeError`]
+/// records.
 ///
 /// `PartialEq` but not `Eq`: [`sample`](Self::sample) holds floats.
 #[derive(Clone, Debug, PartialEq)]

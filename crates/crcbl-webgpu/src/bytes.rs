@@ -30,7 +30,7 @@ use crate::tag;
 /// Shaped after [`crcbl_net`'s `DecodeError`](https://docs.rs/crcbl-net), which
 /// is the house wire style: the variants say where the decode stopped and what
 /// it wanted, so a report names a field rather than a buffer.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum DecodeError {
     /// The buffer does not start with the magic its direction claims —
     /// [`tag::STREAM_MAGIC`] for a command stream, [`tag::REPLY_MAGIC`] for a

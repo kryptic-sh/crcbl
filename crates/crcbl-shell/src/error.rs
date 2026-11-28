@@ -14,7 +14,7 @@
 use crate::{ShellBackend, WindowId};
 
 /// A shell operation failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum ShellError {
     /// No backend could be opened.

@@ -531,7 +531,7 @@ pub enum Event {
 /// records the violation and carries on, so a test sees the *whole* frame's
 /// worth of problems rather than only the first. Check with
 /// [`Recorder::validation_errors`] or [`Recorder::assert_valid`].
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum ValidationError {
     /// A command legal only inside a render or compute pass was recorded
     /// outside one.

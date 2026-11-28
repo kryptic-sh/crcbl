@@ -191,7 +191,7 @@ pub use crcbl_jobs as jobs;
 /// [`crcbl-nav`](crcbl_nav): routing across the ground — today a flat grid
 /// router and a height-aware span grid, each with a bounded flood fill, the
 /// rungs below the navmesh `docs/plan/24-navigation.md` plans. It depends on
-/// `glam` and `thiserror`, both already in every game's graph, and on
+/// `glam` and `crcbl-error`, both already in every game's graph, and on
 /// `crcbl-phys` for `NavAgent::from_character`, so it is re-exported
 /// unconditionally.
 pub use crcbl_nav as nav;
@@ -216,7 +216,7 @@ pub use crcbl_ragdoll as ragdoll;
 /// `apps/breakout`'s `Brick` is the first component that does.
 ///
 /// Unconditional rather than behind a feature, on [`console`]'s terms: the
-/// crate depends on `glam` and `thiserror`, both of which are in this crate's
+/// crate depends on `glam` and `crcbl-error`, both of which are in this crate's
 /// tree already, and its derive is host-compiled — so the arrow costs a browser
 /// build the description and nothing else.
 pub use crcbl_reflect as reflect;

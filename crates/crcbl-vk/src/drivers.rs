@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use ash::vk;
 
 /// Why a driver could not be read or loaded.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum DriverError {
     /// Its manifest could not be read.
     #[error("cannot read the driver manifest {}: {source}", path.display())]

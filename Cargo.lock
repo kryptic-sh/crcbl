@@ -653,6 +653,7 @@ dependencies = [
  "crcbl-console",
  "crcbl-core",
  "crcbl-ecs",
+ "crcbl-error",
  "crcbl-golden",
  "crcbl-greybox",
  "crcbl-hal",
@@ -685,7 +686,6 @@ dependencies = [
  "ron",
  "serde",
  "tempfile",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -705,6 +705,7 @@ version = "0.21.0"
 dependencies = [
  "crcbl-core",
  "crcbl-dx12",
+ "crcbl-error",
  "crcbl-frame",
  "crcbl-hal",
  "crcbl-mtl",
@@ -715,7 +716,6 @@ dependencies = [
  "crcbl-webgpu",
  "glam",
  "log",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -834,11 +834,11 @@ version = "0.21.0"
 dependencies = [
  "bytemuck",
  "crcbl-core",
+ "crcbl-error",
  "crcbl-hal",
  "crcbl-shaders",
  "crcbl-ui",
  "glam",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -865,7 +865,7 @@ version = "0.21.0"
 dependencies = [
  "bitflags",
  "crcbl-core",
- "thiserror 2.0.21",
+ "crcbl-error",
 ]
 
 [[package]]
@@ -1030,6 +1030,7 @@ dependencies = [
  "bytemuck",
  "crcbl-console",
  "crcbl-core",
+ "crcbl-error",
  "crcbl-frame",
  "crcbl-hal",
  "crcbl-jobs",
@@ -1041,7 +1042,6 @@ dependencies = [
  "glam",
  "ron",
  "serde",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1109,11 +1109,11 @@ dependencies = [
  "accesskit_windows",
  "bitflags",
  "crcbl-core",
+ "crcbl-error",
  "crcbl-spawn",
  "crcbl-wayland",
  "crcbl-wl-scanner",
  "crcbl-x11",
- "thiserror 2.0.21",
  "windows",
 ]
 
@@ -1133,11 +1133,11 @@ dependencies = [
 name = "crcbl-steam"
 version = "0.21.0"
 dependencies = [
+ "crcbl-error",
  "crcbl-input",
  "crcbl-net",
  "crcbl-store",
  "log",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1191,6 +1191,7 @@ dependencies = [
  "ash",
  "crcbl-core",
  "crcbl-dcomp",
+ "crcbl-error",
  "crcbl-golden",
  "crcbl-hal",
  "crcbl-render",
@@ -1199,7 +1200,6 @@ dependencies = [
  "glam",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1227,8 +1227,8 @@ name = "crcbl-webgpu"
 version = "0.21.0"
 dependencies = [
  "crcbl-core",
+ "crcbl-error",
  "crcbl-hal",
- "thiserror 2.0.21",
 ]
 
 [[package]]

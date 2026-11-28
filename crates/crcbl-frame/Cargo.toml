@@ -22,7 +22,7 @@ crcbl-shaders = { workspace = true }
 # counters speak.
 crcbl-ui = { workspace = true }
 bytemuck = { workspace = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 [dev-dependencies]
 glam = { workspace = true }

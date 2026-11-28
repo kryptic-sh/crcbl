@@ -265,7 +265,7 @@ pub struct MeshUpload<'a> {
 }
 
 /// What a [`MeshPool`] refuses to do.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum MeshPoolError {
     /// No single free block is large enough.
     ///

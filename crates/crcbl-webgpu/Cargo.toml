@@ -12,12 +12,12 @@ rust-version.workspace = true
 # produced that (a pure command stream, so the shell's allowed-import set can go
 # empty) is recorded in `docs/notes/browser.md`, and a graphics import appearing
 # here would undo it. `crcbl-hal` supplies the descriptors the stream carries,
-# `crcbl-core` the handles, `thiserror` the decode error — the same three
+# `crcbl-core` the handles, `crcbl-error` the decode error — the same three
 # `crcbl-net`'s codec has.
 [dependencies]
 crcbl-core = { workspace = true }
 crcbl-hal = { workspace = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 [lints]
 workspace = true

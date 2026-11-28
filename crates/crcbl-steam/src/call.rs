@@ -149,7 +149,7 @@ pub enum CallState<T: CallResult> {
 }
 
 /// Why an asynchronous call produced no answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum CallError {
     /// `GetAPICallResult` reported an IO failure (`pbFailed`): Steam lost the

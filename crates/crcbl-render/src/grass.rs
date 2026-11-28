@@ -164,7 +164,7 @@ const CALM_DIRECTION: [u8; 4] = [255, 128, 0, 255];
 const CALM_INTENSITY: [u8; 4] = [0, 0, 0, 255];
 
 /// Why a wind layer could not be uploaded.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum WindLayerError {
     /// A layer with a zero dimension.
     #[error("a {width}x{height} wind layer has no texels")]
@@ -507,7 +507,7 @@ impl GrassScene {
 }
 
 /// Why a field could not be made resident: its own description, or the seam.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum SetError {
     /// The description itself.
     #[error(transparent)]

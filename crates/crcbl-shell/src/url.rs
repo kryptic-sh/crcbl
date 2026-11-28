@@ -66,7 +66,7 @@ use core::fmt;
 pub struct WebUrl(String);
 
 /// Why a string is not a [`WebUrl`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum WebUrlError {
     /// A character a URL may only carry percent-encoded: whitespace, a

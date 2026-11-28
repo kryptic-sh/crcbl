@@ -86,7 +86,7 @@ pub const MAX_BLADES: u32 = 16;
 /// `crcbl_wind::WindError`'s terms: a caller can tell a map that has not been
 /// filled in from one that is the wrong shape, and the message names the numbers
 /// it refused.
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, crcbl_error::Error, PartialEq)]
 pub enum GrassError {
     /// A field with no tiles along one of its axes, or more than [`MAX_TILES`]
     /// of them.

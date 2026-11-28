@@ -18,7 +18,7 @@ crcbl-hal = { workspace = true }
 # that driver alone.
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 # A transparent Win32 window's DirectComposition tree, and the D3D11 device that
 # copies this backend's frames into a composition swapchain on it — see

@@ -145,7 +145,7 @@ pub enum Instance {}
 pub type InstanceHandle = Handle<Instance>;
 
 /// What an [`InstancePool`] refuses to do.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum InstancePoolError {
     /// Every slot is in use.
     ///

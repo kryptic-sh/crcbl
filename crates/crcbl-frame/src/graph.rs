@@ -1729,7 +1729,7 @@ fn attachments(
 // --- compilation -----------------------------------------------------------
 
 /// Why a graph could not be compiled.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum GraphError {
     /// One pass declared two different states for the same resource.
     #[error(

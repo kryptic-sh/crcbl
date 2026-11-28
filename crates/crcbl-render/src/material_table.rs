@@ -115,7 +115,7 @@ pub enum Material {}
 pub type MaterialHandle = Handle<Material>;
 
 /// What a [`MaterialTable`] refuses to do.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum MaterialTableError {
     /// Every row is in use.
     ///

@@ -20,10 +20,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   or `#[from]` field (or a field named `source`), `From` for a `#[from]` field,
   and `#[error(transparent)]` forwarding of both — in `thiserror`'s attribute
   syntax, so a crate moves over by changing the derive's path, and its messages
-  read byte for byte as before. `crcbl-jobs`' `SpawnError` is the first to use
-  it and no longer depends on `thiserror`. The parts of `thiserror` nothing here
-  uses (`fmt = …`, an enum-level message, `Backtrace` fields, optional sources)
-  are refused at compile time.
+  read byte for byte as before. Every crate in the workspace now derives its
+  errors with it, and none depends on `thiserror`. The parts of `thiserror`
+  nothing here uses (`fmt = …`, an enum-level message, `Backtrace` fields,
+  optional sources) are refused at compile time.
 - **`crcbl-image`: an SVG `<image>` can embed a GIF.** A `data:image/gif` URL is
   decoded by the `gif` feature's decoder, its first image only, under what is
   left of the document's `Limits` budget, as PNG, JPEG and WebP already are.

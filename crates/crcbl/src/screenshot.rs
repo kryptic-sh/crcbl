@@ -6537,7 +6537,7 @@ pub struct OffscreenSetup {
 }
 
 /// Reasons an offscreen render might fail before a pixel is written.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum OffscreenError {
     /// No GPU backend could be opened.
     #[error("GPU backend: {0}")]

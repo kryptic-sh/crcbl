@@ -10,12 +10,12 @@ rust-version.workspace = true
 [dependencies]
 crcbl-core = { workspace = true }
 # `Schedule::set_pool` ticks the systems of a stage on a `crcbl_jobs::Pool`.
-# That crate depends on `thiserror` alone, so the edge brings nothing else in.
+# That crate depends on `crcbl-error` alone, so the edge brings nothing else in.
 crcbl-jobs = { workspace = true }
 # `SystemTrait::debug_fields` lends a debug overlay an entity's row as
 # `&dyn Reflect`, so a system describes itself without this crate naming a UI.
 # `crcbl-reflect`'s own manifest anticipates this arrow: it carries only the
-# derive, `glam` and `thiserror`, and depends on nothing here.
+# derive, `glam` and `crcbl-error`, and depends on nothing here.
 crcbl-reflect = { workspace = true }
 
 [lints]

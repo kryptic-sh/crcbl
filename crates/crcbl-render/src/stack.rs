@@ -324,7 +324,7 @@ impl CameraStack {
 /// things a person fixing the file needs — where, and what — so a caller
 /// reporting it does not have to depend on ron's types. The message is ron's
 /// verbatim, which is what carries the offending field's name.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 #[error("line {line}, column {column}: {message}")]
 pub struct StackError {
     line: usize,

@@ -23,7 +23,7 @@ crcbl-store = { workspace = true }
 log = { workspace = true }
 # `InitError` is what `Steam::init` returns, so it needs `Display` and `Error`
 # without a macro of this crate's own.
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 [dev-dependencies]
 # The transport conformance suite, run against `SteamTransport` over the fake

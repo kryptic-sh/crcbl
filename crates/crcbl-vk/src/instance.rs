@@ -405,7 +405,7 @@ impl VkInstance {
 /// Separate from [`HalError`] only at the constructor, because "there is no
 /// Vulkan loader on this machine" is a *selection* answer — the registry above
 /// moves to the next backend — rather than a device failure.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum OpenError {
     /// `libvulkan.so.1` (or the platform equivalent) could not be `dlopen`ed.
     ///

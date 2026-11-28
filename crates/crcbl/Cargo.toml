@@ -33,7 +33,7 @@ crcbl-app = { workspace = true }
 crcbl-console = { workspace = true }
 crcbl-hal = { workspace = true }
 # The capture `crate::profile` writes. GPU-free and depending on nothing but
-# `thiserror`, so the arrow adds the format and nothing else.
+# `crcbl-error`, so the arrow adds the format and nothing else.
 crcbl-profile = { workspace = true }
 crcbl-render = { workspace = true }
 crcbl-shaders = { workspace = true }
@@ -58,7 +58,7 @@ crcbl-input = { workspace = true }
 crcbl-jobs = { workspace = true }
 # The ground and span grid routers, reached as `crcbl::nav::grid` and
 # `crcbl::nav::spans`. Unconditional rather than behind a feature, on
-# `crcbl-anim`'s terms: it depends on `glam` and `thiserror`, both already in
+# `crcbl-anim`'s terms: it depends on `glam` and `crcbl-error`, both already in
 # this crate's tree, so the arrow adds one compilation unit and no third-party
 # crate on any target. `phys` is on because `crcbl-phys` is a dependency here
 # already, and it is what gives `NavAgent::from_character`.
@@ -67,7 +67,7 @@ crcbl-net = { workspace = true }
 crcbl-reflect = { workspace = true }
 crcbl-phys = { workspace = true }
 # Ragdolls, reached as `crcbl::ragdoll`: `crcbl-anim`, `crcbl-phys`, `serde`,
-# `ron` and `thiserror`, all already in this crate's tree.
+# `ron` and `crcbl-error`, all already in this crate's tree.
 crcbl-ragdoll = { workspace = true }
 crcbl-server = { workspace = true }
 crcbl-store = { workspace = true }
@@ -97,7 +97,7 @@ crcbl-vfx = { workspace = true, optional = true }
 # The grid inventory: one container primitive, the item catalogue it is checked
 # against, and the placement, rotation and stacking rules. **Optional**, on
 # `crcbl-vfx`'s terms above: a game with no carried items links no grid to put
-# them in. It depends on `serde`, `ron`, `thiserror`, `crcbl-core` and
+# them in. It depends on `serde`, `ron`, `crcbl-error`, `crcbl-core` and
 # `crcbl-store`, every one of which this crate already has in its tree, so
 # turning it on adds no crate at all. See the `inventory` feature and `src/lib.rs`'s
 # `inventory` re-export.
@@ -105,7 +105,7 @@ crcbl-inventory = { workspace = true, optional = true }
 # Steamworks, over the SDK's flat C API opened at run time. **Optional**, on
 # `crcbl-inventory`'s terms above: a game not shipping on Steam links none of
 # it. It has no link-time dependency on Valve's library, and outside the
-# workspace depends on `thiserror` and `log` alone, so turning it on adds no
+# workspace depends on `log` alone, so turning it on adds no
 # third-party crate; on a target Valve ships no 64-bit library for it compiles
 # to documentation. See the
 # `steam` feature and `src/lib.rs`'s `steam` re-export.
@@ -141,7 +141,7 @@ ron = { workspace = true }
 # one dependency past "the engine and nothing else". The derive feature is
 # the workspace's.
 serde = { workspace = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 # The browser's GPU seam, and only where a browser is — and now the *only* GPU
 # backend a browser build links. `crcbl-webgpu` is the wasm → JS

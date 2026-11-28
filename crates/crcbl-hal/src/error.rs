@@ -17,7 +17,7 @@
 use crate::Features;
 
 /// A backend operation failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum HalError {
     /// No adapter with that index exists.
     #[error("no adapter with index {0}")]
@@ -120,7 +120,7 @@ pub enum HalError {
 /// [`SurfaceError::OutOfDate`] as a normal event: every resize produces one, and
 /// a caller that treats it as fatal has a bug that only appears when someone
 /// drags a window edge.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum SurfaceError {
     /// The swapchain no longer matches the surface — the window resized, the
     /// canvas changed size, or the display mode changed. Reconfigure with
