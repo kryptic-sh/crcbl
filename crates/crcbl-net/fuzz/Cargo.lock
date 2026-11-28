@@ -45,9 +45,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.11.3"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02f0e023adb368345ce0ca6cdfc0f24a06554468d0e8503e14a0841de79bfa69"
+checksum = "95e45cf2980b2d467be49a9ed942c9179b701063a7ca3d037de7ee9bd67f8d66"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-assets"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "crcbl-core",
  "crcbl-shaders",
@@ -132,11 +132,11 @@ dependencies = [
 
 [[package]]
 name = "crcbl-console"
-version = "0.21.0"
+version = "0.22.0"
 
 [[package]]
 name = "crcbl-core"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "bitflags",
  "crcbl-console",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-ecs"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "crcbl-core",
  "crcbl-jobs",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-error"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-image"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "crcbl-error",
  "png",
@@ -172,14 +172,14 @@ dependencies = [
 
 [[package]]
 name = "crcbl-jobs"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "crcbl-error",
 ]
 
 [[package]]
 name = "crcbl-net"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "chacha20poly1305",
  "crcbl-core",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-phys"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "crcbl-core",
  "crcbl-ecs",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-rand"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "getrandom",
  "rand_chacha",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-reflect"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "crcbl-error",
  "crcbl-reflect-derive",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-reflect-derive"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "crcbl-scene"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "crcbl-assets",
  "crcbl-core",
@@ -256,18 +256,18 @@ dependencies = [
 
 [[package]]
 name = "crcbl-shaders"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "crcbl-spawn",
 ]
 
 [[package]]
 name = "crcbl-spawn"
-version = "0.21.0"
+version = "0.22.0"
 
 [[package]]
 name = "crcbl-store"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "crcbl-core",
  "crcbl-error",
@@ -379,9 +379,9 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.15"
+version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
+checksum = "3e44f110d1777dc6559a51e7d45083945ded4f1bf3305494350f693b6d20b9c8"
 
 [[package]]
 name = "flate2"

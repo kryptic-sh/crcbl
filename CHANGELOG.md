@@ -13,6 +13,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-29
+
 ### Added
 
 - **`crcbl-error`, the workspace's own `#[derive(Error)]`.** It writes `Display`
@@ -23201,7 +23203,8 @@ the two.
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/kryptic-sh/crcbl/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/kryptic-sh/crcbl/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/kryptic-sh/crcbl/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/kryptic-sh/crcbl/compare/v0.19.0...v0.19.1
