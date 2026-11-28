@@ -33,6 +33,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   gives them, and `unreadable`, the number the platform listed but the crate
   could not describe, so an app can say some are missing rather than pass a
   short list off as complete.
+- **`crcbl-shell`: `Shell::present_hook` and `PresentHook`, the seam for telling
+  a window's shell about its presents.** `crcbl-app`'s `Presenter` takes the
+  hook when it opens on a window, through `open`, `request_open`,
+  `request_open_on` or `SharedGpu::open`, and calls `will_present` with the
+  acquired extent just before each present and `presented` after one that went
+  through. No call site changes, and `Presenter` stays `Send` and `Sync`. The
+  provided default answers `None`, which every backend but Wayland and headless
+  keeps; `HeadlessShell::last_presented` reads back what a window's hook was
+  told. A null device presenting to a real window takes no hook. On Wayland the
+  hook only records the size so far: what the shell sends is unchanged.
 
 ### Changed
 

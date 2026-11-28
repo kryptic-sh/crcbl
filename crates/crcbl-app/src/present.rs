@@ -121,7 +121,7 @@ use crcbl_hal::{
     SurfaceHandle, SwapchainDesc, SwapchainHandle,
 };
 use crcbl_hal::{Device, Instance};
-use crcbl_shell::{Shell, ShellError, ShellEvent, WindowId};
+use crcbl_shell::{PhysicalSize, PresentHook, Shell, ShellError, ShellEvent, WindowId};
 
 use crate::adapter::{ADAPTER_ENV_VAR, AdapterPick, Choice, PinMiss, PowerPreference};
 use crate::backend::{GpuBackend, PendingInstance};
@@ -608,6 +608,7 @@ impl SharedGpu {
         let target = Presenter::target(shell, window)?;
         let mut open = PendingPresenter::new(OpenStage::Done, target, extent, desc)?;
         open.window = Some(window);
+        open.present_hook = Presenter::present_hook(shell, window)?;
 
         // SAFETY: as in `start_device` — `target` came from the caller's shell
         // for a window that must outlive the presenter, which is this
@@ -890,6 +891,14 @@ pub struct Presenter {
     /// answers at the next pump whatever the device did, so requests there are
     /// kept: they are how the gate is tested.
     answers_requests: bool,
+    /// The window's [`Shell::present_hook`], told about every present: the
+    /// size it was drawn at just before it, and that it went through after.
+    ///
+    /// `None` offscreen, where the shell has none, and wherever
+    /// `answers_requests` is `false`, for the same reason: state the shell
+    /// held for a frame would wait for a commit the null device's present
+    /// never makes, where without the hook the shell commits it itself.
+    present_hook: Option<PresentHook>,
     /// Where the window's frame request stands; see [`frame_gate`].
     frame: FrameGate,
     /// The choice of the adapter this presenter opened on, for the program to
@@ -906,6 +915,15 @@ pub struct Presenter {
     signals: Vec<SemaphoreSignal>,
     batch: Vec<CommandBufferHandle>,
 }
+
+// A presenter moves to whichever thread presents, so nothing it holds — the
+// present hook above all, which a backend shares with its window — may take
+// that away. Native only: on wasm the HAL's objects are not `Send` at all.
+#[cfg(not(target_arch = "wasm32"))]
+const _: () = {
+    const fn send_and_sync<T: Send + Sync>() {}
+    send_and_sync::<Presenter>();
+};
 
 /// How far [`PendingPresenter`] has got.
 ///
@@ -944,6 +962,9 @@ pub struct PendingPresenter {
     target: crcbl_hal::SurfaceTarget,
     /// The window `target` describes, or `None` offscreen.
     window: Option<WindowId>,
+    /// The window's [`Shell::present_hook`], taken with `target` so the shell
+    /// is not borrowed for the whole of start-up.
+    present_hook: Option<PresentHook>,
     extent: (u32, u32),
     label: String,
     required_features: Features,
@@ -1021,6 +1042,7 @@ impl PendingPresenter {
             stage,
             target,
             window: None,
+            present_hook: None,
             extent,
             label: desc.label.to_string(),
             required_features: desc.required_features,
@@ -1421,6 +1443,7 @@ impl Presenter {
         let target = Self::target(shell, window)?;
         let mut pending = PendingPresenter::new(OpenStage::Done, target, extent, desc)?;
         pending.window = Some(window);
+        pending.present_hook = Self::present_hook(shell, window)?;
         start_open(desc, &mut pending)?;
         Ok(pending)
     }
@@ -1474,6 +1497,7 @@ impl Presenter {
         let target = Self::target(shell, window)?;
         let mut pending = PendingPresenter::new(OpenStage::Done, target, extent, desc)?;
         pending.window = Some(window);
+        pending.present_hook = Self::present_hook(shell, window)?;
         pending.stage = Self::start_device(instance, &pending)?;
         Ok(pending)
     }
@@ -1507,6 +1531,16 @@ impl Presenter {
             target.platform_name()
         );
         Ok(target)
+    }
+
+    /// The hook `shell` has for presents to `window`, if any.
+    fn present_hook<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+    ) -> Result<Option<PresentHook>, PresentError> {
+        shell.present_hook(window).map_err(|_| {
+            PresentError::Unusable("the window went away before its presenter was opened")
+        })
     }
 
     /// Creates the surface, picks an adapter and starts the device request.
@@ -1854,6 +1888,7 @@ impl Presenter {
             observed_timing: None,
             window: open.window,
             answers_requests,
+            present_hook: open.present_hook.clone().filter(|_| answers_requests),
             frame: FrameGate::Open,
             gpu_choice,
             gpu_choice_outcome,
@@ -2269,6 +2304,10 @@ impl Presenter {
     /// Submits `command_buffer` for `acquired`, presents it, and retires the
     /// oldest command buffer once its submission has completed.
     ///
+    /// The window's [`Shell::present_hook`], if it has one, is told just
+    /// before the present that a frame of [`AcquiredFrame::extent`] is
+    /// coming, and after it that the present went through.
+    ///
     /// # Errors
     ///
     /// [`PresentError`] if the submit, the present or the retire failed. A
@@ -2363,6 +2402,11 @@ impl Presenter {
         // `Pacing::Off`, where nothing else holds the CPU back.
         self.retire_to(self.frames_in_flight - 1)?;
 
+        // Immediately before the present: whatever the shell sends for this
+        // frame has to be on the wire ahead of the commit the present makes.
+        if let Some(hook) = &self.present_hook {
+            hook.will_present(PhysicalSize::new(acquired.extent.0, acquired.extent.1));
+        }
         match self.device.present(
             self.queue,
             &PresentInfo {
@@ -2388,6 +2432,9 @@ impl Presenter {
         // The present committed, so a request made for this frame is now owed
         // an answer, and the next frame waits for it.
         self.frame = self.frame.presented();
+        if let Some(hook) = &self.present_hook {
+            hook.presented();
+        }
 
         // After the present, never before it — and after *this* present rather
         // than at the top of the next frame, because the whole question is what

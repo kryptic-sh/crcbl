@@ -184,6 +184,7 @@ mod frame;
 mod input;
 mod layer;
 mod popup;
+mod present;
 pub mod protocol;
 mod region;
 mod text_input;
@@ -211,6 +212,7 @@ use core::time::Duration;
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::os::fd::AsRawFd as _;
+use std::sync::Arc;
 
 use crcbl_core::input::{DeviceId, Keysym, Modifiers, ScrollDelta};
 use crcbl_core::{EventTime, KeyCode, Pool, SurfaceTarget};
@@ -2084,6 +2086,9 @@ struct WlWindow {
     /// The `wl_callback` of a [`Shell::request_frame`] not yet answered, or
     /// null; see [`frame`].
     frame_callback: *mut WlProxy,
+    /// What the window's [`Shell::present_hook`] has been told; see
+    /// [`present`].
+    present: Arc<present::WlPresent>,
     title: String,
     requested_size: LogicalSize,
     requested_mode: DisplayMode,
@@ -4116,6 +4121,7 @@ impl Shell for WaylandShell {
                 fractional_scale,
                 viewport,
                 frame_callback: ptr::null_mut(),
+                present: Arc::default(),
                 title: desc.title.to_string(),
                 requested_size: desc.size,
                 requested_mode: desc.mode,
@@ -4341,6 +4347,13 @@ impl Shell for WaylandShell {
 
     fn request_frame(&mut self, window: WindowId) -> Result<(), ShellError> {
         self.request_frame_callback(window)
+    }
+
+    /// The window's own; see [`present`] for what it does with what it is
+    /// told.
+    fn present_hook(&self, window: WindowId) -> Result<Option<crate::PresentHook>, ShellError> {
+        let present = Arc::clone(&self.window(window)?.present);
+        Ok(Some(crate::PresentHook::new(present)))
     }
 
     fn monitors(&self) -> &[MonitorInfo] {
@@ -5570,6 +5583,7 @@ mod tests {
             fractional_scale: ptr::null_mut(),
             viewport: ptr::null_mut(),
             frame_callback: ptr::null_mut(),
+            present: Arc::default(),
             title: String::new(),
             requested_size: LogicalSize::new(640.0, 480.0),
             requested_mode: DisplayMode::Windowed,

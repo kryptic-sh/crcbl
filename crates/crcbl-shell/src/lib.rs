@@ -271,6 +271,7 @@ pub mod event;
 pub mod geom;
 pub mod headless;
 pub mod monitor;
+pub mod present_hook;
 pub mod role;
 pub mod url;
 pub mod waker;
@@ -341,6 +342,7 @@ pub use geom::{
 };
 pub use headless::HeadlessShell;
 pub use monitor::{MonitorId, MonitorInfo};
+pub use present_hook::PresentHook;
 pub use role::{
     Margins, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, PopupDesc, PopupInput,
     PopupPlacement, Reserve, WindowRole,
@@ -1160,6 +1162,33 @@ pub trait Shell: core::fmt::Debug {
     ///
     /// [`ShellError::InvalidWindow`] if the handle is stale.
     fn request_frame(&mut self, window: WindowId) -> Result<(), ShellError>;
+
+    /// The hook a presenter calls around every present to `window` — see
+    /// [`PresentHook`].
+    ///
+    /// `crcbl-app`'s `Presenter` asks for it when it opens on the window and
+    /// keeps it; a program presenting through a swapchain of its own asks
+    /// once and calls it the same way. `None` means the window needs nothing
+    /// told about its presents.
+    ///
+    /// # A provided method
+    ///
+    /// The default validates the handle and answers `None`. Unlike
+    /// [`request_frame`](Self::request_frame), a default is right here, not a
+    /// request quietly dropped: no caller waits on a hook, so a backend
+    /// without one loses nothing, and `None` is the true answer wherever the
+    /// window system applies a window's size and state on its own, with no
+    /// commit of the client's to ride a frame. That is every backend but
+    /// Wayland, where state the shell sends waits for a `wl_surface.commit`
+    /// the swapchain's present makes. [`HeadlessShell`] answers with a hook
+    /// that records what it is told, for testing a presenter.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    fn present_hook(&self, window: WindowId) -> Result<Option<PresentHook>, ShellError> {
+        self.window_state(window).map(|_| None)
+    }
 
     /// Tells the input method what text field in `window` is taking typing:
     /// `Some(purpose)` as a field gains the keyboard focus, `None` as it loses

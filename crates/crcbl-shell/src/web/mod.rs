@@ -1694,6 +1694,20 @@ mod tests {
         );
     }
 
+    /// The trait's default, which this backend keeps: a canvas is resized by
+    /// the page, with no commit for a frame to ride, so there is no hook. A
+    /// stale handle is still refused.
+    #[test]
+    fn the_default_present_hook_is_none_for_a_live_window_only() {
+        let (mut shell, window) = shell_with_window(0);
+        assert!(matches!(shell.present_hook(window), Ok(None)));
+        shell.destroy_window(window).expect("destroy");
+        assert!(matches!(
+            shell.present_hook(window),
+            Err(ShellError::InvalidWindow { .. })
+        ));
+    }
+
     #[test]
     fn shim_events_before_a_window_exists_are_dropped_not_accumulated() {
         let mut shell = WebShell::new(0);

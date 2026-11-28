@@ -255,6 +255,7 @@ impl WaylandShell {
                 fractional_scale,
                 viewport,
                 frame_callback: ptr::null_mut(),
+                present: std::sync::Arc::default(),
                 title: desc.title.to_string(),
                 requested_size: desc.size,
                 requested_mode: desc.mode,

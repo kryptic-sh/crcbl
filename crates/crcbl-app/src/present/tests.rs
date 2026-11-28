@@ -13,6 +13,9 @@ mod backend_walk;
 // Frame requests pacing the presents.
 mod frame_gate;
 
+// The window's present hook, told about every present.
+mod present_hook;
+
 // Several windows on one device.
 mod shared;
 

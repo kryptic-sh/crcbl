@@ -145,13 +145,14 @@ use crcbl_core::time::{ManualTime, TimeSource};
 use crcbl_core::{EventTime, Pool, SurfaceTarget};
 
 use crate::frame::FrameRequests;
+use crate::present_hook::PresentSignal;
 use crate::waker::WakeSignal;
 use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
     KeyCode, LogicalRect, LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint,
-    PhysicalRect, PhysicalSize, PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps,
-    ShellError, ShellEvent, ShellWaker, SizeConstraints, TextPurpose, WebUrl, WindowConfiguration,
-    WindowDesc, WindowId, WindowState,
+    PhysicalRect, PhysicalSize, PointerMode, PresentHook, ReceivedMime, Shell, ShellBackend,
+    ShellCaps, ShellError, ShellEvent, ShellWaker, SizeConstraints, TextPurpose, WebUrl,
+    WindowConfiguration, WindowDesc, WindowId, WindowState,
 };
 
 /// Resolution of the virtual monitor [`HeadlessShell::new`] creates.
@@ -259,6 +260,8 @@ struct HeadlessWindow {
     input_region: Option<Vec<PhysicalRect>>,
     /// [`Shell::set_idle_inhibit`]'s last word.
     idle_inhibit: bool,
+    /// What the window's [`Shell::present_hook`] has been told.
+    presents: Arc<HeadlessPresents>,
     /// Whether a pretend assistive technology is reading the window, and what
     /// it has been sent since it started.
     #[cfg(feature = "accesskit")]
@@ -318,6 +321,37 @@ impl HeadlessWindow {
                 mode: config.mode,
                 countdown,
             });
+        }
+    }
+}
+
+/// A headless window's [`PresentHook`]: what it was told, for
+/// [`last_presented`](HeadlessShell::last_presented) to read back.
+#[derive(Debug, Default)]
+struct HeadlessPresents {
+    sizes: Mutex<PresentSizes>,
+}
+
+#[derive(Debug, Default)]
+struct PresentSizes {
+    /// The size of the last `will_present`, until its `presented` comes.
+    announced: Option<PhysicalSize>,
+    /// The size of the last present that went through.
+    presented: Option<PhysicalSize>,
+}
+
+impl PresentSignal for HeadlessPresents {
+    fn will_present(&self, size: PhysicalSize) {
+        self.sizes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .announced = Some(size);
+    }
+
+    fn presented(&self) {
+        let mut sizes = self.sizes.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(size) = sizes.announced.take() {
+            sizes.presented = Some(size);
         }
     }
 }
@@ -1228,6 +1262,27 @@ impl HeadlessShell {
         Ok(self.frames.contains(window))
     }
 
+    /// The size of the last frame presented to the window through its
+    /// [`Shell::present_hook`]: announced by
+    /// [`will_present`](PresentHook::will_present) and confirmed by
+    /// [`presented`](PresentHook::presented). `None` until one has been.
+    ///
+    /// Headless-only, for the same reason as [`title`](Self::title): a test of
+    /// a presenter reads whether it told the shell about its frames, at the
+    /// size each was drawn at, and only about the ones that went through.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    pub fn last_presented(&self, window: WindowId) -> Result<Option<PhysicalSize>, ShellError> {
+        let presents = &self.window(window)?.presents;
+        Ok(presents
+            .sizes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .presented)
+    }
+
     /// Whether the window is asking, with [`Shell::set_idle_inhibit`], for
     /// the display to be kept on.
     ///
@@ -1763,6 +1818,7 @@ impl Shell for HeadlessShell {
                 text_input_area: None,
                 input_region: None,
                 idle_inhibit: false,
+                presents: Arc::default(),
                 #[cfg(feature = "accesskit")]
                 accessibility: None,
             })
@@ -2109,6 +2165,14 @@ impl Shell for HeadlessShell {
         self.window(window)?;
         self.frames.request(window);
         Ok(())
+    }
+
+    /// A hook that records what it is told, which
+    /// [`last_presented`](HeadlessShell::last_presented) reads back; there is
+    /// no surface for it to act on.
+    fn present_hook(&self, window: WindowId) -> Result<Option<PresentHook>, ShellError> {
+        let presents = Arc::clone(&self.window(window)?.presents);
+        Ok(Some(PresentHook::new(presents)))
     }
 
     #[cfg(feature = "accesskit")]
@@ -3753,6 +3817,53 @@ mod tests {
         );
         shell.request_frame(window).expect("the next frame");
         assert_eq!(frames_for(&drain(&mut shell), window), 1);
+    }
+
+    #[test]
+    fn the_present_hook_records_the_presents_that_went_through() {
+        let (shell, window) = shell_with_configured_window();
+        let hook = shell
+            .present_hook(window)
+            .expect("live")
+            .expect("headless hands out a hook");
+        assert_eq!(shell.last_presented(window).expect("live"), None);
+
+        hook.will_present(PhysicalSize::new(320, 240));
+        assert_eq!(
+            shell.last_presented(window).expect("live"),
+            None,
+            "announced, not yet presented"
+        );
+        hook.presented();
+        assert_eq!(
+            shell.last_presented(window).expect("live"),
+            Some(PhysicalSize::new(320, 240))
+        );
+
+        // A present that failed is announced and never confirmed, and leaves
+        // the last one that went through.
+        hook.will_present(PhysicalSize::new(100, 50));
+        assert_eq!(
+            shell.last_presented(window).expect("live"),
+            Some(PhysicalSize::new(320, 240))
+        );
+        hook.will_present(PhysicalSize::new(200, 150));
+        hook.presented();
+        assert_eq!(
+            shell.last_presented(window).expect("live"),
+            Some(PhysicalSize::new(200, 150)),
+            "the failed present's announcement was replaced, not confirmed"
+        );
+    }
+
+    #[test]
+    fn a_stale_window_has_no_present_hook() {
+        let (mut shell, window) = shell_with_configured_window();
+        shell.destroy_window(window).expect("destroy");
+        assert!(matches!(
+            shell.present_hook(window),
+            Err(ShellError::InvalidWindow { .. })
+        ));
     }
 
     #[test]
