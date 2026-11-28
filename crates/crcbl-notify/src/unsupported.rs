@@ -6,7 +6,7 @@
 //! answers [`NotificationError::Unsupported`]. Every other method is a `match`
 //! on nothing.
 
-use crate::{Notification, NotificationCaps, NotificationError, NotificationId};
+use crate::{Listing, NotificationCaps, NotificationError, NotificationId};
 
 /// No backend: uninhabited.
 #[derive(Debug)]
@@ -23,7 +23,7 @@ impl Backend {
         match *self {}
     }
 
-    pub(crate) fn list(&self) -> Result<Vec<Notification>, NotificationError> {
+    pub(crate) fn list(&self) -> Result<Listing, NotificationError> {
         match *self {}
     }
 

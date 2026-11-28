@@ -96,6 +96,18 @@ pub struct Notification {
     pub body: String,
 }
 
+/// One snapshot of the notification store: what [`Notifications::listing`]
+/// answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Listing {
+    /// Every notification that could be read, oldest first.
+    pub notifications: Vec<Notification>,
+    /// How many notifications the platform listed but could not describe, and
+    /// so are not in [`Listing::notifications`].
+    pub unreadable: usize,
+}
+
 /// Why an operation did not happen.
 #[derive(Debug, crcbl_error::Error)]
 #[non_exhaustive]
@@ -140,10 +152,23 @@ impl Notifications {
 
     /// Every notification shown now, oldest first. Blocks until the platform
     /// answers.
+    ///
+    /// A notification the platform lists but cannot describe is left out, so
+    /// one unreadable toast does not hide the rest; [`Notifications::listing`]
+    /// also says how many were left out.
     pub fn list(&self) -> Result<Vec<Notification>, NotificationError> {
-        let mut listed = self.backend.list()?;
-        listed.sort_by_key(|notification| notification.arrived);
-        Ok(listed)
+        self.listing().map(|listing| listing.notifications)
+    }
+
+    /// Every notification shown now, oldest first, and how many more the
+    /// platform listed but could not describe. Blocks until the platform
+    /// answers.
+    pub fn listing(&self) -> Result<Listing, NotificationError> {
+        let mut listing = self.backend.list()?;
+        listing
+            .notifications
+            .sort_by_key(|notification| notification.arrived);
+        Ok(listing)
     }
 
     /// Removes the notification `id` names. One already gone is not an error.
@@ -160,6 +185,26 @@ fn title_and_body(lines: impl IntoIterator<Item = String>) -> (String, String) {
     let title = lines.next().unwrap_or_default();
     let body = lines.collect::<Vec<_>>().join("\n");
     (title, body)
+}
+
+/// The notifications `read` describes from `listed`, in their order, with a
+/// count of the ones it could not describe in place of them.
+#[cfg(any(windows, test))]
+fn read_each<T, E>(
+    listed: impl IntoIterator<Item = T>,
+    mut read: impl FnMut(T) -> Result<Notification, E>,
+) -> Listing {
+    let mut listing = Listing {
+        notifications: Vec::new(),
+        unreadable: 0,
+    };
+    for item in listed {
+        match read(item) {
+            Ok(notification) => listing.notifications.push(notification),
+            Err(_) => listing.unreadable += 1,
+        }
+    }
+    listing
 }
 
 #[cfg(test)]
@@ -180,6 +225,43 @@ mod tests {
             ("Only a title".to_owned(), String::new())
         );
         assert_eq!(title_and_body(lines(&[])), (String::new(), String::new()));
+    }
+
+    /// **An unreadable notification is counted and the rest are kept**, in
+    /// order, wherever the unreadable ones fall: at the start, in the middle,
+    /// at the end, all of them, or none.
+    #[test]
+    fn an_unreadable_notification_is_counted_and_the_rest_kept() {
+        let notification = |id: u32| Notification {
+            id: NotificationId(id),
+            app: NotifyingApp {
+                id: "crcbl.test".to_owned(),
+                name: "crcbl test".to_owned(),
+            },
+            arrived: SystemTime::UNIX_EPOCH,
+            title: format!("Toast {id}"),
+            body: String::new(),
+        };
+        // Each listed toast is its id, readable when it is not in `unreadable`.
+        let listing = |listed: &[u32], unreadable: &[u32]| {
+            read_each(listed.iter().copied(), |id| {
+                if unreadable.contains(&id) {
+                    Err(())
+                } else {
+                    Ok(notification(id))
+                }
+            })
+        };
+        let expected = |kept: &[u32], unreadable: usize| Listing {
+            notifications: kept.iter().copied().map(notification).collect(),
+            unreadable,
+        };
+        assert_eq!(listing(&[1, 2, 3], &[1]), expected(&[2, 3], 1));
+        assert_eq!(listing(&[1, 2, 3, 4], &[2, 3]), expected(&[1, 4], 2));
+        assert_eq!(listing(&[1, 2, 3], &[3]), expected(&[1, 2], 1));
+        assert_eq!(listing(&[1, 2, 3], &[1, 2, 3]), expected(&[], 3));
+        assert_eq!(listing(&[1, 2, 3], &[]), expected(&[1, 2, 3], 0));
+        assert_eq!(listing(&[], &[]), expected(&[], 0));
     }
 
     /// **Every platform but Windows says it cannot open the store**, rather

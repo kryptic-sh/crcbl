@@ -3936,20 +3936,18 @@ owner's call (it would be a new dependency for crcbl).
 - **Unverified on Windows:** a machine where the user never allowed desktop apps
   notification access (`open` answers `Undecided` or `Denied` there; access is
   read, never requested, since `RequestAccessAsync` wants a UI thread); a toast
-  with no `AppInfo`, which would fail the whole `list` rather than skip the one
-  toast; the order and meaning of text elements in templates other than
-  `ToastGeneric` (title is the first line seen across all bindings). Only the
-  conversions are tested automatically;
+  with no `AppInfo`, which should now be skipped and counted in
+  `Listing::unreadable` (only the counting is tested, through `read_each`; no
+  unreadable toast has been seen); the order and meaning of text elements in
+  templates other than `ToastGeneric` (title is the first line seen across all
+  bindings). Only the conversions are tested automatically;
   `this_machines_store_lists_and_dismisses` is ignored, since it reads the real
   store. It listed two toasts here, the same ids twice, and dismissing an id
-  nothing holds returned `Ok`.
+  nothing holds returned `Ok`. Why a toast was unreadable is not kept, only
+  counted: `Listing` is `#[non_exhaustive]`, so the errors can be added as a
+  field if a caller needs to diagnose them.
 - **Not built: the sending app's icon** (`AppDisplayInfo::GetLogo`, a stream
   read per app). lyr said it can wait.
-- **One unreadable toast fails the whole `list`** (`Backend::list` collects
-  `Result`s), which would blank lyr's whole clock panel. lyr's review proposes
-  skipping that toast and counting or logging it, keeping the rest. Not seen to
-  happen; worth doing before lyr ships on it, with a test that feeds `read` a
-  failure, which needs the read split from the WinRT objects first.
 - **`NotificationId`'s value is private, deliberately**: an id is the
   platform's, meaningful only to the store that issued it, so a caller keys its
   own entries by mapping. lyr maps; make it public only if a caller needs to

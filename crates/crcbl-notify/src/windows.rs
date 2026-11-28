@@ -15,7 +15,8 @@ use windows::UI::Notifications::Management::{
 use windows::UI::Notifications::{NotificationKinds, UserNotification};
 
 use crate::{
-    Notification, NotificationCaps, NotificationError, NotificationId, NotifyingApp, title_and_body,
+    Listing, Notification, NotificationCaps, NotificationError, NotificationId, NotifyingApp,
+    read_each, title_and_body,
 };
 
 /// The listener, which WinRT makes agile: usable from any thread.
@@ -42,16 +43,13 @@ impl Backend {
         NotificationCaps::READ | NotificationCaps::DISMISS
     }
 
-    pub(crate) fn list(&self) -> Result<Vec<Notification>, NotificationError> {
+    pub(crate) fn list(&self) -> Result<Listing, NotificationError> {
         let shown = self
             .listener
             .GetNotificationsAsync(NotificationKinds::Toast)
             .and_then(|operation| operation.join())
             .map_err(failed("listing notifications"))?;
-        shown
-            .into_iter()
-            .map(|notification| read(&notification).map_err(failed("reading a notification")))
-            .collect()
+        Ok(read_each(shown, |notification| read(&notification)))
     }
 
     pub(crate) fn dismiss(&self, id: NotificationId) -> Result<(), NotificationError> {
@@ -146,8 +144,12 @@ mod tests {
     #[ignore = "reads this machine's real notification store"]
     fn this_machines_store_lists_and_dismisses() {
         let store = crate::Notifications::open().expect("open");
-        let listed = store.list().expect("list");
-        println!("{} notifications", listed.len());
+        let crate::Listing {
+            notifications: listed,
+            unreadable,
+            ..
+        } = store.listing().expect("list");
+        println!("{} notifications, {unreadable} unreadable", listed.len());
         for notification in &listed {
             println!("{:?} from {}", notification.id, notification.app.id);
         }

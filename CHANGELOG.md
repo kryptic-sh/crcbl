@@ -28,6 +28,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   decoded by the `gif` feature's decoder, its first image only, under what is
   left of the document's `Limits` budget, as PNG, JPEG and WebP already are.
   Without `gif` it is refused by name, the error naming the feature that is off.
+- **`crcbl-notify`: `Notifications::listing` says how many toasts it skipped.**
+  It answers a `Listing`: the readable notifications, oldest first as `list`
+  gives them, and `unreadable`, the number the platform listed but the crate
+  could not describe, so an app can say some are missing rather than pass a
+  short list off as complete.
 
 ### Changed
 
@@ -52,6 +57,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-notify`: one unreadable toast no longer fails the whole `list`.** A
+  toast Windows would not fully describe made `Notifications::list` return an
+  error, so a panel built on it showed nothing; it is now left out and the rest
+  are listed. `list` still fails when the listing itself does.
 - **`crcbl-image`: `resize::resize` checks its intermediate against `Limits`.**
   The horizontal pass's buffer, the new width by the source's height, is now
   checked with `Limits::rgba_bytes` before it is allocated, as `resize_pillow`
