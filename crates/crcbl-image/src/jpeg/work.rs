@@ -4,9 +4,12 @@
 //! Work done from real data bounds itself: each Huffman code, magnitude bit
 //! and correction bit decoded from the file is at least one of its bits, so
 //! there are at most eight a byte, and each costs a fixed amount. What does
-//! not is work done without bits: blocks an end-of-band run skips, and
-//! reads of bits a decoder makes up past the end of a scan's data (both
-//! decoders read zeros there). Those are what [`Work`] counts, against the
+//! not is work done without bits: blocks an end-of-band run skips, blocks
+//! the default decoder walks undecoded to a restart marker once a scan's
+//! data runs out, and reads of bits a decoder makes up past the end of a
+//! scan's data (both read zeros there: stb_image to the end of the scan,
+//! the default decoder, as libjpeg-turbo does, to the end of the MCU the
+//! data runs out in). Those are what [`Work`] counts, against the
 //! entropy-coded bytes the scans brought and the frame's blocks.
 //!
 //! A read is a Huffman code with the magnitude or run bits that follow it,
@@ -41,15 +44,19 @@ pub const MAX_SCANS: u32 = 100;
 /// sequential scan) codes every block it covers, a Huffman code is at least
 /// one bit, so the bytes are at least an eighth of the blocks that pass
 /// walks, and no component is in more than [`MAX_SCANS`] scans. The one
-/// walk over the frame is for a file whose data runs out early, which both
-/// decoders read on as zeros; it is no more than the stages after decoding
-/// spend on every frame anyway.
+/// walk over the frame is for a file whose data runs out early, which
+/// stb_image reads on as zeros to the end of the scan, and the default
+/// decoder walks undecoded to the next restart marker; it is no more than
+/// the stages after decoding spend on every frame anyway.
 pub(crate) const BLOCKS_PER_ENTROPY_BYTE: u64 = 8 * MAX_SCANS as u64;
 
 /// The most made-up reads for each block of the frame, over the whole file:
 /// enough for every block to be read once, at the most one pass can read
 /// in a block, from made-up bits, which is what a file cut short needs to
-/// finish.
+/// finish in stb_image's flavour. The default decoder makes up only the
+/// rest of an MCU's reads, where a scan's data runs out and at the start
+/// of each restart interval with none, so a file cut short at one point
+/// needs at most one MCU's worth there.
 ///
 /// A sequential block takes a code for its DC and one for each of its 63
 /// AC coefficients: 64. A progressive first pass takes no more. A

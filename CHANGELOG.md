@@ -59,6 +59,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and target each fit the limits but whose intermediate does not now returns
   `ImageError::TooLarge` for that intermediate's size, where it used to return
   an image.
+- **`crcbl-image`: a JPEG cut short decodes as libjpeg-turbo decodes it.** When
+  a scan's entropy-coded data runs out, `jpeg::decode` and `decode_stored` now
+  read zeros only to the end of that MCU and leave the rest of its restart
+  interval undecoded (a sequential block flat at the middle level, a progressive
+  one as the earlier scans left it), where they used to read zeros to the end of
+  the scan and gave other pixels. A marker from `0xc0` up that is not a restart
+  marker, such as the end-of-image marker put back after a cut, now ends the
+  scan where a restart marker should be instead of failing with "a restart
+  interval ends without its marker" (a marker below `0xc0` there still fails),
+  and a progressive AC refinement whose run passes the band's end puts its new
+  coefficient where libjpeg-turbo puts it. Such files also cost less: the scan
+  stops being walked once nothing can be decoded, so some damaged files the work
+  bound refused as `TooMuchWork` now decode, as `djpeg` decodes them. A
+  progressive file cut before its last scan can still differ from libjpeg-turbo,
+  which smooths across blocks there and this decoder does not.
+  `decode_as_stb_image` is unchanged.
 
 ## [0.21.0] - 2026-11-26
 

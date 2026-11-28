@@ -147,23 +147,33 @@
 //! The frame's size passes the caller's [`Limits`] before anything is sized
 //! from it, and the coefficient store is bounded by
 //! [`coefficient_allowance`], a share of the limit's bytes for each
-//! component. Entropy-coded data that
-//! runs into a marker early is read as zeros to the end of the scan.
-//! libjpeg-turbo reads zeros only to the end of the MCU it is in and leaves
-//! the rest of the scan (to its next restart marker) undecoded, so such a
-//! file's pixels can differ from its. A file that ends before its
-//! end-of-image marker is [`ImageError::Malformed`] here.
+//! component. Entropy-coded data that runs into a marker early is read as
+//! libjpeg-turbo reads it: zeros to the end of the MCU it runs out in, and
+//! the rest of its restart interval left undecoded, a sequential block with
+//! its coefficients zero (flat, every sample mid-level) and a progressive
+//! one with what the scans before gave it. A marker from `0xc0` up that is
+//! not a restart marker, where one should be, ends the scan there, and the
+//! rest of it is left so too, but for the first MCU after it, which is read
+//! from zeros when the interval before was whole; a marker below `0xc0`
+//! there is refused.
+//! libjpeg-turbo then smooths a progressive frame across its blocks while
+//! any component's first nine AC coefficients are not coded to their last
+//! bit (`decompress_smooth_data` in `jdcoefct.c`), which this decoder does
+//! not do, so a progressive file cut short before its last scan can differ
+//! from its output there. A file that ends before its end-of-image marker
+//! is [`ImageError::Malformed`] here.
 //!
 //! ## Work bounded by the input
 //!
 //! A scan can cover every block of the frame in a few bytes, or in none:
-//! both decoders read zeros past the end of a scan's data, so a scan with
-//! no data still decodes a whole frame, and a progressive one can skip any
-//! number of blocks with end-of-band runs. Work done from real data bounds
-//! itself, since each Huffman code, magnitude bit and correction bit read
-//! is at least one bit of the file. What does not is work done without
-//! bits, so both decoders count it as they go, block by block, and refuse
-//! the file as [`ImageError::TooMuchWork`] the moment it passes:
+//! stb_image reads zeros past the end of a scan's data, so a scan with no
+//! data still decodes a whole frame there, and a progressive one can skip
+//! any number of blocks with end-of-band runs in both decoders. Work done
+//! from real data bounds itself, since each Huffman code, magnitude bit and
+//! correction bit read is at least one bit of the file. What does not is
+//! work done without bits, so both decoders count it as they go, block by
+//! block, and refuse the file as [`ImageError::TooMuchWork`] the moment it
+//! passes:
 //!
 //! * the blocks the scans walk, beyond one walk over the frame, against
 //!   800 for each entropy-coded byte they brought. In its end-of-band
@@ -177,7 +187,8 @@
 //!   reads in a block is 127, in a refinement (a code and a sign for each
 //!   new coefficient, a correction for each nonzero one, and an end of
 //!   band), so the share for each block lets every block be read once
-//!   from made-up bits, which is what a file cut short needs; the share
+//!   from made-up bits, which is what a file cut short needs in stb_image's
+//!   flavour (the default decoder reads only the rest of an MCU); the share
 //!   for each byte is for a file damaged in more than one scan. In a scan
 //!   charged at its end, reads are checked while the reader is past the
 //!   data; a restart starts it on the next interval's data, so reads made
@@ -201,10 +212,13 @@
 //! to 367 at 4:2:0 and 248 at 4:4:4 (96 scans), libjpeg-turbo's own
 //! progressive script to 15 to 24, and baseline and restart-heavy files to
 //! under 1. A complete file reads no made-up bits. A file cut short reads
-//! what decoding the rest of its scan from zeros takes, at most a pass of
-//! reads for each block left. A file damaged in more than one scan takes
-//! that for each damaged scan, and each brought bytes; one whose damage
-//! would cost more than its bytes and one frame allow is refused.
+//! what decoding the rest of its scan from zeros takes in stb_image's
+//! flavour, at most a pass of reads for each block left, and in the default
+//! decoder what the rest of the MCU its data runs out in takes, and the
+//! first MCU of each restart interval after it that has no data. A file
+//! damaged in more than one scan takes that for each damaged scan, and each
+//! brought bytes; one whose damage would cost more than its bytes and one
+//! frame allow is refused.
 //!
 //! Other decoders cap the count of scans, which bounds passes but not the
 //! bytes behind them: Chrome's (Blink's `ProgressMonitor` in
@@ -325,6 +339,12 @@ struct Bits<'a> {
     at_marker: bool,
     /// Whether `acc` holds a byte made up past the marker or the end.
     made_up_byte: bool,
+    /// Whether a bit has been made up since the reader last started on real
+    /// data: libjpeg-turbo's `insufficient_data`, which `jpeg_fill_bit_buffer`
+    /// sets when it must give a bit from past a marker. The MCU it is set in
+    /// is decoded to its end from zeros; [`read_scan`] leaves every MCU after
+    /// it undecoded until a restart marker clears it.
+    out_of_data: bool,
     /// The reads before it that used a made-up bit, for the [work
     /// bound](Work).
     padded_reads: u64,
@@ -339,6 +359,7 @@ impl<'a> Bits<'a> {
             count: 0,
             at_marker: false,
             made_up_byte: false,
+            out_of_data: false,
             padded_reads: 0,
         }
     }
@@ -377,6 +398,7 @@ impl<'a> Bits<'a> {
                 }
             };
             self.made_up_byte = self.at_marker;
+            self.out_of_data |= self.at_marker;
             self.acc = u32::from(byte);
             self.count = 8;
         }
@@ -448,20 +470,43 @@ impl<'a> Bits<'a> {
 
     /// Skips to the restart marker the reader stopped at, past any fill
     /// bytes, and starts reading after it.
+    ///
+    /// A marker there that [`ends_scan`] ends the scan's data, and is left
+    /// where it is, as libjpeg-turbo's `jpeg_resync_to_restart` leaves any
+    /// such marker (its third action): the reader stays at it,
+    /// reading zeros, and `out_of_data` stays as it was, as libjpeg-turbo's
+    /// `process_restart` leaves `insufficient_data` against a marker, so
+    /// every interval left in the scan reads as empty. Its other recoveries,
+    /// from bytes or an invalid marker before the restart marker, are not
+    /// made here.
     fn restart(&mut self) -> Result<(), ImageError> {
         self.acc = 0;
         self.count = 0;
-        self.at_marker = false;
         while self.data.get(self.pos) == Some(&0xff) && self.data.get(self.pos + 1) == Some(&0xff) {
             self.pos += 1;
         }
         match (self.data.get(self.pos), self.data.get(self.pos + 1)) {
             (Some(0xff), Some(0xd0..=0xd7)) => {
                 self.pos += 2;
+                self.at_marker = false;
+                self.out_of_data = false;
+                Ok(())
+            }
+            (Some(0xff), Some(&marker)) if ends_scan(marker) => {
+                self.at_marker = true;
                 Ok(())
             }
             _ => Err(malformed("a restart interval ends without its marker")),
         }
+    }
+
+    /// Whether the reader has stopped at a marker that [`ends_scan`]: one
+    /// [`restart`](Self::restart) leaves where it is, so no restart can
+    /// start the reader again. At any other marker, or at the end of the
+    /// data, the restart that comes next takes it or refuses it.
+    fn at_scan_end(&self) -> bool {
+        let marker = self.data.get(past_fill(self.data, self.pos) + 1);
+        self.at_marker && marker.is_some_and(|&marker| ends_scan(marker))
     }
 
     /// The position of the marker after the scan's data, past any bytes
@@ -481,6 +526,15 @@ impl<'a> Bits<'a> {
         }
         pos
     }
+}
+
+/// Whether `marker` ends a scan's data where a restart marker should be:
+/// a valid marker that is not a restart marker, which libjpeg-turbo's
+/// `jpeg_resync_to_restart` leaves unread (its third action). A marker
+/// below `0xc0` it reads past instead (its second), which is not done
+/// here, so one there is refused.
+fn ends_scan(marker: u8) -> bool {
+    matches!(marker, 0xc0..=0xcf | 0xd8..=0xfe)
 }
 
 /// The last `0xff` of the run that starts at `pos`: where a marker or a
@@ -1080,11 +1134,8 @@ fn read_scan(
     } else {
         frame.mcus_wide * frame.mcus_high
     };
-    let scan_blocks = if count == 1 {
-        mcu_count
-    } else {
-        mcu_count * blocks_per_mcu
-    } as u64;
+    let mcu_blocks = if count == 1 { 1 } else { blocks_per_mcu };
+    let scan_blocks = (mcu_count * mcu_blocks) as u64;
     work.begin_scan(frame, (bytes, data_start), scan_blocks)?;
     let reads_before = work.padded_reads();
     let contexts: Vec<BlockContext<'_>> = scan
@@ -1098,6 +1149,7 @@ fn read_scan(
             first_pass: frame.progressive && scan.start > 0 && scan.high == 0,
         })
         .collect();
+    let mut walked = scan_blocks;
     for mcu in 0..mcu_count {
         if tables.restart_interval > 0 && mcu > 0 && mcu % tables.restart_interval == 0 {
             bits.restart()?;
@@ -1106,12 +1158,27 @@ fn read_scan(
             }
             *eobrun = 0;
         }
+        // Once a bit has been made up, libjpeg-turbo's MCU decoders
+        // (`decode_mcu` in `jdhuff.c`, and each in `jdphuff.c`) leave the
+        // rest of the interval as it was: a sequential block's coefficients
+        // zero, a progressive one's what the scans before gave it. Its DC
+        // refinement reads on, but zeros change nothing there. With no
+        // restart marker ahead to start the reader again, that is the rest
+        // of the scan, so the walk stops; otherwise the blocks to the
+        // restart are walked, and charged, undecoded.
+        let decoded = !bits.out_of_data;
+        if !decoded && (tables.restart_interval == 0 || bits.at_scan_end()) {
+            walked = (mcu * mcu_blocks) as u64;
+            break;
+        }
         if count == 1 {
             let (x, y) = (mcu % own_blocks_wide, mcu / own_blocks_wide);
             if work.needs_block(bits.at_marker) {
                 work.block(bits.at_marker, reads_before + bits.made_up_reads())?;
             }
-            decode_block(&mut bits, frame, &contexts[0], (x, y), eobrun)?;
+            if decoded {
+                decode_block(&mut bits, frame, &contexts[0], (x, y), eobrun)?;
+            }
         } else {
             let (mcu_x, mcu_y) = (mcu % frame.mcus_wide, mcu / frame.mcus_wide);
             for context in &contexts {
@@ -1123,14 +1190,16 @@ fn read_scan(
                         if work.needs_block(bits.at_marker) {
                             work.block(bits.at_marker, reads_before + bits.made_up_reads())?;
                         }
-                        decode_block(&mut bits, frame, context, at, eobrun)?;
+                        if decoded {
+                            decode_block(&mut bits, frame, context, at, eobrun)?;
+                        }
                     }
                 }
             }
         }
     }
-    // A scan is walked whole here; its last block's reads count too.
-    work.end_scan(scan_blocks, reads_before + bits.made_up_reads())?;
+    // The last block's reads count too.
+    work.end_scan(walked, reads_before + bits.made_up_reads())?;
     Ok(bits.end())
 }
 
@@ -1347,7 +1416,13 @@ fn decode_ac_refine(
                 }
                 k += 1;
             }
-            if value != 0 && k <= end {
+            // A run that passes the band's end, which damaged data and
+            // zeros read past it can give, puts the new value just after the
+            // band, where libjpeg-turbo's `decode_mcu_AC_refine` puts it: at
+            // `jpeg_natural_order[k]`, whose entries past the block's end are
+            // its last position.
+            if value != 0 {
+                let k = k.min(ZIGZAG.len() - 1);
                 block[ZIGZAG[k]] = value;
                 mark(nonzero, k, value);
             }
@@ -1470,6 +1545,80 @@ mod tests {
             assert_eq!(image.pixels().len() / 4, rgb.len() / 3, "{name}");
             assert_eq!(first_difference(&image, rgb), None, "{name}");
         }
+    }
+
+    /// Damaged files beside `djpeg -ppm`'s pixels for them (libjpeg-turbo
+    /// 2.1.5), all 61 × 45, a seeded gradient with noise that cjpeg 2.1.5
+    /// wrote at quality 85, then cut short inside a scan's entropy-coded
+    /// data with an end-of-image marker put back, or with bytes taken out:
+    ///
+    /// * `truncated-baseline-420`: a baseline scan cut short, the MCUs after
+    ///   the one its data runs out in left grey;
+    /// * `truncated-restart-420`: a restart marker after every MCU, cut
+    ///   inside one, so the end-of-image marker stands where the next
+    ///   restart marker should;
+    /// * `truncated-at-restart-420`: the same file cut just before a restart
+    ///   marker, so its interval is whole and the next MCU is read from
+    ///   zeros alone;
+    /// * `truncated-progressive-refine`: progressive with a restart marker
+    ///   after every MCU, cut just before one in the last scan, a luma AC
+    ///   refinement, whose next block's zeros decode as a run past the
+    ///   band's end;
+    /// * `shortened-restart-interval`: a restart marker after every three
+    ///   MCUs, the second interval's last bytes taken out, so it runs out
+    ///   early and the intervals after it decode in full.
+    ///
+    /// By the last scan of the progressive file every component's
+    /// coefficients are coded down to their last bit, so libjpeg-turbo's
+    /// block smoothing, which this decoder does not do, is off there.
+    const DAMAGED: [(&str, &[u8], &[u8]); 5] = [
+        fixture!("truncated-baseline-420"),
+        fixture!("truncated-restart-420"),
+        fixture!("truncated-at-restart-420"),
+        fixture!("truncated-progressive-refine"),
+        fixture!("shortened-restart-interval"),
+    ];
+
+    /// Data that runs out leaves the rest of its restart interval
+    /// undecoded, and a marker standing where a restart marker should
+    /// leaves the rest of the scan so, as libjpeg-turbo leaves them.
+    #[test]
+    fn a_scan_whose_data_runs_out_decodes_to_libjpeg_turbos_pixels() {
+        for (name, jpeg, rgb) in DAMAGED {
+            let image = decode_stored(jpeg, &Limits::DEFAULT)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!((image.width(), image.height()), (61, 45), "{name}");
+            assert_eq!(image.pixels().len() / 4, rgb.len() / 3, "{name}");
+            assert_eq!(first_difference(&image, rgb), None, "{name}");
+        }
+    }
+
+    /// A sequential block past where the data runs out keeps the zero
+    /// coefficients libjpeg-turbo leaves it, so it is flat grey whatever
+    /// the DC prediction was: each sequential fixture of more than one MCU,
+    /// cut a quarter of the way into its scan, ends in mid grey.
+    #[test]
+    fn sequential_blocks_past_the_data_are_grey() {
+        let mut checked = 0;
+        for (name, jpeg, _) in FIXTURES {
+            let Some(sos) = jpeg.windows(2).position(|pair| pair == [0xff, 0xda]) else {
+                continue;
+            };
+            let (width, height) = dimensions(jpeg).expect("a frame");
+            if jpeg.windows(2).any(|pair| pair == [0xff, 0xc2]) || width.max(height) <= 16 {
+                continue;
+            }
+            let header = usize::from(u16::from_be_bytes([jpeg[sos + 2], jpeg[sos + 3]]));
+            let start = sos + 2 + header;
+            let mut cut = jpeg[..start + (jpeg.len() - start) / 4].to_vec();
+            cut.extend_from_slice(&[0xff, 0xd9]);
+            let image = decode_stored(&cut, &Limits::DEFAULT)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let last = image.pixels().len() - 4;
+            assert_eq!(&image.pixels()[last..], [128, 128, 128, 255], "{name}");
+            checked += 1;
+        }
+        assert!(checked > 5, "{checked} checked");
     }
 
     /// Two edited streams read as stb_image reads them. A fill byte before a
@@ -2051,6 +2200,8 @@ mod tests {
     /// each test pins its file's FNV-1a to that script's, so the oracle
     /// results quoted are for these bytes.
     mod work_files {
+        use crate::jpeg::work::BLOCKS_PER_ENTROPY_BYTE;
+
         fn segment(marker: u8, body: &[u8]) -> Vec<u8> {
             let mut bytes = vec![0xff, marker];
             bytes.extend_from_slice(&(body.len() as u16 + 2).to_be_bytes());
@@ -2096,9 +2247,27 @@ mod tests {
             bytes
         }
 
+        /// [`empty_scans`], but with a restart interval of `interval` MCUs
+        /// and each scan's data its restart markers alone: every interval
+        /// empty, so each is walked undecoded past its first MCU.
+        pub(super) fn restart_scans(side: u16, scans: usize, interval: u16) -> Vec<u8> {
+            let mcus = (usize::from(side) / 8).pow(2);
+            let mut bytes = head(side, 3, 0xc2);
+            bytes.extend(segment(0xdd, &interval.to_be_bytes()));
+            for _ in 0..scans {
+                bytes.extend(segment(0xda, &[3, 1, 0, 2, 0, 3, 0, 0, 0, 0]));
+                for n in 1..mcus / usize::from(interval) {
+                    bytes.extend_from_slice(&[0xff, 0xd0 + (n - 1) as u8 % 8]);
+                }
+            }
+            bytes.extend_from_slice(&[0xff, 0xd9]);
+            bytes
+        }
+
         /// Grey: one DC scan of real data, a bit a block, then `scans` AC
-        /// first scans of a byte for every 800 blocks, whose zero bits past
-        /// it decode as (run 0, size 1), 63 coefficients a block.
+        /// first scans of a byte for every [`BLOCKS_PER_ENTROPY_BYTE`]
+        /// blocks and one more, whose zero bits past it decode as (run 0,
+        /// size 1), 63 coefficients a block.
         pub(super) fn ac_scans(side: u16, scans: usize, slow: bool) -> Vec<u8> {
             let blocks = (usize::from(side) / 8).pow(2);
             let mut bytes = head(side, 1, 0xc2);
@@ -2107,7 +2276,7 @@ mod tests {
             bytes.extend(vec![0; blocks.div_ceil(8)]);
             for _ in 0..scans {
                 bytes.extend(segment(0xda, &[1, 1, 0, 1, 63, 0]));
-                bytes.extend(vec![0; blocks / 800 + 1]);
+                bytes.extend(vec![0; blocks / BLOCKS_PER_ENTROPY_BYTE as usize + 1]);
             }
             bytes.extend_from_slice(&[0xff, 0xd9]);
             bytes
@@ -2133,67 +2302,141 @@ mod tests {
     }
 
     /// The scans of the review's hostile files, at sizes a test can walk;
-    /// the 8192 × 8192 versions were timed outside the tests. A file of 100
-    /// empty scans walks its frame once from padding, then is refused at
-    /// the first block of its second scan, in both decoders.
+    /// the 8192 × 8192 versions were timed outside the tests. In stb_image
+    /// a file of 100 empty scans walks its frame once from padding, then is
+    /// refused at the first block of its second scan. The default decoder
+    /// reads the first MCU of each scan from zeros, its three blocks a read
+    /// each, and stops there, as libjpeg-turbo does: it decodes the file to
+    /// the flat grey `djpeg` 2.1.5 gives.
     #[test]
-    fn empty_scans_walk_the_frame_once_then_are_refused() {
+    fn empty_scans_walk_the_frame_in_stb_image_and_an_mcu_each_here() {
         let bytes = work_files::empty_scans(1024, 100);
         assert_eq!(fnv(bytes.iter().copied()), 0xffac_78c9_3b56_cb07);
         let frame_blocks = 3 * 128 * 128;
-        for (name, result, work) in decode_both(&bytes) {
-            assert!(
-                matches!(
-                    result,
-                    Err(ImageError::TooMuchWork {
-                        bound: WorkBound::BlocksWalked { entropy_bytes: 0 },
-                        ..
-                    })
-                ),
-                "{name}: {result:?}"
+        let [(_, stored, libjpeg), (_, stb_result, stb)] = decode_both(&bytes);
+        assert!(
+            matches!(
+                stb_result,
+                Err(ImageError::TooMuchWork {
+                    bound: WorkBound::BlocksWalked { entropy_bytes: 0 },
+                    ..
+                })
+            ),
+            "{stb_result:?}"
+        );
+        assert_eq!((stb.scans, stb.walked), (2, frame_blocks + 1));
+        let image = stored.expect("decodes");
+        assert!(
+            image
+                .pixels()
+                .chunks(4)
+                .all(|pixel| pixel == [128, 128, 128, 255])
+        );
+        assert_eq!(
+            (libjpeg.scans, libjpeg.walked, libjpeg.padded_reads),
+            (100, 100 * 3, 100 * 3)
+        );
+    }
+
+    /// Blocks walked undecoded to a restart marker are charged: a file of
+    /// progressive DC scans whose data is nothing but their restart markers
+    /// reads the first MCU of each interval from zeros and walks the rest of
+    /// it, a whole frame a scan bar its last interval, against the bytes the
+    /// markers bring. It is refused in its third scan.
+    #[test]
+    fn blocks_walked_undecoded_to_a_restart_are_charged() {
+        let bytes = work_files::restart_scans(1024, 100, 1024);
+        let mut work = Work::default();
+        let result = decode_stored_with(&bytes, &Limits::DEFAULT, &mut work);
+        assert!(
+            matches!(
+                result,
+                Err(ImageError::TooMuchWork {
+                    bound: WorkBound::BlocksWalked { entropy_bytes: 90 },
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(work.scans, 3);
+    }
+
+    /// A marker below `0xc0` where a restart marker should be is refused,
+    /// whether the reader meets it early in an interval, with MCUs of the
+    /// interval still to walk, or at its end: only a marker that
+    /// [`ends_scan`] ends one early. The file has a restart marker after
+    /// every three MCUs.
+    #[test]
+    fn a_marker_below_0xc0_in_a_restart_interval_is_refused() {
+        let (_, jpeg, _) = DAMAGED
+            .into_iter()
+            .find(|(name, ..)| *name == "shortened-restart-interval")
+            .expect("the fixture");
+        let restarts: Vec<usize> = jpeg
+            .windows(2)
+            .enumerate()
+            .filter_map(|(at, pair)| (pair[0] == 0xff && pair[1] & 0xf8 == 0xd0).then_some(at))
+            .collect();
+        // Two bytes into the second interval, so its first MCU runs into it.
+        let early = restarts[0] + 4;
+        let inside = [&jpeg[..early], &[0xff, 0x4a], &jpeg[early..]].concat();
+        let mut instead = jpeg.to_vec();
+        instead[restarts[1] + 1] = 0x4a;
+        for (case, bytes) in [("inside", inside), ("instead", instead)] {
+            assert_eq!(
+                decode_stored(&bytes, &Limits::DEFAULT),
+                Err(malformed("a restart interval ends without its marker")),
+                "{case}"
             );
-            assert_eq!((work.scans, work.walked), (2, frame_blocks + 1), "{name}");
         }
     }
 
-    /// The review's `ac2` and `slow2`: AC scans each decoding 63
-    /// coefficients a block from bits past one byte of data per 800 blocks,
-    /// by a one-bit code and by a sixteen-bit one. The blocks walked stay
-    /// within the bytes; the codes read from made-up bits do not, and refuse
-    /// the third AC scan (the fourth scan): 63 codes a block each, against
-    /// 128 a block for the frame. The same for either code length and in
-    /// both decoders.
+    /// The review's `ac2` and `slow2`: AC scans whose bits past their data,
+    /// a byte for every [`work::BLOCKS_PER_ENTROPY_BYTE`] blocks and one
+    /// more, decode as 63 coefficients a block, by a one-bit code and by a
+    /// sixteen-bit one, each with a magnitude bit. stb_image reads every
+    /// block of each scan so. The blocks walked stay within the bytes; the
+    /// codes read from made-up bits do not, and refuse its third AC scan
+    /// (the fourth scan): 63 codes a block each, against
+    /// [`work::PADDED_READS_PER_BLOCK`] a block for the frame. The same for
+    /// either code length.
+    ///
+    /// The default decoder reads only the first block of each AC scan, the
+    /// one its data runs out in, and stops there, as libjpeg-turbo does: the
+    /// one-bit codes take eight coefficients from the data and make up the
+    /// other 55 reads, the sixteen-bit ones make up all 63. It decodes the
+    /// file to the pixels `djpeg` 2.1.5 gives.
     #[test]
     fn coefficients_decoded_past_the_data_are_bounded() {
-        for (slow, file_fnv) in [
-            (false, 0xaf5f_ed8d_96ae_238d),
-            (true, 0x17f4_d805_c5f0_4d1f),
+        for (slow, file_fnv, made_up) in [
+            (false, 0xaf5f_ed8d_96ae_238d, 55),
+            (true, 0x17f4_d805_c5f0_4d1f, 63),
         ] {
             let bytes = work_files::ac_scans(256, 99, slow);
             assert_eq!(fnv(bytes.iter().copied()), file_fnv, "slow {slow}");
-            for (name, result, work) in decode_both(&bytes) {
-                assert!(
-                    matches!(
-                        result,
-                        Err(ImageError::TooMuchWork {
-                            bound: WorkBound::MadeUpReads { .. },
-                            ..
-                        })
-                    ),
-                    "{name}, slow {slow}: {result:?}"
-                );
-                // Refused in the course of the fourth scan, not at its end:
-                // the three before it are charged their blocks, it is not.
-                assert_eq!(
-                    (work.scans, work.walked),
-                    (4, 3 * 1024),
-                    "{name}, slow {slow}"
-                );
-                assert!(
-                    work.padded_reads > work::PADDED_READS_PER_BLOCK * 1024,
-                    "{name}"
-                );
-            }
+            let [(_, stored, libjpeg), (_, stb_result, stb)] = decode_both(&bytes);
+            assert!(
+                matches!(
+                    stb_result,
+                    Err(ImageError::TooMuchWork {
+                        bound: WorkBound::MadeUpReads { .. },
+                        ..
+                    })
+                ),
+                "slow {slow}: {stb_result:?}"
+            );
+            // Refused in the course of the fourth scan, not at its end: the
+            // three before it are charged their blocks, it is not.
+            assert_eq!((stb.scans, stb.walked), (4, 3 * 1024), "slow {slow}");
+            assert!(stb.padded_reads > work::PADDED_READS_PER_BLOCK * 1024);
+            let image = stored.unwrap_or_else(|error| panic!("slow {slow}: {error}"));
+            let rgb = image.pixels().chunks(4).flat_map(|p| [p[0], p[1], p[2]]);
+            assert_eq!(fnv(rgb), 0xe9f9_5dfb_8d63_9502, "slow {slow}");
+            assert_eq!(
+                (libjpeg.scans, libjpeg.walked, libjpeg.padded_reads),
+                (100, 1024 + 99, 99 * made_up),
+                "slow {slow}"
+            );
         }
     }
 
@@ -2203,8 +2446,11 @@ mod tests {
     /// its 51 bytes, where whole scans would be 52224. The three builds of
     /// the oracle harness that fill stb_image's buffers with 0x00, 0x37 and
     /// 0xc8 all gave the pixels pinned here, so the file is determined. The
-    /// default decoder refuses it for its missing restart markers. With one
-    /// scan more than [`MAX_SCANS`] it is refused for that.
+    /// default decoder gives the same pixels, as `djpeg` 2.1.5 does: each
+    /// scan's data runs out in its ninth block, which it reads from zeros,
+    /// and the marker where the first restart marker should be ends the
+    /// scan there. With one scan more than [`MAX_SCANS`] stb_image refuses
+    /// it for that.
     #[test]
     fn blocks_are_charged_as_they_are_walked() {
         for (scans, file_fnv) in [(50, 0x510a_5519_bb0c_f421), (99, 0x8b8d_9045_f50e_185a)] {
@@ -2215,10 +2461,10 @@ mod tests {
             let rgb = image.pixels().chunks(4).flat_map(|p| [p[0], p[1], p[2]]);
             assert_eq!(fnv(rgb), 0x141c_0b68_88de_2325, "{scans}");
             assert_eq!(work.walked, 1024 + 32 * scans as u64, "{scans}");
-            assert!(matches!(
-                decode_stored(&bytes, &Limits::DEFAULT),
-                Err(ImageError::Malformed(_))
-            ));
+            let mut work = Work::default();
+            let stored = decode_stored_with(&bytes, &Limits::DEFAULT, &mut work);
+            assert_eq!(stored, Ok(image), "{scans}");
+            assert_eq!(work.walked, 9 * (1 + scans as u64), "{scans}");
         }
         let bytes = work_files::walked_not_whole(256, 100);
         assert_eq!(fnv(bytes.iter().copied()), 0x70e6_a7f6_d6ad_8d4f);
@@ -2231,14 +2477,19 @@ mod tests {
         ));
     }
 
-    /// Both decoders count alike on a damaged file too, made-up reads
-    /// included: each progressive fixture cut short in each of its scans,
-    /// with an end-of-image marker put back, as Pillow's
-    /// `LOAD_TRUNCATED_IMAGES` puts it back.
+    /// A damaged file costs the default decoder no more than stb_image:
+    /// each progressive fixture cut short in each of its scans, with an
+    /// end-of-image marker put back, as Pillow's `LOAD_TRUNCATED_IMAGES`
+    /// puts it back. Both count the same scans and bytes; stb_image reads
+    /// the rest of a scan from zeros, where the default decoder reads only
+    /// the rest of the MCU its data runs out in. Neither undercharges: the
+    /// scans before the cut are charged whole in both, as the file cut at
+    /// that scan's marker shows, and the cut scan at least its first block.
     #[test]
-    fn both_decoders_charge_a_damaged_file_alike() {
+    fn a_damaged_file_costs_no_more_than_in_stb_image() {
         let mut compared = 0;
         let mut made_up = 0;
+        let mut cheaper = 0;
         for (name, jpeg, _) in FIXTURES {
             if !name.starts_with("progressive") {
                 continue;
@@ -2255,22 +2506,31 @@ mod tests {
                 if stored.is_err() || stb_result.is_err() {
                     continue;
                 }
-                let count = |work: &Work| {
-                    (
-                        work.scans,
-                        work.walked,
-                        work.entropy_bytes,
-                        work.padded_reads,
-                    )
-                };
-                assert_eq!(count(&libjpeg), count(&stb), "{name} cut at {scan}");
+                assert_eq!(
+                    (libjpeg.scans, libjpeg.entropy_bytes),
+                    (stb.scans, stb.entropy_bytes),
+                    "{name} cut at {scan}"
+                );
+                assert!(
+                    libjpeg.walked <= stb.walked && libjpeg.padded_reads <= stb.padded_reads,
+                    "{name} cut at {scan}: {libjpeg:?} against {stb:?}"
+                );
+                let mut head = jpeg[..scan].to_vec();
+                head.extend_from_slice(&[0xff, 0xd9]);
+                let [(_, _, before), (_, _, stb_before)] = decode_both(&head);
+                assert_eq!(before.walked, stb_before.walked, "{name} before {scan}");
+                assert!(
+                    libjpeg.walked > before.walked,
+                    "{name} cut at {scan}: {libjpeg:?} after {before:?}"
+                );
                 compared += 1;
                 made_up += u64::from(libjpeg.padded_reads > 0);
+                cheaper += u64::from(libjpeg.padded_reads < stb.padded_reads);
             }
         }
         assert!(
-            compared > 0 && made_up > 0,
-            "{compared} compared, {made_up} made up"
+            compared > 0 && made_up > 0 && cheaper > 0,
+            "{compared} compared, {made_up} made up, {cheaper} cheaper"
         );
     }
 

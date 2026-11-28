@@ -33,12 +33,6 @@ when the stb path matters for speed.
 
 ## `crcbl-image` JPEG: pre-existing findings from the stb review (2026-11-26)
 
-- **The default decoder reads zeros to the end of a truncated scan**, where
-  libjpeg-turbo sets `insufficient_data` and leaves the rest of the restart
-  interval undecoded. On 43 scans cut short with an EOI appended, which both
-  decode, 36 differed from `djpeg` (measured 2026-11-26 by the work-bound
-  implementer; files not kept). Fix: stop decoding the interval once the data
-  runs out, as libjpeg-turbo does, and test against `djpeg`.
 - **Files damaged in several scans are refused** by the JPEG work bound
   (`TooMuchWork`, made-up reads): the user chose the strict allowance on
   2026-11-26, one frame's made-up reads plus a share per real byte, since a file
@@ -46,7 +40,13 @@ when the stb path matters for speed.
   review's synthetic set (real files with k scans shortened): about 8.5% refused
   that decoded before, 20 of them stb-determined. A file cut short at one point
   was never refused (0 of 1440). The knob is `PADDED_READS_PER_ENTROPY_BYTE` in
-  `crates/crcbl-image/src/jpeg/work.rs`.
+  `crates/crcbl-image/src/jpeg/work.rs`. That figure predates 2026-11-28, when
+  the default decoder stopped reading a damaged scan from zeros past the MCU its
+  data runs out in; it now applies mainly to `decode_as_stb_image`. Re-measured
+  for the default decoder on a different, smaller set (320 progressive files of
+  125 x 93, 2, 3, 5 or 10 scans each shortened by 10-90% of their data): none
+  refused as `TooMuchWork` before or after the change. The review's set was not
+  kept, so the 8.5% itself was not re-measured.
 - **The default decoder differs from `djpeg` on some YCbCr files**: 24 of the
   reviewer's generated files, unchanged since before the stb slice; one has luma
   sampled 1 by 2. The "same pixels as libjpeg-turbo" claim is therefore too wide
@@ -55,6 +55,40 @@ when the stb path matters for speed.
   regenerate with cjpeg's `-sample` option.
 - Junk between segments reports "the file ends before its end-of-image marker",
   which misleads.
+- **Block smoothing is not done** (found 2026-11-28, truncation slice). For a
+  progressive frame whose first nine AC coefficients some component has not
+  coded to their last bit, libjpeg-turbo smooths across blocks
+  (`decompress_smooth_data` and `smoothing_ok` in `jdcoefct.c`,
+  `do_block_smoothing` on by default, no `djpeg` switch for it). So a
+  progressive file cut before its last scan differs from `djpeg`: of 620
+  progressive cuts in the slice's corpus, 68 matched `djpeg` and all 620 matched
+  libjpeg-turbo 2.1.5 with `do_block_smoothing` off (set through ctypes). The
+  module docs say so. Needs a decision: transcribe the smoothing, or keep the
+  documented difference.
+- **libjpeg-turbo's other restart recoveries are not made.** `Bits::restart`
+  takes any `RSTn` without checking its number, and refuses ("a restart interval
+  ends without its marker") bytes left before the marker, and a marker below
+  `0xc0` whether it is met inside the interval or at its end;
+  `read_restart_marker` and `jpeg_resync_to_restart` in `jdmarker.c` skip such
+  bytes and markers, and check the number (actions 1 to 3). Only the third
+  action, for a marker from `0xc0` up that is not a restart marker (`ends_scan`
+  in `jpeg.rs`), is made, since a cut file needs it. On the 320 multi-scan
+  damaged files above, 69 are refused for it, all of which libjpeg-turbo
+  decodes.
+- **A Huffman code longer than sixteen bits is refused**, where libjpeg-turbo's
+  `jpeg_huff_decode` warns (`JWRN_HUFF_BAD_CODE`) and reads it as symbol 0. A
+  scan read after a damaged one can meet such codes, since a refinement parses
+  by which coefficients are nonzero. On the 320 multi-scan damaged files above,
+  71 are refused for it (30 before 2026-11-28, when earlier scans were read on
+  from zeros); libjpeg-turbo decodes all 320, and the 180 the default decoder
+  decodes match it (block smoothing off) pixel for pixel.
+- **A run past its band refuses a first pass or a sequential block** ("a
+  coefficient past its band"), where libjpeg-turbo writes the value at
+  `jpeg_natural_order[k]` (a position past the band, or the block's last once
+  past the block) and reads on: `decode_mcu_slow` in `jdhuff.c`,
+  `decode_mcu_AC_first` in `jdphuff.c`. The refinement pass was made to match on
+  2026-11-28; these two were not, since no file in the truncation corpus reached
+  them. Unverified against `djpeg`.
 
 ## `resize::resize`'s `f32` scratch is counted as RGBA8 (2026-11-28)
 
