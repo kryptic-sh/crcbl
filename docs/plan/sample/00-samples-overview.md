@@ -60,6 +60,7 @@ ships with spatial audio, and publishes as a wasm demo on the GitHub Pages site
 | 23  | [mane](23-mane.md)                                                                                                                                  | S4H (P7G)                    | Hair acceptance: fur, cards on simulated chains and strands, driven by the motion of what they hang from                           |
 | 24  | ◐ tumble — built part done, deleted 2026-09-25; rules in `docs/notes/samples.md`, the rest in `docs/backlog.md`                                     | S4I (P8B)                    | Physics acceptance and benchmark: the obstacle wall, the overflowing ball pit, stacks, bullets, joints, each scene one solver rung |
 | 25  | [relief](25-relief.md)                                                                                                                              | S4J (P7H)                    | Tessellation acceptance: smooth silhouettes and displacement on every path, density drawn, no cracks                               |
+| 26  | [sift](26-sift.md)                                                                                                                                  | post-MVP                     | Desktop app acceptance: an image library on the widget tree, panes, keyboard, saved state                                          |
 
 01–06 stay tiny (days, not weeks, each; hud is continuous — a P4 skeleton that
 grows until P10). 07 is the MVP-era flagship and long-lived dogfood. 08 exists
@@ -109,28 +110,33 @@ labelled as the gap it is. **Relief proves tessellation**
 ([../59-tessellation.md](../59-tessellation.md)) on every geometry path,
 including the browser's, where there is no tessellation stage at all.
 
+26 was planned on 2026-11-28 and is **the first sample that is a desktop
+application rather than a game or a fixture**. hud shows the widgets; sift uses
+them the way a desktop application does, over a library of the user's own
+images, and is the first sample to use most of the tree's widgets at all.
+
 **Where the ladder stands.** Every sample on it except arena (08), mirrors (17),
-meadow (22), mane (23) and relief (25) has an `apps/` crate that builds for
-`wasm32`, and every one of them ships on the demo site; `web/build.sh`'s `DEMOS`
-array is the list, and it is the authority — a sample missing from it is a
-sample nobody visits. What each of those crates has and has not built is in its
-own doc's status section — for breakout, flappy, asteroids, horde, viewer,
-lantern, quarry, bracket, sundial, alcove, options and tumble, whose docs were
-folded away, in `docs/backlog.md`, with their rules and recorded measurements in
-`docs/notes/samples.md` — and, fresher than either, in the module header of its
-`src/lib.rs`. **arena, mirrors, meadow, mane and relief have no `apps/`
-directory at all**, and each doc says what it is waiting on — for 17 that is the
-ladder itself, since a comparison fixture holding one technique is not a
-comparison. **alcove (19) is the first of the comparison wave to ship**:
-`apps/alcove` was built natively on 2026-09-04, once the occlusion chain had a
-second technique to compare, and its browser demo landed the same day at
-`/demos/alcove/` — the first page on the site whose controls are HTML rather
-than keys, because a seam walked with `,` and `.` is a comparison a phone cannot
-reach. **sundial (18) followed it the same day**, once the shadow ladder had
-three filters and a seam to compare them across, and its page landed with it at
-`/demos/sundial/` — the second on the site whose controls are HTML, and the only
-one that puts a simulation's own clock among them, because a sun nobody can stop
-is a fixture whose artefacts cannot be looked at. options (20) shipped on
+meadow (22), mane (23), relief (25) and sift (26) has an `apps/` crate that
+builds for `wasm32`, and every one of them ships on the demo site;
+`web/build.sh`'s `DEMOS` array is the list, and it is the authority — a sample
+missing from it is a sample nobody visits. What each of those crates has and has
+not built is in its own doc's status section — for breakout, flappy, asteroids,
+horde, viewer, lantern, quarry, bracket, sundial, alcove, options and tumble,
+whose docs were folded away, in `docs/backlog.md`, with their rules and recorded
+measurements in `docs/notes/samples.md` — and, fresher than either, in the
+module header of its `src/lib.rs`. **arena, mirrors, meadow, mane, relief and
+sift have no `apps/` directory at all**, and each doc says what it is waiting on
+— for 17 that is the ladder itself, since a comparison fixture holding one
+technique is not a comparison. **alcove (19) is the first of the comparison wave
+to ship**: `apps/alcove` was built natively on 2026-09-04, once the occlusion
+chain had a second technique to compare, and its browser demo landed the same
+day at `/demos/alcove/` — the first page on the site whose controls are HTML
+rather than keys, because a seam walked with `,` and `.` is a comparison a phone
+cannot reach. **sundial (18) followed it the same day**, once the shadow ladder
+had three filters and a seam to compare them across, and its page landed with it
+at `/demos/sundial/` — the second on the site whose controls are HTML, and the
+only one that puts a simulation's own clock among them, because a sun nobody can
+stop is a fixture whose artefacts cannot be looked at. options (20) shipped on
 2026-08-28. **tumble (24)** was built on 2026-09-17 with the contact solver's
 rungs 0 and 1 and grew a room per rung to rung 5 by 2026-09-23; its page is
 `/demos/tumble/`.
