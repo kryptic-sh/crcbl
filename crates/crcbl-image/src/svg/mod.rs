@@ -41,7 +41,7 @@
 //! `currentColor`, linear and radial gradients; `clipPath` and `mask`;
 //! group opacity; filters of the primitives drop shadows are made of
 //! (`feGaussianBlur`, `feOffset`, `feFlood`, `feComposite`, `feColorMatrix`
-//! and `feMerge`); `image` elements embedding a PNG, JPEG, WebP or SVG
+//! and `feMerge`); `image` elements embedding a PNG, JPEG, WebP, GIF or SVG
 //! in a `data:` URL, each raster format when its own feature is built; and
 //! `text` with `tspan`, in the system's fonts when the `svg-text` feature is
 //! built, shaped by `harfrust` with bidirectional runs in visual order (the

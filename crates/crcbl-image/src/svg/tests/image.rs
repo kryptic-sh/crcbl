@@ -509,7 +509,10 @@ fn svg_images_share_the_instance_cap() {
 /// decoder as `decoded`, and checks every pixel against that decode:
 /// colour within a step where alpha is partial (the canvas holds it
 /// premultiplied), exact otherwise.
-#[cfg(all(feature = "png", feature = "jpeg", feature = "webp"))]
+#[cfg(any(
+    all(feature = "png", feature = "jpeg", feature = "webp"),
+    feature = "gif"
+))]
 fn assert_drawn_as_decoded(media_type: &str, bytes: &[u8], decoded: &Rgba8Image) {
     let side = decoded.width().max(decoded.height());
     let image = render(
@@ -581,15 +584,64 @@ fn each_media_type_goes_to_its_decoder() {
     }
 }
 
+/// **A GIF goes to the GIF decoder**, which draws its first image: the
+/// first frame of an animation, and a screen that is transparent outside
+/// its image. It decodes within what is left of the budget, and bytes that
+/// are not a GIF are the decoder's to refuse.
+#[cfg(feature = "gif")]
+#[test]
+fn a_gif_goes_to_its_decoder() {
+    for bytes in [
+        &include_bytes!("../../../fixtures/gif/animated.gif")[..],
+        &include_bytes!("../../../fixtures/gif/offset.gif")[..],
+    ] {
+        let gif = crate::gif::decode(bytes, &Limits::DEFAULT).unwrap_or_else(|e| panic!("{e}"));
+        assert_drawn_as_decoded("image/gif", bytes, &gif);
+    }
+    // The offset fixture's 20 by 16 screen, drawn into 4 pixels.
+    let offset = svg(
+        20,
+        &format!(
+            r#"<image href="{}"/>"#,
+            data_url(
+                "image/gif",
+                include_bytes!("../../../fixtures/gif/offset.gif")
+            )
+        ),
+    );
+    let limits = |max_bytes| Limits {
+        max_width: 64,
+        max_height: 64,
+        max_bytes,
+    };
+    assert!(decode(offset.as_bytes(), 4, 1, &limits(20 * 16 * 4)).is_ok());
+    assert!(matches!(
+        decode(offset.as_bytes(), 4, 1, &limits(20 * 16 * 4 - 1)),
+        Err(ImageError::TooLarge { .. })
+    ));
+    let not_gif = svg(
+        4,
+        &format!(
+            r#"<image href="{}"/>"#,
+            data_url("image/gif", b"\x89PNG\r\n\x1a\n")
+        ),
+    );
+    assert!(matches!(
+        decode(not_gif.as_bytes(), 4, 1, &Limits::DEFAULT),
+        Err(ImageError::Malformed(_))
+    ));
+}
+
 /// **A format whose feature is off is refused by name**, never drawn as
 /// nothing.
-#[cfg(not(all(feature = "png", feature = "jpeg", feature = "webp")))]
+#[cfg(not(all(feature = "png", feature = "jpeg", feature = "webp", feature = "gif")))]
 #[test]
 fn a_format_not_built_is_refused_by_name() {
     for (media_type, feature) in [
         ("image/png", cfg!(feature = "png")),
         ("image/jpeg", cfg!(feature = "jpeg")),
         ("image/webp", cfg!(feature = "webp")),
+        ("image/gif", cfg!(feature = "gif")),
     ] {
         if feature {
             continue;
@@ -616,7 +668,8 @@ fn external_and_unknown_images_are_refused() {
         "/etc/passwd",
         "file:///etc/passwd",
         "https://example.com/icon.png",
-        "data:image/gif;base64,R0lGODdh",
+        "data:image/bmp;base64,Qk0=",
+        "data:text/plain,hi",
     ] {
         for attribute in ["href", "xlink:href"] {
             let text = svg(

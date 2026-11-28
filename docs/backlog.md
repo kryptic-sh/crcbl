@@ -56,14 +56,6 @@ when the stb path matters for speed.
 - Junk between segments reports "the file ends before its end-of-image marker",
   which misleads.
 
-## SVG `<image>` still refuses GIF (2026-11-26)
-
-`crates/crcbl-image/src/svg/data_url.rs` maps no `image/gif` media type, so an
-`<image>` with a GIF data URL is refused as unsupported (the
-`external_and_unknown_images_are_refused` test pins it). With the `gif` feature
-it could decode it as it does PNG, JPEG and WebP (first frame). Needs the usual
-feature gating and a test.
-
 ## `resize::resize`'s `f32` scratch is counted as RGBA8 (2026-11-28)
 
 `resize::resize` now checks its horizontal pass's intermediate (new width by the

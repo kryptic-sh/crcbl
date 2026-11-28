@@ -15,6 +15,7 @@ pub(super) enum MediaType {
     Png,
     Jpeg,
     Webp,
+    Gif,
     Svg,
 }
 
@@ -44,6 +45,7 @@ pub(super) fn parse(href: &str) -> Result<DataUrl, ImageError> {
         // reads it as JPEG.
         "image/jpeg" | "image/jpg" => MediaType::Jpeg,
         "image/webp" => MediaType::Webp,
+        "image/gif" => MediaType::Gif,
         "image/svg+xml" => MediaType::Svg,
         other => {
             return Err(unsupported(format_args!(
@@ -66,7 +68,7 @@ mod tests {
         parse(href).unwrap_or_else(|error| panic!("{href}: {error}"))
     }
 
-    /// **Only the four kinds drawn are accepted**, whatever the case or
+    /// **Only the five kinds drawn are accepted**, whatever the case or
     /// parameters; anything else is refused by name.
     #[test]
     fn the_media_type_picks_the_decoder() {
@@ -76,6 +78,7 @@ mod tests {
             ("data:image/jpeg;base64,", MediaType::Jpeg),
             ("data:image/jpg;base64,", MediaType::Jpeg),
             ("data:image/webp;base64,", MediaType::Webp),
+            ("data:image/gif;base64,", MediaType::Gif),
             ("data:image/svg+xml;charset=utf-8,", MediaType::Svg),
             ("data:image/svg+xml;charset=utf-8; base64,", MediaType::Svg),
             (" data:image/png ; base64 ,", MediaType::Png),
@@ -84,7 +87,7 @@ mod tests {
         }
         assert_eq!(parsed("data:image/svg+xml,a%23b").bytes, b"a#b");
         for href in [
-            "data:image/gif;base64,R0lGOD",
+            "data:image/bmp;base64,Qk0=",
             "data:text/plain,hi",
             "data:,hi",
             "data:;base64,Zg==",

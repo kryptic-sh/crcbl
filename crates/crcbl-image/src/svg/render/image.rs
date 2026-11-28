@@ -3,12 +3,13 @@
 //!
 //! # What may be embedded
 //!
-//! PNG, JPEG and WebP, each decoded by this crate's decoder for it when that
-//! format's feature is built and refused by name when it is not, and SVG,
-//! drawn by this renderer as vectors, as resvg draws one. A reference to
-//! anything outside the file is refused ([`data_url`] says why). An SVG
-//! image is a document of its own: nothing of the outer one's style
-//! reaches it, and its ids name only its own elements.
+//! PNG, JPEG, WebP and GIF (its first image), each decoded by this crate's
+//! decoder for it when that format's feature is built and refused by name
+//! when it is not, and SVG, drawn by this renderer as vectors, as resvg
+//! draws one. A reference to anything outside the file is refused
+//! ([`data_url`] says why). An SVG image is a document of its own: nothing
+//! of the outer one's style reaches it, and its ids name only its own
+//! elements.
 //!
 //! # Orientation, as a browser shows it
 //!
@@ -115,6 +116,7 @@ impl MediaType {
             Self::Png => ("PNG", "png"),
             Self::Jpeg => ("JPEG", "jpeg"),
             Self::Webp => ("WebP", "webp"),
+            Self::Gif => ("GIF", "gif"),
             Self::Svg => ("SVG", "svg"),
         }
     }
@@ -283,6 +285,8 @@ impl Renderer<'_> {
             MediaType::Jpeg => crate::jpeg::decode(&url.bytes, &self.remaining_limits()),
             #[cfg(feature = "webp")]
             MediaType::Webp => crate::webp::decode(&url.bytes, &self.remaining_limits()),
+            #[cfg(feature = "gif")]
+            MediaType::Gif => crate::gif::decode(&url.bytes, &self.remaining_limits()),
             other => {
                 let (name, feature) = other.name_and_feature();
                 Err(unsupported(format_args!(

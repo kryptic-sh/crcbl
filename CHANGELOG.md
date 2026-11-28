@@ -13,6 +13,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`crcbl-image`: an SVG `<image>` can embed a GIF.** A `data:image/gif` URL is
+  decoded by the `gif` feature's decoder, its first image only, under what is
+  left of the document's `Limits` budget, as PNG, JPEG and WebP already are.
+  Without `gif` it is refused by name, the error naming the feature that is off.
+
 ### Changed
 
 - **Font parsing and shaping move to skrifa 0.50 and harfrust 0.16**, together,
