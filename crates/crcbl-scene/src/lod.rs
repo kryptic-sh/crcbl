@@ -84,7 +84,7 @@ use crate::simplify::{SimplifyError, simplify};
 pub const DEFAULT_LOD_RATIOS: [f32; 4] = [0.5, 0.25, 0.125, 0.0625];
 
 /// Why a LOD chain could not be built.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum LodError {
     /// A ratio is not inside `(0, 1)`, or is not below the ratio before it.
     ///

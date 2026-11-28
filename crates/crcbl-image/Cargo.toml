@@ -49,7 +49,7 @@ theme = []
 # written here: the owner's direction of 2026-10-16, recorded in
 # `docs/backlog.md` under S28.
 png = { workspace = true, optional = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 # SVG text's fonts: the system's, through the workspace's lookup crate, and
 # their outlines and metrics through the font reader `crcbl-ui` and
 # `crcbl-font` already share.

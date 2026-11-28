@@ -1145,7 +1145,7 @@ fn pretty() -> ron::ser::PrettyConfig {
 ///
 /// Every variant names the key or the system it is about, because the caller
 /// showing this to a person is showing them which file to open.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum ScnError {
     /// A key would not read, or its bytes are not text.
     #[error("reading `{key}`: {source}")]

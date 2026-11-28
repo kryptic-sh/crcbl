@@ -42,7 +42,7 @@ struct Link {
 }
 
 /// Why a ragdoll was not tethered.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum TetherError {
     /// The spring's frequency is not finite and positive.
     #[error("a tether's spring of {0} Hz is not finite and positive")]

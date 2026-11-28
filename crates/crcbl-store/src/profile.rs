@@ -149,7 +149,7 @@ enum Refusal {
 }
 
 /// Why a profile could not be read or written. Each names the file.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum ProfileError {
     /// The file is there and is not a profile: not UTF-8, not TOML, or not the
     /// layout its version names.

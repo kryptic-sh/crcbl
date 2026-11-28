@@ -82,7 +82,7 @@ const KIND_UNRELIABLE: u8 = 3;
 const KIND_DISCONNECT: u8 = 4;
 
 /// Why a datagram is not a packet.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum PacketDecodeError {
     /// Shorter than its own framing, or longer than a bodiless kind allows.
     #[error("packet framing: {0}")]

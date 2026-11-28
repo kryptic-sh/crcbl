@@ -138,7 +138,7 @@ pub const fn snapshot_budget(max_unreliable_message_bytes: usize) -> usize {
 
 /// A snapshot whose unsheddable part — the delta's header, the systems it
 /// must declare, and one removal when there is any — does not fit the budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crcbl_error::Error)]
 #[error(
     "the smallest snapshot carrying what cannot be held back encodes to {size} bytes, \
      past its {budget}-byte budget"

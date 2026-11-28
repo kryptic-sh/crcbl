@@ -319,7 +319,7 @@ impl From<Catalog> for CatalogFile {
 /// things a person fixing the file needs, so a caller reporting it does not
 /// have to depend on ron's types. This is the shape
 /// `crcbl_render::stack::StackError` already has, and for the same reason.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 #[error("line {line}, column {column}: {message}")]
 pub struct CatalogError {
     line: usize,

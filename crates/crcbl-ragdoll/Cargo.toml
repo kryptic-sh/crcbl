@@ -23,7 +23,7 @@ glam = { workspace = true }
 # state machine and `crcbl-inventory`'s catalogue are.
 ron = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 [lints]
 workspace = true

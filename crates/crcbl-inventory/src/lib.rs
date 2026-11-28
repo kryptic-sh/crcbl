@@ -17,7 +17,7 @@
 //! answer. That only works if the code answering is *the same code*, which
 //! means it cannot live in a game, cannot live in `crcbl-ui`, and cannot carry
 //! anything a browser build refuses to link. The placement half — [`Grid`],
-//! [`Catalog`], [`Shape`] — depends on `serde`, `ron` and `thiserror` and has
+//! [`Catalog`], [`Shape`] — depends on `serde`, `ron` and `crcbl-error` and has
 //! no IO and no clock. The authority half — the [`Inventory`] a [`Command`] is
 //! applied to and the [`stash`] — names the two engine crates the plan names
 //! for it: `crcbl-core`, for the [`PlayerId`](crcbl_core::PlayerId) a stash and
@@ -116,7 +116,7 @@ pub use stash::{StashError, StashLayout};
 /// to report the refusal — the cell that was taken, the filter that rejected
 /// it, the maximum a stack would have exceeded — because the caller that shows
 /// a player *why* is the only reason this is an enum rather than a `bool`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum InventoryError {
     /// A footprint wider or taller than [`MAX_SHAPE`], refused rather than
     /// truncated into the mask.

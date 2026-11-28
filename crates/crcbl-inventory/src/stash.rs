@@ -142,7 +142,7 @@ impl StashLayout {
 }
 
 /// Why a stash could not be written or read.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum StashError {
     /// The storage refused. [`StorageError::NotFound`] on a read is a server
     /// that has never saved a stash, which is a fresh one rather than a fault.

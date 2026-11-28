@@ -59,7 +59,7 @@ pub const MAX_IN_MEMORY_MESSAGE_BYTES: usize = 64 * 1024;
 pub const IN_MEMORY_CHANNEL_CAPACITY: usize = 256;
 
 /// Errors the transport can produce.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum TransportError {
     /// The transport is no longer connected and cannot recover.
     #[error("transport disconnected")]

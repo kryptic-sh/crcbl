@@ -12,7 +12,7 @@ chacha20poly1305 = { workspace = true }
 crcbl-core = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 x25519-dalek = { workspace = true }
 
 [lints]

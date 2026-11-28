@@ -112,7 +112,7 @@ impl<C: Clock + Clone> Route<C> {
 }
 
 /// Why the connect could not start.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum ConnectError {
     /// The local socket could not be bound or configured.
     #[error("socket: {0}")]

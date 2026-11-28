@@ -90,7 +90,7 @@ const _: () = assert!(MAC_AT + TOKEN_MAC_BYTES == TOKEN_BYTES);
 const _: () = assert!(NO_TOKEN_KIND != SERVER_MINTED);
 
 /// Why a token did not verify.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crcbl_error::Error)]
 pub enum TokenError {
     /// The hello carries no token: its first challenge has not come back yet.
     #[error("no token")]

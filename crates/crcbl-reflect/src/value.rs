@@ -118,7 +118,7 @@ impl fmt::Display for Value {
 ///
 /// Every arm names the type it is about, so a panel can say which row rejected
 /// the edit without tracking that itself.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum SetError {
     /// The value is not of the kind this leaf holds.
     #[error("`{type_name}` is {expected}, not {actual}")]

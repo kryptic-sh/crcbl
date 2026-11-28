@@ -166,8 +166,8 @@ dependencies = [
 name = "crcbl-image"
 version = "0.21.0"
 dependencies = [
+ "crcbl-error",
  "png",
- "thiserror",
 ]
 
 [[package]]
@@ -183,10 +183,10 @@ version = "0.21.0"
 dependencies = [
  "chacha20poly1305",
  "crcbl-core",
+ "crcbl-error",
  "getrandom",
  "hmac",
  "sha2",
- "thiserror",
  "x25519-dalek",
 ]
 
@@ -225,9 +225,9 @@ dependencies = [
 name = "crcbl-reflect"
 version = "0.21.0"
 dependencies = [
+ "crcbl-error",
  "crcbl-reflect-derive",
  "glam",
- "thiserror",
 ]
 
 [[package]]
@@ -246,12 +246,12 @@ dependencies = [
  "crcbl-assets",
  "crcbl-core",
  "crcbl-ecs",
+ "crcbl-error",
  "crcbl-reflect",
  "crcbl-shaders",
  "glam",
  "ron",
  "serde",
- "thiserror",
 ]
 
 [[package]]
@@ -270,12 +270,12 @@ name = "crcbl-store"
 version = "0.21.0"
 dependencies = [
  "crcbl-core",
+ "crcbl-error",
  "crcbl-net",
  "crcbl-rand",
  "crcbl-shaders",
  "dirs",
  "serde",
- "thiserror",
  "toml",
 ]
 

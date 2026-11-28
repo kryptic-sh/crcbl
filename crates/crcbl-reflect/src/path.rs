@@ -22,7 +22,7 @@
 use crate::{Kind, Reflect, SetError, Value};
 
 /// Why a path did not reach a leaf.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum PathError {
     /// A segment named nothing in the value it was resolved against.
     ///

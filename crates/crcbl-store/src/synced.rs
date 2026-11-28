@@ -137,7 +137,7 @@ pub enum Corruption {
 }
 
 /// A synced-file failure.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum SyncError {
     /// The cloud or the shadow failed.

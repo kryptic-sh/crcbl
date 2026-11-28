@@ -58,7 +58,7 @@ const SESSION_KEY_INFO: &[u8] = b"crcbl session key v1";
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 /// Why an authenticated envelope was rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crcbl_error::Error)]
 pub enum AuthError {
     /// The payload is not an authenticated envelope at all.
     #[error("message is not authenticated")]

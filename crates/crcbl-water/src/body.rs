@@ -40,7 +40,7 @@ pub struct WaterBody {
 }
 
 /// Why a [`WaterBody`] cannot be meshed.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum BodyError {
     /// The outline has fewer than three points, so it encloses nothing.
     #[error("an outline needs at least three points, and this one has {count}")]

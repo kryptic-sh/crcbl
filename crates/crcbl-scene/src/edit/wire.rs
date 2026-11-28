@@ -152,7 +152,7 @@ pub enum EditOp {
 }
 
 /// Why an [`EditOp`] has no wire form.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum OpEncodeError {
     /// A text or a count past what its `u32` length can say.
     #[error("the {what} is {len} long, past what one op can carry")]
@@ -171,7 +171,7 @@ pub enum OpEncodeError {
 }
 
 /// Why bytes are not an [`EditOp`].
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum OpDecodeError {
     /// Another wire version than [`WIRE_VERSION`].
     #[error("the op is wire version {found}, and this build reads version {WIRE_VERSION}")]

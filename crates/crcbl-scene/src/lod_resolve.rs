@@ -166,7 +166,7 @@ impl MeshLod {
 }
 
 /// Why a LOD chain could not be resolved.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum LodResolveError {
     /// [`resolve_lod`] was given a node index the scene does not have.
     #[error("node {node} was asked for, and the scene has {nodes}")]

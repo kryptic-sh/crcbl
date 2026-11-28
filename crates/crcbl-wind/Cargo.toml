@@ -33,7 +33,7 @@ crcbl-sprite = { workspace = true, features = ["load"] }
 glam = { workspace = true }
 # `WindError` is returned from four constructors and two loaders, so it needs
 # `Display` and `Error` without a macro of this crate's own.
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 # The PNG *encoder*, for the generator that writes the committed layer pair —
 # the same half `crcbl-sprite`'s own manifest says a `build.rs` enables. A

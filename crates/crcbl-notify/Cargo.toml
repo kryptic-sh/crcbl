@@ -10,10 +10,11 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
-# `bitflags` and `thiserror` are vocabulary, as in `crcbl-shell`.
+# `bitflags` is vocabulary, as in `crcbl-shell`; `crcbl-error` is the workspace's
+# error derive.
 [dependencies]
 bitflags = { workspace = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 # WinRT's notification listener (`src/windows.rs`), through the `windows` crate
 # at the version `crcbl-mixer` and `crcbl-dx12` already resolve. The features,

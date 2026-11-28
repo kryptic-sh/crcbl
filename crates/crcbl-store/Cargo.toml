@@ -18,7 +18,7 @@ crcbl-shaders = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 [dev-dependencies]
 crcbl-spawn = { path = "../crcbl-spawn" }

@@ -87,7 +87,7 @@ impl SettledPose {
 }
 
 /// Why [`Ragdoll::settle_to`] did not apply a pose. Nothing moved.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum SettleError {
     /// The pose has another number of bodies than the ragdoll.
     #[error("the pose has {pose} bodies and the ragdoll {ragdoll}")]

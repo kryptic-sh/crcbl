@@ -121,7 +121,7 @@ const MIN_FACE_SINE: f64 = 1e-6;
 /// that enum also carries a failure mode of the meshlet *record*, which this
 /// module has no equivalent of, and a caller matching on one enum for two
 /// unrelated builders would have unreachable arms either way.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum SimplifyError {
     /// The index buffer's length is not a whole number of triangles.
     #[error("{count} indices is not a whole number of triangles")]

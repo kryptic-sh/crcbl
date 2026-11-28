@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-# `glam` and `thiserror`, and by default nothing else. The grids are arithmetic over cell
+# `glam` and `crcbl-error`, and by default nothing else. The grids are arithmetic over cell
 # indices and one `DVec3` per waypoint, so there is no IO, no clock and no
 # `crcbl-core` here — which is what lets a server that draws nothing, a browser
 # build and a game's own tests all link the same router. `DVec3` is spelled in
@@ -23,7 +23,7 @@ rust-version.workspace = true
 glam = { workspace = true }
 # The error enums are returned across the crate boundary, so they need
 # `Display` and `Error` without a macro of this crate's own.
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 # Only for `NavAgent::from_character`, behind `phys`: a character
 # controller's configuration read as the body a span grid is built for. No
 # probe of a physics world comes with it.

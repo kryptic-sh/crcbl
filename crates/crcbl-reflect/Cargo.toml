@@ -33,7 +33,7 @@ glam = { workspace = true }
 # `SetError` and `PathError` are returned from the two halves of an edit, so
 # they need `Display` and `Error` without a macro of this crate's own. Same
 # argument as `crates/crcbl-water/Cargo.toml` makes for its `BodyError`.
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 [lints]
 workspace = true

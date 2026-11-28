@@ -16,7 +16,7 @@ rust-version.workspace = true
 [dependencies]
 # `BodyError` is returned from the mesher, so it needs `Display` and `Error`
 # without a macro of this crate's own.
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 # The mesher's invariants — the triangles cover exactly the outline's area, and
 # every one of them faces up — hold over every simple outline, not over the few

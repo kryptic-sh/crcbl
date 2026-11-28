@@ -90,7 +90,7 @@ impl fmt::Display for EntityName {
 }
 
 /// Why a piece of text is not an [`EntityName`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum NameError {
     /// Nothing is left once the surrounding whitespace is trimmed.
     #[error("a name cannot be empty")]

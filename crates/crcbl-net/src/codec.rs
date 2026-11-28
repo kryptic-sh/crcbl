@@ -13,7 +13,7 @@ use crcbl_core::{PlayerId, TickId};
 // ── Error type ────────────────────────────────────────────────────────────────
 
 /// All decode errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum DecodeError {
     #[error("payload too short: need {needed} bytes at offset {offset}, have {remaining}")]
     TooShort {

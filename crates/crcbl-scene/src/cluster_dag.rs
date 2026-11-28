@@ -147,7 +147,7 @@ const GROUP_TARGET_CLUSTERS: usize = 4;
 const LEVEL_TRIANGLE_DIVISOR: usize = 2;
 
 /// Why a cluster DAG could not be built.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum ClusterDagError {
     /// A level could not be decimated.
     #[error(transparent)]

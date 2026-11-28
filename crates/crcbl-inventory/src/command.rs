@@ -180,7 +180,7 @@ pub enum Applied {
 /// Every variant names what the player would otherwise have to be told
 /// without: the container that was not theirs, the stack that was not there,
 /// the placement rule that said no.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum Refusal {
     /// The inventory holds no container by that id.
     #[error("there is no {0}")]

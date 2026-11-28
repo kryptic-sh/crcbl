@@ -193,7 +193,7 @@ pub struct SaveData {
 }
 
 /// Why the container refused a save, by the writer or the reader.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum FormatError {
     /// Too short to hold a magic, a version and a checksum.

@@ -90,7 +90,7 @@ const RECORD_CRC_BYTES: usize = 4;
 
 /// Why a spool was refused before any record was read — its header — or why
 /// one could not be read the same way twice.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum SpoolError {
     /// Shorter than the header.

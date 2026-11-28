@@ -140,7 +140,7 @@ pub enum GridCell {
 }
 
 /// Why [`GroundGrid::new`] refused a config or a cell map.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, crcbl_error::Error)]
 pub enum GroundGridConfigError {
     /// A component of the origin is NaN or infinite.
     #[error("the grid origin is not a finite position")]
@@ -160,7 +160,7 @@ pub enum GroundGridConfigError {
 }
 
 /// Why a query on a [`GroundGrid`] produced no answer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, crcbl_error::Error)]
 pub enum GroundRouteError {
     /// A position has a NaN or infinite component.
     #[error("a position is not finite")]

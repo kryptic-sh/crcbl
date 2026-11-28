@@ -97,7 +97,7 @@ pub struct Notification {
 }
 
 /// Why an operation did not happen.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum NotificationError {
     /// This platform does not perform the operation.

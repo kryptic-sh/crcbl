@@ -19,7 +19,7 @@ use super::keys::{Role, SessionKeys, X25519_BYTES};
 use super::{Opener, Sealer};
 
 /// Why no channel could be keyed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crcbl_error::Error)]
 pub enum KeyAgreementError {
     /// The X25519 output is all zeros, which it is exactly when the peer sent
     /// a small-order point: the "shared" secret is then one an observer knows

@@ -113,7 +113,7 @@ impl Default for GenerateSettings {
 }
 
 /// Why [`RagdollRig::generate`] made no rig.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum GenerateError {
     /// A setting is out of range.
     #[error("ragdoll generation settings are out of range")]

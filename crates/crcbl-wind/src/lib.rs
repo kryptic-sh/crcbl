@@ -60,7 +60,7 @@ use glam::DVec2;
 /// One variant per way of being wrong rather than one string, so a caller can
 /// tell an asset that has not arrived yet from one that is the wrong shape —
 /// and so the message can name the numbers it refused.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum WindError {
     /// A direction that is zero-length or not finite, so there is nothing to
     /// normalise.

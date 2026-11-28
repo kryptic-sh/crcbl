@@ -53,7 +53,7 @@ const FORMAT_VERSION: u8 = 1;
 const FILE_BYTES: usize = MAGIC.len() + 1 + PlayerId::BYTES;
 
 /// Why no id could be had.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum IdentityError {
     /// There was no id to read and none could be drawn.
     #[error("no player id could be drawn: {0}")]

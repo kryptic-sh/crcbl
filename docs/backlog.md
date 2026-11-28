@@ -75,9 +75,11 @@ The user's call: every error type in the project derives `crcbl_error::Error`,
 our own, and `thiserror` leaves the workspace; taking it on was an oversight.
 Before the `crcbl-image` self-hosting below.
 
-**Built 2026-11-28:** `crates/crcbl-error`, with `crcbl-jobs` as its first user.
-Left: the other 21 crates whose manifests name `thiserror` (83 derives), then
-the `thiserror` line in the workspace manifest. A crate moves by swapping
+**Built 2026-11-28:** `crates/crcbl-error`, and thirteen crates moved onto it
+(`crcbl-jobs`, then notify, profile, water, wind, image, reflect, nav,
+inventory, ragdoll, store, scene and net). Left: crcbl, crcbl-app, crcbl-frame,
+crcbl-hal, crcbl-render, crcbl-shell, crcbl-steam, crcbl-vk and crcbl-webgpu,
+then the `thiserror` line in the workspace manifest. A crate moves by swapping
 `thiserror::Error` for `crcbl_error::Error` in its derives and its manifest
 line; nothing else changes.
 

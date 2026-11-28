@@ -11,7 +11,7 @@ use super::{
 };
 
 /// Why a packet was not sealed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crcbl_error::Error)]
 pub enum SealError {
     /// Every counter this key has was used. The sealer never wraps, because a
     /// repeated counter is a repeated nonce; key a new channel.
@@ -24,7 +24,7 @@ pub enum SealError {
 }
 
 /// Why a datagram did not open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crcbl_error::Error)]
 pub enum OpenError {
     /// The first byte is not [`SEALED_TAG`]: not a sealed datagram at all.
     #[error("datagram is not sealed")]

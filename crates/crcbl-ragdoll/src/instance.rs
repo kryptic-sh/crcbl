@@ -43,7 +43,7 @@ pub struct Handoff<'a> {
 }
 
 /// Why a ragdoll was not spawned, or could not do what was asked.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum SpawnError {
     /// The rig was made for a skeleton of another size.
     #[error("the rig is for {rig} joints and the skeleton has {skeleton}")]
@@ -79,7 +79,7 @@ pub enum SpawnError {
 }
 
 /// Why [`Ragdoll::strike_with`] did not apply a contact.
-#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, crcbl_error::Error)]
 pub enum StrikeError {
     /// The contact struck one of this ragdoll's own bodies, so the solver
     /// has already applied its impulse.

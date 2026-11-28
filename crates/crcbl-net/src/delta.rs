@@ -96,7 +96,7 @@ impl Trust {
 }
 
 /// Errors returned while constructing a [`Baseline`] from snapshots.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum BaselineDecodeError {
     #[error("entity blob is truncated")]
     Truncated,
@@ -1032,7 +1032,7 @@ pub fn decode_delta(payload: &[u8], trust: Trust) -> Result<Delta, DeltaDecodeEr
 // ── DeltaDecodeError ──────────────────────────────────────────────────────────
 
 /// Errors returned by [`decode_delta`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum DeltaDecodeError {
     #[error("payload too short")]
     TooShort,

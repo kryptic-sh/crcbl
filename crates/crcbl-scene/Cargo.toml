@@ -83,7 +83,8 @@ crcbl-ecs = { workspace = true }
 # `Value`, `Snapshot` and the path grammar an edit command carries and applies
 # through (`src/edit.rs`): the scene's edit vocabulary lives beside the format
 # it edits, so a tool, a server and a fuzz target reach it without linking the
-# editor. Its own dependencies are `glam`, `thiserror` and its derive.
+# editor. Its own dependencies are `glam`, `crcbl-error` and
+# `crcbl-reflect-derive`.
 crcbl-reflect = { workspace = true }
 # `GpuMaterial` is what a glTF PBR material's factors *are*: its
 # `base_color_factor` is linear RGBA and so is `GpuMaterial::base_color`, so the
@@ -125,7 +126,7 @@ crcbl-image = { workspace = true, features = ["jpeg"], optional = true }
 # directory lives in git.
 ron = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 # The writer half of the `gltf-fixture` feature: it puts those bytes on disk and
 # reads them back through `import_gltf` before it says it worked. An example

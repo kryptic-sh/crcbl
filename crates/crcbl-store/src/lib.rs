@@ -55,7 +55,7 @@ use std::path::{Component, Path, PathBuf};
 /// `#[non_exhaustive]`: the browser backends in [`web`] added three variants
 /// after the native ones shipped, and an IndexedDB fallback is still to come
 /// (`docs/backlog.md`, _Browser persistence_). Match with a `_` arm.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum StorageError {
     /// An underlying I/O error.

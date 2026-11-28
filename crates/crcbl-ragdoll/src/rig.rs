@@ -380,7 +380,7 @@ fn half_sine(angle: f64) -> f64 {
 }
 
 /// Why a rig is not valid.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum RigError {
     /// A rig needs at least one body.
     #[error("a ragdoll rig has no bodies")]

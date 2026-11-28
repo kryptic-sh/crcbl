@@ -364,7 +364,7 @@ pub fn encode_scene_files(files: &BTreeMap<String, String>) -> Result<Vec<u8>, S
 }
 
 /// Why the joined parts of a scene are not a scene's files.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum SceneFilesError {
     /// Cut short, a count or length past its limit or past the bytes there
     /// are, text that is not UTF-8, or trailing bytes.
@@ -434,7 +434,7 @@ pub struct FetchedScene {
 }
 
 /// Why a [`SceneAssembly`] refused a part, or the scene its parts made.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum SceneAssemblyError {
     /// A part other than the next: the reliable channel delivers in order, so
     /// one missing or repeated means the fetch lost a part.

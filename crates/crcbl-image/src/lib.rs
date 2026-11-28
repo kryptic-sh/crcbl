@@ -157,7 +157,7 @@ impl Default for Limits {
 }
 
 /// Why an image could not be built.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum ImageError {
     /// A side is zero: there is nothing to draw, and the atlas refuses it.
@@ -216,7 +216,7 @@ pub enum ImageError {
 /// Which bound on decoding work a JPEG passed, for
 /// [`ImageError::TooMuchWork`]; the `jpeg` module's docs say how each is
 /// counted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum WorkBound {
     /// More scans than an encoder writes.

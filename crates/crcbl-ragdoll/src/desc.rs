@@ -338,7 +338,7 @@ const fn yes() -> bool {
 }
 
 /// Why a file is not a [`RagdollRig`] for a skeleton.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, crcbl_error::Error)]
 pub enum DescError {
     /// The text is not RON of this shape.
     #[error("ragdoll file, line {line}, column {column}: {message}")]

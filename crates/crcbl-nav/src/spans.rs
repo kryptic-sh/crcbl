@@ -206,7 +206,7 @@ pub struct ProbedFloor {
 }
 
 /// Why [`SpanGrid::build`] refused a config, an agent or a probe's answer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, crcbl_error::Error)]
 pub enum SpanGridError {
     /// A component of the origin is NaN or infinite.
     #[error("the grid origin is not a finite position")]

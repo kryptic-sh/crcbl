@@ -39,7 +39,7 @@ pub struct RecordedStateHash {
 }
 
 /// Why a replay's input section was refused, by the writer or the reader.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum InputSectionError {
     /// The file ends inside the section.

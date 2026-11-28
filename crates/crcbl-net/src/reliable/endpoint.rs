@@ -184,7 +184,7 @@ impl EndpointState {
 ///
 /// None of them changes the endpoint's state, and none acknowledges the
 /// packet: a refused reliable fragment is resent by an honest peer.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, crcbl_error::Error)]
 pub enum ReceiveError {
     /// Not a packet of ours.
     #[error(transparent)]

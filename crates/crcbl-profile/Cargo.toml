@@ -11,7 +11,7 @@ rust-version.workspace = true
 # `FormatError` is what the reader returns, so it needs `Display` and `Error`.
 # Nothing else: the editor and the CLI read a capture with no engine and no GPU,
 # which is the point of the crate (`docs/plan/60-profiler.md`, decision 2).
-thiserror = { workspace = true }
+crcbl-error = { workspace = true }
 
 [lints]
 workspace = true

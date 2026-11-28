@@ -55,7 +55,7 @@ const CLOCK_VERSION: u16 = 2;
 const COUNTERS: usize = 10;
 
 /// Why a capture could not be written or read.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 #[non_exhaustive]
 pub enum FormatError {
     /// The bytes do not start with [`MAGIC`].

@@ -113,7 +113,7 @@ const CONE_AXIS_EPSILON: f32 = 1e-4;
 /// position array does not have has no bounds and a partial triangle has no
 /// corners. The third is the mesh being larger than the *record* can describe,
 /// which is a property of the input rather than a mistake in it.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, crcbl_error::Error)]
 pub enum MeshletError {
     /// A cluster's offsets outgrew the `uint`s [`Meshlet`] holds.
     ///
