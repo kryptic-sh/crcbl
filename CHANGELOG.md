@@ -34,6 +34,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Code that names `rand_core::RngCore` for it moves to `rand_core::Rng`. The
   ChaCha8 stream is unchanged: the same seed gives the same bytes as before.
 
+### Fixed
+
+- **`crcbl-image`: `resize::resize` checks its intermediate against `Limits`.**
+  The horizontal pass's buffer, the new width by the source's height, is now
+  checked with `Limits::rgba_bytes` before it is allocated, as `resize_pillow`
+  already did. A lopsided resize (a tall source made much wider) whose source
+  and target each fit the limits but whose intermediate does not now returns
+  `ImageError::TooLarge` for that intermediate's size, where it used to return
+  an image.
+
 ## [0.21.0] - 2026-11-26
 
 ### Added

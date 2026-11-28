@@ -64,16 +64,18 @@ when the stb path matters for speed.
 it could decode it as it does PNG, JPEG and WebP (first frame). Needs the usual
 feature gating and a test.
 
-## `resize::resize` does not check its intermediate against `Limits` (2026-11-26)
+## `resize::resize`'s `f32` scratch is counted as RGBA8 (2026-11-28)
 
-Found while building `resize_pillow`, which does check it: `resize::resize`
-allocates the horizontal pass's intermediate (new width by source height)
-without asking `Limits` (and in `f32`, four times the RGBA8 size), so a very
-lopsided resize (a tall source made much wider) can allocate more than the
-caller's caps allow, although the source and target each passed them. Not fixed
-in that slice because it changes what existing callers get (a `TooLarge` where
-they now get an image). Fix: check the intermediate with `limits.rgba_bytes` as
-`resize_pillow` does, with a test of the lopsided case.
+`resize::resize` now checks its horizontal pass's intermediate (new width by the
+source's height) with `Limits::rgba_bytes` before allocating, as `resize_pillow`
+does. But `Limits::max_bytes` is "the most bytes one image's RGBA8 may take",
+and `resize`'s two scratch buffers, `premultiplied` (source size) and `wide`
+(the intermediate), are `f32` at 16 bytes a pixel, so each really takes four
+times what the check counts. Needs the user's call: accept the factor and
+document it; check `f32` scratch against `max_bytes / 4`; or give `Limits` a
+scratch allowance. The crate already scales scratch by its own rules elsewhere
+(`jpeg::coefficient_allowance`, png's `DECODER_OVERHEAD`), so there is precedent
+for the second.
 
 ## `crcbl-error` replaces `thiserror` workspace-wide (decided 2026-11-26)
 

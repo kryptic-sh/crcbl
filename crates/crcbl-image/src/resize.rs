@@ -106,8 +106,9 @@ fn taps(source: u32, target: u32) -> Vec<Taps> {
 ///
 /// # Errors
 ///
-/// [`ImageError::Empty`] or [`ImageError::TooLarge`] if the new size breaks
-/// `limits`.
+/// [`ImageError::Empty`] or [`ImageError::TooLarge`] if the new size, or
+/// the intermediate `width` × the source's height the horizontal pass
+/// writes, breaks `limits`.
 pub fn resize(
     image: &Rgba8Image,
     width: u32,
@@ -118,6 +119,8 @@ pub fn resize(
     if (width, height) == (image.width(), image.height()) {
         return Ok(image.clone());
     }
+    // The horizontal pass always runs, even for an unchanged width.
+    limits.rgba_bytes(width, image.height())?;
     let (source_width, source_height) = (image.width() as usize, image.height() as usize);
     let premultiplied: Vec<f32> = image
         .pixels()
@@ -514,6 +517,28 @@ mod tests {
                 height: 1
             })
         );
+    }
+
+    /// A tall source made wide: the source and the target are 40 bytes of
+    /// RGBA8 each, but the horizontal pass's intermediate is ten by ten.
+    #[test]
+    fn resize_refuses_an_intermediate_past_the_limits() {
+        let tall = hashed(1, 10);
+        let limits = |max_bytes| Limits {
+            max_width: 10,
+            max_height: 10,
+            max_bytes,
+        };
+        assert_eq!(
+            resize(&tall, 10, 1, &limits(10 * 10 * 4 - 1)),
+            Err(ImageError::TooLarge {
+                width: 10,
+                height: 10,
+                limits: limits(10 * 10 * 4 - 1)
+            })
+        );
+        let wide = resize(&tall, 10, 1, &limits(10 * 10 * 4)).expect("resizes");
+        assert_eq!((wide.width(), wide.height()), (10, 1));
     }
 
     /// Every case's source pixels: an opaque image whose RGB bytes, in
